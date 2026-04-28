@@ -1,0 +1,27 @@
+# ai_agent_output_to_shell.yml
+# Expected findings: AI-GH-014 (agent output → shell via step-output reference)
+#                    AI-GH-006 also fires (agent action on PR trigger).
+name: Claude PR review + auto-label
+on: pull_request
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Ask Claude to classify the PR
+        id: classify
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: "Classify this PR into one of: bug, feat, chore. Emit as outputs.label."
+
+      - name: Apply label from Claude
+        run: echo "LABEL=${{ steps.classify.outputs.label }}" >> $GITHUB_ENV

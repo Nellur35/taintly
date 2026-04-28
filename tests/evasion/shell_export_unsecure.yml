@@ -1,0 +1,22 @@
+# EVASION: Shell export bypasses SEC4-GH-009 (ACTIONS_ALLOW_UNSECURE_COMMANDS)
+#
+# SEC4-GH-009 checks for the YAML key 'ACTIONS_ALLOW_UNSECURE_COMMANDS: true'
+# in the env: block. Setting the same variable via 'export' in a run: block
+# is semantically equivalent but the YAML structure is different.
+# The rule cannot detect this because it scans YAML keys, not shell semantics.
+#
+# Bypasses: SEC4-GH-009
+# Why undetectable: requires understanding shell variable assignment in run: blocks
+name: CI
+on: push
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          export ACTIONS_ALLOW_UNSECURE_COMMANDS=true
+          echo "::set-env name=FOO::bar"
+          echo "::add-path::/tmp/evil"

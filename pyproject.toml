@@ -1,0 +1,332 @@
+[project]
+name = "taintly"
+dynamic = ["version"]
+description = "Zero-dependency CI/CD pipeline security auditor for GitHub Actions and GitLab CI"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{name = "Asaf Yashayev"}]
+keywords = ["security", "cicd", "github-actions", "gitlab", "supply-chain", "audit", "owasp"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.scripts]
+taintly = "taintly.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+    "coverage>=7.0",
+    "pytest-cov>=5.0",
+    # Property-based testing (PSE Domain 3.4) — optional but strongly
+    # recommended. Tests fall back to pytest.importorskip when absent.
+    "hypothesis>=6.100",
+    "mypy>=1.14",
+    # Snapshot tests for the five reporter formats (text/JSON/CSV/SARIF/HTML).
+    # Output regressions are easy to introduce without anyone noticing
+    # because the structural assertions in test_reporters.py only check
+    # specific fields — pytest-snapshot pins the full rendered output so
+    # any formatting change is loud.  Re-run with --snapshot-update after
+    # an intentional reporter change.  Tests are gated on importorskip so
+    # the absence of pytest-snapshot in a minimal environment doesn't
+    # break the existing 886-test baseline.
+    "pytest-snapshot>=0.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/Nellur35/taintly"
+Repository = "https://github.com/Nellur35/taintly"
+Issues = "https://github.com/Nellur35/taintly/issues"
+Releases = "https://github.com/Nellur35/taintly/releases"
+
+[build-system]
+# setuptools>=77 is required for PEP 639 SPDX `license = "..."` shorthand.
+# setuptools-scm>=8 derives the version from git tags at build time, so
+# cutting a release is just `git tag vX.Y.Z && git push --tags`.
+requires = ["setuptools>=77.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+# Explicit include-list so sdists don't accidentally sweep in scratch
+# dirs (benchmark/, docs/, scripts/, tests/, templates/).
+include = ["taintly*"]
+
+[tool.setuptools_scm]
+# fallback_version keeps `python -m build` working in a detached
+# checkout (e.g. a Docker layer that copies the source without .git).
+# Real releases always flow through a tag, so this only surfaces in
+# local dev / dirty-working-copy scenarios.
+fallback_version = "0.0.0+unknown"
+
+# git_describe_command restricts setuptools-scm to ONLY consider
+# semver-shaped tags (vMAJOR.MINOR.PATCH). The floating `v1` tag
+# (which advances with each v1.x.y release) is closer to HEAD than
+# the most recent versioned tag in `git describe` ordering, so
+# without this filter setuptools-scm picks `v1`, fails the version
+# pattern match, and falls back to ``0.0.0+unknown`` — which is
+# exactly how taintly-0.0.0 ended up on PyPI for the v1.0.0 / v1.1.0
+# tag pushes. The match pattern excludes the floating `v1` tag from
+# the candidate set so the next-nearest semver tag wins.
+git_describe_command = "git describe --dirty --tags --long --match 'v[0-9]*.[0-9]*.[0-9]*'"
+
+# local_scheme = no-local-version strips the `+g<sha>` suffix that
+# setuptools-scm's default ``node-and-date`` scheme appends for
+# untagged / dirty builds. PyPI and TestPyPI both reject any version
+# containing a `+local` segment per PEP 440 — see
+# https://packaging.python.org/en/latest/specifications/version-specifiers/#local-version-identifiers
+# Surfaced when test-release.yml's first dispatch produced
+# ``taintly-1.1.2.dev22+g8d44f71`` and TestPyPI returned
+# ``400 The use of local versions ... is not allowed``. On a tagged
+# commit the version has no local segment to begin with, so this is
+# a no-op for real releases and only affects dev-version rehearsals.
+local_scheme = "no-local-version"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "W",     # pycodestyle warnings
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear — mutable defaults, unused loop vars, empty try/except
+    "C4",    # flake8-comprehensions — better comprehensions
+    "SIM",   # flake8-simplify — redundant patterns
+    "RUF",   # ruff-specific lints
+    "PT",    # flake8-pytest-style — test hygiene
+    # High-signal categories added in the strict-ratchet pass:
+    "A",     # flake8-builtins — shadowing `list`, `dict`, `id`, `type`
+    "ARG",   # flake8-unused-arguments — unused params signal stale interfaces
+    "PERF",  # perflint — anti-patterns (manual list comprehension, etc.)
+    "RET",   # flake8-return — unnecessary else/elif after return
+    "TCH",   # flake8-type-checking — imports used only in annotations
+    "TRY",   # tryceratops — exception handling hygiene
+    # PTH (use-pathlib) intentionally NOT selected — os.path works
+    # fine here and wholesale migration is large-churn for no bug
+    # signal. Opt in per-file once a real bug motivates it.
+    # S (bandit-overlap) not selected — bandit already covers it.
+]
+ignore = [
+    "E501",    # line too long — handled by formatter
+    "UP007",   # Use X | Y for type hints — keep for 3.10 compat
+    "SIM102",  # flatten nested if — sometimes explicit is clearer
+    "SIM105",  # contextlib.suppress — try/except/pass is more explicit in hot paths
+    "SIM108",  # ternary operator — readability judgement, keep explicit if/else where clearer
+    "SIM110",  # any()-from-for-loop — retained where the loop adds context
+    "SIM117",  # nested with — keep explicit nesting where it aids readability
+    "B008",    # function-call-in-default-arg — legitimate for dataclass fields in some patterns
+    "PT011",   # pytest.raises without match — acceptable in many cases
+    "RUF002",  # ambiguous unicode in docstrings — the ×/x confusion is intentional (52× citation)
+    "RUF003",  # ambiguous unicode in comments — same rationale as RUF002
+    "RUF005",  # iterable-unpacking-over-concat — pure style, keep concatenation for readability
+    "C401",    # generator-over-set-comprehension — semantically equivalent, style choice
+    "TRY003",  # avoid long exception messages — pure style, messages inform callers
+    "TRY400",  # logger.exception vs logger.error — we don't use logging
+    "TRY300",  # move statement to else block — readability judgement
+    "PERF203", # try-except in loop — the loops in question are already exception-bounded
+    "PERF401", # loop vs list-comprehension — readability beats micro-perf for
+               # multi-line f-string / HTML-rendering loops in this codebase
+    "TC001",   # TYPE_CHECKING import block — we use runtime types (dataclass
+    "TC003",   #   fields, registry Rule construction) so real-import is intended
+]
+
+# Per-file overrides for cases where the rule conflicts with a
+# protocol contract (same-signature methods that don't use every arg).
+[tool.ruff.lint.per-file-ignores]
+# Pattern classes implement a shared `check(content, lines)` contract
+# (PatternProtocol). Individual implementations may legitimately not
+# use every argument — RegexPattern doesn't need `content`, AbsencePattern
+# doesn't need `lines`, etc. Signature is fixed by the protocol.
+"taintly/models.py" = ["ARG001", "ARG002"]
+# analyze() signature matches the TaintPattern.check contract; the
+# content string is provided but the linewise analysis only uses lines.
+"taintly/gitlab_taint.py" = ["ARG001"]
+"taintly/taint.py" = ["ARG001"]
+# Test-only files can get away with more.
+"tests/**/*.py" = ["ARG001", "ARG002", "PERF401", "PT011"]
+# taintly/platform/ namespaces token handling per platform; the
+# `token` module name is intentional (it's taintly.platform.token,
+# not a top-level shadow of stdlib `token`). Renaming would obscure
+# the platform taxonomy for no bug-surface benefit.
+"taintly/platform/token.py" = ["A005"]
+
+[tool.bandit]
+targets = ["taintly"]
+exclude_dirs = ["taintly/testing"]
+# Ratcheted: show LOW-severity HIGH-confidence findings too.
+# Medium+ confidence is kept — pure low-confidence findings swamp
+# the signal with things like "import subprocess could be dangerous"
+# that produce no actionable bug signal. Low-severity/high-confidence
+# findings (try/except/pass, try/except/continue) ARE worth annotating
+# since they document real design choices.
+severity = "low"
+confidence = "high"
+# B404 is an import-level warning for `subprocess` and fires everywhere
+# we legitimately spawn `git ls-remote` — purely informational, not a
+# bug. Skip at config level rather than per-line to keep the noise out.
+skips = ["B404"]
+
+# PSE Domain 2.1 — static type checking. Each flag below catches a
+# different real-bug class without requiring a full annotate-every-
+# function pass:
+#   no_implicit_optional       — `def f(x: int = None)` no longer
+#                                silently types x as Optional[int]
+#   warn_return_any            — catches lost types through `Any`-
+#                                returning stubs (json.loads etc.)
+#   warn_unreachable           — dead code after `raise`/`sys.exit`;
+#                                surfaced a real bug in gitlab_api
+#   strict_equality            — catches `int == str` silent-False
+#   disallow_any_generics      — forces `dict[str, Any]` over bare
+#                                `dict`, caught several stale signatures
+# Next-ratchet target (requires annotating ~15 CLI / reporter
+# functions): disallow_untyped_defs + disallow_incomplete_defs +
+# disallow_untyped_calls.
+[tool.mypy]
+python_version = "3.10"
+files = ["taintly"]
+exclude = ["taintly/testing/"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_no_return = true
+warn_return_any = true
+warn_unreachable = true
+no_implicit_optional = true
+strict_equality = true
+disallow_any_generics = true
+
+# Modules with pre-existing type errors — captured as a baseline so
+# the mypy gate passes today while still catching NEW drift in
+# everything else. Each entry is a tracked follow-up; the target is
+# to delete every override below over time.
+[[tool.mypy.overrides]]
+# Test-support code only — full type coverage would require refactoring
+# the MUTATION_OPERATORS registry, which is out of scope for the gate.
+module = ["taintly.testing.*"]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+timeout = 30
+# Strictness gates — every flag below catches a different silent-rot
+# failure mode:
+#  - filterwarnings=error  : DeprecationWarning / ResourceWarning in
+#    tests now fail CI instead of being swallowed.
+#  - --strict-markers      : a typo'd @pytest.mark.foo fails collection
+#    rather than silently skipping the mark.
+#  - --strict-config       : unknown ini keys fail rather than being
+#    ignored (protects against settings going stale).
+#  - xfail_strict=True     : an xfailed test that starts passing is
+#    treated as a regression, not a silent success.
+addopts = "-v --tb=short --strict-markers --strict-config"
+xfail_strict = true
+filterwarnings = [
+    "error",
+    # Allowlist — each entry needs a reason comment. If a new warning
+    # shows up here, verify it's truly out of our control before
+    # adding rather than silencing a real issue.
+
+    # hypothesis occasionally emits internal deprecation noise between
+    # versions; we control the pin in pyproject, so this is harmless.
+    "ignore::DeprecationWarning:hypothesis.*",
+]
+
+[tool.coverage.run]
+source = ["taintly"]
+# Branch coverage catches bugs where a conditional has untested paths
+# even when every line executes — e.g. `if a or b:` with only `a=True`
+# ever tested. Line-only coverage would score that 100%; branch
+# coverage flags the `b=True` path as missed.
+branch = true
+omit = [
+    "taintly/testing/*",
+    # CLI entrypoint: a long argparse + dispatch function that's hard
+    # to unit-test meaningfully. Exercised by the integration tests
+    # via `subprocess.run([sys.executable, "-m", "taintly", ...])`
+    # in test_fixes.py etc., but those runs don't feed into line
+    # coverage without coverage-subprocess plumbing.
+    "taintly/__main__.py",
+    # Live-API modules: exercising these requires a real GitHub /
+    # GitLab token and a known-state remote. Manual smoke-tested
+    # instead of in CI coverage.
+    "taintly/transitive.py",
+    "taintly/ingestion/*",
+    "taintly/platform/github_client.py",
+    "taintly/platform/gitlab_client.py",
+    # User-facing remediation content — pure string constants.
+    "taintly/guides.py",
+]
+
+[tool.coverage.report]
+# Coverage-floor policy — the CURRENT floor is 78; the TARGET is 85.
+#
+# History: was ratcheted 60 → 80 when branch coverage was first turned
+# on, then temporarily lowered to 78 after 9b88e3f ("Add full platform
+# posture scanning across GitHub, GitLab, and Jenkins") landed without
+# corresponding tests. Lowering to 78 was honest about current state;
+# it is NOT the steady-state target.
+#
+# Ratchet plan — raise fail_under in lockstep with tests landing for
+# the modules that currently drag the total below 85:
+#
+#   Module                           Current  Target  Main blocker
+#   taintly/fixes.py               46%      90%    auto-patch synthesis paths untested
+#   taintly/config.py              64%      90%    CLI / env-file parsing branches untested
+#   taintly/engine.py              65%      85%    error-path branches (ENGINE-ERR) untested
+#   taintly/reporters/score_text.py 68%      85%    score-text edge cases untested
+#
+# Why 90 vs 85: fixes.py and config.py are pure-logic modules — the
+# uncovered branches represent straightforward argument / parse paths
+# that SHOULD have unit tests; 90% is an honest "no excuse" target.
+# engine.py and score_text.py have genuine I/O and error paths
+# (ENGINE-ERR recovery, scorer tie-break edge cases) that are awkward
+# to exercise without broader fixtures; 85% is the point at which all
+# straightforward branches are covered and what's left is the awkward
+# minority. A future PR that lands harness improvements for the
+# awkward paths could ratchet those two to 90 as well.
+#
+# The "Main blocker" column decays — if you're reading this and the
+# coverage numbers don't match what `pytest --cov` actually reports,
+# treat the column as stale and regenerate it. A scripted refresh
+# would be better; tracked as a follow-up. In the meantime, refresh
+# this block whenever you raise the floor.
+#
+# Closing these four pushes total coverage past 85. CLI / live-API /
+# content-only modules stay excluded from the denominator (see `omit`
+# above) — the floor applies only to logic that actually has unit
+# tests, which is where test absence genuinely signals risk.
+#
+# When raising the floor: change both this value AND the matching
+# `--cov-fail-under=78` in .github/workflows/ci.yml in the same PR so
+# the two gates never drift.
+fail_under = 78
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    # Defensive branches: type-narrow asserts that catch programmer
+    # error but can't realistically be exercised by tests.
+    "if TYPE_CHECKING:",
+    "raise AssertionError",
+]

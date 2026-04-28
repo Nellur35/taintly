@@ -1,0 +1,17 @@
+# GitLab CI fixture — expected findings: AI-GL-007 (LLM call + MR context)
+stages:
+  - triage
+
+triage-mr:
+  stage: triage
+  image: python@sha256:a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4
+  variables:
+    MR_BODY: $CI_MERGE_REQUEST_DESCRIPTION
+  script:
+    - |
+      curl https://api.anthropic.com/v1/messages \
+        -H "x-api-key: $ANTHROPIC_API_KEY" \
+        -H "anthropic-version: 2023-06-01" \
+        -d "{\"model\":\"claude-sonnet-4-5\",\"messages\":[{\"role\":\"user\",\"content\":\"$MR_BODY\"}]}"
+  only:
+    - merge_requests

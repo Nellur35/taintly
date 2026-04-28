@@ -1,0 +1,18 @@
+# ai_joblib_load.yml
+# Expected findings: AI-GH-010 (joblib.load — pickle RCE on load)
+name: Score churn model
+on: push
+
+permissions:
+  contents: read
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Load sklearn model
+        run: python -c "import joblib; m = joblib.load('models/churn.pkl')"

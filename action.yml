@@ -1,0 +1,222 @@
+# Composite GitHub Action wrapping taintly.
+#
+# Replaces the 6-step install+scan+upload-SARIF boilerplate with a
+# single `uses:` call. Consumers only specify the inputs that differ
+# from the defaults; the action handles Python setup, installation,
+# fail-on / baseline / SARIF wiring.
+#
+# Usage (minimum):
+#
+#     - uses: Nellur35/taintly@v1
+#
+# Usage (typical PR gate + SARIF):
+#
+#     permissions:
+#       contents: read
+#       security-events: write
+#     steps:
+#       - uses: actions/checkout@v4
+#         with: { persist-credentials: false }
+#       - uses: Nellur35/taintly@v1
+#         with:
+#           fail-on: HIGH
+#           upload-sarif: true
+
+name: "taintly"
+description: "Scan CI/CD pipelines (GitHub Actions, GitLab, Jenkins) for security issues"
+author: "Asaf Yashayev"
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  path:
+    description: "Path to the repository or workflow directory to scan."
+    required: false
+    default: "."
+
+  version:
+    description: "taintly version to install. Accepts any git ref the repo has
+      (tag, branch, commit SHA). Default `v1` tracks the floating `v1` tag
+      and advances with each v1.x.y release. Pin narrowly (e.g. `v1.1.1`) in
+      security-critical consumers."
+    required: false
+    default: "v1"
+
+  python-version:
+    description: "Python version used to run the scanner. Any 3.10+ works; 3.12 is fastest."
+    required: false
+    default: "3.12"
+
+  fail-on:
+    description: "Minimum severity that makes the action fail (CRITICAL/HIGH/MEDIUM/LOW/INFO).
+      Default HIGH matches the tool's built-in exit-code convention. Set to an empty string
+      to disable fail-on and rely on the built-in HIGH=exit-1, CRITICAL=exit-2 behaviour."
+    required: false
+    default: "HIGH"
+
+  min-severity:
+    description: "Suppress findings below this severity. Default INFO shows every finding;
+      set HIGH for a quiet dashboard that only surfaces action-needed issues."
+    required: false
+    default: "INFO"
+
+  platform:
+    description: "Force a specific platform (github/gitlab/jenkins). Default auto-detects,
+      which works for single-platform repos. Specify explicitly for dual-platform (e.g.
+      repo has both .github/workflows/ AND .gitlab-ci.yml)."
+    required: false
+    default: ""
+
+  format:
+    description: "Report format for stdout (text/json/csv/sarif/html). SARIF is also
+      written separately via sarif-file when upload-sarif is true — this input controls
+      what the action prints to the job log."
+    required: false
+    default: "text"
+
+  config:
+    description: "Path to .taintly.yml. Default auto-discovers at the scanned repo root;
+      set to a custom path to override."
+    required: false
+    default: ""
+
+  exclude-rules:
+    description: "Comma or newline-separated rule IDs to exclude (e.g. SEC2-GH-002,SEC4-GH-002).
+      Prefer a committed .taintly.yml for anything more than a handful of rules."
+    required: false
+    default: ""
+
+  baseline:
+    description: "Enable baseline mode. When set, pass --diff <baseline-file> to the scanner:
+      only findings NOT in the baseline will be reported. Use for adopting the tool on a
+      repo with pre-existing findings without breaking CI on day 1."
+    required: false
+    default: "false"
+
+  baseline-file:
+    description: "Path to the baseline JSON file. Default is .taintly-baseline.json,
+      matching the scanner's built-in default."
+    required: false
+    default: ".taintly-baseline.json"
+
+  upload-sarif:
+    description: "When true, emit SARIF output to sarif-file so a subsequent
+      github/codeql-action/upload-sarif step can send findings to the GitHub Security tab.
+      The action itself does NOT upload — the caller runs the upload-sarif step so the
+      permissions model (security-events: write) stays explicit in the caller's workflow."
+    required: false
+    default: "false"
+
+  sarif-file:
+    description: "Path where the SARIF report is written when upload-sarif is true."
+    required: false
+    default: "taintly.sarif"
+
+  extra-args:
+    description: "Extra CLI arguments passed through verbatim (e.g. '--transitive --score')."
+    required: false
+    default: ""
+
+outputs:
+  exit-code:
+    description: "The scanner's exit code. 0 = clean, 1 = HIGH or fail-on threshold hit,
+      2 = CRITICAL. Exposed so downstream steps can gate on it without re-running the scan."
+    value: ${{ steps.scan.outputs.exit-code }}
+
+  sarif-file:
+    description: "Path of the SARIF output (only meaningful when upload-sarif=true)."
+    value: ${{ inputs.sarif-file }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@0a5c49d9b0ae9702c08fa4cf9d7bef6f3a2e3f4a # v5.3.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install taintly
+      shell: bash
+      run: |
+        # taintly is not published on PyPI; install from the Git repo
+        # at the tag/ref the consumer specified. pip handles the
+        # sdist/wheel build from source via setuptools-scm.
+        pip install "git+https://github.com/Nellur35/taintly@${{ inputs.version }}"
+
+    - name: Run taintly
+      id: scan
+      shell: bash
+      env:
+        CICD_AUDIT_PATH: ${{ inputs.path }}
+        CICD_AUDIT_FAIL_ON: ${{ inputs.fail-on }}
+        CICD_AUDIT_MIN_SEVERITY: ${{ inputs.min-severity }}
+        CICD_AUDIT_PLATFORM: ${{ inputs.platform }}
+        CICD_AUDIT_FORMAT: ${{ inputs.format }}
+        CICD_AUDIT_CONFIG: ${{ inputs.config }}
+        CICD_AUDIT_EXCLUDE_RULES: ${{ inputs.exclude-rules }}
+        CICD_AUDIT_BASELINE: ${{ inputs.baseline }}
+        CICD_AUDIT_BASELINE_FILE: ${{ inputs.baseline-file }}
+        CICD_AUDIT_UPLOAD_SARIF: ${{ inputs.upload-sarif }}
+        CICD_AUDIT_SARIF_FILE: ${{ inputs.sarif-file }}
+        CICD_AUDIT_EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: |
+        set -u
+        # Build the CLI command line as an array so args with spaces
+        # (e.g. paths containing whitespace) survive intact.
+        args=( "$CICD_AUDIT_PATH" --no-color )
+
+        [[ -n "$CICD_AUDIT_FAIL_ON" ]]       && args+=( --fail-on "$CICD_AUDIT_FAIL_ON" )
+        [[ -n "$CICD_AUDIT_MIN_SEVERITY" ]]  && args+=( --min-severity "$CICD_AUDIT_MIN_SEVERITY" )
+        [[ -n "$CICD_AUDIT_PLATFORM" ]]      && args+=( --platform "$CICD_AUDIT_PLATFORM" )
+        [[ -n "$CICD_AUDIT_CONFIG" ]]        && args+=( --config "$CICD_AUDIT_CONFIG" )
+
+        if [[ "$CICD_AUDIT_BASELINE" == "true" ]]; then
+          args+=( --diff "$CICD_AUDIT_BASELINE_FILE" )
+        fi
+
+        # Split comma-or-newline separated exclude list into repeated
+        # --exclude-rule flags. Emptiness handled by the loop no-op.
+        if [[ -n "$CICD_AUDIT_EXCLUDE_RULES" ]]; then
+          IFS=$',\n' read -r -a exclude_list <<< "$CICD_AUDIT_EXCLUDE_RULES"
+          for rule in "${exclude_list[@]}"; do
+            rule="${rule// /}"
+            [[ -n "$rule" ]] && args+=( --exclude-rule "$rule" )
+          done
+        fi
+
+        if [[ -n "$CICD_AUDIT_EXTRA_ARGS" ]]; then
+          # shellcheck disable=SC2206
+          extra=( $CICD_AUDIT_EXTRA_ARGS )
+          args+=( "${extra[@]}" )
+        fi
+
+        if [[ "$CICD_AUDIT_UPLOAD_SARIF" == "true" ]]; then
+          # Run twice: once for the human-readable console log (failing
+          # on findings), once to write the SARIF file for upload. The
+          # second run reuses the first's cached Python import, so the
+          # cost is a fresh scan pass only.
+          set +e
+          taintly "${args[@]}" --format "$CICD_AUDIT_FORMAT"
+          console_rc=$?
+          taintly "${args[@]}" --format sarif > "$CICD_AUDIT_SARIF_FILE"
+          sarif_rc=$?
+          set -e
+          rc=$console_rc
+          # Surface SARIF-generation failure as a warning but don't mask
+          # the real (console) exit code.
+          if [[ "$sarif_rc" -ne 0 && "$sarif_rc" -ne 1 && "$sarif_rc" -ne 2 ]]; then
+            echo "::warning::taintly SARIF write exited $sarif_rc"
+          fi
+        else
+          set +e
+          taintly "${args[@]}" --format "$CICD_AUDIT_FORMAT"
+          rc=$?
+          set -e
+        fi
+
+        # Emit the exit code as a step output before we propagate it
+        # via `exit`, so the composite action's `outputs.exit-code` is
+        # populated even when the action fails the job.
+        echo "exit-code=$rc" >> "$GITHUB_OUTPUT"
+        exit "$rc"

@@ -1,0 +1,6 @@
+# Triggers: SEC4-GL-001 — user-controlled variable unquoted in shell script
+notify:
+  stage: notify
+  script:
+    - echo $CI_COMMIT_MESSAGE
+    - git tag $CI_MERGE_REQUEST_TITLE

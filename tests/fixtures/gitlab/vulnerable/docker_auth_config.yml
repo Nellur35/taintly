@@ -1,0 +1,9 @@
+# Triggers: SEC2-GL-001 — DOCKER_AUTH_CONFIG embedded in pipeline YAML
+variables:
+  DOCKER_AUTH_CONFIG: '{"auths": {"registry.example.com": {"auth": "dXNlcjpwYXNz"}}}'
+
+build:
+  stage: build
+  script:
+    - docker build -t registry.example.com/myapp:$CI_COMMIT_SHA .
+    - docker push registry.example.com/myapp:$CI_COMMIT_SHA

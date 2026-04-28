@@ -1,0 +1,10 @@
+# Triggers: SEC2-GL-002 — docker:dind service without DOCKER_TLS_CERTDIR
+build:
+  stage: build
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+  script:
+    - docker build -t myapp:latest .
+    - docker push registry.example.com/myapp:latest

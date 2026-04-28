@@ -1,0 +1,8 @@
+# Triggers: SEC6-GL-008 — package manager registry URL overridden (dependency confusion risk)
+build:
+  stage: build
+  variables:
+    PIP_INDEX_URL: http://pypi.internal.example.com/simple/
+  script:
+    - pip install -r requirements.txt
+    - python setup.py build

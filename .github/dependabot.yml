@@ -1,0 +1,67 @@
+# Dependabot — automated dep version updates (PSE Domain 8.x / 3.5).
+#
+# Motivation: our CI pins GitHub Actions by SHA (per our own SEC3-GH-001
+# rule) and tool versions by strict pin (ruff==0.9.0, bandit==1.8.3,
+# mypy==1.14.1, etc.). Without Dependabot those pins silently rot —
+# unpatched CVEs in bandit/mypy, deprecated Action APIs, stale ruff
+# rules — and the maintainer has to manually chase each one.
+#
+# Configuration:
+# - `pip` ecosystem watches both the project's own deps (there are
+#   none at runtime) AND the pinned versions inside workflow `run:`
+#   steps via the version references — Dependabot updates both.
+# - `github-actions` ecosystem watches every `uses: owner/action@sha`
+#   line and opens PRs to roll the SHA forward, updating the trailing
+#   `# v-tag` comment with the new version.
+# - Weekly cadence keeps PR volume manageable for a one-maintainer
+#   project while still catching CVEs quickly.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    # Group dev-only tool bumps so we don't get 6 separate PRs every
+    # Monday; security-relevant packages still surface individually.
+    groups:
+      test-tooling:
+        patterns:
+          - "pytest*"
+          - "hypothesis"
+          - "coverage"
+      lint-tooling:
+        patterns:
+          - "ruff"
+          - "mypy*"
+      security-tooling:
+        # Security scanners get individual PRs — we want to see each
+        # version bump and its changelog, not a batched commit.
+        patterns:
+          - "bandit*"
+          - "pip-audit*"

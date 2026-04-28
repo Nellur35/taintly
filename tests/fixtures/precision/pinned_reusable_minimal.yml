@@ -1,0 +1,23 @@
+# Precision fixture — from the improvement report:
+#
+#   "SHA-pinned reusable workflow with minimal permissions
+#    → No mutable-reference finding"
+#
+# Expected behavior:
+#   - SEC3-GH-001 / SEC3-GH-002 MUST NOT fire (reusable workflow is
+#     pinned to a full 40-char SHA)
+#   - SEC8-GH-003 MUST NOT fire for the reusable workflow reference
+#   - The supply_chain_immutability family should be EMPTY of findings
+#   - Score should not be penalized for pinning decisions
+name: Shared CI
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  ci:
+    uses: my-org/shared-workflows/.github/workflows/ci.yml@57a97c7e7821a5776cebc9bb87c984fa69cba8f1
+    permissions:
+      contents: read
+      checks: write

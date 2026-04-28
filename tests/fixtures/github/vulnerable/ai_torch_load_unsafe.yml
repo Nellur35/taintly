@@ -1,0 +1,18 @@
+# ai_torch_load_unsafe.yml
+# Expected findings: AI-GH-003 (torch.load without weights_only=True)
+name: Evaluate checkpoint
+on: push
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Load checkpoint
+        run: python -c "import torch; torch.load('checkpoints/model.pt')"

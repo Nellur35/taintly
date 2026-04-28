@@ -1,0 +1,28 @@
+# EVASION: Orphaned fork SHA bypasses SEC3-GH-001 (unpinned action detection)
+#
+# SEC3-GH-001 treats ANY 40-char hex string as a safe pin.
+# The SHA below (70379aad...) is a real 40-char hex string — but it points to
+# an orphaned commit in a fork, not a commit in the real actions/checkout repo.
+# GitHub resolves fork commits transparently. Only a GitHub API call to
+# repos/{owner}/{repo}/commits/{sha}/branches-where-head (empty list = orphaned)
+# reveals the deception. This was the exact technique used in the March 2026
+# aquasecurity/trivy and Checkmarx/kics supply chain attack (TeamPCP campaign).
+#
+# Bypasses: SEC3-GH-001
+# Why undetectable: static analysis cannot distinguish real from orphaned SHA
+# Reference: https://www.rosecurity.dev/post/github-actions-sha-pinning-not-enough/
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@70379aad1a8b40919ce8b382d3cd7d0315cde1d0 # v6.0.2
+        with:
+          persist-credentials: false
+      - run: echo "This SHA points to an orphaned fork commit"

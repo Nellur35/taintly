@@ -1,0 +1,8 @@
+# Triggers: SEC4-GL-004 — CI_PIPELINE_SOURCE == 'push' as sole access gate
+deploy:
+  stage: deploy
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: on_success
+  script:
+    - ./deploy.sh

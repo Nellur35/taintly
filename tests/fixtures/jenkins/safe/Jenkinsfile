@@ -1,0 +1,126 @@
+// Fully hardened Jenkins declarative pipeline — must produce ZERO findings from ALL Jenkins rules
+// Hardening:
+//   SEC3-JK-001: @Library pinned to full 40-char commit SHA
+//   SEC6-JK-001: No hardcoded credential literals in environment block
+//   SEC6-JK-002: No echo of credential variables inside withCredentials
+//   SEC7-JK-001: agent label specified — not 'agent any'
+//   SEC8-JK-001: Docker image pinned to SHA256 digest — no :latest or untagged
+//   SEC9-JK-001: No curl|bash or wget|sh patterns
+//   SEC4-JK-001: params.* never interpolated into sh commands
+//   SEC4-JK-002: SCM env vars (GIT_BRANCH, BRANCH_NAME) not interpolated into sh
+//   SEC4-JK-003: No evaluate() or Eval.me() dynamic execution
+//   SEC6-JK-003: No println inside withCredentials blocks
+//   SEC8-JK-002: No new URL(...).text remote script loading
+//   SEC3-JK-002: No @Grab without explicit version
+//   SEC1-JK-001: Production deploy stage has an input step
+//   SEC9-JK-002: archiveArtifacts uses fingerprint: true
+//   SEC2-JK-001: No password() parameters — use withCredentials instead
+//   SEC2-JK-002: credentialsId values are hardcoded, not from params
+//   SEC4-JK-004: input step specifies submitter restriction
+//   SEC4-JK-005: PR author/URL env vars not interpolated into sh
+//   SEC5-JK-001: disableConcurrentBuilds() present for pipeline with deploy stage
+//   SEC3-JK-003: docker.image() pinned to SHA256 — no :latest
+//   SEC6-JK-004: No curl -k / --insecure or wget --no-check-certificate
+//   SEC6-JK-005: No long-lived cloud credentials in environment block
+//   SEC6-JK-006: No writeFile with private key or PEM material
+//   SEC6-JK-007: No bat step with Groovy interpolation of params/env
+//   SEC7-JK-002: No scripted node{} blocks without label
+//   SEC7-JK-003: docker.withRegistry uses real credentials, not null
+//   SEC8-JK-003: All repository URLs use HTTPS, not HTTP
+//   SEC9-JK-003: wget downloads use sha256sum verification on same line
+//   SEC1-JK-002: Pipeline has timeout() in options
+//   SEC10-JK-001: Pipeline has post { always { } } block
+
+@Library('shared-lib@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2') _
+
+pipeline {
+    agent {
+        label 'trusted-linux'
+    }
+
+    options {
+        disableConcurrentBuilds(abortPrevious: true)
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(name: 'DEPLOY_ENV', defaultValue: 'staging', description: 'Deployment environment')
+        booleanParam(name: 'RUN_TESTS', defaultValue: true, description: 'Run full test suite')
+    }
+
+    environment {
+        APP_NAME     = 'my-application'
+        REGISTRY_URL = 'registry.example.com'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout([$class: 'GitSCM',
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/org/repo.git',
+                        credentialsId: 'github-app-credentials'
+                    ]]
+                ])
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh 'make build'
+                archiveArtifacts artifacts: 'dist/**/*.jar', fingerprint: true
+            }
+        }
+
+        stage('Test') {
+            when {
+                expression { return params.RUN_TESTS }
+            }
+            steps {
+                sh 'make test'
+            }
+        }
+
+        stage('Push Image') {
+            steps {
+                // Use pinned SHA256 digest — mutable :latest tag not used (SEC3-JK-003 / SEC8-JK-001)
+                // Credentials hardcoded by ID — not derived from params (SEC2-JK-002)
+                docker.withRegistry("https://${REGISTRY_URL}", 'registry-creds') {
+                    docker.image("ubuntu@sha256:a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9").inside {
+                        sh 'make package'
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Production') {
+            steps {
+                // Manual approval gate with submitter restriction (SEC1-JK-001, SEC4-JK-004)
+                input(
+                    message: 'Deploy to production?',
+                    ok: 'Deploy',
+                    submitter: 'release-team,ops-leads'
+                )
+                // Credential bound by hardcoded ID — not from params (SEC2-JK-002)
+                // sshUserPrivateKey binding avoids writing key to disk with writeFile (SEC6-JK-006)
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: 'deploy-ssh-key',
+                    keyFileVariable: 'SSH_KEY_FILE'
+                )]) {
+                    // Credential used directly — not echoed (SEC6-JK-002), not printed (SEC6-JK-003)
+                    sh 'ssh -i "$SSH_KEY_FILE" deployer@prod.example.com ./deploy.sh'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Guaranteed cleanup runs on success and failure (SEC10-JK-001)
+            cleanWs()
+        }
+        failure {
+            echo 'Pipeline failed — check logs at the build URL above'
+        }
+    }
+}

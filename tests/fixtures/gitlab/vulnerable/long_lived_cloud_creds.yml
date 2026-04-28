@@ -1,0 +1,8 @@
+# Triggers: SEC6-GL-007 — long-lived cloud credentials in GitLab CI configuration
+deploy:
+  stage: deploy
+  variables:
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_KEY
+  script:
+    - aws s3 sync dist/ s3://my-bucket/

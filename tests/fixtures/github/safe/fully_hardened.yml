@@ -1,0 +1,79 @@
+# fully_hardened.yml
+# Golden reference: this workflow must produce ZERO findings from ALL GitHub rules.
+# If any rule fires here, that rule either has a false positive or this file needs review.
+#
+# Hardening applied:
+#   - permissions: contents: read at workflow + job level (no write-all)
+#   - All actions pinned to full 40-char commit SHA
+#   - persist-credentials: false on all checkouts
+#   - Safe trigger: push + pull_request only
+#   - All GitHub context values passed via env: block, never inline in run:
+#   - No hardcoded secrets or credentials
+#   - No curl piped to a shell interpreter
+#   - No id-token: write without OIDC action
+#   - No secrets dump, no inherited secrets
+#   - No legacy set-env commands
+#   - No workflow_run trigger
+#   - No self-hosted runners
+
+name: Hardened CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0a5c49d9b0ae9702c08fa4cf9d7bef6f3a2e3f4a # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest tests/
+
+      - name: Log PR info safely
+        if: github.event_name == 'pull_request'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "PR: $PR_NUMBER"
+          echo "SHA: $PR_SHA"
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0a5c49d9b0ae9702c08fa4cf9d7bef6f3a2e3f4a # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Lint
+        run: |
+          pip install ruff==0.9.0
+          ruff check .
+          ruff format --check .

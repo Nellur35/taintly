@@ -1,0 +1,46 @@
+"""JSON output reporter."""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING
+
+from taintly.families import cluster_findings
+from taintly.models import AuditReport
+
+if TYPE_CHECKING:
+    from taintly.scorer import ScoreReport
+
+
+def format_json(report: AuditReport, score_report: "ScoreReport | None" = None) -> str:
+    """Render an AuditReport as pretty-printed JSON."""
+    clusters = cluster_findings(report.findings)
+    confirmed_clusters = [cl for cl in clusters if not cl.review_needed]
+    review_clusters = [cl for cl in clusters if cl.review_needed]
+
+    # ``errors`` mirrors ENGINE-ERR findings into a top-level array so
+    # downstream tooling can detect silent coverage loss without grep-
+    # ping the findings stream by ``rule_id``.  The same Findings
+    # remain in ``findings`` for backwards compatibility — pre-v1.1
+    # consumers parsing only ``findings`` keep working unchanged.
+    data: dict = {
+        "repo_path": report.repo_path,
+        "platform": report.platform,
+        "files_scanned": report.files_scanned,
+        "summary": report.summary,
+        "distinct_risk_count": len(confirmed_clusters),
+        "review_needed_count": len(review_clusters),
+        "families": [cl.to_dict() for cl in clusters],
+        "findings": [f.to_dict() for f in report.findings],
+        "errors": [f.to_dict() for f in report.engine_errors()],
+    }
+
+    if score_report is not None:
+        data["score"] = {
+            "total": score_report.total_score,
+            "grade": score_report.grade,
+            "distinct_risks": score_report.distinct_risks,
+            "review_needed": score_report.review_needed,
+        }
+
+    return json.dumps(data, indent=2)

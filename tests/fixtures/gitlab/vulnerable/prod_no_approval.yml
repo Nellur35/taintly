@@ -1,0 +1,8 @@
+# Triggers: SEC1-GL-001 — production environment without manual approval gate
+deploy_production:
+  stage: deploy
+  environment: production
+  script:
+    - ./deploy.sh
+  only:
+    - main

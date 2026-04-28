@@ -1,0 +1,17 @@
+# ppe_classic.yml — Poisoned Pipeline Execution (classic pattern)
+# Expected findings: SEC4-GH-001 (pull_request_target + checkout ref),
+#                    SEC4-GH-011 (pull_request_target + npm install),
+#                    SEC3-GH-001 (unpinned actions)
+name: PR Tests
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: npm install && npm test

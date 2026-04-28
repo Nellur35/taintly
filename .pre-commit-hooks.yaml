@@ -1,0 +1,25 @@
+- id: taintly
+  name: taintly — CI/CD security scanner
+  description: Scan GitHub Actions / GitLab CI / Jenkinsfile for security issues
+  entry: python -m taintly
+  language: python
+  # The `files:` filter triggers the hook only when a CI/CD config file
+  # changes, but the entry scans the whole repo (pass_filenames: false)
+  # so cross-file rules (CorpusPattern) keep their full coverage.
+  files: '(\.github/workflows/.*\.ya?ml|\.gitlab-ci\.yml|Jenkinsfile.*|.*\.jenkinsfile)$'
+  pass_filenames: false
+  args:
+    - --min-severity=HIGH
+    - --no-color
+
+- id: taintly-strict
+  name: taintly — CI/CD security scanner (strict)
+  description: Scan and fail on any MEDIUM+ finding
+  entry: python -m taintly
+  language: python
+  files: '(\.github/workflows/.*\.ya?ml|\.gitlab-ci\.yml|Jenkinsfile.*|.*\.jenkinsfile)$'
+  pass_filenames: false
+  args:
+    - --min-severity=MEDIUM
+    - --fail-on=MEDIUM
+    - --no-color

@@ -1,0 +1,18 @@
+# injection_run_block.yml
+# Expected findings: SEC4-GH-004 (context directly in run:),
+#                    SEC4-GH-006 (GITHUB_ENV injection)
+name: PR Labeler
+on: pull_request_target
+
+permissions:
+  contents: read
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo PR title
+        run: echo "Title is ${{ github.event.pull_request.title }}"
+
+      - name: Set env
+        run: echo "TITLE=${{ github.event.pull_request.title }}" >> $GITHUB_ENV

@@ -1,0 +1,270 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Lint — ruff check + format enforcement
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    # Dogfooding SEC10-GH-001 — explicit bound prevents a hung or
+    # compromised job from running up to the 6-hour default.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff==0.9.0
+
+      - name: Check lint
+        run: ruff check taintly/
+
+      - name: Check formatting
+        run: ruff format --check taintly/
+
+  # ---------------------------------------------------------------------------
+  # mypy — static type check (PSE Domain 2.1)
+  # Loose mode: enables the highest-value bug classes (undefined name,
+  # arg mismatch, missing return) without requiring every function to be
+  # annotated. Runs across the full Python version matrix so we catch
+  # stdlib typing drift that only surfaces on older interpreters
+  # (e.g. `list[X]` semantics across 3.10 → 3.12).
+  # ---------------------------------------------------------------------------
+  type-check:
+    name: mypy (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install mypy
+        run: pip install mypy==1.14.1
+
+      - name: Run mypy
+        run: mypy --python-version ${{ matrix.python-version }}
+
+  # ---------------------------------------------------------------------------
+  # Unit tests — reporters, models, engine
+  # Tests the layer beneath pattern matching: output correctness, filtering,
+  # line numbers, ENGINE-ERR handling, discover_files, golden fixture.
+  # Runs on a single Python version (fast feedback path).
+  # ---------------------------------------------------------------------------
+  unit-test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        # hypothesis pulls in property-based tests
+        # (tests/unit/test_pattern_properties.py — PSE Domain 3.4).
+        run: pip install pytest pytest-timeout pytest-cov hypothesis==6.152.1
+
+      - name: Unit + integration + evasion tests
+        # Branch coverage enabled here too (not just via pyproject) so
+        # the floor reflects both line AND branch coverage. Current
+        # floor is 78; target is 85 — see pyproject.toml
+        # [tool.coverage.report] for the ratchet plan and per-module
+        # drag list. MUST stay in lockstep with pyproject's fail_under.
+        run: |
+          pytest tests/unit/ tests/integration/ tests/evasion/ \
+            --tb=short -q \
+            --cov=taintly \
+            --cov-branch \
+            --cov-report=term-missing \
+            --cov-fail-under=78
+
+  # ---------------------------------------------------------------------------
+  # Rule tests — self-test, mutation tests, integration tests (pattern layer)
+  # Tests pattern matching logic across Python version matrix.
+  # ---------------------------------------------------------------------------
+  rule-test:
+    name: Rule tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Rule self-tests
+        run: python -m taintly --self-test --no-color
+        # Exit 10 if any rule self-test fails
+
+      - name: Mutation tests (100% kill rate required)
+        run: python -m taintly --self-test --mutate --no-color
+        # Exit 12 if mutation kill rate < 100%
+
+      - name: Integration tests
+        run: python -m taintly --integration-test --no-color
+        # Exit 10 if any non-bypass integration test fails
+        # known_bypass failures are expected and do not fail the build
+
+  # ---------------------------------------------------------------------------
+  # Fuzz — adversarial input resilience (scanner as attack surface)
+  # Verifies scanner does not crash, hang, or OOM on malformed/adversarial YAML.
+  # Inspired by pre-mortem Failure 1: YAML bomb causing runner credential corruption.
+  # Inputs include: anchor bombs, null bytes, 100k-char lines, RTL unicode,
+  # binary content, deeply nested keys, repeated keys, ReDoS payloads.
+  # Single Python version — this is adversarial posture, not compatibility.
+  # ---------------------------------------------------------------------------
+  fuzz:
+    name: Adversarial input (fuzz)
+    runs-on: ubuntu-latest
+    # Fuzz has a 30s per-test timeout at the pytest layer; a 20-minute
+    # job-level bound catches the case where a new fuzz test explodes
+    # in example count and bypasses the per-test cap in aggregate.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install pytest pytest-timeout
+
+      - name: Fuzz tests
+        run: pytest tests/fuzz/ --tb=short -q
+        # 30s per-test timeout enforced via pyproject.toml [tool.pytest.ini_options]
+
+  # ---------------------------------------------------------------------------
+  # Self-audit — run taintly on its own workflow files (dogfood)
+  # Must produce zero HIGH or CRITICAL findings on our own CI config.
+  # This enforces that the project's CI config follows its own security rules.
+  # ---------------------------------------------------------------------------
+  audit-self:
+    name: Self-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Audit own workflows
+        # Intentionally runs `python -m taintly` against the
+        # checked-out tree WITHOUT a prior `pip install -e .`. The package
+        # resolves from the current directory, so we audit THIS commit's
+        # version of the rules against this commit's workflows — the
+        # dogfood loop only works if the code and rules evolve together.
+        # Installing a pinned wheel first would decouple them, which is
+        # the wrong signal: we want CI to fail when a rule change and a
+        # workflow change disagree on the same commit. If the package
+        # layout ever moves so `python -m` no longer resolves, switch to
+        # `pip install -e . && python -m taintly ...` and update this
+        # comment; do NOT add `pip install taintly` from PyPI.
+        run: |
+          python -m taintly .github/workflows/ \
+            --platform github \
+            --min-severity HIGH \
+            --no-color
+          echo "Exit code: $?"
+        # Fails with exit 1/2 if any HIGH or CRITICAL findings exist in our own workflows.
+
+  # ---------------------------------------------------------------------------
+  # Windows test slice — preventive gate against path-separator
+  # regressions and any other OS-specific behaviour drift.
+  #
+  # Background: PR #135 fixed four Windows path-separator bugs that
+  # had silently slipped through Linux-only CI for several rule
+  # releases.  The scanner ran fine on Windows for read-only paths
+  # but `endswith` / `split("/")` / `"/ci/" in filepath` checks
+  # silently misclassified legitimate workflow files as non-matching
+  # because os.path.join produces `\`-separated paths on Windows.
+  #
+  # Discipline:
+  # - Single Python version (3.12) — Windows-runner minutes are not
+  #   free; the unit suite is OS-sensitive but not interpreter-
+  #   sensitive in this layer.  The Linux matrix already covers 3.10
+  #   / 3.11 / 3.12 for Python-version compatibility.
+  # - Runs the SAME pytest invocation as the Linux unit-test job, but
+  #   without coverage instrumentation (Windows coverage tooling adds
+  #   flake without catching path bugs).
+  # - Bash-driven slices (gitleaks, bandit, fuzz, lint, audit-self)
+  #   stay Linux-only — they exercise tooling, not OS-portable code.
+  # ---------------------------------------------------------------------------
+  windows-test:
+    name: Tests (Windows, Python 3.12)
+    runs-on: windows-latest
+    # Windows-runner startup is ~2x slower than Ubuntu; the budget here
+    # matches the Linux unit-test job (15 min) since coverage is off.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        # hypothesis pulled at the same pin as the Linux unit-test job to
+        # keep the property-based test suite reproducible across OSes.
+        run: pip install pytest pytest-timeout hypothesis==6.152.1
+
+      - name: Unit + integration + evasion tests
+        # No coverage gate on Windows — the Linux job already enforces
+        # the 78% floor; the Windows job's purpose is OS-portability,
+        # not coverage.  If a test fails ONLY on Windows, that's a
+        # path / line-ending / case-sensitivity bug worth fixing.
+        run: pytest tests/unit/ tests/integration/ tests/evasion/ --tb=short -q
+

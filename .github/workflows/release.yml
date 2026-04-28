@@ -1,0 +1,180 @@
+name: Release
+
+# Publishes taintly to PyPI + GitHub Releases on a semver tag.
+#
+# Trigger: pushing a tag that matches v*.*.*. Gated on the tag existing
+# on main (enforced by the build job's `fetch-depth: 0` + git ancestry
+# check below) so a rogue branch tag can't ship a release.
+#
+# Auth: PyPI trusted publishing via OpenID Connect. There is NO
+# long-lived API token anywhere — PyPI validates the workflow identity
+# against the publisher configured under
+# https://pypi.org/manage/project/taintly/settings/publishing/
+# See CONTRIBUTING.md §"PyPI trusted publishing setup" for one-time
+# config. TestPyPI dry-runs go through .github/workflows/test-release.yml.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build — sdist + wheel. Attached to the GitHub Release so people
+  # who want raw artefacts (not `pip install git+...`) can grab them.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          # Full history so we can assert tag ancestry against main.
+          fetch-depth: 0
+          # setuptools-scm needs the tag refs to derive the version.
+          fetch-tags: true
+
+      - name: Assert tag is on main
+        run: |
+          # Refuse to publish a tag that's not an ancestor of main.
+          # Prevents a rogue branch tag from triggering a release.
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::tag $GITHUB_REF_NAME is not on main"; exit 1; }
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: pip install build==1.2.2
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Sanity-check the wheel installs cleanly
+        # Catches missing MANIFEST entries or package-data gaps before
+        # we attach the artefact to a Release.
+        run: |
+          python -m venv /tmp/install-check
+          /tmp/install-check/bin/pip install dist/*.whl
+          /tmp/install-check/bin/taintly --version
+
+      - name: Upload build artefacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish to PyPI via trusted publishing (OIDC, no long-lived token).
+  # ---------------------------------------------------------------------------
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      # Bind to the `pypi` environment so PyPI's trusted-publisher
+      # config can require it. This used to also gate on a manual
+      # reviewer click — that was deliberately removed because the
+      # `Assert tag is on main` step inside the build job is already
+      # the right gate, and the approval click added friction without
+      # adding safety. If you want belt-and-braces, re-add reviewers
+      # to the `pypi` environment in repo settings.
+      name: pypi
+      url: https://pypi.org/project/taintly/
+    permissions:
+      # Required for OIDC → PyPI trusted publishing.
+      id-token: write
+    steps:
+      - name: Download build artefacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          # Default repository is pypi.org — trusted publisher config
+          # there maps this (repo, workflow, environment) tuple to
+          # the `taintly` project. No token input required.
+          packages-dir: dist/
+          # Confirm the uploaded files survived round-trip.
+          verify-metadata: true
+          # skip-existing:false — if a file collides it means the tag
+          # is a re-run or a mistake. The prior v1.0.0/v1.1.0 incident
+          # was a build that produced taintly-0.0.0 due to missing tags
+          # in the checkout (now fixed via fetch-tags: true above);
+          # detect-the-collision-loudly is the right behaviour, not skip.
+          skip-existing: false
+
+  # ---------------------------------------------------------------------------
+  # GitHub Release — attach sdist + wheel + CHANGELOG excerpt as the body.
+  # Runs after PyPI so the GH Release links to a PyPI version that
+  # exists. If PyPI publish fails, no GH Release is created either.
+  # ---------------------------------------------------------------------------
+  github-release:
+    name: GitHub Release
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write    # required to create the release
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Download build artefacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - name: Extract changelog section for this tag
+        id: changelog
+        run: |
+          # Pull the matching `## [vX.Y.Z]` section out of CHANGELOG.md
+          # into a tempfile so gh can use it as the release body. The
+          # awk incantation reads: "print lines between our section
+          # header and the next one, excluding those headers."
+          #
+          # The `[[]` / `[]]` form encodes literal `[` / `]` as
+          # single-element character classes — portable across awk
+          # implementations. The previous form (`\\[` / `\\]`) was
+          # silently degrading to character classes on gawk via
+          # "escape sequence treated as plain `['" so v1.0.0 / v1.1.0 /
+          # v1.1.1 GitHub Releases all shipped with the generic
+          # fallback body instead of the CHANGELOG section.
+          tag="${GITHUB_REF_NAME#v}"
+          # `in` is an awk keyword (array membership) — use a non-reserved name.
+          awk -v tag="$tag" '
+            $0 ~ "^## [[]" tag "[]]" { inside=1; next }
+            inside && $0 ~ "^## [[]" { exit }
+            inside { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release notes for $GITHUB_REF_NAME" > release-notes.md
+          fi
+          echo "notes-path=release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "${{ steps.changelog.outputs.notes-path }}" \
+            dist/*

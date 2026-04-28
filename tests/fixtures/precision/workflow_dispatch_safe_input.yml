@@ -1,0 +1,30 @@
+# Precision fixture — from the improvement report:
+#
+#   "workflow_dispatch input passed safely via validated env var
+#    → Lower or no injection finding"
+#
+# The input is routed through a step-level env var before hitting any
+# run: block, which is the documented safe pattern. Script-injection
+# rules SHOULD NOT fire on the run: line because the value reaches the
+# shell as $INPUT_MESSAGE, not as a direct ${{ }} expansion.
+name: Manual echo
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: Text to echo
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Safe echo
+        env:
+          INPUT_MESSAGE: ${{ inputs.message }}
+        run: |
+          # Shell variable — no template expansion on this line
+          echo "Got: $INPUT_MESSAGE"
