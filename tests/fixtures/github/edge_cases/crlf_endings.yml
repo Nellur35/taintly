@@ -1,0 +1,1 @@
+name: CRLF test\r\non: push\r\n\r\npermissions:\r\n  contents: read\r\n\r\njobs:\r\n  build:\r\n    runs-on: ubuntu-latest\r\n    steps:\r\n      - uses: actions/checkout@v4\r\n

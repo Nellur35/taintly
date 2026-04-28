@@ -1,0 +1,18 @@
+# ai_hf_no_revision.yml
+# Expected findings: AI-GH-002 (HuggingFace fetch without pinned revision SHA)
+name: Model smoke test
+on: push
+
+permissions:
+  contents: read
+
+jobs:
+  fetch-model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Pull model (unpinned)
+        run: huggingface-cli download org/classifier --revision main

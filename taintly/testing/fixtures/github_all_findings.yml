@@ -1,0 +1,142 @@
+# Fixture: deliberately vulnerable GitHub Actions workflow
+# Designed to trigger most of the rules in taintly for end-to-end testing.
+# DO NOT use this in a real repository.
+
+name: Vulnerable All-Findings Fixture
+
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+      debug_flag:
+        description: Enable debug
+        required: false
+
+# No permissions block — triggers SEC2-GH-002
+
+jobs:
+  # SEC7-GH-003: self-hosted runner + pull_request context
+  build:
+    runs-on: [self-hosted, linux]
+    # SEC7-GH-002: debug mode hardcoded
+    env:
+      ACTIONS_RUNNER_DEBUG: true
+      ACTIONS_STEP_DEBUG: true
+      # SEC6-GH-003: long-lived AWS credentials
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET }}
+    steps:
+      # SEC3-GH-001: unpinned action tag
+      - uses: actions/checkout@v4
+
+      # SEC4-GH-005: checkout without persist-credentials: false
+
+      # SEC4-GH-004: script injection via GitHub context
+      - run: echo "PR title is ${{ github.event.pull_request.title }}"
+
+      # SEC4-GH-006: GITHUB_ENV injection
+      - run: echo "TITLE=${{ github.event.pull_request.title }}" >> $GITHUB_ENV
+
+      # SEC4-GH-007: GITHUB_OUTPUT injection
+      - run: echo "branch=${{ github.head_ref }}" >> $GITHUB_OUTPUT
+
+      # SEC4-GH-008: workflow_dispatch input in run block
+      - run: deploy.sh ${{ inputs.environment }}
+
+      # SEC4-GH-009: insecure commands re-enabled
+      - env:
+          ACTIONS_ALLOW_UNSECURE_COMMANDS: true
+        run: echo "::set-env name=FOO::bar"
+
+      # SEC4-GH-010: spoofable bot actor check
+      - if: github.actor == 'dependabot[bot]'
+        run: echo "Dependabot detected"
+
+      # SEC4-GH-011: LOTP tools in pull_request_target
+      - run: npm install && npm test
+
+      # SEC4-GH-012: secrets inherit
+      - uses: ./.github/workflows/called.yml
+        secrets: inherit
+
+      # SEC4-GH-013: if: always true via block scalar
+      - if: |
+          github.event_name == 'push'
+        run: echo "this always runs"
+
+      # SEC6-GH-001: hardcoded secret
+      - run: echo "setting up"
+        env:
+          password: "MyS3cretP@ssw0rd!"
+
+      # SEC6-GH-004: toJSON(secrets) — all secrets exposed
+      - run: echo '${{ toJSON(secrets) }}'
+
+      # SEC6-GH-005: secret directly in shell
+      - run: curl -H "Authorization: Bearer ${{ secrets.API_TOKEN }}" https://api.example.com
+
+      # SEC6-GH-006: base64 obfuscation + exec
+      - run: echo 'aGVsbG8gd29ybGQ=' | base64 --decode | bash
+
+      # SEC6-GH-007: curl pipe to shell
+      - run: curl -sSL https://get.example.com/install.sh | bash
+
+      # SEC3-GH-002: action pinned to branch
+      - uses: some-org/deploy@main
+
+      # SEC3-GH-003: known compromised action
+      - uses: aquasecurity/trivy-action@v0.33.0
+
+      # SEC9-GH-001: binary downloaded without checksum
+      - run: |
+          curl -fsSL -o installer.bin https://example.com/releases/v1.0/installer.bin
+          chmod +x installer.bin && ./installer.bin
+
+  # SEC1-GH-001: deploy job without environment gate
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - run: ./deploy.sh production
+
+  # SEC9-GH-002: cache used in release workflow
+  release-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          cache: npm
+      - run: npm ci && npm run build
+
+  # SEC2-GH-001: write-all permissions
+  privileged:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    steps:
+      - run: echo "wide open"
+
+  # SEC2-GH-004: hardcoded container credentials
+  containerized:
+    runs-on: ubuntu-latest
+    container:
+      image: private-registry.example.com/app:latest
+      credentials:
+        username: myreguser
+        password: myregpassword123
+    steps:
+      - run: echo "in container"
+
+  # SEC5-GH-001: id-token: write without OIDC action
+  id-token-misuse:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - run: echo "no OIDC action here"

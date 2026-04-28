@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "source": "GitHub Advisory Database (REST API: /advisories?ecosystem=actions)",
+  "fetched_at": "2026-04-26",
+  "advisories": [
+    {
+      "ghsa": "GHSA-mrrh-fwg8-r2c3",
+      "cve": "CVE-2025-30066",
+      "package": "tj-actions/changed-files",
+      "severity": "high",
+      "summary": "tj-actions/changed-files compromised; outputs hijacked to leak secrets via action logs.",
+      "affected": "<= 45.0.7",
+      "fixed": "46.0.1",
+      "discovered": "2025-03-14"
+    },
+    {
+      "ghsa": "GHSA-mcph-m25j-8j63",
+      "cve": "CVE-2023-51664",
+      "package": "tj-actions/changed-files",
+      "severity": "high",
+      "summary": "Command injection via attacker-controlled output filenames (GHSL-2023-271).",
+      "affected": "< 41",
+      "fixed": "41",
+      "discovered": "2024-01-02"
+    },
+    {
+      "ghsa": "GHSA-qmg3-hpqr-gqvc",
+      "cve": "CVE-2025-30154",
+      "package": "reviewdog/action-setup",
+      "severity": "high",
+      "summary": "Multiple Reviewdog actions compromised; PAT abused to push malicious commits.",
+      "affected": "== 1",
+      "fixed": null,
+      "discovered": "2025-03-11"
+    },
+    {
+      "ghsa": "GHSA-69fq-xp46-6x23",
+      "cve": "CVE-2026-33634",
+      "package": "aquasecurity/trivy-action",
+      "severity": "critical",
+      "summary": "Trivy ecosystem supply chain briefly compromised.",
+      "affected": "< 0.35.0",
+      "fixed": "0.35.0",
+      "discovered": "2026-03-XX"
+    },
+    {
+      "ghsa": "GHSA-69fq-xp46-6x23",
+      "cve": "CVE-2026-33634",
+      "package": "aquasecurity/setup-trivy",
+      "severity": "critical",
+      "summary": "Trivy ecosystem supply chain briefly compromised (setup-trivy is also affected).",
+      "affected": "< 0.2.6",
+      "fixed": "0.2.6",
+      "discovered": "2026-03-XX"
+    },
+    {
+      "ghsa": "GHSA-9p44-j4g5-cfx5",
+      "cve": "CVE-2026-26189",
+      "package": "aquasecurity/trivy-action",
+      "severity": "medium",
+      "summary": "Script injection via sourced env file in composite action.",
+      "affected": ">= 0.31.0, < 0.34.0",
+      "fixed": "0.34.0",
+      "discovered": "2026-XX-XX"
+    }
+  ]
+}

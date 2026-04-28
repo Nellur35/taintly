@@ -1,0 +1,6 @@
+# Triggers: SEC1-GL-002 — security scanning job configured to allow failure
+sast:
+  stage: test
+  script:
+    - semgrep --config=auto .
+  allow_failure: true

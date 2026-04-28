@@ -1,0 +1,69 @@
+name: CodeQL
+
+# PSE Domain 3.1 — SAST via dataflow analysis.
+# Complementary to bandit (pattern-based SAST). CodeQL does actual
+# dataflow tracking — finds taint flows, null-propagation bugs, and
+# use-after-free-shaped Python bugs that bandit regexes cannot see.
+#
+# For taintly specifically, CodeQL catches "source → sink" issues in
+# the analyzer itself — exactly the class of bug the product exists to
+# find in OTHER workflows.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly deep-dataflow run catches issues the incremental PR run
+    # might miss (DB maturity improves over time).
+    - cron: "0 10 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    # CodeQL is the slowest job (database build + query execution);
+    # 30 min matches GitHub's own default-recommended bound and is
+    # well above the typical 10-15 min a Python-only repo needs.
+    timeout-minutes: 30
+    permissions:
+      # Required to upload SARIF results to the Security tab.
+      security-events: write
+      # Required for auto-build of the repo under analysis.
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Add more languages here if the repo ever ships non-Python code
+        # (e.g. bundled rust helpers). `python` is the only language
+        # currently in scope.
+        language: ["python"]
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@181d5eefc20863364f96762470ba6f862bdef56b # v3.29.2
+        with:
+          languages: ${{ matrix.language }}
+          # `security-extended` adds recommended queries beyond the
+          # default set; `security-and-quality` also flags non-security
+          # code-quality issues. Pick security-extended: the noise floor
+          # of security-and-quality is too high for a security tool's
+          # own CI.
+          queries: security-extended
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@181d5eefc20863364f96762470ba6f862bdef56b # v3.29.2
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@181d5eefc20863364f96762470ba6f862bdef56b # v3.29.2
+        with:
+          category: "/language:${{ matrix.language }}"

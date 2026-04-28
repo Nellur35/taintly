@@ -1,0 +1,20 @@
+# EVASION: Variable indirection bypasses SEC4-GH-006
+#
+# SEC4-GH-006 looks for: ${{ context_value }} >> $GITHUB_ENV on the same line.
+# Storing $GITHUB_ENV in a shell variable first breaks the single-line pattern match.
+# The injection is semantically identical — writing to $OUT writes to $GITHUB_ENV.
+#
+# Bypasses: SEC4-GH-006 (GITHUB_ENV injection)
+# Why undetectable: requires multi-line shell taint tracking
+name: PR handler
+on: pull_request_target
+permissions:
+  contents: read
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          OUT="$GITHUB_ENV"
+          echo "TITLE=${{ github.event.pull_request.title }}" >> "$OUT"

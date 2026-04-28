@@ -1,0 +1,26 @@
+# EVASION: YAML anchor merge key bypasses SEC4-GH-005 (false positive variant)
+#
+# SEC4-GH-005 uses an N-line lookahead after checkout to find persist-credentials: false.
+# When the value is set via YAML anchor merge (<<: *checkout_opts), the anchor definition
+# is at the TOP of the file (before jobs:), outside the lookahead window.
+# The rule fires even though persist-credentials IS properly set — a false positive.
+#
+# Bypasses: SEC4-GH-005 fires incorrectly (false positive, not false negative)
+# Why undetectable: YAML anchors are not expanded by the text scanner
+name: CI
+on: push
+permissions:
+  contents: read
+
+checkout_opts: &checkout_opts
+  persist-credentials: false
+  fetch-depth: 0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          <<: *checkout_opts
+      - run: npm ci && npm test

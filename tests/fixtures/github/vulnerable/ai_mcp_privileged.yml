@@ -1,0 +1,23 @@
+# ai_mcp_privileged.yml
+# Expected findings: AI-GH-012 (privileged MCP server on fork-triggerable event)
+#                    AI-GH-006 / AI-GH-011 may also fire (agent action on PR; unpinned MCP server).
+name: Claude with filesystem MCP
+on: pull_request
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Claude with filesystem access
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          mcp_config: '{"mcpServers":{"fs":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem@1.0.0"]}}}'

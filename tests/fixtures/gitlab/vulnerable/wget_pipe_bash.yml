@@ -1,0 +1,5 @@
+# Triggers: SEC6-GL-006 — wget piped to bash without integrity check
+setup:
+  stage: build
+  script:
+    - wget -q -O - https://example.com/setup.sh | bash

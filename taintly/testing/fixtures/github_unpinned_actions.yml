@@ -1,0 +1,11 @@
+name: Unpinned Actions Example
+on: push
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v3
+      - uses: some-org/deploy@main
+      - run: npm build

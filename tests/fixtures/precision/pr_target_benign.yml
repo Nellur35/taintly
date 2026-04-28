@@ -1,0 +1,22 @@
+# Precision fixture — from the improvement report's Phase 2 Scenario table:
+#
+#   "pull_request_target with no checkout, no secrets, permissions: {}
+#    → Review-needed or lower priority, not top-severity alarm"
+#
+# Expected behavior:
+#   - SEC4-GH-002 MUST fire (trigger is detected)
+#   - The finding MUST carry review_needed=True (it's trigger-only, design-intent-dependent)
+#   - Workflow-context exploitability for privileged_pr_trigger family MUST be 'low'
+#     (no checkout, no secrets, permissions: {} — nothing to exfiltrate)
+name: PR triage comment
+on:
+  pull_request_target:
+    types: [opened]
+permissions: {}
+jobs:
+  welcome:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Say hi
+        run: echo "hello"

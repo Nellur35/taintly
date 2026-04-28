@@ -1,0 +1,6 @@
+# Triggers: SEC4-GL-005 — MR pipeline runs deployment command (fork code with project secrets)
+publish:
+  only:
+    - merge_requests
+  script:
+    - docker push registry.example.com/myapp:$CI_COMMIT_SHA

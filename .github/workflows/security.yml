@@ -1,0 +1,80 @@
+name: Security
+
+on:
+  push:
+    branches: [main, "claude/*"]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly scan every Monday at 08:00 UTC
+    - cron: "0 8 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Bandit — Python static application security testing (SAST)
+  # Fails on any MEDIUM+ severity / MEDIUM+ confidence finding.
+  # nosec comments in source are respected.
+  # ---------------------------------------------------------------------------
+  bandit:
+    name: Bandit SAST
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install bandit
+        run: pip install bandit==1.8.3
+
+      - name: Run bandit SAST
+        # Config lives in pyproject.toml [tool.bandit] so strictness
+        # is version-controlled with the code rather than scattered
+        # across CLI flags. Ratcheted to severity=low, confidence=high
+        # — every low-severity high-confidence finding either is a
+        # real smell or carries an inline `# nosec BXXX` with a
+        # reason comment.
+        run: bandit -r taintly/ -c pyproject.toml -x taintly/testing/ -f txt
+
+  # ---------------------------------------------------------------------------
+  # pip-audit — dependency vulnerability scan
+  # taintly has zero third-party runtime deps; this guards against
+  # vulnerabilities introduced by dev/build tooling.
+  # ---------------------------------------------------------------------------
+  pip-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: pip install pip-audit==2.9.0
+
+      - name: Audit installed packages
+        # GHSA-58qw-9mgm-455v is in pip itself (the build tool), not
+        # in any package taintly installs.  taintly has zero runtime
+        # dependencies — only pip is in the environment, and pip's
+        # own vulnerability is patched by pip's own maintainers in a
+        # later pip version.  Ignored at this gate so pip-audit only
+        # alerts on vulns in code we actually ship.
+        run: pip-audit --ignore-vuln GHSA-58qw-9mgm-455v
+        # The project itself has no runtime dependencies, so this catches
+        # vulnerabilities in dev/build tooling (pip, setuptools, bandit, etc.)

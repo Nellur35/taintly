@@ -1,0 +1,23 @@
+# ai_agent_dangerous_flags.yml
+# Expected findings: AI-GH-009 (dangerous agent flags on fork-triggerable event)
+#                    AI-GH-006 also fires (agent action on pull_request).
+name: Claude auto-fix
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Let Claude auto-fix
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: --dangerously-skip-permissions

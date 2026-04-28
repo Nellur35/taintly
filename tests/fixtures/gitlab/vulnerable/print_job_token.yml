@@ -1,0 +1,6 @@
+# Triggers: SEC10-GL-001 — CI_JOB_TOKEN printed to job log
+debug:
+  stage: build
+  script:
+    - echo $CI_JOB_TOKEN
+    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY

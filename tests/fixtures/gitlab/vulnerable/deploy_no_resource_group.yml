@@ -1,0 +1,8 @@
+# Triggers: SEC5-GL-001 — deployment job targets environment without resource_group
+deploy_prod:
+  stage: deploy
+  environment: production
+  script:
+    - ./deploy.sh
+  only:
+    - main

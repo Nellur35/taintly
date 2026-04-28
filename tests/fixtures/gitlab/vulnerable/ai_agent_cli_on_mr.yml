@@ -1,0 +1,12 @@
+# GitLab CI fixture — expected findings: AI-GL-008 (agentic CLI on MR pipeline)
+stages:
+  - review
+
+claude-review:
+  stage: review
+  image: python@sha256:a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+  script:
+    - npm install -g @anthropic-ai/claude-code@1.0.0
+    - claude -p "Review this MR and comment on the changed files"

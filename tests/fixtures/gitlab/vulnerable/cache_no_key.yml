@@ -1,0 +1,10 @@
+# Triggers: SEC9-GL-003 — cache block without explicit key (cross-branch cache poisoning risk)
+build:
+  stage: build
+  script:
+    - pip install -r requirements.txt
+    - make build
+  cache:
+    paths:
+      - .pip/
+      - node_modules/

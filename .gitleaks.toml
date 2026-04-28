@@ -1,0 +1,31 @@
+# gitleaks config.
+#
+# This repo's rule files and tests contain intentional *fake* secrets
+# (test fixtures that exercise detection logic). We extend the default
+# rule set but allowlist the paths that are known to contain
+# test/fixture data — secrets introduced outside those paths still fail.
+
+title = "taintly secret scan"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fixtures and rule definitions contain intentional fake secrets"
+paths = [
+    '''tests/fixtures/.*''',
+    '''tests/.*test_.*\.py''',
+    '''taintly/rules/.*\.py''',
+    '''taintly/testing/.*\.py''',
+    '''benchmark/corpus/.*''',
+    '''docs/.*\.md''',
+    '''\.gitleaks\.toml''',
+]
+# Example-style strings that look like secrets but aren't.
+regexTarget = "match"
+regexes = [
+    '''example\.com''',
+    '''attacker\.com''',
+    '''your-secret-here''',
+    '''REPLACE-ME''',
+]

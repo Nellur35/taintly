@@ -1,0 +1,27 @@
+# ai_prompt_injection_surface.yml
+# Expected findings: AI-GH-005 (LLM call + attacker-controlled PR body)
+#                    (SEC4-GH-002 also fires — this is a pull_request_target workflow.)
+name: Triage with Claude
+on: pull_request_target
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Summarise with Claude
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          curl https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "{\"model\":\"claude-sonnet-4-5\",\"messages\":[{\"role\":\"user\",\"content\":\"$PR_BODY\"}]}"

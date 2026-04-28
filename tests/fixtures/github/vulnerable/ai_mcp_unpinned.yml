@@ -1,0 +1,23 @@
+# ai_mcp_unpinned.yml
+# Expected findings: AI-GH-011 (MCP server from npx without version pin)
+#                    AI-GH-006 also fires (claude-code-action on PR).
+name: Claude with GitHub MCP
+on: pull_request
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Claude review with MCP
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          mcp_config: '{"mcpServers":{"github":{"command":"npx","args":["-y","@modelcontextprotocol/server-github"]}}}'

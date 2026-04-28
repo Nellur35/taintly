@@ -1,0 +1,27 @@
+# Precision fixture — from the improvement report:
+#
+#   "Unpinned action in release workflow with contents: write
+#    → Strong finding"
+#
+# Expected behavior:
+#   - SEC3-GH-001 fires (unpinned action)
+#   - Finding lands in supply_chain_immutability family
+#   - Exploitability is 'high' (release workflow + write permission =
+#     privileged context; mutable dep in that context is maximum risk)
+name: Release
+on:
+  release:
+    types: [published]
+permissions:
+  contents: write
+  packages: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

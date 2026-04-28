@@ -1,0 +1,22 @@
+# ai_trust_remote_code.yml
+# Expected findings: AI-GH-001 (HuggingFace trust_remote_code=True)
+name: Inference CI
+on: push
+
+permissions:
+  contents: read
+
+jobs:
+  infer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Load model
+        run: |
+          python - <<'PY'
+          from transformers import AutoModel
+          AutoModel.from_pretrained("attacker/custom-arch", trust_remote_code=True)
+          PY

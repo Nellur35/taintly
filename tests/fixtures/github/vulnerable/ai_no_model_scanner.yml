@@ -1,0 +1,22 @@
+# ai_no_model_scanner.yml
+# Expected findings: AI-GH-004 (model fetched but no picklescan/modelscan in the same job)
+#                    AI-GH-002 also fires (no revision pin on the HF download).
+name: Inference pipeline
+on: push
+
+permissions:
+  contents: read
+
+jobs:
+  infer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Pull model
+        run: huggingface-cli download org/classifier --revision abc123def456abc123def456abc123def456abc1
+
+      - name: Run inference
+        run: python run_eval.py

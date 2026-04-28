@@ -1,0 +1,27 @@
+# Evasion: attacker-controlled context written to $GITHUB_ENV via a
+# here-document instead of an inline `echo "..." >> $GITHUB_ENV`.
+#
+# SEC4-GH-006's regex requires the tainted ${{ ... }} expression and
+# the `>> $GITHUB_ENV` redirect to appear on the SAME LINE:
+#
+#   r"\$\{\{[^}]*(event\...|head_ref)[^}]*\}\}[^#\n]*>>\s*\$GITHUB_ENV"
+#
+# In the heredoc form, `>> $GITHUB_ENV` is on the opener line and the
+# ${{ ... }} expansion is on a later line — the per-line regex cannot
+# bridge them. SEC4-GH-004 still fires on the general "attacker context
+# in run: block" pattern, but the specific-sink rule (SEC4-GH-006)
+# silently misses.
+#
+# Reporting severity: HIGH. The attack surface (PR title → GITHUB_ENV)
+# is identical to the inline form; the rule's downstream remediation
+# advice (use an intermediate env var) would still apply.
+name: Deploy
+on: pull_request_target
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          cat <<EOF >> $GITHUB_ENV
+          TITLE=${{ github.event.pull_request.title }}
+          EOF

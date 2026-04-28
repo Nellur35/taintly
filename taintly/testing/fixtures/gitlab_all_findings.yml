@@ -1,0 +1,88 @@
+# Fixture: deliberately vulnerable GitLab CI config
+# Designed to trigger most of the GitLab rules in taintly for end-to-end testing.
+# DO NOT use this in a real repository.
+
+image: alpine:3.18
+
+# SEC3-GL-001: remote include without integrity verification
+include:
+  - remote: 'https://example.com/ci-templates/build.yml'
+  - local: '/ci/local-template.yml'
+
+variables:
+  # SEC7-GL-001: debug trace enabled
+  CI_DEBUG_TRACE: "true"
+  # SEC6-GL-007: long-lived cloud credentials
+  AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+  AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS
+  GOOGLE_APPLICATION_CREDENTIALS: /keys/service-account.json
+
+stages:
+  - build
+  - test
+  - deploy
+
+build:
+  stage: build
+  # SEC3-GL-005: Docker image without digest
+  image: node:20-slim
+  script:
+    # SEC6-GL-001: hardcoded secret
+    - password: "MyS3cretP@ssw0rd!"
+    # SEC6-GL-002: curl piped to bash
+    - curl -sSL https://install.example.com | bash
+    # SEC6-GL-006: wget piped to shell
+    - wget -q -O - https://setup.example.com/bootstrap.sh | bash
+    # SEC6-GL-004: eval of dynamic content
+    - eval "$DYNAMIC_COMMAND"
+    # SEC4-GL-001: user-controlled variable in script unquoted
+    - echo $CI_COMMIT_MESSAGE
+    - git tag $CI_MERGE_REQUEST_TITLE
+    # SEC6-GL-003: TLS verification disabled
+    - curl --insecure https://internal.example.com/api
+    # SEC9-GL-002: binary downloaded without checksum
+    - curl -fsSL -o tool.bin https://example.com/releases/v1.0/tool.bin
+    - chmod +x tool.bin && ./tool.bin
+  # SEC9-GL-001: artifacts without access restriction
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+
+test:
+  stage: test
+  script:
+    - npm test
+  artifacts:
+    reports:
+      junit: report.xml
+
+# SEC1-GL-001: production deploy without manual gate
+deploy_production:
+  stage: deploy
+  environment: production
+  script:
+    - ./deploy.sh production
+
+# SEC4-GL-002: trigger passing CI_JOB_TOKEN downstream
+trigger_downstream:
+  trigger:
+    project: my-group/downstream-service
+  variables:
+    UPSTREAM_TOKEN: $CI_JOB_TOKEN
+    ENV: production
+
+security_scan:
+  stage: test
+  script:
+    # SEC6-GL-005: world-writable permissions
+    - chmod 777 /app/deploy.sh
+    # SEC6-GL-003: GIT_SSL_NO_VERIFY
+    - GIT_SSL_NO_VERIFY=true git clone https://internal.example.com/repo.git
+  # SEC3-GL-002: project include without pinned ref
+  # (demonstrating the include pattern)
+
+vendor_include_check:
+  script:
+    - echo "checking vendor"
+  # SEC3-GL-002 pattern tested via include block above

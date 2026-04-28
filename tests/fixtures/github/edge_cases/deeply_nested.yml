@@ -1,0 +1,21 @@
+# deeply_nested.yml — 4-space indent, matrix, multiple jobs
+# Rule SEC3-GH-001 must still fire on unpinned action despite formatting
+name: Matrix Build
+on: push
+
+permissions:
+    contents: read
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        strategy:
+            matrix:
+                os: [ubuntu-latest, macos-latest]
+                python: ["3.10", "3.11", "3.12"]
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ matrix.python }}
+            - run: python -m pytest

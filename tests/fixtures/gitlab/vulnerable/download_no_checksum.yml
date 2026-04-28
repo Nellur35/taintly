@@ -1,0 +1,6 @@
+# Triggers: SEC9-GL-002 — binary downloaded without checksum verification
+setup:
+  stage: build
+  script:
+    - curl -fsSL -o tool.bin https://example.com/releases/v1.0/tool.bin
+    - chmod +x tool.bin && ./tool.bin --version

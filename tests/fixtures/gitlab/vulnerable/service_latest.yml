@@ -1,0 +1,7 @@
+# Triggers: SEC8-GL-003 — service container uses mutable :latest tag
+integration_test:
+  stage: test
+  services:
+    - postgres:latest
+  script:
+    - pytest tests/integration/

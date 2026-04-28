@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# pytest-cov artefacts — local run output, never committed.
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+# Subagent worktree infrastructure — created by Claude Code when
+# isolation="worktree" is used. Pure runtime state, never versioned.
+.claude/
