@@ -634,7 +634,7 @@ def main():
         report.summarize()
 
         score_report = (
-            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report))
+            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report), families_with_surface=report.families_with_surface, families_with_ctx_coverage=report.families_with_ctx_coverage)
             if (args.score or args.format == "html")
             else None
         )
@@ -706,7 +706,7 @@ def main():
         report.filter_severity(effective_min_sev)
         report.summarize()
         score_report = (
-            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report))
+            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report), families_with_surface=report.families_with_surface, families_with_ctx_coverage=report.families_with_ctx_coverage)
             if (args.score or args.format == "html")
             else None
         )
@@ -775,7 +775,7 @@ def main():
         report.filter_severity(effective_min_sev)
         report.summarize()
         score_report = (
-            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report))
+            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report), families_with_surface=report.families_with_surface, families_with_ctx_coverage=report.families_with_ctx_coverage)
             if (args.score or args.format == "html")
             else None
         )
@@ -811,7 +811,7 @@ def main():
         report.filter_severity(effective_min_sev)
         report.summarize()
         score_report = (
-            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report))
+            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report), families_with_surface=report.families_with_surface, families_with_ctx_coverage=report.families_with_ctx_coverage)
             if (args.score or args.format == "html")
             else None
         )
@@ -962,7 +962,21 @@ def main():
     # when --format html is used even if the user didn't pass --score.
     if args.score or args.format == "html":
         total_files = sum(r.files_scanned for r in reports)
-        score_report = compute_score(all_findings, files_scanned=total_files, platforms_scanned=_platforms_for_reports(*reports))
+        # Surface-evaluation tracking: union across all reports so the
+        # debt profile sees every family any platform's engine reported
+        # a candidate for.
+        agg_surface: set[str] = set()
+        agg_ctx_coverage: set[str] = set()
+        for r in reports:
+            agg_surface |= getattr(r, "families_with_surface", set())
+            agg_ctx_coverage |= getattr(r, "families_with_ctx_coverage", set())
+        score_report = compute_score(
+            all_findings,
+            files_scanned=total_files,
+            platforms_scanned=_platforms_for_reports(*reports),
+            families_with_surface=agg_surface,
+            families_with_ctx_coverage=agg_ctx_coverage,
+        )
 
     for report in reports:
         _output_report(report, args, score_report=score_report)

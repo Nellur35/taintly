@@ -431,8 +431,40 @@ def scan_repo(
         report.rules_loaded = len(platform_rules)
 
         all_findings: list[Finding] = []
+        # ContextPattern rules whose finding_family is set are the
+        # subset we can answer "did this family have a candidate
+        # location?" for.  We compute anchor-match counts per file
+        # and populate report.families_with_surface, which the scorer
+        # uses to label "Strong" vs "Not applicable" on families
+        # with zero findings.
+        from taintly.models import ContextPattern as _ContextPattern
+
+        ctx_rules_by_family: dict[str, list[Rule]] = {}
+        for r in platform_rules:
+            if isinstance(r.pattern, _ContextPattern) and getattr(r, "finding_family", ""):
+                ctx_rules_by_family.setdefault(r.finding_family, []).append(r)
+        report.families_with_ctx_coverage = set(ctx_rules_by_family)
+
         for fpath in files:
             all_findings.extend(scan_file(fpath, platform_rules))
+            # Surface-evaluation pass: re-read the file once and
+            # check each ContextPattern's anchor regex.  Only families
+            # whose anchors found a candidate get added — so a family
+            # with no candidates anywhere stays "Not applicable".
+            if ctx_rules_by_family:
+                try:
+                    with open(fpath, encoding="utf-8", errors="replace") as _f:
+                        _content = _f.read()
+                    _lines = _content.splitlines()
+                except OSError:
+                    continue
+                for family, fam_rules in ctx_rules_by_family.items():
+                    if family in report.families_with_surface:
+                        continue
+                    for r in fam_rules:
+                        if r.pattern.count_anchor_matches(_content, _lines) > 0:
+                            report.families_with_surface.add(family)
+                            break
         # PSE-GH-002: enrich PSE-GH-001 findings by classifying any
         # local IAM policy that matches the workflow's role-to-assume
         # ARN.  Mutates findings in-place — escalation only happens on

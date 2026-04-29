@@ -322,6 +322,9 @@ def compute_score(
     findings: list[Finding],
     files_scanned: int = 0,
     platforms_scanned: set[Platform] | None = None,
+    *,
+    families_with_surface: set[str] | None = None,
+    families_with_ctx_coverage: set[str] | None = None,
 ) -> ScoreReport:
     """Compute a ScoreReport from a list of Finding objects.
 
@@ -423,7 +426,11 @@ def compute_score(
     distinct_risks = sum(1 for cl in clusters if not cl.review_needed)
     review_needed = sum(1 for cl in clusters if cl.review_needed)
 
-    debt_profile = _compute_debt_profile(clusters)
+    debt_profile = _compute_debt_profile(
+        clusters,
+        families_with_surface=families_with_surface or set(),
+        families_with_ctx_coverage=families_with_ctx_coverage or set(),
+    )
 
     return ScoreReport(
         total_score=total_score,
@@ -440,34 +447,58 @@ def compute_score(
     )
 
 
-def _compute_debt_profile(clusters) -> list[DebtDimension]:
+def _compute_debt_profile(
+    clusters,
+    *,
+    families_with_surface: set[str] | None = None,
+    families_with_ctx_coverage: set[str] | None = None,
+) -> list[DebtDimension]:
     """Build per-family qualitative debt labels from the cluster list.
 
     Mapping rationale — one label per family cluster:
 
-    * ``Strong``       — no findings in this family
-    * ``Needs review`` — only review-needed findings (e.g.
-                         pull_request_target without exploitation signal)
-    * ``Weak``         — at least one high-exploitability CRITICAL or
-                         HIGH finding
-    * ``Moderate``     — findings exist but none are both high-severity
-                         AND high-exploitability
-
-    Families with no findings are emitted too — that's the whole point
-    of the profile: "where are we strong, where are we weak".
+    * ``Strong``         — at least one rule's anchor matched on a
+                           scanned file but no finding emerged.  We
+                           checked and found nothing wrong.
+    * ``Not applicable`` — no rule in the family had a candidate
+                           location to evaluate (the threat surface
+                           isn't present in this repository at all).
+                           Only assigned when the family is covered by
+                           a ``ContextPattern`` rule and the engine
+                           has populated surface-tracking data — other
+                           pattern types fall back to ``Strong`` for
+                           zero-finding families.
+    * ``Needs review``   — only review-needed findings (e.g.
+                           pull_request_target without exploitation
+                           signal)
+    * ``Weak``           — at least one high-exploitability CRITICAL
+                           or HIGH finding
+    * ``Moderate``       — findings exist but none are both
+                           high-severity AND high-exploitability
     """
     from taintly.families import iter_families  # local import avoids cycle
+
+    surface = families_with_surface or set()
+    coverage = families_with_ctx_coverage or set()
 
     by_family = {cl.family_id: cl for cl in clusters}
     rows: list[DebtDimension] = []
     for fam in iter_families():
         cluster = by_family.get(fam.id)
         if cluster is None:
+            # No findings for this family.  Distinguish "Strong" from
+            # "Not applicable" only when the family is ContextPattern-
+            # covered and the engine has reported surface data —
+            # otherwise preserve the prior "Strong" default.
+            if coverage and fam.id in coverage and fam.id not in surface:
+                label = "Not applicable"
+            else:
+                label = "Strong"
             rows.append(
                 DebtDimension(
                     family_id=fam.id,
                     title=fam.title,
-                    label="Strong",
+                    label=label,
                     finding_count=0,
                     top_exploitability="-",
                     top_severity="-",
