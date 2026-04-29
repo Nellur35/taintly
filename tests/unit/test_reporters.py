@@ -487,6 +487,72 @@ def test_text_quick_win_prefers_auto_fixable_rule():
     assert "auto-fixable via --fix" in quick_win_section
 
 
+def test_quick_win_skips_findings_with_foreign_suppression_marker():
+    """A finding whose source line carries a recognised external-scanner
+    suppression marker should not be selected as the report's
+    "Quick win" — surfacing a maintainer-already-reviewed line as the
+    first impression looks like noise on first read.
+    """
+    from taintly.models import AuditReport, Finding, Severity
+    from taintly.reporters.text import _quick_win
+
+    suppressed = Finding(
+        rule_id="SEC3-GH-001",  # auto-fixable
+        severity=Severity.HIGH,
+        title="Unpinned action",
+        description="",
+        file=".github/workflows/ci.yml",
+        line=10,
+        snippet="      - uses: actions/checkout@v4 # zizmor: ignore[unpinned-uses]",
+        remediation="Pin to a full commit SHA.",
+    )
+    other = Finding(
+        rule_id="SEC3-GH-001",
+        severity=Severity.HIGH,
+        title="Unpinned action",
+        description="",
+        file=".github/workflows/ci.yml",
+        line=20,
+        snippet="      - uses: actions/setup-node@v3",
+        remediation="Pin to a full commit SHA.",
+    )
+    report = AuditReport(repo_path="/repo", platform="github")
+    report.add(suppressed)
+    report.add(other)
+    report.summarize()
+
+    win = _quick_win(report.findings)
+    assert win is not None
+    assert win is other, (
+        f"Quick win must skip a finding marked with a foreign-scanner "
+        f"suppression marker, picked: {win.snippet!r}"
+    )
+
+
+def test_quick_win_returns_none_when_only_findings_are_foreign_suppressed():
+    """If every candidate carries a foreign suppression marker, the
+    quick-win surface goes empty rather than picking a clearly-already-
+    reviewed line.
+    """
+    from taintly.models import AuditReport, Finding, Severity
+    from taintly.reporters.text import _quick_win
+
+    f = Finding(
+        rule_id="SEC3-GH-001",
+        severity=Severity.HIGH,
+        title="Unpinned action",
+        description="",
+        file=".github/workflows/ci.yml",
+        line=10,
+        snippet="      - uses: actions/checkout@v4 # zizmor: ignore",
+        remediation="Pin to a full commit SHA.",
+    )
+    report = AuditReport(repo_path="/repo", platform="github")
+    report.add(f)
+    report.summarize()
+    assert _quick_win(report.findings) is None
+
+
 def test_text_includes_score_when_passed():
     from taintly.scorer import compute_score
 

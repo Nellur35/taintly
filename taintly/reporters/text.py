@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from taintly.families import cluster_findings
@@ -96,18 +97,53 @@ def _top_risk(findings: list[Finding]) -> Finding | None:
     return max(findings, key=_surface_priority)
 
 
+# Foreign-scanner inline-suppression markers we recognise when ranking
+# the report's "Quick win" finding.  A finding whose source line
+# carries one of these markers is demoted from quick-win consideration:
+# the maintainer has clearly already reviewed it (under another tool)
+# and surfacing it as the "first impression" would be misleading.
+#
+# The presence of these markers in code is interop, not endorsement —
+# we do not honour the suppressions globally (that's the broader
+# --respect-foreign-ignores feature).  We only de-prioritise these
+# lines from the quick-win surface.
+_FOREIGN_SUPPRESSION_MARKER_RE = re.compile(
+    r"#\s*(?:"
+    r"zizmor\s*:\s*ignore"      # zizmor (GitHub Actions auditor)
+    r"|checkov\s*:\s*skip"      # checkov (IaC scanner)
+    r"|nosec\b"                 # bandit
+    r"|nosemgrep\b"             # semgrep
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _has_foreign_suppression_marker(snippet: str) -> bool:
+    """Return True when the finding's source-line snippet carries a
+    recognised external-scanner inline ignore marker."""
+    return bool(_FOREIGN_SUPPRESSION_MARKER_RE.search(snippet or ""))
+
+
 def _quick_win(findings: list[Finding]) -> Finding | None:
     """Pick a finding whose rule has an auto-fix, preferring higher severity.
 
     Falls back to any finding with a short remediation string if no auto-fix
     rule fired. Returns ``None`` if neither heuristic applies.
+
+    Findings whose source line carries a recognised foreign-scanner
+    suppression marker (``# zizmor: ignore``, ``# checkov:skip``,
+    ``# nosec``, ``# nosemgrep``) are demoted from quick-win
+    consideration — they remain in the full findings list, but the
+    report's first-impression surface skips lines the maintainer has
+    already reviewed under another tool.
     """
-    fixable = [f for f in findings if f.rule_id in _AUTO_FIXABLE_RULES]
+    eligible = [f for f in findings if not _has_foreign_suppression_marker(f.snippet)]
+    fixable = [f for f in eligible if f.rule_id in _AUTO_FIXABLE_RULES]
     if fixable:
         return max(fixable, key=lambda f: f.severity.rank)
 
     # Fallback: shortest remediation that's still actionable (non-empty one-liner).
-    one_liner = [f for f in findings if f.remediation and "\n" not in f.remediation.strip()]
+    one_liner = [f for f in eligible if f.remediation and "\n" not in f.remediation.strip()]
     if one_liner:
         return max(one_liner, key=lambda f: f.severity.rank)
     return None
