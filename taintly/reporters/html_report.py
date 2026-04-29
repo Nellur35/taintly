@@ -94,6 +94,22 @@ body {
   font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
 }
 main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+
+/* Threat-model disclosure banner.  Uses existing theme variables
+   (--card / --label-review) so the colour adapts to light and dark
+   modes via the prefers-color-scheme media query above. */
+.taintly-scope-banner {
+  background: var(--card);
+  border: 1px solid var(--label-review);
+  border-left: 4px solid var(--label-review);
+  border-radius: 6px;
+  padding: 14px 18px;
+  margin: 0 0 16px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.taintly-scope-banner strong { color: var(--label-review); }
+
 header.cover { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
 header.cover h1 { margin: 0 0 8px 0; font-size: 24px; }
 header.cover .meta { color: var(--muted); font-size: 13px; }
@@ -331,6 +347,37 @@ def _cover(report: AuditReport, title: str) -> str:
         f"<span><strong>Platform:</strong> {_e(report.platform or 'auto-detected')}</span>"
         f"<span><strong>Generated:</strong> {_e(ts)}</span>"
         "</div></header>"
+    )
+
+
+def _threat_model_banner() -> str:
+    """Top-of-report banner declaring the fixed scoring threat model.
+
+    Placed BEFORE the score-card so a reader skimming the report sees
+    the assumption before the score number.  The wording mirrors the
+    score-text reporter — "required, not optional" is the load-bearing
+    phrase that makes user assessment a contract rather than a polite
+    suggestion.
+
+    The banner sits above the summary in HTML (vs. inline-with-the-
+    score in score_text) because HTML reports are read top-to-bottom
+    in a browser; placing the disclosure where the reader's eye lands
+    first maximises the chance it gets seen.  The two surfaces have
+    deliberately-different placements; don't try to harmonise them.
+    """
+    return (
+        '<aside class="taintly-scope-banner" role="note" '
+        'aria-label="Scoring threat model disclosure">'
+        '<strong>Scoring threat model: public-OSS deployment.</strong> '
+        "Findings are exploitability-weighted against a default model in which "
+        "fork PRs are reachable, runners are shared, and secrets are repo-scoped. "
+        "If your deployment differs (internal-only, OIDC-only, isolated runners, "
+        "etc.) some findings may be over- or under-weighted for your situation. "
+        "<strong>Reviewing each finding against your actual workflow and "
+        "environment is required, not optional.</strong> "
+        'See <code>docs/SCORING.md</code> for the assumption list and '
+        "assessment guidance."
+        "</aside>"
     )
 
 
@@ -662,6 +709,10 @@ def format_html(
     parts.append(f"<style>{_CSS}</style>")
     parts.append("</head><body><main>")
     parts.append(_cover(report, heading))
+    if score_report is not None:
+        # Banner only renders when a score is being shown.  Without a
+        # score there's no threat-model assumption to disclose.
+        parts.append(_threat_model_banner())
     parts.append(_summary(report, score_report, clusters))
     parts.append(_debt_profile_section(score_report))
     if score_report is not None:

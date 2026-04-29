@@ -27,6 +27,22 @@ body {
   font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
 }
 main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+
+/* Threat-model disclosure banner.  Uses existing theme variables
+   (--card / --label-review) so the colour adapts to light and dark
+   modes via the prefers-color-scheme media query above. */
+.taintly-scope-banner {
+  background: var(--card);
+  border: 1px solid var(--label-review);
+  border-left: 4px solid var(--label-review);
+  border-radius: 6px;
+  padding: 14px 18px;
+  margin: 0 0 16px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.taintly-scope-banner strong { color: var(--label-review); }
+
 header.cover { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
 header.cover h1 { margin: 0 0 8px 0; font-size: 24px; }
 header.cover .meta { color: var(--muted); font-size: 13px; }

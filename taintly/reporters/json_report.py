@@ -36,11 +36,22 @@ def format_json(report: AuditReport, score_report: "ScoreReport | None" = None) 
     }
 
     if score_report is not None:
+        # Threat-model disclosure mirrors the score-text reporter.
+        # Stable contract for aggregators: ``threat_model`` is an enum
+        # string (only ``"public-oss-default"`` today; future values
+        # would be added as a documented migration).
+        # ``user_assessment_required: true`` is a constant for the
+        # public-OSS profile — the tool always requires user
+        # assessment for fit, regardless of the score number.
+        # New fields added at the end so existing JSON consumers that
+        # parse only the prior keys keep working unchanged.
         data["score"] = {
             "total": score_report.total_score,
             "grade": score_report.grade,
             "distinct_risks": score_report.distinct_risks,
             "review_needed": score_report.review_needed,
+            "threat_model": "public-oss-default",
+            "user_assessment_required": True,
         }
 
     return json.dumps(data, indent=2)

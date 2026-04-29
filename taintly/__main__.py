@@ -1005,11 +1005,18 @@ def main():
     if score_report is not None and args.format != "html":
         print(format_score(score_report, use_color=not args.no_color))
 
-    # Exit code: built-in CRITICAL=2/HIGH=1 logic + optional fail-on threshold
+    # Exit code: built-in CRITICAL=2/HIGH=1 logic + optional fail-on
+    # threshold + coverage-warning branch (exit 11) so a scan that
+    # completed but degraded coverage is distinguishable from a
+    # genuinely clean run.  ENGINE-ERR is excluded from the worst-
+    # severity calculation so its LOW severity doesn't masquerade as
+    # a real LOW finding.
+    real = [f for f in all_findings if f.rule_id != "ENGINE-ERR"]
     worst = Severity.INFO
-    for f in all_findings:
+    for f in real:
         if f.severity > worst:
             worst = f.severity
+    has_coverage_warning = any(f.rule_id == "ENGINE-ERR" for f in all_findings)
 
     if effective_fail_on and worst >= effective_fail_on:
         sys.exit(1)
@@ -1017,6 +1024,8 @@ def main():
         sys.exit(2)
     elif worst == Severity.HIGH:
         sys.exit(1)
+    elif has_coverage_warning:
+        sys.exit(11)
     else:
         sys.exit(0)
 
