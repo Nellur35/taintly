@@ -93,6 +93,26 @@ def _cache_prefix_is_high_blast_radius(prefix: str) -> bool:
     return any(tok in p for tok in _HIGH_BLAST_RADIUS_CACHE_TOKENS)
 
 
+def _key_is_per_ref_scoped(key: str) -> bool:
+    """Return True when the cache key embeds the workflow's ref so the
+    runtime cache namespace is partitioned per-ref.
+
+    GitHub's Actions cache namespace is per-repository, but a key that
+    embeds ``${{ github.ref }}`` (or ``github.ref_name``) writes and
+    reads under a ref-scoped subnamespace.  A fork PR's
+    ``github.ref`` resolves to ``refs/pull/N/merge``; a privileged
+    push's resolves to ``refs/heads/main`` (or similar).  The runtime
+    keyspaces never overlap, so prefix-match poisoning across the
+    fork→privileged boundary cannot happen even when the literal-
+    prefix portion of the key is identical on both sides.
+
+    Substring check on ``github.ref`` matches both ``github.ref`` and
+    ``github.ref_name``; no other GitHub Actions context expression
+    contains that token.
+    """
+    return "github.ref" in key
+
+
 def _collect_xf_gh_001_matches(
     corpus: WorkflowCorpus,
 ) -> list[tuple[str, int, str, str, str, int]]:
@@ -126,8 +146,15 @@ def _collect_xf_gh_001_matches(
     fork_writes: list[tuple[str, int, str]] = []
     for w in corpus.by_trigger(TriggerFamily.FORK_REACHABLE):
         for c in w.cache_keys:
-            if c.role in ("write", "both") and c.prefix:
-                fork_writes.append((w.filepath, c.line, c.prefix))
+            if c.role not in ("write", "both") or not c.prefix:
+                continue
+            # Per-ref-scoped fork writes land in a different runtime
+            # keyspace from privileged-side reads — they can't poison
+            # across the trigger boundary even when the literal prefix
+            # overlaps.
+            if _key_is_per_ref_scoped(c.key):
+                continue
+            fork_writes.append((w.filepath, c.line, c.prefix))
 
     if not fork_writes:
         return matches
@@ -136,6 +163,21 @@ def _collect_xf_gh_001_matches(
     for w in corpus.by_trigger(TriggerFamily.PRIVILEGED):
         for c in w.cache_keys:
             if c.role not in ("read", "both"):
+                continue
+            # Without ``restore-keys``, GitHub Actions requires an
+            # exact key match on restoration.  The cross-privilege
+            # cache-poisoning chain this rule detects relies on
+            # prefix-overlap matching, which is only available via
+            # ``restore-keys``.  Cache entries with no fallback keys
+            # are not the threat shape.
+            if not c.restore_keys:
+                continue
+            # Per-ref-scoped reads pull from a disjoint runtime
+            # namespace from any fork-side writes — even an identical
+            # literal prefix maps to a different evaluated key.
+            if _key_is_per_ref_scoped(c.key) or any(
+                _key_is_per_ref_scoped(rk) for rk in c.restore_keys
+            ):
                 continue
             read_queries = [c.key, *list(c.restore_keys)]
             fired = False

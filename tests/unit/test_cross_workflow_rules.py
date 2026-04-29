@@ -136,6 +136,10 @@ def test_xf_gh_001_fires_on_dual_trigger_workflow(tmp_path: Path) -> None:
     dual-trigger workflows; the wild scan against flask, transformers,
     and openai-cookbook produced 0 hits exactly because of that
     guard.  Removing the guard recovers all the real-world TPs.
+
+    The cache block carries ``restore-keys:`` because the practically
+    reachable cross-privilege poisoning chain depends on prefix-match
+    restoration — the rule's gate skips exact-match-only caches.
     """
     wf = _write_workflow(
         tmp_path,
@@ -145,6 +149,7 @@ def test_xf_gh_001_fires_on_dual_trigger_workflow(tmp_path: Path) -> None:
         "      - uses: actions/cache@v3\n"
         "        with:\n"
         "          key: mypy|${{ hashFiles('pyproject.toml') }}\n"
+        "          restore-keys: mypy|\n"
         "          path: ./.mypy_cache\n",
     )
     findings = _xf_findings(tmp_path, "XF-GH-001")
@@ -225,6 +230,89 @@ def test_xf_gh_001_does_not_fire_on_save_only_in_privileged(tmp_path: Path) -> N
     assert _xf_findings(tmp_path, "XF-GH-001") == []
 
 
+def test_xf_gh_001_does_not_fire_when_privileged_cache_has_no_restore_keys(
+    tmp_path: Path,
+) -> None:
+    """Without ``restore-keys:``, GitHub requires an exact key match
+    on restoration — the prefix-overlap chain this rule detects is
+    not reachable, so no finding is emitted.
+    """
+    _write_workflow(
+        tmp_path,
+        "pr.yml",
+        "on: pull_request\n"
+        "jobs:\n  b:\n    steps:\n"
+        "      - uses: actions/cache@v3\n"
+        "        with:\n          key: linux-build-${{ github.sha }}\n",
+    )
+    _write_workflow(
+        tmp_path,
+        "release.yml",
+        "on: push\n"
+        "jobs:\n  b:\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n          key: linux-build-${{ github.sha }}\n",
+    )
+    assert _xf_findings(tmp_path, "XF-GH-001") == []
+
+
+def test_xf_gh_001_does_not_fire_when_privileged_key_is_per_ref_scoped(
+    tmp_path: Path,
+) -> None:
+    """Per-ref-scoped privileged-side keys (containing
+    ``${{ github.ref }}``) draw from a runtime namespace partitioned
+    by ref — the fork PR's writes land in a different keyspace and
+    cannot overlap.
+    """
+    _write_workflow(
+        tmp_path,
+        "pr.yml",
+        "on: pull_request\n"
+        "jobs:\n  b:\n    steps:\n"
+        "      - uses: actions/cache@v3\n"
+        "        with:\n          key: docs-${{ hashFiles('docs/**') }}\n",
+    )
+    _write_workflow(
+        tmp_path,
+        "build-docs.yml",
+        "on: push\n"
+        "jobs:\n  b:\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: docs-${{ github.ref }}-${{ hashFiles('docs/**') }}\n"
+        "          restore-keys: docs-\n",
+    )
+    assert _xf_findings(tmp_path, "XF-GH-001") == []
+
+
+def test_xf_gh_001_does_not_fire_when_fork_write_is_per_ref_scoped(
+    tmp_path: Path,
+) -> None:
+    """Per-ref-scoped fork-side writes (key embeds
+    ``${{ github.ref }}``) cannot poison main's namespace — the
+    runtime keyspace is partitioned per-ref.
+    """
+    _write_workflow(
+        tmp_path,
+        "pr.yml",
+        "on: pull_request\n"
+        "jobs:\n  b:\n    steps:\n"
+        "      - uses: actions/cache@v3\n"
+        "        with:\n          key: linux-build-${{ github.ref }}\n",
+    )
+    _write_workflow(
+        tmp_path,
+        "release.yml",
+        "on: push\n"
+        "jobs:\n  b:\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: linux-build-deadbeef\n"
+        "          restore-keys: linux-build-\n",
+    )
+    assert _xf_findings(tmp_path, "XF-GH-001") == []
+
+
 # ---------------------------------------------------------------------------
 # XF-GH-001A — Executable-content cache poisoning (HIGH split)
 # ---------------------------------------------------------------------------
@@ -290,6 +378,10 @@ def test_xf_gh_001a_fires_on_node_modules_cache(tmp_path: Path) -> None:
 def test_xf_gh_001a_does_not_fire_on_generic_cache(tmp_path: Path) -> None:
     """A `mypy|` prefix is not in the executable-cache allowlist —
     XF-GH-001A stays silent; XF-GH-001 (generic) fires.
+
+    The cache block carries ``restore-keys:`` so the prefix-match
+    poisoning chain is reachable — without it the rule's gate would
+    skip the entry as exact-match-only.
     """
     _write_workflow(
         tmp_path,
@@ -297,7 +389,9 @@ def test_xf_gh_001a_does_not_fire_on_generic_cache(tmp_path: Path) -> None:
         "on: [push, pull_request]\n"
         "jobs:\n  b:\n    steps:\n"
         "      - uses: actions/cache@v3\n"
-        "        with:\n          key: mypy|${{ hashFiles('pyproject.toml') }}\n",
+        "        with:\n"
+        "          key: mypy|${{ hashFiles('pyproject.toml') }}\n"
+        "          restore-keys: mypy|\n",
     )
     assert _xf_findings(tmp_path, "XF-GH-001A") == []
     assert len(_xf_findings(tmp_path, "XF-GH-001")) == 1
