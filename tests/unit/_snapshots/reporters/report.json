@@ -1,0 +1,224 @@
+{
+  "repo_path": "/snapshot/repo",
+  "platform": "github",
+  "files_scanned": 4,
+  "summary": {
+    "total": 5,
+    "CRITICAL": 1,
+    "HIGH": 1,
+    "MEDIUM": 1,
+    "LOW": 2,
+    "INFO": 0
+  },
+  "distinct_risk_count": 4,
+  "review_needed_count": 1,
+  "families": [
+    {
+      "family_id": "supply_chain_immutability",
+      "title": "Mutable dependency references",
+      "why": "Actions, reusable workflows, and includes referenced by tag or branch can be force-pushed to point at different code without any record in your repository's history. Pin every external dependency to a full 40-char commit SHA.",
+      "finding_count": 1,
+      "rule_ids": [
+        "SEC3-GH-001"
+      ],
+      "affected_files": [
+        ".github/workflows/ci.yml"
+      ],
+      "review_needed": false,
+      "top_exploitability": "high"
+    },
+    {
+      "family_id": "agent_credential_chain",
+      "title": "Agent Credential Chain",
+      "why": "",
+      "finding_count": 1,
+      "rule_ids": [
+        "PSE-GH-001"
+      ],
+      "affected_files": [
+        ".github/workflows/agent.yml"
+      ],
+      "review_needed": false,
+      "top_exploitability": "high"
+    },
+    {
+      "family_id": "excessive_permissions",
+      "title": "Excessive Permissions",
+      "why": "",
+      "finding_count": 1,
+      "rule_ids": [
+        "SEC2-GH-002"
+      ],
+      "affected_files": [
+        ".github/workflows/ci.yml"
+      ],
+      "review_needed": false,
+      "top_exploitability": "medium"
+    },
+    {
+      "family_id": "ENGINE-ERR",
+      "title": "File size 60000 bytes exceeds scanner cap (50000)",
+      "why": "",
+      "finding_count": 1,
+      "rule_ids": [
+        "ENGINE-ERR"
+      ],
+      "affected_files": [
+        ".github/workflows/big.yml"
+      ],
+      "review_needed": false,
+      "top_exploitability": "medium"
+    },
+    {
+      "family_id": "taint_to_run_block",
+      "title": "Taint To Run Block",
+      "why": "",
+      "finding_count": 1,
+      "rule_ids": [
+        "TAINT-GH-001"
+      ],
+      "affected_files": [
+        ".github/workflows/ci.yml"
+      ],
+      "review_needed": true,
+      "top_exploitability": "medium"
+    }
+  ],
+  "findings": [
+    {
+      "rule_id": "SEC3-GH-001",
+      "severity": "CRITICAL",
+      "title": "Action referenced by mutable tag",
+      "description": "An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action's repo can move the tag to a malicious commit; every consumer pinned by tag picks up the new code on the next workflow run.",
+      "file": ".github/workflows/ci.yml",
+      "line": 12,
+      "snippet": "      - uses: actions/checkout@v4",
+      "remediation": "Pin the action to a full 40-character commit SHA.\nUse `gh action pin` or `taintly --fix`.",
+      "reference": "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions",
+      "owasp_cicd": "CICD-SEC-3",
+      "stride": [
+        "T"
+      ],
+      "threat_narrative": "Tag-based pinning lets the upstream maintainer (or anyone who compromises their account) hot-swap the action contents without changing the workflow file.",
+      "incidents": [
+        "tj-actions/changed-files (CVE-2025-30066)"
+      ],
+      "origin": "file",
+      "finding_family": "supply_chain_immutability",
+      "confidence": "high",
+      "exploitability": "high",
+      "review_needed": false
+    },
+    {
+      "rule_id": "PSE-GH-001",
+      "severity": "HIGH",
+      "title": "AI agent with cloud-credential grant on a fork-reachable event",
+      "description": "Permission Slip Effect: a fork-reachable trigger, an AI agent action, and a cloud-credential grant co-exist.  An attacker who steers the agent via prompt injection holds a valid OIDC token.",
+      "file": ".github/workflows/agent.yml",
+      "line": 24,
+      "snippet": "      - uses: anthropics/claude-code-action@v1",
+      "remediation": "Break at least one leg of the triangle:\n1. Gate the agent job by same-repo identity.\n2. Drop the id-token: write grant from the agent job.\n3. Narrow the agent's allowedTools to forbid shell.",
+      "reference": "https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/",
+      "owasp_cicd": "CICD-SEC-4",
+      "stride": [
+        "E",
+        "T",
+        "I"
+      ],
+      "threat_narrative": "Attacker mints OIDC token via prompt injection.",
+      "incidents": [],
+      "origin": "file",
+      "finding_family": "agent_credential_chain",
+      "confidence": "medium",
+      "exploitability": "high",
+      "review_needed": false
+    },
+    {
+      "rule_id": "SEC2-GH-002",
+      "severity": "MEDIUM",
+      "title": "Missing top-level permissions block",
+      "description": "Workflow does not declare a top-level permissions block.",
+      "file": ".github/workflows/ci.yml",
+      "line": 1,
+      "snippet": "on: push",
+      "remediation": "Add `permissions: contents: read` at the top level.",
+      "reference": "https://docs.github.com/en/actions/security-guides/automatic-token-authentication",
+      "owasp_cicd": "CICD-SEC-2",
+      "stride": [
+        "E",
+        "T"
+      ],
+      "threat_narrative": "A compromised step inherits the default token's full scope.",
+      "incidents": [],
+      "origin": "file",
+      "finding_family": "excessive_permissions",
+      "confidence": "high",
+      "exploitability": "medium",
+      "review_needed": false
+    },
+    {
+      "rule_id": "TAINT-GH-001",
+      "severity": "LOW",
+      "title": "Possible taint flow",
+      "description": "Untrusted context flows into a run: block via env.",
+      "file": ".github/workflows/ci.yml",
+      "line": 42,
+      "snippet": "        run: echo \"$PR_TITLE\"",
+      "remediation": "Quote the variable in the run: block.",
+      "reference": "",
+      "owasp_cicd": "CICD-SEC-1",
+      "stride": [
+        "T"
+      ],
+      "threat_narrative": "",
+      "incidents": [],
+      "origin": "file",
+      "finding_family": "taint_to_run_block",
+      "confidence": "medium",
+      "exploitability": "medium",
+      "review_needed": true
+    },
+    {
+      "rule_id": "ENGINE-ERR",
+      "severity": "LOW",
+      "title": "File size 60000 bytes exceeds scanner cap (50000)",
+      "description": "Per-line rules still ran but file-scope coverage degraded.",
+      "file": ".github/workflows/big.yml",
+      "line": 0,
+      "snippet": "",
+      "remediation": "",
+      "reference": "",
+      "owasp_cicd": "",
+      "stride": [],
+      "threat_narrative": "",
+      "incidents": [],
+      "origin": "file",
+      "finding_family": "",
+      "confidence": "high",
+      "exploitability": "medium",
+      "review_needed": false
+    }
+  ],
+  "errors": [
+    {
+      "rule_id": "ENGINE-ERR",
+      "severity": "LOW",
+      "title": "File size 60000 bytes exceeds scanner cap (50000)",
+      "description": "Per-line rules still ran but file-scope coverage degraded.",
+      "file": ".github/workflows/big.yml",
+      "line": 0,
+      "snippet": "",
+      "remediation": "",
+      "reference": "",
+      "owasp_cicd": "",
+      "stride": [],
+      "threat_narrative": "",
+      "incidents": [],
+      "origin": "file",
+      "finding_family": "",
+      "confidence": "high",
+      "exploitability": "medium",
+      "review_needed": false
+    }
+  ]
+}

@@ -1,0 +1,172 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>TAINTLY REPORT</title><style>
+:root {
+  --bg: #ffffff; --fg: #1a1a1a; --muted: #666; --card: #f6f7f9;
+  --border: #e1e4e8; --accent: #0969da;
+  --sev-critical: #b31d28; --sev-high: #d1741f; --sev-medium: #9a6700;
+  --sev-low: #0550ae; --sev-info: #57606a;
+  --grade-a: #1a7f37; --grade-b: #3fa65a; --grade-c: #9a6700;
+  --grade-d: #d1741f; --grade-f: #b31d28;
+  --label-strong: #1a7f37; --label-moderate: #9a6700;
+  --label-weak: #b31d28; --label-review: #0550ae;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e; --card: #161b22;
+    --border: #30363d; --accent: #58a6ff;
+    --sev-critical: #ff7b72; --sev-high: #ffa657; --sev-medium: #e3b341;
+    --sev-low: #79c0ff; --sev-info: #8b949e;
+    --grade-a: #3fb950; --grade-b: #56d364; --grade-c: #e3b341;
+    --grade-d: #ffa657; --grade-f: #ff7b72;
+    --label-strong: #3fb950; --label-moderate: #e3b341;
+    --label-weak: #ff7b72; --label-review: #79c0ff;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+header.cover { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
+header.cover h1 { margin: 0 0 8px 0; font-size: 24px; }
+header.cover .meta { color: var(--muted); font-size: 13px; }
+header.cover .meta span { margin-right: 16px; }
+section { margin-bottom: 32px; }
+section h2 { font-size: 18px; margin: 0 0 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+section h3 { font-size: 14px; margin: 16px 0 8px 0; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* Executive summary card */
+.summary-card { display: grid; grid-template-columns: auto 1fr; gap: 24px; align-items: center;
+                background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+.grade-box {
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center;
+  width: 96px; height: 96px; border-radius: 12px; border: 3px solid currentColor;
+  font-weight: 700; line-height: 1;
+}
+.grade-box .grade { font-size: 40px; }
+.grade-box .score { font-size: 13px; margin-top: 4px; }
+.grade-A { color: var(--grade-a); }
+.grade-B { color: var(--grade-b); }
+.grade-C { color: var(--grade-c); }
+.grade-D { color: var(--grade-d); }
+.grade-F { color: var(--grade-f); }
+.summary-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px 20px; }
+.stat .num { font-size: 22px; font-weight: 700; line-height: 1; }
+.stat .lbl { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.summary-counts { grid-column: 1 / -1; padding-top: 12px; border-top: 1px solid var(--border);
+                  display: flex; flex-wrap: wrap; gap: 8px 14px; }
+
+/* Severity / exploitability / family labels */
+.sev-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px;
+  font-weight: 700; color: #fff; letter-spacing: 0.02em;
+}
+.sev-CRITICAL { background: var(--sev-critical); }
+.sev-HIGH { background: var(--sev-high); }
+.sev-MEDIUM { background: var(--sev-medium); }
+.sev-LOW { background: var(--sev-low); }
+.sev-INFO { background: var(--sev-info); }
+.expl-badge { display: inline-block; padding: 2px 6px; border-radius: 8px; font-size: 11px;
+              border: 1px solid var(--border); color: var(--muted); margin-left: 4px; }
+.expl-high { color: var(--sev-critical); border-color: var(--sev-critical); }
+.expl-medium { color: var(--sev-medium); border-color: var(--sev-medium); }
+.expl-low { color: var(--muted); }
+
+/* Debt profile grid */
+.debt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 8px; }
+.debt-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center;
+            padding: 8px 12px; background: var(--card); border: 1px solid var(--border); border-radius: 6px; }
+.debt-name { font-weight: 600; }
+.debt-meta { color: var(--muted); font-size: 12px; }
+.debt-label { font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 10px;
+              border: 1px solid currentColor; }
+.label-Strong { color: var(--label-strong); }
+.label-Moderate { color: var(--label-moderate); }
+.label-Weak { color: var(--label-weak); }
+.label-Needs.review, .label-Needs-review { color: var(--label-review); }
+
+/* Cluster cards */
+.cluster {
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  margin-bottom: 12px; border-left: 4px solid var(--border); padding: 0;
+}
+.cluster.sev-card-CRITICAL { border-left-color: var(--sev-critical); }
+.cluster.sev-card-HIGH     { border-left-color: var(--sev-high); }
+.cluster.sev-card-MEDIUM   { border-left-color: var(--sev-medium); }
+.cluster.sev-card-LOW      { border-left-color: var(--sev-low); }
+.cluster.review-needed     { border-left-color: var(--label-review); opacity: 0.92; }
+.cluster summary {
+  /* Flexbox, not grid. The `::before` disclosure triangle is a grid
+     item per the CSS Grid spec, so the previous `auto 1fr auto` grid
+     had THREE columns for FOUR items (triangle + badges + title +
+     counts). The counts wrapped to an implicit second row in some
+     browsers and collapsed the title column to zero width in others,
+     producing the "empty title field" rendering bug. Flex absorbs the
+     pseudo-element naturally (it just sits inline with the spans) and
+     `flex: 1` on the title makes it grow and push counts to the right. */
+  list-style: none; cursor: pointer; padding: 12px 16px; user-select: none;
+  display: flex; align-items: center; gap: 10px;
+}
+.cluster summary::-webkit-details-marker { display: none; }
+.cluster summary::before {
+  /* U+25B8 BLACK RIGHT-POINTING SMALL TRIANGLE, written as a CSS hex
+     escape ("\25B8") so the generated HTML stays pure ASCII. Writing
+     the raw glyph would embed two UTF-8 bytes that get re-decoded as
+     cp1252 mojibake when the report is piped through Windows PowerShell. */
+  content: "\25B8"; color: var(--muted); font-size: 12px; transition: transform 0.15s;
+  transform: rotate(0deg); display: inline-block; flex: none;
+}
+.cluster[open] summary::before { transform: rotate(90deg); }
+.cluster .cluster-title { font-weight: 600; flex: 1; min-width: 0; }
+.cluster .cluster-counts { color: var(--muted); font-size: 12px; white-space: nowrap; flex: none; }
+.cluster-body { padding: 0 16px 16px 16px; border-top: 1px solid var(--border); }
+.cluster-body .why { color: var(--muted); margin: 12px 0 8px 0; }
+.cluster-body .rule-ids { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.cluster-body .rule-ids code { background: transparent; padding: 0; }
+
+/* Findings table inside a cluster */
+.cluster-findings { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+.cluster-findings th, .cluster-findings td { text-align: left; padding: 6px 10px;
+                                              border-bottom: 1px solid var(--border); vertical-align: top; }
+.cluster-findings th { color: var(--muted); font-weight: 600; font-size: 11px;
+                       text-transform: uppercase; letter-spacing: 0.04em; }
+.cluster-findings tr:last-child td { border-bottom: 0; }
+.cluster-findings .file { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+                          font-size: 12px; color: var(--muted); }
+
+/* Quick win callout */
+.callout { background: var(--card); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+           border-radius: 6px; padding: 12px 16px; margin-bottom: 12px; }
+.callout-label { font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase;
+                 letter-spacing: 0.06em; margin-bottom: 4px; }
+.callout .fix { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+/* SVG bar chart */
+.bar-label { fill: var(--fg); font-size: 12px; }
+.bar-track { fill: var(--border); }
+.bar-fill { fill: var(--accent); }
+.bar-caption { fill: var(--muted); font-size: 11px; }
+
+/* Supplemental flat findings table (collapsed by default) */
+.flat-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.flat-table th, .flat-table td { text-align: left; padding: 6px 10px;
+                                  border-bottom: 1px solid var(--border); vertical-align: top; }
+.flat-table th { background: var(--card); font-weight: 600; }
+
+/* Misc */
+code, pre {
+  font: 12px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  background: var(--card); border-radius: 4px;
+}
+code { padding: 1px 4px; }
+pre { padding: 8px 10px; overflow-x: auto; border: 1px solid var(--border); margin: 4px 0; }
+.tag { display: inline-block; padding: 1px 6px; background: var(--card);
+       border: 1px solid var(--border); border-radius: 4px; font-size: 11px;
+       margin-right: 6px; color: var(--muted); }
+footer { color: var(--muted); font-size: 12px; text-align: center;
+         padding: 20px 0; border-top: 1px solid var(--border); margin-top: 32px; }
+</style></head><body><main><header class="cover"><h1>TAINTLY REPORT</h1><div class="meta"><span><strong>Repository:</strong> /snapshot/repo</span><span><strong>Platform:</strong> github</span><span><strong>Generated:</strong> 2026-01-01T00:00:00</span></div></header><section aria-labelledby="sum-h"><h2 id="sum-h">Executive summary</h2><div class="summary-card"><div></div><div class="summary-stats"><div class="stat"><div class="num">4</div><div class="lbl">distinct risks</div></div><div class="stat"><div class="num">1</div><div class="lbl">review-needed</div></div><div class="stat"><div class="num">5</div><div class="lbl">total findings</div></div><div class="stat"><div class="num">4</div><div class="lbl">files scanned</div></div></div><div class="summary-counts"><span class="sev-badge sev-CRITICAL">CRITICAL</span> <strong>1</strong>  <span class="sev-badge sev-HIGH">HIGH</span> <strong>1</strong>  <span class="sev-badge sev-MEDIUM">MEDIUM</span> <strong>1</strong>  <span class="sev-badge sev-LOW">LOW</span> <strong>2</strong></div></div></section><section><div class="callout"><div class="callout-label">Quick win</div><div><span class="sev-badge sev-CRITICAL">CRITICAL</span> <a href="#rule-SEC3-GH-001"><code>SEC3-GH-001</code></a>: Action referenced by mutable tag <span class="tag">auto-fixable via --fix</span></div><div class="fix"><strong>Location:</strong> <code>../../home/user/taintly/.github/workflows/ci.yml:12</code></div><div class="fix"><strong>Fix:</strong> Pin the action to a full 40-character commit SHA.</div></div></section><section aria-labelledby="risks-h"><h2 id="risks-h">Top distinct risks (4)</h2><details class="cluster sev-card-CRITICAL"><summary><span><span class="sev-badge sev-CRITICAL">CRITICAL</span><span class="expl-badge expl-high">expl:high</span></span><span class="cluster-title">Mutable dependency references</span><span class="cluster-counts">1 finding &middot; 1 file</span></summary><div class="cluster-body"><p class="why">Actions, reusable workflows, and includes referenced by tag or branch can be force-pushed to point at different code without any record in your repository&#x27;s history. Pin every external dependency to a full 40-char commit SHA.</p><div class="rule-ids">Rules: <a href="#rule-SEC3-GH-001"><code>SEC3-GH-001</code></a></div><table class="cluster-findings"><thead><tr><th>Sev</th><th>Rule</th><th>Location</th><th>Title</th></tr></thead><tbody><tr><td><span class="sev-badge sev-CRITICAL">CRITICAL</span></td><td><a href="#rule-SEC3-GH-001"><code>SEC3-GH-001</code></a></td><td class="file">../../home/user/taintly/.github/workflows/ci.yml:12</td><td>Action referenced by mutable tag</td></tr></tbody></table></div></details><details class="cluster sev-card-HIGH"><summary><span><span class="sev-badge sev-HIGH">HIGH</span><span class="expl-badge expl-high">expl:high</span></span><span class="cluster-title">Agent Credential Chain</span><span class="cluster-counts">1 finding &middot; 1 file</span></summary><div class="cluster-body"><div class="rule-ids">Rules: <a href="#rule-PSE-GH-001"><code>PSE-GH-001</code></a></div><table class="cluster-findings"><thead><tr><th>Sev</th><th>Rule</th><th>Location</th><th>Title</th></tr></thead><tbody><tr><td><span class="sev-badge sev-HIGH">HIGH</span></td><td><a href="#rule-PSE-GH-001"><code>PSE-GH-001</code></a></td><td class="file">../../home/user/taintly/.github/workflows/agent.yml:24</td><td>AI agent with cloud-credential grant on a fork-reachable event</td></tr></tbody></table></div></details><details class="cluster sev-card-MEDIUM"><summary><span><span class="sev-badge sev-MEDIUM">MEDIUM</span></span><span class="cluster-title">Excessive Permissions</span><span class="cluster-counts">1 finding &middot; 1 file</span></summary><div class="cluster-body"><div class="rule-ids">Rules: <a href="#rule-SEC2-GH-002"><code>SEC2-GH-002</code></a></div><table class="cluster-findings"><thead><tr><th>Sev</th><th>Rule</th><th>Location</th><th>Title</th></tr></thead><tbody><tr><td><span class="sev-badge sev-MEDIUM">MEDIUM</span></td><td><a href="#rule-SEC2-GH-002"><code>SEC2-GH-002</code></a></td><td class="file">../../home/user/taintly/.github/workflows/ci.yml:1</td><td>Missing top-level permissions block</td></tr></tbody></table></div></details><details class="cluster sev-card-LOW"><summary><span><span class="sev-badge sev-LOW">LOW</span></span><span class="cluster-title">File size 60000 bytes exceeds scanner cap (50000)</span><span class="cluster-counts">1 finding &middot; 1 file</span></summary><div class="cluster-body"><div class="rule-ids">Rules: <a href="#rule-ENGINE-ERR"><code>ENGINE-ERR</code></a></div><table class="cluster-findings"><thead><tr><th>Sev</th><th>Rule</th><th>Location</th><th>Title</th></tr></thead><tbody><tr><td><span class="sev-badge sev-LOW">LOW</span></td><td><a href="#rule-ENGINE-ERR"><code>ENGINE-ERR</code></a></td><td class="file">../../home/user/taintly/.github/workflows/big.yml:0</td><td>File size 60000 bytes exceeds scanner cap (50000)</td></tr></tbody></table></div></details></section><section aria-labelledby="review-h"><h2 id="review-h">Review-needed patterns (1)</h2><details class="cluster sev-card-LOW review-needed"><summary><span><span class="sev-badge sev-LOW">LOW</span></span><span class="cluster-title">Taint To Run Block</span><span class="cluster-counts">1 finding &middot; 1 file</span></summary><div class="cluster-body"><div class="rule-ids">Rules: <a href="#rule-TAINT-GH-001"><code>TAINT-GH-001</code></a></div><table class="cluster-findings"><thead><tr><th>Sev</th><th>Rule</th><th>Location</th><th>Title</th></tr></thead><tbody><tr><td><span class="sev-badge sev-LOW">LOW</span></td><td><a href="#rule-TAINT-GH-001"><code>TAINT-GH-001</code></a></td><td class="file">../../home/user/taintly/.github/workflows/ci.yml:42</td><td>Possible taint flow</td></tr></tbody></table></div></details></section><section aria-labelledby="f-h"><h2 id="f-h">All findings (5)</h2><details><summary style="cursor:pointer; color:var(--muted); padding:6px 0">Show flat list of every finding</summary><table class="flat-table" style="margin-top:8px"><thead><tr><th>Sev</th><th>Rule</th><th>Location</th><th>Title</th></tr></thead><tbody><tr><td><span class="sev-badge sev-CRITICAL">CRITICAL</span></td><td><a href="#rule-SEC3-GH-001"><code>SEC3-GH-001</code></a></td><td><code>../../home/user/taintly/.github/workflows/ci.yml:12</code></td><td>Action referenced by mutable tag</td></tr><tr><td><span class="sev-badge sev-HIGH">HIGH</span></td><td><a href="#rule-PSE-GH-001"><code>PSE-GH-001</code></a></td><td><code>../../home/user/taintly/.github/workflows/agent.yml:24</code></td><td>AI agent with cloud-credential grant on a fork-reachable event</td></tr><tr><td><span class="sev-badge sev-MEDIUM">MEDIUM</span></td><td><a href="#rule-SEC2-GH-002"><code>SEC2-GH-002</code></a></td><td><code>../../home/user/taintly/.github/workflows/ci.yml:1</code></td><td>Missing top-level permissions block</td></tr><tr><td><span class="sev-badge sev-LOW">LOW</span></td><td><a href="#rule-TAINT-GH-001"><code>TAINT-GH-001</code></a></td><td><code>../../home/user/taintly/.github/workflows/ci.yml:42</code></td><td>Possible taint flow</td></tr><tr><td><span class="sev-badge sev-LOW">LOW</span></td><td><a href="#rule-ENGINE-ERR"><code>ENGINE-ERR</code></a></td><td><code>../../home/user/taintly/.github/workflows/big.yml:0</code></td><td>File size 60000 bytes exceeds scanner cap (50000)</td></tr></tbody></table></details></section><section aria-labelledby="rules-h"><h2 id="rules-h">Rule reference</h2><details class="rule-ref-block" id="rule-ENGINE-ERR"><summary><code>ENGINE-ERR</code> &mdash; File size 60000 bytes exceeds scanner cap (50000)</summary><div class="rule-ref-body"><p class="rule-desc">Per-line rules still ran but file-scope coverage degraded.</p></div></details><details class="rule-ref-block" id="rule-PSE-GH-001"><summary><code>PSE-GH-001</code> &mdash; AI agent with cloud-credential grant on a fork-reachable event</summary><div class="rule-ref-body"><p class="rule-desc">Permission Slip Effect: a fork-reachable trigger, an AI agent action, and a cloud-credential grant co-exist.  An attacker who steers the agent via prompt injection holds a valid OIDC token.</p><p class="rule-remediation"><strong>Fix:</strong> <code>Break at least one leg of the triangle:
+1. Gate the agent job by same-repo identity.
+2. Drop the id-token: write grant from the agent job.
+3. Narrow the agent&#x27;s allowedTools to forbid shell.</code></p><p class="rule-ref">Reference: <code>https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/</code></p></div></details><details class="rule-ref-block" id="rule-SEC2-GH-002"><summary><code>SEC2-GH-002</code> &mdash; Missing top-level permissions block</summary><div class="rule-ref-body"><p class="rule-desc">Workflow does not declare a top-level permissions block.</p><p class="rule-remediation"><strong>Fix:</strong> <code>Add `permissions: contents: read` at the top level.</code></p><p class="rule-ref">Reference: <code>https://docs.github.com/en/actions/security-guides/automatic-token-authentication</code></p></div></details><details class="rule-ref-block" id="rule-SEC3-GH-001"><summary><code>SEC3-GH-001</code> &mdash; Action referenced by mutable tag</summary><div class="rule-ref-body"><p class="rule-desc">An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action&#x27;s repo can move the tag to a malicious commit; every consumer pinned by tag picks up the new code on the next workflow run.</p><p class="rule-remediation"><strong>Fix:</strong> <code>Pin the action to a full 40-character commit SHA.
+Use `gh action pin` or `taintly --fix`.</code></p><p class="rule-ref">Reference: <code>https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions</code></p></div></details><details class="rule-ref-block" id="rule-TAINT-GH-001"><summary><code>TAINT-GH-001</code> &mdash; Possible taint flow</summary><div class="rule-ref-body"><p class="rule-desc">Untrusted context flows into a run: block via env.</p><p class="rule-remediation"><strong>Fix:</strong> <code>Quote the variable in the run: block.</code></p></div></details></section><footer>Generated by taintly &mdash; zero-dependency CI/CD security scanner. No data was sent to any external service.</footer></main></body></html>
