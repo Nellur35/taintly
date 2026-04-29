@@ -68,6 +68,11 @@ def _is_suppressed(line: str, rule_id: str) -> bool:
       # taintly: ignore                     — suppress all rules on this line
       # taintly: ignore[SEC3-GH-001]        — suppress a specific rule
       # taintly: ignore[SEC3-GH-001,SEC3-GH-002]  — suppress multiple rules
+
+    Optionally also honours foreign-scanner inline-ignore comments
+    when the user has opted in via ``--respect-zizmor-ignores``; the
+    foreign-format check only runs in that mode so the default
+    behaviour stays "taintly's own format only".
     """
     if _SUPPRESS_GENERIC.search(line):
         return True
@@ -75,6 +80,13 @@ def _is_suppressed(line: str, rule_id: str) -> bool:
     if m:
         suppressed = {s.strip() for s in m.group(1).split(",")}
         if rule_id in suppressed:
+            return True
+    # Foreign-scanner suppression interop (opt-in).  Late import keeps
+    # the default suppression path dependency-free.
+    from taintly.suppressions import zizmor_compat
+
+    if zizmor_compat.is_respect_zizmor_ignores_enabled():
+        if zizmor_compat.is_zizmor_suppressed(line, rule_id):
             return True
     return False
 

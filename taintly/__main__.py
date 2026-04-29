@@ -327,6 +327,22 @@ def main():
             "because of the per-action API cost."
         ),
     )
+    parser.add_argument(
+        "--respect-zizmor-ignores",
+        action="store_true",
+        help=(
+            "Honour foreign-scanner inline ignore comments that match "
+            "zizmor's format (``# zizmor: ignore`` / "
+            "``# zizmor: ignore[<rule-id>]``).  A small mapping table "
+            "translates well-known zizmor rule IDs onto the taintly "
+            "rules that detect the same threat shape; unmapped IDs "
+            "fall through to broad-line suppression so a maintainer "
+            "who already reviewed the line under another tool isn't "
+            "asked to re-review under taintly.  Default off — taintly "
+            "doesn't change behaviour based on another tool's "
+            "suppressions without explicit opt-in."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -334,6 +350,11 @@ def main():
         from taintly.platform import github_sha_verify
 
         github_sha_verify.set_enabled(True)
+
+    if args.respect_zizmor_ignores:
+        from taintly.suppressions import zizmor_compat
+
+        zizmor_compat.set_respect_zizmor_ignores(True)
 
     # Auto-disable ANSI colour when stdout is not a TTY (piped / redirected)
     # so `taintly > report.txt` and `taintly --format html > report.html`
