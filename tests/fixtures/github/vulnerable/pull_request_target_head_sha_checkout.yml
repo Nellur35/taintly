@@ -1,0 +1,25 @@
+# pull_request_target_head_sha_checkout.yml — vulnerable fixture for
+# SEC4-GH-001.
+#
+# The "imposter trigger" pattern: a workflow declares
+# ``on: pull_request_target`` (which runs with the base repo's write
+# context and full secret scope) and then explicitly checks out the
+# PR's head SHA via ``actions/checkout`` with
+# ``ref: ${{ github.event.pull_request.head.sha }}``.  The combination
+# is functionally equivalent to ``pull_request`` but with elevated
+# privilege — an attacker's PR code runs against the maintainer's
+# write GITHUB_TOKEN.
+#
+# SEC4-GH-001 must fire on this exact shape; the rule's anchor is
+# ``pull_request_target`` and its requires regex is
+# ``github\.event\.pull_request\.head\.(sha|ref)``.
+on: pull_request_target
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: ./build.sh

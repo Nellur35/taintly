@@ -469,7 +469,11 @@ RULES: list[Rule] = [
         description=(
             "Workflow uses pull_request_target AND checks out the PR author's code. "
             "This is the exact attack vector used in the Trivy supply chain compromise (March 2026). "
-            "Attacker-controlled code executes with access to repo secrets and write permissions."
+            "Attacker-controlled code executes with access to repo secrets and write permissions. "
+            "The ``head.sha`` and ``head.ref`` checkout variants — explicitly checking out the "
+            "PR's head commit via ``actions/checkout`` with ``ref: ${{ github.event."
+            "pull_request.head.sha }}`` (or ``head.ref``) — produce the same imposter-trigger "
+            "shape and are covered by this rule's requires regex."
         ),
         pattern=ContextPattern(
             anchor=r"pull_request_target",
