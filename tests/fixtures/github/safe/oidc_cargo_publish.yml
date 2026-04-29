@@ -1,0 +1,23 @@
+# oidc_cargo_publish.yml — safe fixture for SEC5-GH-001.
+#
+# Cargo trusted publishing exchanges the workflow's OIDC token for a
+# crates.io registry token; id-token: write is legitimately required.
+# SEC5-GH-001 must NOT fire.
+name: Publish (cargo)
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: cargo publish

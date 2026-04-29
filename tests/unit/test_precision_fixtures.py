@@ -24,6 +24,7 @@ from taintly.models import Platform, Severity
 from taintly.rules.registry import load_all_rules
 
 _FIX = Path(__file__).parent.parent / "fixtures" / "precision"
+_SAFE_GH = Path(__file__).parent.parent / "fixtures" / "github" / "safe"
 
 
 @pytest.fixture(scope="module")
@@ -154,3 +155,30 @@ def test_placeholder_password_not_treated_as_confirmed_secret(gh_rules):
             assert f.confidence != "high", (
                 f"{f.rule_id} classified the placeholder password with HIGH confidence"
             )
+
+
+# ---------------------------------------------------------------------------
+# SEC5-GH-001 — modern OIDC publishers (uv / twine / cargo / npm)
+#
+# Workflows that grant ``id-token: write`` and invoke a modern
+# trusted-publishing command via ``run:`` legitimately need the
+# permission.  SEC5-GH-001 must not fire on these.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "oidc_uv_publish.yml",
+        "oidc_twine_use_oidc.yml",
+        "oidc_cargo_publish.yml",
+        "oidc_npm_provenance.yml",
+    ],
+)
+def test_oidc_shell_publishers_do_not_trip_sec5_gh_001(fixture_name, gh_rules):
+    findings = scan_file(str(_SAFE_GH / fixture_name), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC5-GH-001"]
+    assert not fired, (
+        f"{fixture_name}: SEC5-GH-001 fired on a workflow with a "
+        f"recognised shell-form OIDC publisher: {fired}"
+    )

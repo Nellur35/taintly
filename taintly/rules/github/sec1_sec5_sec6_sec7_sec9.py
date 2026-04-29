@@ -17,6 +17,56 @@ from taintly.models import (
     Severity,
 )
 
+
+# ---------------------------------------------------------------------------
+# OIDC consumer markers for SEC5-GH-001
+# ---------------------------------------------------------------------------
+#
+# A workflow that grants ``id-token: write`` legitimately needs at
+# least one OIDC consumer.  SEC5-GH-001 fires when the permission is
+# granted but no consumer is present.  The list below is the single
+# source of truth for "what counts as an OIDC consumer" — extend here
+# when a new federated-credential or trusted-publishing flow lands in
+# the wild.
+#
+# Two shapes:
+#
+#   * Action-form (``uses: <publisher>``) — the established federated-
+#     credential and trusted-publishing actions.  Substring-matched
+#     against the full workflow text.
+#
+#   * Shell-form (``run: <command>``) — modern PEP-740 / sigstore /
+#     registry-OIDC publish flows that legitimately request
+#     ``id-token: write`` but invoke via ``run:`` rather than ``uses:``.
+#     ``--use-oidc`` (twine) and ``--provenance`` (npm) are the
+#     positive markers; ``uv publish`` and ``cargo publish`` auto-
+#     detect the workflow's OIDC token and need no flag.  The
+#     shell-form regexes use word boundaries so a substring inside an
+#     unrelated step name doesn't suppress legitimate findings.
+_OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
+    # Action-form
+    r"role-to-assume",
+    r"workload_identity_provider",
+    r"azure/login",
+    r"google-github-actions/auth",
+    r"configure-aws-credentials",
+    r"pypa/gh-action-pypi-publish",
+    r"sigstore/gh-action-sigstore",
+    r"actions/attest-build-provenance",
+    # Shell-form.  ``--`` is two non-word characters, so a leading
+    # ``\b`` would never match on the flag — the preceding space is
+    # also non-word, so there is no word boundary between them.  The
+    # trailing ``\b`` keeps ``--use-oidc`` from matching a longer flag
+    # like ``--use-oidc-suffix``.
+    r"\buv\s+publish\b",
+    r"\btwine\s+upload\b[^\n]*--use-oidc\b",
+    r"\bcargo\s+publish\b",
+    r"\bnpm\s+publish\b[^\n]*--provenance\b",
+)
+
+_OIDC_CONSUMER_REGEX: str = "|".join(_OIDC_CONSUMER_ALTERNATES)
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # CICD-SEC-1: Insufficient Flow Control Mechanisms
@@ -116,24 +166,24 @@ RULES: list[Rule] = [
         description=(
             "The workflow grants 'id-token: write' permission — which allows minting "
             "OIDC tokens that can authenticate to cloud providers or a package registry "
-            "via trusted publishing — but does not use any OIDC-consuming action "
+            "via trusted publishing — but does not use any OIDC-consuming action or "
+            "command.  Recognised consumers include the federated-credential actions "
             "(aws-actions/configure-aws-credentials, google-github-actions/auth, "
-            "azure/login, pypa/gh-action-pypi-publish, sigstore/gh-action-sigstore-python, etc.). "
-            "The permission is over-provisioned and unnecessarily expands token capabilities."
+            "azure/login) and modern trusted-publishing flows (pypa/gh-action-pypi-publish, "
+            "sigstore/gh-action-sigstore-python, actions/attest-build-provenance, "
+            "uv publish, twine upload --use-oidc, cargo publish, npm publish --provenance). "
+            "Without one of these the permission is over-provisioned and unnecessarily "
+            "expands token capabilities."
         ),
         pattern=ContextPattern(
             anchor=r"id-token:\s*write",
             requires=r"id-token:\s*write",
-            # Known OIDC consumers. Expanded to include PyPI trusted publishing
-            # and sigstore signing — both of which ARE OIDC-consuming and
-            # legitimately need id-token: write. Previously flagged release
-            # workflows that used these as false positives.
-            requires_absent=(
-                r"role-to-assume|workload_identity_provider|azure/login|"
-                r"google-github-actions/auth|configure-aws-credentials|"
-                r"pypa/gh-action-pypi-publish|sigstore/gh-action-sigstore|"
-                r"actions/attest-build-provenance"
-            ),
+            # OIDC consumers — see _OIDC_CONSUMER_ALTERNATES above for
+            # the canonical list.  Action-form covers the established
+            # federated-credential and trusted-publishing actions;
+            # shell-form covers PEP-740 / registry-OIDC publish
+            # commands that don't go through a uses: reference.
+            requires_absent=_OIDC_CONSUMER_REGEX,
             exclude=[r"^\s*#"],
         ),
         remediation=(
@@ -149,6 +199,12 @@ RULES: list[Rule] = [
             "permissions:\n  id-token: write\nsteps:\n  - uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc",
             "permissions:\n  id-token: write\nsteps:\n  - uses: sigstore/gh-action-sigstore-python@abc",
             "permissions:\n  contents: read",
+            # Modern shell-form OIDC publishers — each legitimately
+            # needs id-token: write and must not trip SEC5-GH-001.
+            "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: uv publish",
+            "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: twine upload --use-oidc dist/*",
+            "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: cargo publish",
+            "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: npm publish --provenance --access public",
         ],
         stride=["E"],
         threat_narrative=(
