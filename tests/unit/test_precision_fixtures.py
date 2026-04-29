@@ -250,3 +250,39 @@ def test_sec6_gh_010_fires_on_unmasked_with_input(gh_rules):
         f"Expected anchor on the with-input line citing secrets.X, "
         f"got snippets: {[f.snippet for f in fired]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SEC1-GH-001 — job-scoped anchor (don't fire on trigger keywords)
+#
+# A workflow that triggers ``on: release: { types: [...] }`` AND runs a
+# publish: job has two lines that lexically match the credential-shape
+# regex.  Only the job line should fire; the trigger keyword is a
+# false-positive shape.
+# ---------------------------------------------------------------------------
+
+
+def test_sec1_gh_001_does_not_fire_on_release_trigger(gh_rules):
+    findings = scan_file(str(_SAFE_GH / "release_trigger_with_environment.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
+    assert not fired, (
+        f"SEC1-GH-001 must not fire on a publish: job that has "
+        f"environment: declared, regardless of the trigger keyword "
+        f"shape on the on: block: {fired}"
+    )
+
+
+def test_sec1_gh_001_anchors_on_job_not_trigger(gh_rules):
+    findings = scan_file(str(_VULN_GH / "publish_job_no_environment.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
+    assert len(fired) == 1, (
+        f"SEC1-GH-001 must fire exactly once on a publish: job lacking "
+        f"environment:, regardless of any same-shape trigger keyword "
+        f"earlier in the file. Got {len(fired)} findings: "
+        f"{[(f.line, f.snippet) for f in fired]}"
+    )
+    # The anchor cites the publish: line, not the release: trigger.
+    assert "publish:" in fired[0].snippet, (
+        f"Expected anchor on the publish: job line, "
+        f"got snippet: {fired[0].snippet!r}"
+    )

@@ -4,6 +4,8 @@ Covers OWASP CICD-SEC-1, SEC-2 (extended), SEC-5, SEC-6, SEC-7, SEC-9.
 These were entirely missing from initial implementation.
 """
 
+import re
+
 from taintly.models import (
     _YAML_BOOL_FALSE,
     _YAML_BOOL_TRUE,
@@ -16,6 +18,75 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+
+
+# ---------------------------------------------------------------------------
+# SEC1-GH-001 — job-scoped variant of SequencePattern
+# ---------------------------------------------------------------------------
+#
+# The naive ``SequencePattern`` for "credential-shape job name without
+# environment: in the lookahead window" can't tell a job name (under
+# ``jobs:``) from a top-level trigger keyword (under ``on:``).  Both
+# sit at 2-space indent with the same lexical shape — ``release:``,
+# ``publish:`` are both valid trigger-event keywords AND valid job
+# names.  That ambiguity produced a false-positive finding anchored
+# on the trigger line of any workflow whose ``on:`` block named one of
+# the credential-shape events (release, publish, deployment, etc.).
+#
+# This pattern restricts the SequencePattern's match window to lines
+# AFTER the file's top-level ``jobs:`` declaration so trigger-block
+# matches are skipped.
+
+
+class _JobScopedSequencePattern:
+    """SequencePattern variant that only matches inside the ``jobs:``
+    block.  Before the ``jobs:`` line — anywhere ``on:``,
+    ``permissions:``, ``defaults:``, ``env:`` keys live — matches are
+    silently dropped.
+
+    The fallback when no ``jobs:`` line is found is to behave like the
+    underlying SequencePattern (cover the whole file), so the
+    presence-or-absence of ``jobs:`` doesn't change the rule's
+    behaviour on workflows that lack the block entirely.
+    """
+
+    _JOBS_LINE_RE = re.compile(r"^jobs\s*:\s*(#.*)?$")
+
+    def __init__(
+        self,
+        *,
+        pattern_a: str,
+        absent_within: str,
+        lookahead_lines: int = 10,
+        exclude: list[str] | None = None,
+    ) -> None:
+        self._pattern_a_re = re.compile(pattern_a)
+        self._absent_re = re.compile(absent_within)
+        self._lookahead = lookahead_lines
+        self._excludes = [re.compile(e) for e in (exclude or [])]
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        # Find the ``jobs:`` line.  When absent, the pattern degrades
+        # to whole-file coverage to preserve the original behaviour.
+        jobs_line_idx: int | None = None
+        for i, line in enumerate(lines):
+            if self._JOBS_LINE_RE.match(line):
+                jobs_line_idx = i
+                break
+
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            if jobs_line_idx is not None and i <= jobs_line_idx:
+                # Pre-jobs: trigger block, file-level permissions,
+                # env: defaults — never the rule's intended target.
+                continue
+            if any(ex.search(line) for ex in self._excludes):
+                continue
+            if self._pattern_a_re.search(line):
+                window = "\n".join(lines[i : i + self._lookahead])
+                if not self._absent_re.search(window):
+                    results.append((i + 1, line.strip()))
+        return results
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +154,7 @@ RULES: list[Rule] = [
             "workflow trigger causes immediate deployment. GitHub Environments allow requiring "
             "manual approval from designated reviewers before sensitive jobs run."
         ),
-        pattern=SequencePattern(
+        pattern=_JobScopedSequencePattern(
             pattern_a=r"^\s{2,4}(deploy|release|publish|production|prod)[_-]?\w*:\s*$",
             absent_within=r"environment:",
             lookahead_lines=20,

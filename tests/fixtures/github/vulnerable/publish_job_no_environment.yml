@@ -1,0 +1,22 @@
+# publish_job_no_environment.yml — vulnerable fixture for SEC1-GH-001.
+#
+# Workflow triggers on a release event and runs a publish: job that
+# has no ``environment:`` gate.  SEC1-GH-001 must fire ONCE, anchored
+# on the publish: job line, not on the release: trigger keyword.
+# (Both keywords sit at indent 2 with the same lexical shape; the
+# rule's job-scope check distinguishes them by their position
+# relative to the file's ``jobs:`` declaration.)
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./publish.sh

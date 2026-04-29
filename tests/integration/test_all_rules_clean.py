@@ -145,6 +145,7 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         ("github/vulnerable/injection_run_block.yml",   ["SEC4-GH-004"]),
         ("github/vulnerable/workflow_run_no_conclusion.yml", ["SEC4-GH-003"]),
         ("github/vulnerable/secret_in_with_input.yml", ["SEC6-GH-010"]),
+        ("github/vulnerable/publish_job_no_environment.yml", ["SEC1-GH-001"]),
         ("github/vulnerable/ai_trust_remote_code.yml",  ["AI-GH-001"]),
         ("github/vulnerable/ai_hf_no_revision.yml",     ["AI-GH-002"]),
         ("github/vulnerable/ai_torch_load_unsafe.yml",  ["AI-GH-003"]),
