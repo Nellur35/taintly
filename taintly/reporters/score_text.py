@@ -38,6 +38,23 @@ def format_score(report: ScoreReport, use_color: bool = True) -> str:
     lines.append(f"\n{b}{sep * 3} CI/CD SECURITY SCORE {sep * 3}{r}")
     lines.append("")
     lines.append(f"  Score: {b}{gc}{report.total_score}/100 ({report.grade}){r}")
+    # Threat-model disclosure.  The score is computed against a fixed
+    # public-OSS threat model; the user's deployment may differ in ways
+    # taintly can't observe.  Surfacing this adjacent to the score (not
+    # at the bottom of the report) ensures CI consumers see it.  This
+    # is disclosure, NOT a basis for score adjustment — taintly takes
+    # no position on what the user's deployment actually is.  The
+    # phrase "required, not optional" is load-bearing — see
+    # docs/decisions/threat-model-disclosure-not-adjustment.md.
+    lines.append(
+        f"  {b}Threat model:{r} public-OSS deployment "
+        "(fork PRs reachable, runners shared, secrets repo-scoped)."
+    )
+    lines.append(
+        "  Findings are exploitability-weighted against this model. "
+        "Assessing fit to your deployment is required, not optional."
+    )
+    lines.append("  See docs/SCORING.md.")
     if report.distinct_risks or report.review_needed:
         bits = [f"{report.distinct_risks} confirmed cluster(s)"]
         if report.review_needed:

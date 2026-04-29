@@ -11,6 +11,8 @@ Security scanner for CI/CD pipelines. Reads GitHub Actions, GitLab CI, and Jenki
 
 Pure Python 3.10+. Zero runtime dependencies. No telemetry.
 
+**The score is computed against a fixed threat model:** public-OSS deployment, fork PRs reachable, runners shared, secrets repo-scoped, no OIDC-only posture. Whether a flagged pattern is actually exploitable in your deployment depends on context taintly cannot see — your network topology, your contributor policy, your runner posture. The score is a starting point for assessment, not a verdict. For details, see [docs/SCORING.md](docs/SCORING.md).
+
 ## Install
 
 Pure stdlib, zero deps — clone and run:
@@ -41,6 +43,8 @@ Common flags:
 | `--transitive` | Walk into composite actions and check sub-actions |
 | `--guide [RULE_ID]` | Step-by-step remediation guide |
 | `--token-stdin` | Read API token from stdin |
+| `--check-imposter-commits` | Verify pinned action SHAs are reachable in their upstream repo's ref history (opt-in, network) |
+| `--respect-zizmor-ignores` | Honor zizmor's inline suppression markers (opt-in) |
 
 Run `python -m taintly --help` for the full list.
 
@@ -66,9 +70,11 @@ CLI flags override config values.
 ### Inline suppressions
 
 ```yaml
-- uses: actions/checkout@v4  # taintly: ignore
-- uses: actions/checkout@v4  # taintly: ignore[SEC4-GH-005]
+- uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # taintly: ignore
+- uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # taintly: ignore[SEC4-GH-005]
 ```
+
+`--respect-zizmor-ignores` extends recognition to zizmor's `# zizmor: ignore` / `# zizmor: ignore[<rule>]` form via a small mapped allowlist; default off.
 
 ### Remote scans
 
@@ -83,7 +89,7 @@ taintly /path/to/repo --platform jenkins
 **GitHub Actions**
 
 ```yaml
-- uses: Nellur35/taintly@v1
+- uses: Nellur35/taintly@08298f9dd1458ecc892d4753ab08aa8fb5814f4c  # pin to a release SHA
   with:
     fail-on: HIGH
 ```
@@ -101,10 +107,175 @@ include:
 
 ```yaml
 - run: python -m taintly . --format sarif > taintly.sarif
-- uses: github/codeql-action/upload-sarif@v3
+- uses: github/codeql-action/upload-sarif@181d5eefc20863364f96762470ba6f862bdef56b  # v3.29.2
   with:
     sarif_file: taintly.sarif
 ```
+
+## Using taintly as a CI gate
+
+The right gating shape depends on whether the codebase has existing
+findings. Three patterns, each with a recipe.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Scan completed cleanly (no findings above the configured threshold, or `--fail-on` not set) |
+| `1` | Scan completed with HIGH-severity findings (or with findings at or above `--fail-on` severity) |
+| `2` | CLI argument error OR scan completed with CRITICAL-severity findings — distinguish via stderr (argparse usage on argument error vs. severity summary on findings) |
+| `3` | Configuration error (missing config file, invalid YAML, unknown rule ID) |
+| `10` | `--self-test` failed: a positive sample didn't fire, or a negative sample did, or `--integration-test` reported a non-bypass failure |
+| `11` | Scan completed but coverage was degraded — at least one `ENGINE-ERR` finding present (file unreadable, ReDoS cap hit, rule crashed) |
+| `12` | `--self-test --mutate` detected a surviving mutation |
+
+CI gates should distinguish `0` from non-zero. Treating any non-zero
+as "scan failed" is correct; treating non-zero as "findings exist" is
+wrong because it conflates findings with scanner errors.
+
+### Pattern A — fail-fast for clean codebases
+
+Run on every PR. Fail the build on any HIGH-or-above finding. No
+baseline. Works only if the codebase already has zero findings at the
+threshold.
+
+```yaml
+# .github/workflows/security.yml
+on: [pull_request]
+jobs:
+  taintly:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: Nellur35/taintly@08298f9dd1458ecc892d4753ab08aa8fb5814f4c  # pin to a release SHA
+        with:
+          fail-on: HIGH
+```
+
+### Pattern B — diff-only for repos with existing findings
+
+The realistic pattern for any non-greenfield codebase. Maintain a
+baseline file in the repo; per-PR runs only fail on **new** findings.
+The baseline ratchets down over time as findings get fixed.
+
+**One-time setup** (run locally, commit the baseline):
+
+```bash
+python -m taintly . --baseline .taintly-baseline.json
+git add .taintly-baseline.json
+git commit -m "Add taintly baseline"
+```
+
+**Per-PR workflow:**
+
+```yaml
+on: [pull_request]
+jobs:
+  taintly-diff:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: Nellur35/taintly@08298f9dd1458ecc892d4753ab08aa8fb5814f4c  # pin to a release SHA
+        with:
+          extra-args: --diff .taintly-baseline.json --fail-on HIGH
+```
+
+The baseline should be regenerated periodically (e.g., monthly) so
+fixed findings don't keep counting toward the silent-acceptance set.
+Don't regenerate it from a feature branch — the baseline represents
+the team's agreed acceptance state of `main`.
+
+### Pattern C — scheduled deep scan
+
+`--check-imposter-commits` and `--platform-audit` make network calls
+and shouldn't run on every PR (rate limits, latency). Run them weekly
+on a schedule with results either feeding back into a tracking issue
+or posting to a security channel.
+
+```yaml
+# .github/workflows/taintly-deep-scan.yml
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Mondays 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  deep-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # for SARIF upload
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Imposter-commit + platform-audit scan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m taintly . \
+            --check-imposter-commits \
+            --platform-audit --github-repo ${{ github.repository }} \
+            --format sarif > deep-scan.sarif
+      - uses: github/codeql-action/upload-sarif@181d5eefc20863364f96762470ba6f862bdef56b  # v3.29.2
+        with:
+          sarif_file: deep-scan.sarif
+          category: taintly-deep-scan
+```
+
+The default `GITHUB_TOKEN` works for repository-scoped `--platform-audit`
+checks. Org-level checks (CODEOWNERS coverage at the org level, default
+workflow-permission settings) need a personal access token with
+`read:org` scope; pipe it via `--token-stdin` rather than embedding in
+the workflow.
+
+For most teams, **Pattern B + Pattern C is the right combination**:
+fast offline gate on every PR, slow networked check on a schedule.
+
+### Pre-commit hook (individual contributors)
+
+For local feedback before pushing, add a pre-commit hook to your
+project's `.pre-commit-config.yaml`. taintly's CLI takes a single
+positional path, not a list of files, so the hook scans the whole
+repo on every commit (with `pass_filenames: false`):
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: taintly
+        name: taintly (full repo, fail on HIGH)
+        entry: python -m taintly .
+        language: system
+        pass_filenames: false
+        args: [--min-severity=HIGH, --no-color]
+```
+
+This runs on every commit and fails fast if a HIGH or CRITICAL
+appears anywhere in the repo's CI configuration.
+
+### Configuration sources, in priority order
+
+When using taintly in CI, three sources can configure it:
+
+1. **CLI flags** (highest priority) — what the workflow sets via
+   `extra-args` or `with:`.
+2. **`.taintly.yml`** at the repo root — versioned config the team
+   agrees on.
+3. **Defaults** — what taintly does without configuration.
+
+For CI gates, prefer `.taintly.yml` for stable settings (severity
+threshold, excluded rules) and CLI flags for run-specific behavior
+(`--diff`, `--check-imposter-commits`). This way the CI workflow stays
+focused on invocation; the policy lives in the repo.
 
 ## How findings are reported
 
@@ -118,23 +289,23 @@ Each finding carries three signals:
 | Confidence | How sure the detector is it found a real instance |
 | Exploitability | How much damage is reachable in this particular workflow |
 
-`--score` prints a 0–100 grade and a debt profile labelling each family Strong, Moderate, Weak, or Needs review.
+`--score` prints a 0–100 grade and a debt profile labelling each family Strong, Moderate, Weak, Needs review, or Not applicable. "Not applicable" is reserved for families whose rules had no candidate location to evaluate in this scan — distinct from "Strong" (rules ran, nothing was wrong).
 
 ## Coverage
 
 <!-- AUTOGEN:summary -->
-229 file-based rules and 21 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+231 file-based rules and 29 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 <!-- AUTOGEN:coverage -->
 | Category | GitHub | GitLab | Jenkins |
 |----------|--------|--------|---------|
-| SEC-1 — Insufficient Flow Control | 2 | 2 | 2 |
-| SEC-2 — Inadequate IAM | 4 | 3 | 3 |
-| SEC-3 — Dependency Chain Abuse | 11 | 6 | 6 |
-| SEC-4 — Poisoned Pipeline Execution | 25 | 9 | 8 |
+| SEC-1 — Insufficient Flow Control | 1 | 2 | 2 |
+| SEC-2 — Inadequate IAM | 3 | 3 | 3 |
+| SEC-3 — Dependency Chain Abuse | 9 | 5 | 5 |
+| SEC-4 — Poisoned Pipeline Execution | 20 | 7 | 6 |
 | SEC-5 — Insufficient PBAC | 2 | 1 | 1 |
-| SEC-6 — Insufficient Credential Hygiene | 8 | 9 | 8 |
+| SEC-6 — Insufficient Credential Hygiene | 9 | 9 | 8 |
 | SEC-7 — Insecure System Configuration | 4 | 1 | 3 |
 | SEC-8 — Ungoverned 3rd Party Services | 4 | 3 | 4 |
 | SEC-9 — Improper Artifact Integrity | 5 | 3 | 3 |
@@ -143,11 +314,11 @@ Each finding carries three signals:
 | TAINT — Multi-stage taint flows | 13 | 4 | 2 |
 <!-- /AUTOGEN:coverage -->
 
-Plus 21 platform-posture rules in `--platform-audit` mode.
+Plus 29 platform-posture rules in `--platform-audit` mode.
 
 ## Network behaviour
 
-Local scans make no network calls. `--fix` calls `git ls-remote` to resolve action tags to commit SHAs. `--platform-audit`, `--github-org`, `--gitlab-group`, and `--transitive` call the GitHub or GitLab API and need a token.
+Local scans make no network calls. `--fix` calls `git ls-remote` to resolve action tags to commit SHAs. `--platform-audit`, `--github-org`, `--gitlab-group`, `--transitive`, and `--check-imposter-commits` call the GitHub or GitLab API and need a token.
 
 ## Requirements
 
