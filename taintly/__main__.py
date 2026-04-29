@@ -314,8 +314,26 @@ def main():
             "summary block listing the affected files."
         ),
     )
+    parser.add_argument(
+        "--check-imposter-commits",
+        action="store_true",
+        help=(
+            "Enable SEC3-GH-009: per-action SHA-reachability check. "
+            "For each ``uses: owner/repo@<sha>`` reference pinned to a "
+            "40-char SHA, query the GitHub Commits API to confirm the "
+            "SHA is still reachable from a ref in the action's repo. "
+            "Requires GITHUB_TOKEN in the environment for authenticated "
+            "requests; recommended on a weekly cron rather than per-PR "
+            "because of the per-action API cost."
+        ),
+    )
 
     args = parser.parse_args()
+
+    if args.check_imposter_commits:
+        from taintly.platform import github_sha_verify
+
+        github_sha_verify.set_enabled(True)
 
     # Auto-disable ANSI colour when stdout is not a TTY (piped / redirected)
     # so `taintly > report.txt` and `taintly --format html > report.html`

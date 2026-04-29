@@ -50,8 +50,15 @@ def _is_stub_rule(rule) -> bool:
         behaviour.
     """
     from taintly.models import AbsencePattern, Severity
+    from taintly.rules.github.sec3_sec4_supply_chain_ppe import ImposterCommitPattern
     from taintly.workflow_corpus import CorpusPattern
     if isinstance(rule.pattern, CorpusPattern):
+        return True
+    # SEC3-GH-009 (imposter-commit) is opt-in via --check-imposter-commits
+    # and depends on a network call.  Its samples live in
+    # tests/unit/test_imposter_commits.py against a stub verifier;
+    # the per-file test-sample contract isn't applicable.
+    if isinstance(rule.pattern, ImposterCommitPattern):
         return True
     if (
         getattr(rule, "review_needed", False)
