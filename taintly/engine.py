@@ -230,7 +230,108 @@ def scan_file(filepath: str, rules: list[Rule], _content: str | None = None) -> 
                     )
                 )
 
+    _downgrade_maintainer_gated_ref_name_findings(findings, content)
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Post-detection severity calibration
+# ---------------------------------------------------------------------------
+
+# ``on:`` events whose firing is restricted to maintainers — pushing
+# tags, creating releases, scheduling cron, or invoking
+# workflow_dispatch all require maintainer-equivalent privilege.  When
+# the workflow's trigger set is exclusively in this group, an
+# unquoted ``$GITHUB_REF_NAME`` is only attacker-controlled if a
+# maintainer is already compromised; HIGH severity overstates the
+# threat in that context.
+_MAINTAINER_GATED_TRIGGER_RE = re.compile(
+    # ``on:`` block followed (anywhere in the file) by one of the
+    # maintainer-gated events.  The presence of these events alongside
+    # a fork-reachable event would still trip the un-narrowed firing,
+    # so the per-file check below additionally requires the file to
+    # contain none of the fork-reachable events.
+    r"(?ms)^on:\s*\n.*?\b("
+    r"push:\s*\n[^\S\n]*tags:"
+    r"|push:\s*\n[^\S\n]*branches-ignore:"  # tag push only via branches-ignore
+    r"|release:"
+    r"|schedule:"
+    r"|workflow_dispatch:"
+    r")"
+)
+_FORK_REACHABLE_TRIGGER_RE = re.compile(
+    r"(?m)^\s*("
+    r"pull_request"  # covers pull_request and pull_request_target / _review etc.
+    r"|issue_comment"
+    r"|issues"
+    r"|discussion"
+    r"|fork"
+    r"|workflow_run"
+    r"|workflow_call"
+    r")\s*:"
+)
+# Single-line shape: ``on: push`` / ``on: [push, pull_request]``.
+_INLINE_TRIGGER_RE = re.compile(r"^on:\s*(\[[^\]]+\]|\w+)\s*$", re.MULTILINE)
+_REF_NAME_REF_RE = re.compile(
+    r"\$\{?\s*GITHUB_REF_NAME\b|github\.ref_name\b", re.IGNORECASE
+)
+
+
+def _is_maintainer_gated_only(content: str) -> bool:
+    """Return True when the workflow's ``on:`` block contains only
+    maintainer-gated events (tag push, release, schedule,
+    workflow_dispatch).  Returns False when any fork-reachable event
+    is also declared, when the trigger uses an inline shorthand we
+    can't classify, or when no recognised maintainer-gated event is
+    present.
+    """
+    # Inline-shorthand form: ``on: push`` / ``on: [push, pull_request]``.
+    # We can't tell whether the bare push is tag-only without a body,
+    # so we conservatively decline to apply the downgrade in that
+    # case.
+    if _INLINE_TRIGGER_RE.search(content):
+        return False
+    if _FORK_REACHABLE_TRIGGER_RE.search(content):
+        return False
+    return bool(_MAINTAINER_GATED_TRIGGER_RE.search(content))
+
+
+def _downgrade_maintainer_gated_ref_name_findings(
+    findings: list[Finding], content: str
+) -> None:
+    """Mutate ``findings`` in place: for findings in the
+    script-injection family that cite ``$GITHUB_REF_NAME`` (or
+    ``github.ref_name``) on a workflow whose triggers are all
+    maintainer-gated, downgrade severity by one tier.
+
+    Rationale: exploitability presumes attacker control of
+    ``$GITHUB_REF_NAME``, but tag-push / release / schedule events
+    are maintainer-only firing paths.  HIGH severity with low
+    exploitability is internally inconsistent — when the only
+    attacker path requires maintainer compromise, MEDIUM is the
+    correct calibration.
+    """
+    if not findings:
+        return
+    if not _is_maintainer_gated_only(content):
+        return
+
+    # Severity tier table — one step less severe.
+    _downgrade = {
+        Severity.CRITICAL: Severity.HIGH,
+        Severity.HIGH: Severity.MEDIUM,
+        Severity.MEDIUM: Severity.LOW,
+        Severity.LOW: Severity.INFO,
+    }
+
+    for f in findings:
+        if getattr(f, "finding_family", "") != "script_injection":
+            continue
+        if not _REF_NAME_REF_RE.search(f.snippet or ""):
+            continue
+        new_sev = _downgrade.get(f.severity)
+        if new_sev is not None and new_sev != f.severity:
+            f.severity = new_sev
 
 
 def _normalize_input_path(path: str) -> tuple[str, list[str]]:

@@ -286,3 +286,50 @@ def test_sec1_gh_001_anchors_on_job_not_trigger(gh_rules):
         f"Expected anchor on the publish: job line, "
         f"got snippet: {fired[0].snippet!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SEC4-GH-018 — severity calibration on maintainer-gated triggers
+#
+# The unquoted-$GITHUB_REF_NAME vector is HIGH only when
+# ``$GITHUB_REF_NAME`` is attacker-controlled.  Tag push and release
+# events are maintainer-gated firing paths, so the same unquoted
+# reference under those triggers is MEDIUM at most.
+# ---------------------------------------------------------------------------
+
+
+def test_sec4_gh_018_downgrades_to_medium_on_tag_push(gh_rules):
+    from taintly.models import Severity
+
+    findings = scan_file(str(_VULN_GH / "tag_push_unquoted_ref_name.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC4-GH-018"]
+    assert fired, "SEC4-GH-018 must still fire on the unquoted vector"
+    for f in fired:
+        assert f.severity == Severity.MEDIUM, (
+            f"On a tag-push-only trigger, SEC4-GH-018 should be downgraded "
+            f"from HIGH to MEDIUM, got {f.severity!r}"
+        )
+
+
+def test_sec4_gh_018_stays_high_on_pull_request(gh_rules, tmp_path):
+    """Same unquoted vector on a fork-reachable trigger must stay
+    HIGH — the calibration only applies when the trigger set is
+    exclusively maintainer-gated.
+    """
+    from taintly.models import Severity
+
+    p = tmp_path / "pr.yml"
+    p.write_text(
+        "name: PR\n"
+        "on:\n  pull_request:\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo Building $GITHUB_REF_NAME\n"
+    )
+    findings = scan_file(str(p), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC4-GH-018"]
+    assert fired
+    for f in fired:
+        assert f.severity == Severity.HIGH

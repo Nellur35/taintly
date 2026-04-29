@@ -1,0 +1,22 @@
+# tag_push_unquoted_ref_name.yml — vulnerable fixture for SEC4-GH-018
+# under maintainer-gated trigger calibration.
+#
+# Trigger is ``on: push: tags: ['v*']`` — only maintainers can push
+# tags, so the unquoted ``$GITHUB_REF_NAME`` reference is reachable
+# only via maintainer compromise.  SEC4-GH-018 still fires (the
+# unquoted vector is real), but its severity is downgraded from HIGH
+# to MEDIUM by the engine's post-detection calibration.
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo Building tag $GITHUB_REF_NAME
