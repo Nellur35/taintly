@@ -210,3 +210,43 @@ def test_sec4_gh_003_fires_once_per_workflow(gh_rules):
         f"Expected anchor on the workflow_run: declaration line, "
         f"got snippet: {fired[0].snippet!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SEC6-GH-010 — Secret passed as action input without env-block masking
+#
+# The rule fires when a credential-shape ``with:`` input takes a
+# ``${{ secrets.X }}`` value directly.  When the same job routes the
+# secret through ``env:`` instead, the env-block declaration registers
+# the value with the runner's log-redactor and the rule must not fire.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "secret_in_with_but_also_env.yml",
+        "with_input_no_secret.yml",
+    ],
+)
+def test_sec6_gh_010_does_not_fire_on_safe_with_input(fixture_name, gh_rules):
+    findings = scan_file(str(_SAFE_GH / fixture_name), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC6-GH-010"]
+    assert not fired, (
+        f"{fixture_name}: SEC6-GH-010 fired on a workflow whose "
+        f"with-input is either env-masked or non-secret: {fired}"
+    )
+
+
+def test_sec6_gh_010_fires_on_unmasked_with_input(gh_rules):
+    findings = scan_file(str(_VULN_GH / "secret_in_with_input.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC6-GH-010"]
+    assert fired, (
+        "SEC6-GH-010 must fire on a workflow that passes a secret as a "
+        "credential-shape with-input without env-block routing"
+    )
+    # Cite the anchor line, not the surrounding context.
+    assert all("secrets." in f.snippet for f in fired), (
+        f"Expected anchor on the with-input line citing secrets.X, "
+        f"got snippets: {[f.snippet for f in fired]}"
+    )

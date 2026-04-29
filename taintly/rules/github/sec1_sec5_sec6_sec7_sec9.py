@@ -1584,6 +1584,167 @@ RULES: list[Rule] = [
         confidence="medium",
     ),
     # =========================================================================
+    # SEC6-GH-010: Secret passed as action input without env-block masking
+    # =========================================================================
+    # GitHub auto-masks secrets that flow through a step's ``env:`` block:
+    # the runner registers each secret value with the log-redactor on
+    # process start.  The same secret routed through a ``with:`` input
+    # is passed to the action's process directly and may be echoed by
+    # the receiving action — actions that print their inputs to stdout
+    # for debugging, or that write inputs to a file the action then
+    # `cat`s, bypass the runner's redaction pass.
+    #
+    # The safe pattern routes the secret through ``env:`` and references
+    # it in ``with:`` via ``${{ env.NAME }}``; the env: declaration
+    # re-registers the value with the redactor before the action sees it.
+    Rule(
+        id="SEC6-GH-010",
+        title="Secret passed as action input without env-block masking",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-6",
+        description=(
+            "An action input whose name suggests a credential "
+            "(``token``, ``key``, ``secret``, ``password``, ``pass``) "
+            "receives a ``${{ secrets.X }}`` value directly via "
+            "``with:``.  Secrets routed through ``with:`` are passed to "
+            "the action as raw input; secrets routed through ``env:`` "
+            "are registered with the runner's log-redactor at process "
+            "start and consistently masked.  An action that echoes its "
+            "inputs to stdout (a common debugging pattern) leaks the "
+            "secret into job logs where the redactor cannot see it.\n"
+            "\n"
+            "The safe pattern declares the secret in the step's "
+            "``env:`` block and references it from ``with:`` via "
+            "``${{ env.NAME }}`` — the env-block path is masked, the "
+            "with-input is then a non-secret reference."
+        ),
+        pattern=ContextPattern(
+            # Per-line anchor: a YAML key ending in a credential-shape
+            # token, mapped to a ``${{ secrets.X }}`` value.  The
+            # ``(?i)`` flag accepts both ``token:`` and ``Token:``
+            # spellings; the leading whitespace requirement excludes
+            # workflow-level keys.  The prefix portion is zero-or-more
+            # word/hyphen characters so bare ``token:`` / ``password:``
+            # match alongside hyphenated forms like ``api-key:``.
+            anchor=(
+                r"(?i)^\s+[\w-]*"
+                r"(?:token|key|secret|password|pass)"
+                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
+            ),
+            # The full file must contain at least one such pattern for
+            # the rule to fire — the anchor regex itself is the
+            # presence check.
+            requires=(
+                r"(?i)\s+[\w-]*"
+                r"(?:token|key|secret|password|pass)"
+                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
+            ),
+            # Job-scope suppression: when the same job has an ``env:``
+            # block routing any secret, the safe pattern is in use
+            # somewhere — suppress.  This trades a small amount of
+            # precision (a job that with-inputs ``secrets.A`` while
+            # env-exporting ``secrets.B`` in a sibling step would
+            # suppress) for the avoidance of the dominant false
+            # positive: workflows that DO route secrets through
+            # ``env:`` but reference them in ``with:`` via ``env.X``
+            # would otherwise still trip the anchor regex on lines
+            # the rule shouldn't flag.  Step-scope suppression would
+            # require an engine-level model change; revisit if the
+            # broad-suppression FP rate is observed in the wild.
+            anchor_job_exclude=(
+                r"env:\s*\n[\s\S]*?\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"
+            ),
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Route the secret through the step's ``env:`` block and\n"
+            "reference it from ``with:`` via ``${{ env.NAME }}``:\n"
+            "\n"
+            "    - uses: some-org/some-action@<sha>\n"
+            "      with:\n"
+            "        token: ${{ env.GH_TOKEN }}\n"
+            "      env:\n"
+            "        GH_TOKEN: ${{ secrets.GH_TOKEN }}\n"
+            "\n"
+            "The env-block declaration registers the value with the\n"
+            "runner's log-redactor on process start, so any later\n"
+            "echo of the value is masked.  The with-input is then a\n"
+            "non-secret reference to a redacted env var."
+        ),
+        reference=(
+            "https://docs.github.com/en/actions/security-for-github-actions/"
+            "security-guides/using-secrets-in-github-actions#accessing-your-secrets"
+        ),
+        test_positive=[
+            # Bare with: token: ${{ secrets.X }} with no env: anywhere
+            # in the job — the dominant unsafe shape.
+            (
+                "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/some-action@v1\n"
+                "        with:\n"
+                "          token: ${{ secrets.GH_TOKEN }}"
+            ),
+            # Hyphenated input name — still credential-shape.
+            (
+                "jobs:\n  release:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/upload@v1\n"
+                "        with:\n"
+                "          api-key: ${{ secrets.API_KEY }}"
+            ),
+            # password input.
+            (
+                "jobs:\n  push:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: docker/login-action@v3\n"
+                "        with:\n"
+                "          password: ${{ secrets.REGISTRY_PASSWORD }}"
+            ),
+        ],
+        test_negative=[
+            # Same secret routed via env: — env-block exception fires.
+            (
+                "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/some-action@v1\n"
+                "        with:\n"
+                "          token: ${{ env.GH_TOKEN }}\n"
+                "        env:\n"
+                "          GH_TOKEN: ${{ secrets.GH_TOKEN }}"
+            ),
+            # with: input value is a hardcoded string, not a secret —
+            # anchor regex doesn't match.
+            (
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/some-action@v1\n"
+                "        with:\n"
+                "          registry-url: https://registry.npmjs.org"
+            ),
+            # with: input name is not credential-shape — anchor doesn't
+            # match.
+            (
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/some-action@v1\n"
+                "        with:\n"
+                "          repository: ${{ secrets.PRIVATE_REPO }}"
+            ),
+            # Comment.
+            "          # token: ${{ secrets.GH_TOKEN }}",
+        ],
+        stride=["I"],
+        threat_narrative=(
+            "An action receives a credential as a ``with:`` input.  "
+            "The action's implementation includes a debug-style log "
+            "line that echoes its inputs to stdout — a pattern the "
+            "runner's log-redactor will not catch because the input "
+            "value was never registered with the redactor (only "
+            "``env:`` values are).  The secret appears in the job "
+            "log; anyone with read access to the workflow run "
+            "(including, for many repos, anyone with public-fork "
+            "logs visibility) can copy it."
+        ),
+        confidence="high",
+        finding_family="credential_persistence",
+    ),
+    # =========================================================================
     # SEC9-GH-004: Tainted `actions/cache` key — a workflow restores an
     # `actions/cache` entry whose `key:` or `restore-keys:` interpolates
     # attacker-controlled context (github.event.*, github.head_ref,
