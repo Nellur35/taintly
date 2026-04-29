@@ -1,0 +1,23 @@
+# release_trigger_with_environment.yml — safe fixture for SEC1-GH-001.
+#
+# A workflow that triggers ``on: release: { types: [published] }``
+# and runs a publish: job behind a protected ``environment:``.  The
+# trigger keyword ``release:`` and the credential-shape job name
+# ``publish:`` both sit at the same indent — the rule must anchor on
+# the publish job and skip the trigger keyword.  With the
+# environment: key declared on the job, no finding fires.
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - run: ./publish.sh

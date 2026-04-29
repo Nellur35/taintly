@@ -3,6 +3,8 @@
 These two categories cover the exact attack vectors used in documented supply chain campaigns.
 """
 
+import re
+
 from taintly.models import (
     _YAML_BOOL_FALSE,
     CompromisedActionPattern,
@@ -13,6 +15,77 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+from taintly.platform import github_sha_verify
+
+
+# ---------------------------------------------------------------------------
+# SEC3-GH-009 — imposter-commit detection (opt-in, network-dependent)
+# ---------------------------------------------------------------------------
+#
+# A ``uses: owner/repo@<sha>`` reference pinned to a 40-character hex
+# SHA gives strong supply-chain integrity ONLY when the SHA is
+# reachable from a ref in the action's repository.  When the
+# maintainer force-pushes over the tag the SHA pointed at — or the SHA
+# was published transiently and later garbage-collected — the
+# reference resolves to an orphan commit that no audit trail covers.
+# The action's repo no longer has the code review record that
+# produced the SHA, and a future ref recreation could rebind the SHA
+# to attacker-controlled content.
+#
+# The rule is opt-in (``--check-imposter-commits`` CLI flag) because
+# verification requires per-action GitHub API calls; documentation
+# recommends running it on a weekly cron rather than per-PR.
+
+_USES_SHA_RE = re.compile(
+    # ``uses: owner/repo@<40-char hex>`` with optional surrounding
+    # whitespace and an optional trailing comment.  We require the
+    # 40-char hex form because anything shorter is necessarily a tag
+    # or branch (SEC3-GH-001 covers those).
+    r"\buses:\s+([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)@([0-9a-fA-F]{40})\b"
+)
+
+
+class ImposterCommitPattern:
+    """Pattern that fires on ``uses: owner/repo@<sha>`` whose SHA is
+    not reachable from any ref in the action's repository.
+
+    Conforms to ``PatternProtocol``: ``check(content, lines) ->
+    list[(line_number, snippet)]``.
+
+    Behaviour is gated by :func:`github_sha_verify.is_enabled`.  When
+    disabled (the default), ``check`` returns ``[]`` immediately —
+    the rule is silent under normal scans.  When enabled, each
+    matched SHA is verified via :func:`github_sha_verify.is_sha_reachable`
+    (which caches verdicts process-wide).
+    """
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if not github_sha_verify.is_enabled():
+            return []
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            # Comments don't reach the workflow runner — skip.
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            m = _USES_SHA_RE.search(line)
+            if not m:
+                continue
+            owner, repo, sha = m.group(1), m.group(2), m.group(3)
+            verdict = github_sha_verify.is_sha_reachable(owner, repo, sha.lower())
+            if verdict is False:
+                # Definitive 404 — orphan.  Indeterminate outcomes
+                # (rate-limit, transport error) bypass emission so a
+                # network blip never produces a false-positive SEC3
+                # finding.
+                snippet = (
+                    f"{owner}/{repo}@{sha[:12]} not reachable from any ref "
+                    f"in {owner}/{repo} (orphan SHA — force-push over tag "
+                    f"or garbage-collected commit)"
+                )
+                results.append((i + 1, snippet))
+        return results
+
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -396,7 +469,11 @@ RULES: list[Rule] = [
         description=(
             "Workflow uses pull_request_target AND checks out the PR author's code. "
             "This is the exact attack vector used in the Trivy supply chain compromise (March 2026). "
-            "Attacker-controlled code executes with access to repo secrets and write permissions."
+            "Attacker-controlled code executes with access to repo secrets and write permissions. "
+            "The ``head.sha`` and ``head.ref`` checkout variants — explicitly checking out the "
+            "PR's head commit via ``actions/checkout`` with ``ref: ${{ github.event."
+            "pull_request.head.sha }}`` (or ``head.ref``) — produce the same imposter-trigger "
+            "shape and are covered by this rule's requires regex."
         ),
         pattern=ContextPattern(
             anchor=r"pull_request_target",
@@ -471,7 +548,23 @@ RULES: list[Rule] = [
             "succeeded. May process tainted artifacts from failed/compromised workflows."
         ),
         pattern=ContextPattern(
-            anchor=r"workflow_run",
+            # The anchor matches the ``workflow_run`` trigger
+            # DECLARATION line only, not every reference to
+            # ``github.event.workflow_run.*`` later in the file.
+            # Without this, the rule emits one finding per property
+            # reference on a non-gated workflow_run-triggered job —
+            # the missing conclusion gate is one bug, not N.
+            #
+            # Three accepted shapes:
+            #   block-form key       ``  workflow_run:``
+            #   inline shorthand     ``on: workflow_run``  (end-of-line)
+            #   list form            ``on: [workflow_run, push]``
+            #
+            # The negative lookbehind ``(?<![.\w])`` rejects property
+            # references like ``${{ github.event.workflow_run.* }}``
+            # (preceded by ``.``) and identifiers that happen to end
+            # in ``workflow_run`` (preceded by a word char).
+            anchor=r"(?<![.\w])workflow_run\s*(?::|,|\]|$)",
             requires=r"workflow_run",
             requires_absent=r"workflow_run\.conclusion",
             exclude=[r"^\s*#"],
@@ -704,5 +797,66 @@ RULES: list[Rule] = [
             # ``actions/*@v4`` tag mutability (SEC3-GH-001) and the
             # general Docker-image-tag attack class.
         ],
+    ),
+    # =========================================================================
+    # SEC3-GH-009: Imposter commit (SHA pinned to an orphan commit)
+    # =========================================================================
+    Rule(
+        id="SEC3-GH-009",
+        title="Action pinned to a SHA that is not reachable from any ref",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-3",
+        description=(
+            "A ``uses: owner/repo@<sha>`` reference is pinned to a "
+            "40-character hex SHA, but the SHA is not reachable from any "
+            "ref (branch, tag, or open PR) in the action's repository.  "
+            "Two scenarios produce this state: (1) the maintainer "
+            "force-pushed over the tag the SHA originally pointed at, "
+            "leaving the SHA orphaned; (2) the SHA was published "
+            "transiently and later garbage-collected.  Either way, the "
+            "SHA no longer has the ref-history audit trail that "
+            "originally produced it.  A future ref recreation could "
+            "rebind the SHA to attacker-controlled content with no "
+            "warning to consumers.\n"
+            "\n"
+            "This rule is opt-in via ``--check-imposter-commits`` "
+            "because verification requires a per-action GitHub API "
+            "call; documentation recommends running it on a weekly "
+            "cron rather than on every PR build."
+        ),
+        pattern=ImposterCommitPattern(),
+        remediation=(
+            "Confirm with the action's maintainers whether the SHA was\n"
+            "intentionally orphaned.  If it was, repin to a current\n"
+            "tag-reachable SHA and document the rotation.  If the\n"
+            "maintainers do not respond, treat the action as untrusted\n"
+            "and pin to a fork at a vetted SHA under your own account.\n"
+            "\n"
+            "Run ``taintly --guide SEC3-GH-009`` for the full checklist."
+        ),
+        reference=(
+            "https://docs.github.com/en/actions/security-for-github-actions/"
+            "security-guides/security-hardening-for-github-actions#using-third-party-actions"
+        ),
+        # Empty inline samples — verification requires a real or
+        # stubbed verifier, exercised by tests/unit/test_imposter_commits.py.
+        test_positive=[],
+        test_negative=[],
+        stride=["T", "S"],
+        threat_narrative=(
+            "An attacker who controls the action's repository (compromised "
+            "maintainer account, account takeover) force-pushes the tag "
+            "the SHA originally referenced.  The SHA itself remains "
+            "valid for fetches until GitHub garbage-collects unreachable "
+            "objects.  After GC, the SHA returns 404 — but consumers "
+            "pinning to it have no automated way to learn that.  In the "
+            "interim, an attacker who can recreate a ref pointing back "
+            "at the SHA can also rebind it to fresh, attacker-supplied "
+            "content if they win the race against GC."
+        ),
+        confidence="high",
+        review_needed=True,
+        finding_family="action_pin_drift",
     ),
 ]

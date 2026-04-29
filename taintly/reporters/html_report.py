@@ -24,6 +24,7 @@ collapse — no JavaScript required for the basic interaction.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from html import escape
 from typing import TYPE_CHECKING
@@ -34,6 +35,30 @@ from taintly.reporters.text import _AUTO_FIXABLE_RULES, _quick_win
 
 if TYPE_CHECKING:
     from taintly.scorer import ScoreReport
+
+
+def _relpath_for_display(file: str, repo_path: str) -> str:
+    """Render a finding's file path relative to the scanned repo root.
+
+    The HTML report previously rendered absolute paths
+    (``C:\\Users\\asafy\\...`` / ``/home/user/...``), which leaks
+    machine-local detail when reports are shared.  Rendering relative
+    to ``report.repo_path`` keeps the column compact and portable.
+
+    Falls back to the original path on any error (mismatched drives
+    on Windows, non-existent path, etc.) so a quirky path never
+    crashes the renderer.
+    """
+    if not repo_path or not file:
+        return file
+    try:
+        rel = os.path.relpath(file, repo_path)
+    except (ValueError, OSError):
+        return file
+    # Normalise to forward slashes for consistent reading regardless
+    # of the host OS — matches the slashes already used elsewhere in
+    # the report.
+    return rel.replace(os.sep, "/")
 
 
 # ---------------------------------------------------------------------------
@@ -418,15 +443,16 @@ def _quick_win_section(report: AuditReport) -> str:
         '<section><div class="callout">'
         '<div class="callout-label">Quick win</div>'
         f"<div>{_severity_badge(win.severity)} "
-        f"<code>{_e(win.rule_id)}</code>: {_e(win.title)}{auto}</div>"
+        f'<a href="#rule-{_e(win.rule_id)}"><code>{_e(win.rule_id)}</code></a>: '
+        f"{_e(win.title)}{auto}</div>"
         f'<div class="fix"><strong>Location:</strong> '
-        f"<code>{_e(win.file)}:{_e(win.line)}</code></div>"
+        f"<code>{_e(_relpath_for_display(win.file, report.repo_path))}:{_e(win.line)}</code></div>"
         f"{fix_html}"
         "</div></section>"
     )
 
 
-def _cluster_card(cluster: FindingCluster) -> str:
+def _cluster_card(cluster: FindingCluster, repo_path: str = "") -> str:
     """One root-cause cluster card.
 
     Uses native ``<details>``/``<summary>`` so the card expands without any
@@ -443,7 +469,10 @@ def _cluster_card(cluster: FindingCluster) -> str:
     if cluster.review_needed:
         extra_class = " review-needed"
 
-    rules_str = ", ".join(f"<code>{_e(rid)}</code>" for rid in sorted(cluster.rule_ids))
+    rules_str = ", ".join(
+        f'<a href="#rule-{_e(rid)}"><code>{_e(rid)}</code></a>'
+        for rid in sorted(cluster.rule_ids)
+    )
 
     rows: list[str] = []
     sorted_findings = sorted(cluster.findings, key=lambda f: (f.file, f.line))
@@ -453,8 +482,8 @@ def _cluster_card(cluster: FindingCluster) -> str:
         rows.append(
             "<tr>"
             f"<td>{_severity_badge(f.severity)}</td>"
-            f"<td><code>{_e(f.rule_id)}</code></td>"
-            f'<td class="file">{_e(f.file)}:{_e(f.line)}</td>'
+            f'<td><a href="#rule-{_e(f.rule_id)}"><code>{_e(f.rule_id)}</code></a></td>'
+            f'<td class="file">{_e(_relpath_for_display(f.file, repo_path))}:{_e(f.line)}</td>'
             f"<td>{_e(f.title)}</td>"
             "</tr>"
         )
@@ -494,16 +523,79 @@ def _cluster_card(cluster: FindingCluster) -> str:
 
 
 def _clusters_section(
-    clusters: list[FindingCluster], heading: str, section_id: str, only_review: bool
+    clusters: list[FindingCluster],
+    heading: str,
+    section_id: str,
+    only_review: bool,
+    repo_path: str = "",
 ) -> str:
     relevant = [c for c in clusters if c.review_needed == only_review]
     if not relevant:
         return ""
-    cards = "".join(_cluster_card(c) for c in relevant)
+    cards = "".join(_cluster_card(c, repo_path) for c in relevant)
     return (
         f'<section aria-labelledby="{section_id}">'
         f'<h2 id="{section_id}">{_e(heading)} ({len(relevant)})</h2>'
         f"{cards}"
+        "</section>"
+    )
+
+
+def _rule_reference_section(report: AuditReport) -> str:
+    """Per-rule reference appendix.
+
+    Renders one collapsed ``<details>`` block per unique rule that
+    fired, anchored at ``id="rule-<RULE_ID>"`` so cluster headers and
+    table rows can link back here.  The block holds the rule's
+    title, description, and (when present) remediation text — taken
+    from the first finding for that rule, since every finding for
+    the same rule shares the same metadata.
+    """
+    if not report.findings:
+        return ""
+
+    # Deduplicate while preserving the first occurrence's metadata.
+    seen: dict[str, "Finding"] = {}  # noqa: F821 — quoted for forward use
+    for f in report.findings:
+        if f.rule_id not in seen:
+            seen[f.rule_id] = f
+
+    if not seen:
+        return ""
+
+    blocks: list[str] = []
+    for rule_id in sorted(seen):
+        f = seen[rule_id]
+        body_parts: list[str] = []
+        if f.description:
+            body_parts.append(f'<p class="rule-desc">{_e(f.description)}</p>')
+        if f.remediation:
+            body_parts.append(
+                '<p class="rule-remediation"><strong>Fix:</strong> '
+                f"<code>{_e(f.remediation)}</code></p>"
+            )
+        if f.reference:
+            # Render reference URL as plain text rather than a
+            # clickable href.  The HTML report's zero-dependency
+            # promise (test_no_external_resource_links) prohibits
+            # ``href="http..."`` so the document never gestures at
+            # outbound traffic on render.  Users copy the URL.
+            body_parts.append(
+                f'<p class="rule-ref">Reference: <code>{_e(f.reference)}</code></p>'
+            )
+        body_html = "".join(body_parts) or "<p>(no further reference)</p>"
+
+        blocks.append(
+            f'<details class="rule-ref-block" id="rule-{_e(rule_id)}">'
+            f"<summary><code>{_e(rule_id)}</code> &mdash; {_e(f.title)}</summary>"
+            f'<div class="rule-ref-body">{body_html}</div>'
+            "</details>"
+        )
+
+    return (
+        '<section aria-labelledby="rules-h">'
+        '<h2 id="rules-h">Rule reference</h2>'
+        f"{''.join(blocks)}"
         "</section>"
     )
 
@@ -528,8 +620,8 @@ def _flat_findings_section(report: AuditReport) -> str:
         rows.append(
             "<tr>"
             f"<td>{_severity_badge(f.severity)}</td>"
-            f"<td><code>{_e(f.rule_id)}</code></td>"
-            f"<td><code>{_e(f.file)}:{_e(f.line)}</code></td>"
+            f'<td><a href="#rule-{_e(f.rule_id)}"><code>{_e(f.rule_id)}</code></a></td>'
+            f"<td><code>{_e(_relpath_for_display(f.file, report.repo_path))}:{_e(f.line)}</code></td>"
             f"<td>{_e(f.title)}</td>"
             "</tr>"
         )
@@ -581,6 +673,7 @@ def format_html(
             "Top distinct risks",
             "risks-h",
             only_review=False,
+            repo_path=report.repo_path,
         )
     )
     parts.append(
@@ -589,9 +682,11 @@ def format_html(
             "Review-needed patterns",
             "review-h",
             only_review=True,
+            repo_path=report.repo_path,
         )
     )
     parts.append(_flat_findings_section(report))
+    parts.append(_rule_reference_section(report))
     parts.append(
         "<footer>Generated by taintly &mdash; zero-dependency CI/CD "
         "security scanner. No data was sent to any external service.</footer>"

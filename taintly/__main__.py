@@ -314,8 +314,47 @@ def main():
             "summary block listing the affected files."
         ),
     )
+    parser.add_argument(
+        "--check-imposter-commits",
+        action="store_true",
+        help=(
+            "Enable SEC3-GH-009: per-action SHA-reachability check. "
+            "For each ``uses: owner/repo@<sha>`` reference pinned to a "
+            "40-char SHA, query the GitHub Commits API to confirm the "
+            "SHA is still reachable from a ref in the action's repo. "
+            "Requires GITHUB_TOKEN in the environment for authenticated "
+            "requests; recommended on a weekly cron rather than per-PR "
+            "because of the per-action API cost."
+        ),
+    )
+    parser.add_argument(
+        "--respect-zizmor-ignores",
+        action="store_true",
+        help=(
+            "Honour foreign-scanner inline ignore comments that match "
+            "zizmor's format (``# zizmor: ignore`` / "
+            "``# zizmor: ignore[<rule-id>]``).  A small mapping table "
+            "translates well-known zizmor rule IDs onto the taintly "
+            "rules that detect the same threat shape; unmapped IDs "
+            "fall through to broad-line suppression so a maintainer "
+            "who already reviewed the line under another tool isn't "
+            "asked to re-review under taintly.  Default off — taintly "
+            "doesn't change behaviour based on another tool's "
+            "suppressions without explicit opt-in."
+        ),
+    )
 
     args = parser.parse_args()
+
+    if args.check_imposter_commits:
+        from taintly.platform import github_sha_verify
+
+        github_sha_verify.set_enabled(True)
+
+    if args.respect_zizmor_ignores:
+        from taintly.suppressions import zizmor_compat
+
+        zizmor_compat.set_respect_zizmor_ignores(True)
 
     # Auto-disable ANSI colour when stdout is not a TTY (piped / redirected)
     # so `taintly > report.txt` and `taintly --format html > report.html`
@@ -616,7 +655,7 @@ def main():
         report.summarize()
 
         score_report = (
-            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report))
+            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report), families_with_surface=report.families_with_surface, families_with_ctx_coverage=report.families_with_ctx_coverage)
             if (args.score or args.format == "html")
             else None
         )
@@ -688,7 +727,7 @@ def main():
         report.filter_severity(effective_min_sev)
         report.summarize()
         score_report = (
-            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report))
+            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report), families_with_surface=report.families_with_surface, families_with_ctx_coverage=report.families_with_ctx_coverage)
             if (args.score or args.format == "html")
             else None
         )
@@ -757,7 +796,7 @@ def main():
         report.filter_severity(effective_min_sev)
         report.summarize()
         score_report = (
-            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report))
+            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report), families_with_surface=report.families_with_surface, families_with_ctx_coverage=report.families_with_ctx_coverage)
             if (args.score or args.format == "html")
             else None
         )
@@ -793,7 +832,7 @@ def main():
         report.filter_severity(effective_min_sev)
         report.summarize()
         score_report = (
-            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report))
+            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report), families_with_surface=report.families_with_surface, families_with_ctx_coverage=report.families_with_ctx_coverage)
             if (args.score or args.format == "html")
             else None
         )
@@ -944,7 +983,21 @@ def main():
     # when --format html is used even if the user didn't pass --score.
     if args.score or args.format == "html":
         total_files = sum(r.files_scanned for r in reports)
-        score_report = compute_score(all_findings, files_scanned=total_files, platforms_scanned=_platforms_for_reports(*reports))
+        # Surface-evaluation tracking: union across all reports so the
+        # debt profile sees every family any platform's engine reported
+        # a candidate for.
+        agg_surface: set[str] = set()
+        agg_ctx_coverage: set[str] = set()
+        for r in reports:
+            agg_surface |= getattr(r, "families_with_surface", set())
+            agg_ctx_coverage |= getattr(r, "families_with_ctx_coverage", set())
+        score_report = compute_score(
+            all_findings,
+            files_scanned=total_files,
+            platforms_scanned=_platforms_for_reports(*reports),
+            families_with_surface=agg_surface,
+            families_with_ctx_coverage=agg_ctx_coverage,
+        )
 
     for report in reports:
         _output_report(report, args, score_report=score_report)

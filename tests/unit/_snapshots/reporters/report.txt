@@ -1,0 +1,83 @@
+
+=== TAINTLY REPORT ===
+Repository: /snapshot/repo
+Platform:   github
+Files:      4
+Rules:      215
+
+! Coverage degraded on 1 file(s)
+  -> .github/workflows/big.yml: File size 60000 bytes exceeds scanner cap (50000)
+  File-scope rule coverage was incomplete on these files; results below may be incomplete.
+
+Summary
+  Files scanned:  4
+  Total findings: 5
+  Distinct risks: 4 confirmed, 1 review-needed
+  By severity:    CRITICAL:1  HIGH:1  MEDIUM:1  LOW:2
+
+Top distinct risks
+  [CRITICAL exploitability:high] Mutable dependency references (1 finding across 1 file)
+      Actions, reusable workflows, and includes referenced by tag or branch can be force-pushed to point at different code without any record in your repository's history.
+      Rules: SEC3-GH-001
+  [HIGH exploitability:high] Agent Credential Chain (1 finding across 1 file)
+      Rules: PSE-GH-001
+  [MEDIUM] Excessive Permissions (1 finding across 1 file)
+      Rules: SEC2-GH-002
+  [LOW] File size 60000 bytes exceeds scanner cap (50000) (1 finding across 1 file)
+      Rules: ENGINE-ERR
+
+Review-needed patterns
+  These patterns can be safe or dangerous depending on design intent - confirm with a human before acting.
+  [LOW] Taint To Run Block (1 finding)
+
+Top 3 issues
+  [CRITICAL] SEC3-GH-001 -> 1 finding: Action referenced by mutable tag
+  [HIGH] PSE-GH-001 -> 1 finding: AI agent with cloud-credential grant on a fork-reachable event
+  [MEDIUM] SEC2-GH-002 -> 1 finding: Missing top-level permissions block
+
+Top risk
+  [CRITICAL] SEC3-GH-001: Action referenced by mutable tag
+  .github/workflows/ci.yml:12
+
+Quick win
+  [CRITICAL] SEC3-GH-001: Action referenced by mutable tag (auto-fixable via --fix)
+  .github/workflows/ci.yml:12
+  Fix: Pin the action to a full 40-character commit SHA.
+
+=== Findings (5) ===
+
+  [CRITICAL] SEC3-GH-001: Action referenced by mutable tag [exploitability:high]
+    File: .github/workflows/ci.yml:12
+    Code:       - uses: actions/checkout@v4
+    An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action's repo can move the tag to a malicious commit; every consumer
+    Threat: Tag-based pinning lets the upstream maintainer (or anyone who compromises their account) hot-swap the action contents without changing the workflow file.
+    Fix:  Pin the action to a full 40-character commit SHA.
+    OWASP:CICD-SEC-3 | STRIDE:T
+    Incidents: tj-actions/changed-files (CVE-2025-30066)
+
+  [HIGH] PSE-GH-001: AI agent with cloud-credential grant on a fork-reachable event [confidence:medium, exploitability:high]
+    File: .github/workflows/agent.yml:24
+    Code:       - uses: anthropics/claude-code-action@v1
+    Permission Slip Effect: a fork-reachable trigger, an AI agent action, and a cloud-credential grant co-exist.  An attacker who steers the agent via prompt injection holds a valid OIDC token.
+    Threat: Attacker mints OIDC token via prompt injection.
+    Fix:  Break at least one leg of the triangle:
+    OWASP:CICD-SEC-4 | STRIDE:E+T+I
+
+  [MEDIUM] SEC2-GH-002: Missing top-level permissions block
+    File: .github/workflows/ci.yml:1
+    Code: on: push
+    Workflow does not declare a top-level permissions block.
+    Threat: A compromised step inherits the default token's full scope.
+    Fix:  Add `permissions: contents: read` at the top level.
+    OWASP:CICD-SEC-2 | STRIDE:E+T
+
+  [LOW] ENGINE-ERR: File size 60000 bytes exceeds scanner cap (50000)
+    File: .github/workflows/big.yml:0
+    Per-line rules still ran but file-scope coverage degraded.
+
+  [LOW] TAINT-GH-001: Possible taint flow [review-needed, confidence:medium]
+    File: .github/workflows/ci.yml:42
+    Code:         run: echo "$PR_TITLE"
+    Untrusted context flows into a run: block via env.
+    Fix:  Quote the variable in the run: block.
+    OWASP:CICD-SEC-1 | STRIDE:T

@@ -50,8 +50,15 @@ def _is_stub_rule(rule) -> bool:
         behaviour.
     """
     from taintly.models import AbsencePattern, Severity
+    from taintly.rules.github.sec3_sec4_supply_chain_ppe import ImposterCommitPattern
     from taintly.workflow_corpus import CorpusPattern
     if isinstance(rule.pattern, CorpusPattern):
+        return True
+    # SEC3-GH-009 (imposter-commit) is opt-in via --check-imposter-commits
+    # and depends on a network call.  Its samples live in
+    # tests/unit/test_imposter_commits.py against a stub verifier;
+    # the per-file test-sample contract isn't applicable.
+    if isinstance(rule.pattern, ImposterCommitPattern):
         return True
     if (
         getattr(rule, "review_needed", False)
@@ -136,6 +143,11 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         ("github/vulnerable/ppe_classic.yml",           ["SEC3-GH-001"]),
         ("github/vulnerable/write_all_permissions.yml", ["SEC2-GH-001"]),
         ("github/vulnerable/injection_run_block.yml",   ["SEC4-GH-004"]),
+        ("github/vulnerable/workflow_run_no_conclusion.yml", ["SEC4-GH-003"]),
+        ("github/vulnerable/secret_in_with_input.yml", ["SEC6-GH-010"]),
+        ("github/vulnerable/publish_job_no_environment.yml", ["SEC1-GH-001"]),
+        ("github/vulnerable/tag_push_unquoted_ref_name.yml", ["SEC4-GH-018"]),
+        ("github/vulnerable/pull_request_target_head_sha_checkout.yml", ["SEC4-GH-001"]),
         ("github/vulnerable/ai_trust_remote_code.yml",  ["AI-GH-001"]),
         ("github/vulnerable/ai_hf_no_revision.yml",     ["AI-GH-002"]),
         ("github/vulnerable/ai_torch_load_unsafe.yml",  ["AI-GH-003"]),

@@ -320,3 +320,63 @@ def test_sec9_gl_artifact_cluster_does_not_dominate_score():
     # Findings still count for display — only the deduction is suppressed.
     assert score.finding_count == 100
     assert score.review_needed > 0
+
+
+# ---------------------------------------------------------------------------
+# Debt-profile: Strong vs Not applicable disambiguation
+#
+# Families with zero findings render as "Not applicable" iff the family is
+# covered by ContextPattern AND no rule's anchor matched on any scanned
+# file.  Families that ARE covered AND had at least one anchor match
+# render as "Strong"; families with no ContextPattern coverage stay on
+# the existing "Strong" default regardless of surface state.
+# ---------------------------------------------------------------------------
+
+
+def test_family_with_no_findings_and_no_surface_is_not_applicable():
+    fam_id = "ai_ml_model_risk"  # Existing taintly family ID
+    score = compute_score(
+        findings=[],
+        files_scanned=1,
+        families_with_surface=set(),
+        families_with_ctx_coverage={fam_id},
+    )
+    fam_rows = [d for d in score.debt_profile if d.family_id == fam_id]
+    assert fam_rows, f"family {fam_id} not in debt profile rows"
+    assert fam_rows[0].label == "Not applicable", (
+        f"covered family with zero anchor matches must render as "
+        f"'Not applicable', got label={fam_rows[0].label!r}"
+    )
+
+
+def test_family_with_no_findings_but_anchor_matched_is_strong():
+    fam_id = "ai_ml_model_risk"
+    score = compute_score(
+        findings=[],
+        files_scanned=1,
+        families_with_surface={fam_id},
+        families_with_ctx_coverage={fam_id},
+    )
+    fam_rows = [d for d in score.debt_profile if d.family_id == fam_id]
+    assert fam_rows
+    assert fam_rows[0].label == "Strong", (
+        f"covered family with at least one anchor match must render as "
+        f"'Strong', got label={fam_rows[0].label!r}"
+    )
+
+
+def test_family_without_ctx_coverage_defaults_to_strong():
+    """Backward compatibility: families that aren't ContextPattern-covered
+    keep the existing 'Strong' default — no information about surface
+    means we can't distinguish, so the prior behaviour wins.
+    """
+    fam_id = "ai_ml_model_risk"
+    score = compute_score(
+        findings=[],
+        files_scanned=1,
+        families_with_surface=set(),
+        families_with_ctx_coverage=set(),  # no coverage info
+    )
+    fam_rows = [d for d in score.debt_profile if d.family_id == fam_id]
+    assert fam_rows
+    assert fam_rows[0].label == "Strong"

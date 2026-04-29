@@ -18,6 +18,13 @@ python -m taintly --self-test
 python -m taintly --self-test --mutate
 ```
 
+A fresh clone runs the full suite with zero failing tests when
+`pip install -e ".[dev]"` has been run.  Reporter snapshot baselines
+live under `tests/unit/_snapshots/reporters/` and are checked in;
+intentional reporter-output changes get regenerated with
+`pytest tests/unit/test_reporter_snapshots.py --snapshot-update`,
+and the regenerated files ship alongside the reporter change.
+
 ## Code style
 
 - `ruff check taintly/` and `ruff format taintly/`

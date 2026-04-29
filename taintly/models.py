@@ -502,6 +502,28 @@ class ContextPattern:
                     results.append((seg_start + j + 1, line.strip()))
         return results
 
+    def count_anchor_matches(self, content: str, lines: list[str]) -> int:
+        """Return the number of lines whose content matches the rule's
+        anchor regex, before any context-gating, exclusion, or
+        suppression is applied.
+
+        Distinct from :meth:`check`'s output: ``check`` only returns
+        lines that pass the requires/requires_absent gates and the
+        per-line excludes.  ``count_anchor_matches`` ignores those —
+        it answers the question "did this rule have a candidate
+        location to evaluate?" — used by the scorer to distinguish
+        "Strong" (rule had candidates, none became findings) from
+        "Not applicable" (rule had no surface to evaluate).
+        """
+        # Per-line anchor matching mirrors ``_check_file_scoped`` /
+        # ``_check_job_scoped`` so the counting agrees with the
+        # firing path on what counts as an anchor match.
+        count = 0
+        for line in lines:
+            if _safe_search(self._anchor_re, line):
+                count += 1
+        return count
+
 
 @dataclass
 class SequencePattern:
@@ -864,6 +886,20 @@ class AuditReport:
     rules_loaded: int = 0
     findings: list[Finding] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict[str, Any])
+    # Families where at least one ``ContextPattern`` rule's anchor
+    # found a candidate location during the scan (regardless of
+    # whether the candidate became a finding).  Populated by the
+    # engine; consumed by the scorer to label families with zero
+    # findings as "Strong" (surface evaluated, nothing wrong) versus
+    # "Not applicable" (no surface to evaluate).  Empty by default
+    # so reports built outside the engine retain prior behaviour.
+    families_with_surface: set[str] = field(default_factory=set)
+    # Families that have at least one ContextPattern-pattern rule
+    # registered for this platform.  Pairs with
+    # ``families_with_surface``: a family that's covered but had no
+    # anchor match maps to "Not applicable"; a family with no
+    # ContextPattern coverage keeps the existing "Strong" default.
+    families_with_ctx_coverage: set[str] = field(default_factory=set)
 
     def add(self, finding: Finding):
         self.findings.append(finding)

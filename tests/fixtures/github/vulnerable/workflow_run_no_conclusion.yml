@@ -1,0 +1,34 @@
+# workflow_run_no_conclusion.yml — vulnerable fixture for SEC4-GH-003.
+#
+# Workflow triggers on the upstream-completion event but the
+# consuming job has no upstream-success gate.  The downstream job
+# processes head_sha, head_branch, actor, and repository attributes
+# from the upstream run — all attacker-controllable when the upstream
+# workflow was triggered by a fork PR.
+#
+# The threat shape is one missing gate per workflow, not one per
+# property reference.  SEC4-GH-003 must fire exactly once on this
+# file, anchored at the trigger declaration line.
+name: Deploy Docs
+
+on:
+  workflow_run:
+    workflows: [Build]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - run: echo "head_branch=${{ github.event.workflow_run.head_branch }}"
+      - run: echo "actor=${{ github.event.workflow_run.actor.login }}"
+      - run: echo "url=${{ github.event.workflow_run.html_url }}"
+      - run: ./deploy.sh
+        env:
+          REPO: ${{ github.event.workflow_run.head_repository.full_name }}

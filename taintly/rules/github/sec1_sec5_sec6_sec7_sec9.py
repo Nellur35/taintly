@@ -4,6 +4,8 @@ Covers OWASP CICD-SEC-1, SEC-2 (extended), SEC-5, SEC-6, SEC-7, SEC-9.
 These were entirely missing from initial implementation.
 """
 
+import re
+
 from taintly.models import (
     _YAML_BOOL_FALSE,
     _YAML_BOOL_TRUE,
@@ -16,6 +18,125 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+
+
+# ---------------------------------------------------------------------------
+# SEC1-GH-001 — job-scoped variant of SequencePattern
+# ---------------------------------------------------------------------------
+#
+# The naive ``SequencePattern`` for "credential-shape job name without
+# environment: in the lookahead window" can't tell a job name (under
+# ``jobs:``) from a top-level trigger keyword (under ``on:``).  Both
+# sit at 2-space indent with the same lexical shape — ``release:``,
+# ``publish:`` are both valid trigger-event keywords AND valid job
+# names.  That ambiguity produced a false-positive finding anchored
+# on the trigger line of any workflow whose ``on:`` block named one of
+# the credential-shape events (release, publish, deployment, etc.).
+#
+# This pattern restricts the SequencePattern's match window to lines
+# AFTER the file's top-level ``jobs:`` declaration so trigger-block
+# matches are skipped.
+
+
+class _JobScopedSequencePattern:
+    """SequencePattern variant that only matches inside the ``jobs:``
+    block.  Before the ``jobs:`` line — anywhere ``on:``,
+    ``permissions:``, ``defaults:``, ``env:`` keys live — matches are
+    silently dropped.
+
+    The fallback when no ``jobs:`` line is found is to behave like the
+    underlying SequencePattern (cover the whole file), so the
+    presence-or-absence of ``jobs:`` doesn't change the rule's
+    behaviour on workflows that lack the block entirely.
+    """
+
+    _JOBS_LINE_RE = re.compile(r"^jobs\s*:\s*(#.*)?$")
+
+    def __init__(
+        self,
+        *,
+        pattern_a: str,
+        absent_within: str,
+        lookahead_lines: int = 10,
+        exclude: list[str] | None = None,
+    ) -> None:
+        self._pattern_a_re = re.compile(pattern_a)
+        self._absent_re = re.compile(absent_within)
+        self._lookahead = lookahead_lines
+        self._excludes = [re.compile(e) for e in (exclude or [])]
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        # Find the ``jobs:`` line.  When absent, the pattern degrades
+        # to whole-file coverage to preserve the original behaviour.
+        jobs_line_idx: int | None = None
+        for i, line in enumerate(lines):
+            if self._JOBS_LINE_RE.match(line):
+                jobs_line_idx = i
+                break
+
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            if jobs_line_idx is not None and i <= jobs_line_idx:
+                # Pre-jobs: trigger block, file-level permissions,
+                # env: defaults — never the rule's intended target.
+                continue
+            if any(ex.search(line) for ex in self._excludes):
+                continue
+            if self._pattern_a_re.search(line):
+                window = "\n".join(lines[i : i + self._lookahead])
+                if not self._absent_re.search(window):
+                    results.append((i + 1, line.strip()))
+        return results
+
+
+# ---------------------------------------------------------------------------
+# OIDC consumer markers for SEC5-GH-001
+# ---------------------------------------------------------------------------
+#
+# A workflow that grants ``id-token: write`` legitimately needs at
+# least one OIDC consumer.  SEC5-GH-001 fires when the permission is
+# granted but no consumer is present.  The list below is the single
+# source of truth for "what counts as an OIDC consumer" — extend here
+# when a new federated-credential or trusted-publishing flow lands in
+# the wild.
+#
+# Two shapes:
+#
+#   * Action-form (``uses: <publisher>``) — the established federated-
+#     credential and trusted-publishing actions.  Substring-matched
+#     against the full workflow text.
+#
+#   * Shell-form (``run: <command>``) — modern PEP-740 / sigstore /
+#     registry-OIDC publish flows that legitimately request
+#     ``id-token: write`` but invoke via ``run:`` rather than ``uses:``.
+#     ``--use-oidc`` (twine) and ``--provenance`` (npm) are the
+#     positive markers; ``uv publish`` and ``cargo publish`` auto-
+#     detect the workflow's OIDC token and need no flag.  The
+#     shell-form regexes use word boundaries so a substring inside an
+#     unrelated step name doesn't suppress legitimate findings.
+_OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
+    # Action-form
+    r"role-to-assume",
+    r"workload_identity_provider",
+    r"azure/login",
+    r"google-github-actions/auth",
+    r"configure-aws-credentials",
+    r"pypa/gh-action-pypi-publish",
+    r"sigstore/gh-action-sigstore",
+    r"actions/attest-build-provenance",
+    # Shell-form.  ``--`` is two non-word characters, so a leading
+    # ``\b`` would never match on the flag — the preceding space is
+    # also non-word, so there is no word boundary between them.  The
+    # trailing ``\b`` keeps ``--use-oidc`` from matching a longer flag
+    # like ``--use-oidc-suffix``.
+    r"\buv\s+publish\b",
+    r"\btwine\s+upload\b[^\n]*--use-oidc\b",
+    r"\bcargo\s+publish\b",
+    r"\bnpm\s+publish\b[^\n]*--provenance\b",
+)
+
+_OIDC_CONSUMER_REGEX: str = "|".join(_OIDC_CONSUMER_ALTERNATES)
+
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -33,7 +154,7 @@ RULES: list[Rule] = [
             "workflow trigger causes immediate deployment. GitHub Environments allow requiring "
             "manual approval from designated reviewers before sensitive jobs run."
         ),
-        pattern=SequencePattern(
+        pattern=_JobScopedSequencePattern(
             pattern_a=r"^\s{2,4}(deploy|release|publish|production|prod)[_-]?\w*:\s*$",
             absent_within=r"environment:",
             lookahead_lines=20,
@@ -116,24 +237,24 @@ RULES: list[Rule] = [
         description=(
             "The workflow grants 'id-token: write' permission — which allows minting "
             "OIDC tokens that can authenticate to cloud providers or a package registry "
-            "via trusted publishing — but does not use any OIDC-consuming action "
+            "via trusted publishing — but does not use any OIDC-consuming action or "
+            "command.  Recognised consumers include the federated-credential actions "
             "(aws-actions/configure-aws-credentials, google-github-actions/auth, "
-            "azure/login, pypa/gh-action-pypi-publish, sigstore/gh-action-sigstore-python, etc.). "
-            "The permission is over-provisioned and unnecessarily expands token capabilities."
+            "azure/login) and modern trusted-publishing flows (pypa/gh-action-pypi-publish, "
+            "sigstore/gh-action-sigstore-python, actions/attest-build-provenance, "
+            "uv publish, twine upload --use-oidc, cargo publish, npm publish --provenance). "
+            "Without one of these the permission is over-provisioned and unnecessarily "
+            "expands token capabilities."
         ),
         pattern=ContextPattern(
             anchor=r"id-token:\s*write",
             requires=r"id-token:\s*write",
-            # Known OIDC consumers. Expanded to include PyPI trusted publishing
-            # and sigstore signing — both of which ARE OIDC-consuming and
-            # legitimately need id-token: write. Previously flagged release
-            # workflows that used these as false positives.
-            requires_absent=(
-                r"role-to-assume|workload_identity_provider|azure/login|"
-                r"google-github-actions/auth|configure-aws-credentials|"
-                r"pypa/gh-action-pypi-publish|sigstore/gh-action-sigstore|"
-                r"actions/attest-build-provenance"
-            ),
+            # OIDC consumers — see _OIDC_CONSUMER_ALTERNATES above for
+            # the canonical list.  Action-form covers the established
+            # federated-credential and trusted-publishing actions;
+            # shell-form covers PEP-740 / registry-OIDC publish
+            # commands that don't go through a uses: reference.
+            requires_absent=_OIDC_CONSUMER_REGEX,
             exclude=[r"^\s*#"],
         ),
         remediation=(
@@ -149,6 +270,12 @@ RULES: list[Rule] = [
             "permissions:\n  id-token: write\nsteps:\n  - uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc",
             "permissions:\n  id-token: write\nsteps:\n  - uses: sigstore/gh-action-sigstore-python@abc",
             "permissions:\n  contents: read",
+            # Modern shell-form OIDC publishers — each legitimately
+            # needs id-token: write and must not trip SEC5-GH-001.
+            "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: uv publish",
+            "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: twine upload --use-oidc dist/*",
+            "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: cargo publish",
+            "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: npm publish --provenance --access public",
         ],
         stride=["E"],
         threat_narrative=(
@@ -1526,6 +1653,167 @@ RULES: list[Rule] = [
             "tj-actions/changed-files — lateral token exfil (Mar 2025)",
         ],
         confidence="medium",
+    ),
+    # =========================================================================
+    # SEC6-GH-010: Secret passed as action input without env-block masking
+    # =========================================================================
+    # GitHub auto-masks secrets that flow through a step's ``env:`` block:
+    # the runner registers each secret value with the log-redactor on
+    # process start.  The same secret routed through a ``with:`` input
+    # is passed to the action's process directly and may be echoed by
+    # the receiving action — actions that print their inputs to stdout
+    # for debugging, or that write inputs to a file the action then
+    # `cat`s, bypass the runner's redaction pass.
+    #
+    # The safe pattern routes the secret through ``env:`` and references
+    # it in ``with:`` via ``${{ env.NAME }}``; the env: declaration
+    # re-registers the value with the redactor before the action sees it.
+    Rule(
+        id="SEC6-GH-010",
+        title="Secret passed as action input without env-block masking",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-6",
+        description=(
+            "An action input whose name suggests a credential "
+            "(``token``, ``key``, ``secret``, ``password``, ``pass``) "
+            "receives a ``${{ secrets.X }}`` value directly via "
+            "``with:``.  Secrets routed through ``with:`` are passed to "
+            "the action as raw input; secrets routed through ``env:`` "
+            "are registered with the runner's log-redactor at process "
+            "start and consistently masked.  An action that echoes its "
+            "inputs to stdout (a common debugging pattern) leaks the "
+            "secret into job logs where the redactor cannot see it.\n"
+            "\n"
+            "The safe pattern declares the secret in the step's "
+            "``env:`` block and references it from ``with:`` via "
+            "``${{ env.NAME }}`` — the env-block path is masked, the "
+            "with-input is then a non-secret reference."
+        ),
+        pattern=ContextPattern(
+            # Per-line anchor: a YAML key ending in a credential-shape
+            # token, mapped to a ``${{ secrets.X }}`` value.  The
+            # ``(?i)`` flag accepts both ``token:`` and ``Token:``
+            # spellings; the leading whitespace requirement excludes
+            # workflow-level keys.  The prefix portion is zero-or-more
+            # word/hyphen characters so bare ``token:`` / ``password:``
+            # match alongside hyphenated forms like ``api-key:``.
+            anchor=(
+                r"(?i)^\s+[\w-]*"
+                r"(?:token|key|secret|password|pass)"
+                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
+            ),
+            # The full file must contain at least one such pattern for
+            # the rule to fire — the anchor regex itself is the
+            # presence check.
+            requires=(
+                r"(?i)\s+[\w-]*"
+                r"(?:token|key|secret|password|pass)"
+                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
+            ),
+            # Job-scope suppression: when the same job has an ``env:``
+            # block routing any secret, the safe pattern is in use
+            # somewhere — suppress.  This trades a small amount of
+            # precision (a job that with-inputs ``secrets.A`` while
+            # env-exporting ``secrets.B`` in a sibling step would
+            # suppress) for the avoidance of the dominant false
+            # positive: workflows that DO route secrets through
+            # ``env:`` but reference them in ``with:`` via ``env.X``
+            # would otherwise still trip the anchor regex on lines
+            # the rule shouldn't flag.  Step-scope suppression would
+            # require an engine-level model change; revisit if the
+            # broad-suppression FP rate is observed in the wild.
+            anchor_job_exclude=(
+                r"env:\s*\n[\s\S]*?\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"
+            ),
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Route the secret through the step's ``env:`` block and\n"
+            "reference it from ``with:`` via ``${{ env.NAME }}``:\n"
+            "\n"
+            "    - uses: some-org/some-action@<sha>\n"
+            "      with:\n"
+            "        token: ${{ env.GH_TOKEN }}\n"
+            "      env:\n"
+            "        GH_TOKEN: ${{ secrets.GH_TOKEN }}\n"
+            "\n"
+            "The env-block declaration registers the value with the\n"
+            "runner's log-redactor on process start, so any later\n"
+            "echo of the value is masked.  The with-input is then a\n"
+            "non-secret reference to a redacted env var."
+        ),
+        reference=(
+            "https://docs.github.com/en/actions/security-for-github-actions/"
+            "security-guides/using-secrets-in-github-actions#accessing-your-secrets"
+        ),
+        test_positive=[
+            # Bare with: token: ${{ secrets.X }} with no env: anywhere
+            # in the job — the dominant unsafe shape.
+            (
+                "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/some-action@v1\n"
+                "        with:\n"
+                "          token: ${{ secrets.GH_TOKEN }}"
+            ),
+            # Hyphenated input name — still credential-shape.
+            (
+                "jobs:\n  release:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/upload@v1\n"
+                "        with:\n"
+                "          api-key: ${{ secrets.API_KEY }}"
+            ),
+            # password input.
+            (
+                "jobs:\n  push:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: docker/login-action@v3\n"
+                "        with:\n"
+                "          password: ${{ secrets.REGISTRY_PASSWORD }}"
+            ),
+        ],
+        test_negative=[
+            # Same secret routed via env: — env-block exception fires.
+            (
+                "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/some-action@v1\n"
+                "        with:\n"
+                "          token: ${{ env.GH_TOKEN }}\n"
+                "        env:\n"
+                "          GH_TOKEN: ${{ secrets.GH_TOKEN }}"
+            ),
+            # with: input value is a hardcoded string, not a secret —
+            # anchor regex doesn't match.
+            (
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/some-action@v1\n"
+                "        with:\n"
+                "          registry-url: https://registry.npmjs.org"
+            ),
+            # with: input name is not credential-shape — anchor doesn't
+            # match.
+            (
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/some-action@v1\n"
+                "        with:\n"
+                "          repository: ${{ secrets.PRIVATE_REPO }}"
+            ),
+            # Comment.
+            "          # token: ${{ secrets.GH_TOKEN }}",
+        ],
+        stride=["I"],
+        threat_narrative=(
+            "An action receives a credential as a ``with:`` input.  "
+            "The action's implementation includes a debug-style log "
+            "line that echoes its inputs to stdout — a pattern the "
+            "runner's log-redactor will not catch because the input "
+            "value was never registered with the redactor (only "
+            "``env:`` values are).  The secret appears in the job "
+            "log; anyone with read access to the workflow run "
+            "(including, for many repos, anyone with public-fork "
+            "logs visibility) can copy it."
+        ),
+        confidence="high",
+        finding_family="credential_persistence",
     ),
     # =========================================================================
     # SEC9-GH-004: Tainted `actions/cache` key — a workflow restores an

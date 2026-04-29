@@ -24,6 +24,7 @@ from taintly.models import Platform, Severity
 from taintly.rules.registry import load_all_rules
 
 _FIX = Path(__file__).parent.parent / "fixtures" / "precision"
+_SAFE_GH = Path(__file__).parent.parent / "fixtures" / "github" / "safe"
 
 
 @pytest.fixture(scope="module")
@@ -154,3 +155,181 @@ def test_placeholder_password_not_treated_as_confirmed_secret(gh_rules):
             assert f.confidence != "high", (
                 f"{f.rule_id} classified the placeholder password with HIGH confidence"
             )
+
+
+# ---------------------------------------------------------------------------
+# SEC5-GH-001 — modern OIDC publishers (uv / twine / cargo / npm)
+#
+# Workflows that grant ``id-token: write`` and invoke a modern
+# trusted-publishing command via ``run:`` legitimately need the
+# permission.  SEC5-GH-001 must not fire on these.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "oidc_uv_publish.yml",
+        "oidc_twine_use_oidc.yml",
+        "oidc_cargo_publish.yml",
+        "oidc_npm_provenance.yml",
+    ],
+)
+def test_oidc_shell_publishers_do_not_trip_sec5_gh_001(fixture_name, gh_rules):
+    findings = scan_file(str(_SAFE_GH / fixture_name), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC5-GH-001"]
+    assert not fired, (
+        f"{fixture_name}: SEC5-GH-001 fired on a workflow with a "
+        f"recognised shell-form OIDC publisher: {fired}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# SEC4-GH-003 — workflow_run conclusion gate
+#
+# The missing-conclusion-gate finding is one per workflow, not one
+# per ``github.event.workflow_run.*`` property reference.  Anchor
+# matches the trigger declaration line only.
+# ---------------------------------------------------------------------------
+
+
+_VULN_GH = Path(__file__).parent.parent / "fixtures" / "github" / "vulnerable"
+
+
+def test_sec4_gh_003_fires_once_per_workflow(gh_rules):
+    findings = scan_file(str(_VULN_GH / "workflow_run_no_conclusion.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC4-GH-003"]
+    assert len(fired) == 1, (
+        f"SEC4-GH-003 must fire exactly once per workflow_run-triggered "
+        f"workflow lacking the conclusion gate, got {len(fired)} findings: "
+        f"{[(f.line, f.snippet) for f in fired]}"
+    )
+    # Anchor cites the trigger declaration line, not a property
+    # reference deeper in the file.
+    assert "workflow_run:" in fired[0].snippet, (
+        f"Expected anchor on the workflow_run: declaration line, "
+        f"got snippet: {fired[0].snippet!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# SEC6-GH-010 — Secret passed as action input without env-block masking
+#
+# The rule fires when a credential-shape ``with:`` input takes a
+# ``${{ secrets.X }}`` value directly.  When the same job routes the
+# secret through ``env:`` instead, the env-block declaration registers
+# the value with the runner's log-redactor and the rule must not fire.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "secret_in_with_but_also_env.yml",
+        "with_input_no_secret.yml",
+    ],
+)
+def test_sec6_gh_010_does_not_fire_on_safe_with_input(fixture_name, gh_rules):
+    findings = scan_file(str(_SAFE_GH / fixture_name), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC6-GH-010"]
+    assert not fired, (
+        f"{fixture_name}: SEC6-GH-010 fired on a workflow whose "
+        f"with-input is either env-masked or non-secret: {fired}"
+    )
+
+
+def test_sec6_gh_010_fires_on_unmasked_with_input(gh_rules):
+    findings = scan_file(str(_VULN_GH / "secret_in_with_input.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC6-GH-010"]
+    assert fired, (
+        "SEC6-GH-010 must fire on a workflow that passes a secret as a "
+        "credential-shape with-input without env-block routing"
+    )
+    # Cite the anchor line, not the surrounding context.
+    assert all("secrets." in f.snippet for f in fired), (
+        f"Expected anchor on the with-input line citing secrets.X, "
+        f"got snippets: {[f.snippet for f in fired]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# SEC1-GH-001 — job-scoped anchor (don't fire on trigger keywords)
+#
+# A workflow that triggers ``on: release: { types: [...] }`` AND runs a
+# publish: job has two lines that lexically match the credential-shape
+# regex.  Only the job line should fire; the trigger keyword is a
+# false-positive shape.
+# ---------------------------------------------------------------------------
+
+
+def test_sec1_gh_001_does_not_fire_on_release_trigger(gh_rules):
+    findings = scan_file(str(_SAFE_GH / "release_trigger_with_environment.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
+    assert not fired, (
+        f"SEC1-GH-001 must not fire on a publish: job that has "
+        f"environment: declared, regardless of the trigger keyword "
+        f"shape on the on: block: {fired}"
+    )
+
+
+def test_sec1_gh_001_anchors_on_job_not_trigger(gh_rules):
+    findings = scan_file(str(_VULN_GH / "publish_job_no_environment.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
+    assert len(fired) == 1, (
+        f"SEC1-GH-001 must fire exactly once on a publish: job lacking "
+        f"environment:, regardless of any same-shape trigger keyword "
+        f"earlier in the file. Got {len(fired)} findings: "
+        f"{[(f.line, f.snippet) for f in fired]}"
+    )
+    # The anchor cites the publish: line, not the release: trigger.
+    assert "publish:" in fired[0].snippet, (
+        f"Expected anchor on the publish: job line, "
+        f"got snippet: {fired[0].snippet!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# SEC4-GH-018 — severity calibration on maintainer-gated triggers
+#
+# The unquoted-$GITHUB_REF_NAME vector is HIGH only when
+# ``$GITHUB_REF_NAME`` is attacker-controlled.  Tag push and release
+# events are maintainer-gated firing paths, so the same unquoted
+# reference under those triggers is MEDIUM at most.
+# ---------------------------------------------------------------------------
+
+
+def test_sec4_gh_018_downgrades_to_medium_on_tag_push(gh_rules):
+    from taintly.models import Severity
+
+    findings = scan_file(str(_VULN_GH / "tag_push_unquoted_ref_name.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC4-GH-018"]
+    assert fired, "SEC4-GH-018 must still fire on the unquoted vector"
+    for f in fired:
+        assert f.severity == Severity.MEDIUM, (
+            f"On a tag-push-only trigger, SEC4-GH-018 should be downgraded "
+            f"from HIGH to MEDIUM, got {f.severity!r}"
+        )
+
+
+def test_sec4_gh_018_stays_high_on_pull_request(gh_rules, tmp_path):
+    """Same unquoted vector on a fork-reachable trigger must stay
+    HIGH — the calibration only applies when the trigger set is
+    exclusively maintainer-gated.
+    """
+    from taintly.models import Severity
+
+    p = tmp_path / "pr.yml"
+    p.write_text(
+        "name: PR\n"
+        "on:\n  pull_request:\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo Building $GITHUB_REF_NAME\n"
+    )
+    findings = scan_file(str(p), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC4-GH-018"]
+    assert fired
+    for f in fired:
+        assert f.severity == Severity.HIGH

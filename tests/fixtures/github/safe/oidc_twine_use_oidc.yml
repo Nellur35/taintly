@@ -1,0 +1,23 @@
+# oidc_twine_use_oidc.yml — safe fixture for SEC5-GH-001.
+#
+# ``twine upload --use-oidc`` is the OIDC-federated upload form;
+# id-token: write is legitimately required.  SEC5-GH-001 must NOT fire.
+name: Publish (twine)
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: python -m build
+      - run: twine upload --use-oidc dist/*

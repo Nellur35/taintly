@@ -1,0 +1,329 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "taintly",
+          "version": "9.9.9-test",
+          "informationUri": "https://github.com/Nellur35/taintly",
+          "rules": [
+            {
+              "id": "SEC3-GH-001",
+              "name": "SEC3_GH_001",
+              "shortDescription": {
+                "text": "Action referenced by mutable tag"
+              },
+              "fullDescription": {
+                "text": "An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action's repo can move the tag to a malicious commit; every consumer pinned by tag picks up the new code on the next workflow run."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "tags": [
+                  "CICD-SEC-3",
+                  "STRIDE:T"
+                ],
+                "severity": "CRITICAL",
+                "threat_narrative": "Tag-based pinning lets the upstream maintainer (or anyone who compromises their account) hot-swap the action contents without changing the workflow file.",
+                "incidents": [
+                  "tj-actions/changed-files (CVE-2025-30066)"
+                ]
+              },
+              "helpUri": "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions",
+              "help": {
+                "text": "Pin the action to a full 40-character commit SHA."
+              }
+            },
+            {
+              "id": "PSE-GH-001",
+              "name": "PSE_GH_001",
+              "shortDescription": {
+                "text": "AI agent with cloud-credential grant on a fork-reachable event"
+              },
+              "fullDescription": {
+                "text": "Permission Slip Effect: a fork-reachable trigger, an AI agent action, and a cloud-credential grant co-exist.  An attacker who steers the agent via prompt injection holds a valid OIDC token."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "tags": [
+                  "CICD-SEC-4",
+                  "STRIDE:E",
+                  "STRIDE:T",
+                  "STRIDE:I"
+                ],
+                "severity": "HIGH",
+                "threat_narrative": "Attacker mints OIDC token via prompt injection.",
+                "incidents": []
+              },
+              "helpUri": "https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/",
+              "help": {
+                "text": "Break at least one leg of the triangle:"
+              }
+            },
+            {
+              "id": "SEC2-GH-002",
+              "name": "SEC2_GH_002",
+              "shortDescription": {
+                "text": "Missing top-level permissions block"
+              },
+              "fullDescription": {
+                "text": "Workflow does not declare a top-level permissions block."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "tags": [
+                  "CICD-SEC-2",
+                  "STRIDE:E",
+                  "STRIDE:T"
+                ],
+                "severity": "MEDIUM",
+                "threat_narrative": "A compromised step inherits the default token's full scope.",
+                "incidents": []
+              },
+              "helpUri": "https://docs.github.com/en/actions/security-guides/automatic-token-authentication",
+              "help": {
+                "text": "Add `permissions: contents: read` at the top level."
+              }
+            },
+            {
+              "id": "TAINT-GH-001",
+              "name": "TAINT_GH_001",
+              "shortDescription": {
+                "text": "Possible taint flow"
+              },
+              "fullDescription": {
+                "text": "Untrusted context flows into a run: block via env."
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "properties": {
+                "tags": [
+                  "CICD-SEC-1",
+                  "STRIDE:T"
+                ],
+                "severity": "LOW",
+                "threat_narrative": "",
+                "incidents": []
+              },
+              "help": {
+                "text": "Quote the variable in the run: block."
+              }
+            },
+            {
+              "id": "ENGINE-ERR",
+              "name": "ENGINE_ERR",
+              "shortDescription": {
+                "text": "File size 60000 bytes exceeds scanner cap (50000)"
+              },
+              "fullDescription": {
+                "text": "Per-line rules still ran but file-scope coverage degraded."
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "properties": {
+                "tags": [],
+                "severity": "LOW",
+                "threat_narrative": "",
+                "incidents": []
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "SEC3-GH-001",
+          "level": "error",
+          "message": {
+            "text": "An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action's repo can move the tag to a malicious commit; every consumer pinned by tag picks up the new code on the next workflow run."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/ci.yml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 12,
+                  "snippet": {
+                    "text": "      - uses: actions/checkout@v4"
+                  }
+                }
+              }
+            }
+          ],
+          "properties": {
+            "finding_family": "supply_chain_immutability",
+            "confidence": "high",
+            "exploitability": "high"
+          }
+        },
+        {
+          "ruleId": "PSE-GH-001",
+          "level": "error",
+          "message": {
+            "text": "Permission Slip Effect: a fork-reachable trigger, an AI agent action, and a cloud-credential grant co-exist.  An attacker who steers the agent via prompt injection holds a valid OIDC token."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/agent.yml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 24,
+                  "snippet": {
+                    "text": "      - uses: anthropics/claude-code-action@v1"
+                  }
+                }
+              }
+            }
+          ],
+          "properties": {
+            "finding_family": "agent_credential_chain",
+            "confidence": "medium",
+            "exploitability": "high"
+          }
+        },
+        {
+          "ruleId": "SEC2-GH-002",
+          "level": "warning",
+          "message": {
+            "text": "Workflow does not declare a top-level permissions block."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/ci.yml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 1,
+                  "snippet": {
+                    "text": "on: push"
+                  }
+                }
+              }
+            }
+          ],
+          "properties": {
+            "finding_family": "excessive_permissions",
+            "confidence": "high",
+            "exploitability": "medium"
+          }
+        },
+        {
+          "ruleId": "TAINT-GH-001",
+          "level": "note",
+          "message": {
+            "text": "Untrusted context flows into a run: block via env."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/ci.yml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 42,
+                  "snippet": {
+                    "text": "        run: echo \"$PR_TITLE\""
+                  }
+                }
+              }
+            }
+          ],
+          "properties": {
+            "finding_family": "taint_to_run_block",
+            "confidence": "medium",
+            "exploitability": "medium",
+            "review_needed": true
+          }
+        },
+        {
+          "ruleId": "ENGINE-ERR",
+          "level": "note",
+          "message": {
+            "text": "Per-line rules still ran but file-scope coverage degraded."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/big.yml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "properties": {
+            "confidence": "high",
+            "exploitability": "medium"
+          }
+        }
+      ],
+      "artifacts": [
+        {
+          "location": {
+            "uri": ".github/workflows/ci.yml",
+            "uriBaseId": "%SRCROOT%"
+          }
+        },
+        {
+          "location": {
+            "uri": ".github/workflows/agent.yml",
+            "uriBaseId": "%SRCROOT%"
+          }
+        },
+        {
+          "location": {
+            "uri": ".github/workflows/big.yml",
+            "uriBaseId": "%SRCROOT%"
+          }
+        }
+      ],
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "toolExecutionNotifications": [
+            {
+              "level": "note",
+              "message": {
+                "text": "File size 60000 bytes exceeds scanner cap (50000)"
+              },
+              "descriptor": {
+                "id": "ENGINE-ERR"
+              },
+              "locations": [
+                {
+                  "physicalLocation": {
+                    "artifactLocation": {
+                      "uri": ".github/workflows/big.yml",
+                      "uriBaseId": "%SRCROOT%"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
