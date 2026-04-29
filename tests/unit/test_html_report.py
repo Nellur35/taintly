@@ -430,3 +430,50 @@ def test_cli_format_html_produces_valid_document(tmp_path):
     assert "</html>" in result.stdout
     # Score section auto-computed for html format.
     assert "Score breakdown" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Relative-path rendering (replaces machine-local absolute paths).
+# ---------------------------------------------------------------------------
+
+
+def test_html_renders_relative_file_paths(tmp_path):
+    """Findings should render with paths relative to the scanned repo
+    rather than the absolute path embedded in Finding.file.
+    """
+    finding = Finding(
+        rule_id="SEC3-GH-001",
+        severity=Severity.HIGH,
+        title="Unpinned action",
+        description="Unpinned action.",
+        file="/home/asafy/projects/myrepo/.github/workflows/ci.yml",
+        line=12,
+        snippet="      - uses: actions/checkout@v4",
+        owasp_cicd="CICD-SEC-3",
+    )
+    report = AuditReport(repo_path="/home/asafy/projects/myrepo", platform="github")
+    report.add(finding)
+    report.summarize()
+
+    html = format_html(report)
+
+    # Absolute path must NOT appear; relative form must be present.
+    assert "/home/asafy/projects/myrepo/" not in html
+    assert ".github/workflows/ci.yml" in html
+
+
+# ---------------------------------------------------------------------------
+# Rule-ID linking (clickable in the cluster cards / findings table) and the
+# matching rule-reference appendix.
+# ---------------------------------------------------------------------------
+
+
+def test_html_rule_ids_are_anchored_links(one_report, one_finding):
+    html = format_html(one_report)
+    # Each rule id render should be wrapped in an anchor pointing at
+    # the rule-reference appendix.
+    assert f'href="#rule-{one_finding.rule_id}"' in html
+    # And the matching anchor target must exist in the document.
+    assert f'id="rule-{one_finding.rule_id}"' in html
+    # Reference section is rendered.
+    assert "Rule reference" in html
