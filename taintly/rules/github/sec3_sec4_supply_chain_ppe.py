@@ -471,7 +471,23 @@ RULES: list[Rule] = [
             "succeeded. May process tainted artifacts from failed/compromised workflows."
         ),
         pattern=ContextPattern(
-            anchor=r"workflow_run",
+            # The anchor matches the ``workflow_run`` trigger
+            # DECLARATION line only, not every reference to
+            # ``github.event.workflow_run.*`` later in the file.
+            # Without this, the rule emits one finding per property
+            # reference on a non-gated workflow_run-triggered job —
+            # the missing conclusion gate is one bug, not N.
+            #
+            # Three accepted shapes:
+            #   block-form key       ``  workflow_run:``
+            #   inline shorthand     ``on: workflow_run``  (end-of-line)
+            #   list form            ``on: [workflow_run, push]``
+            #
+            # The negative lookbehind ``(?<![.\w])`` rejects property
+            # references like ``${{ github.event.workflow_run.* }}``
+            # (preceded by ``.``) and identifiers that happen to end
+            # in ``workflow_run`` (preceded by a word char).
+            anchor=r"(?<![.\w])workflow_run\s*(?::|,|\]|$)",
             requires=r"workflow_run",
             requires_absent=r"workflow_run\.conclusion",
             exclude=[r"^\s*#"],

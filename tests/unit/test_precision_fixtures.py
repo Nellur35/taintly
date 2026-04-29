@@ -182,3 +182,31 @@ def test_oidc_shell_publishers_do_not_trip_sec5_gh_001(fixture_name, gh_rules):
         f"{fixture_name}: SEC5-GH-001 fired on a workflow with a "
         f"recognised shell-form OIDC publisher: {fired}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SEC4-GH-003 — workflow_run conclusion gate
+#
+# The missing-conclusion-gate finding is one per workflow, not one
+# per ``github.event.workflow_run.*`` property reference.  Anchor
+# matches the trigger declaration line only.
+# ---------------------------------------------------------------------------
+
+
+_VULN_GH = Path(__file__).parent.parent / "fixtures" / "github" / "vulnerable"
+
+
+def test_sec4_gh_003_fires_once_per_workflow(gh_rules):
+    findings = scan_file(str(_VULN_GH / "workflow_run_no_conclusion.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC4-GH-003"]
+    assert len(fired) == 1, (
+        f"SEC4-GH-003 must fire exactly once per workflow_run-triggered "
+        f"workflow lacking the conclusion gate, got {len(fired)} findings: "
+        f"{[(f.line, f.snippet) for f in fired]}"
+    )
+    # Anchor cites the trigger declaration line, not a property
+    # reference deeper in the file.
+    assert "workflow_run:" in fired[0].snippet, (
+        f"Expected anchor on the workflow_run: declaration line, "
+        f"got snippet: {fired[0].snippet!r}"
+    )
