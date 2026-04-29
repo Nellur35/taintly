@@ -42,6 +42,9 @@ jobs:
       - name: README coverage table is in sync with rule pack
         run: python scripts/update_readme_coverage.py --check
 
+      - name: No-rules-change gate (rule-pack output stable across fixtures)
+        run: python scripts/no_rules_change_gate.py --check
+
   # ---------------------------------------------------------------------------
   # mypy — static type check (PSE Domain 2.1)
   # Loose mode: enables the highest-value bug classes (undefined name,
