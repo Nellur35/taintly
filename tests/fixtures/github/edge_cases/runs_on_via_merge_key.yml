@@ -1,0 +1,19 @@
+# Both jobs inherit ``runs-on: self-hosted`` via a YAML merge key.
+# SEC7-GH-001 must fire on every job that effectively has
+# ``runs-on: self-hosted``, not just the anchor definition site.
+# This is a real precision improvement the structural form gives
+# over the regex form, which only fires once on the anchor body.
+on: push
+
+defaults: &job_defaults
+  runs-on: self-hosted
+
+jobs:
+  build:
+    <<: *job_defaults
+    steps:
+      - run: echo build
+  test:
+    <<: *job_defaults
+    steps:
+      - run: echo test

@@ -1,0 +1,15 @@
+# A multi-line ``run: |`` block scalar with one attacker-
+# controlled GitHub-context interpolation in it.  After Subtask 2
+# (Event.block_lines + StructuralPattern per-line emission),
+# SEC4-GH-004 fires at the body line containing the dangerous
+# expression — not at the ``run: |`` header line above it.
+on: pull_request_target
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Processing PR..."
+          echo "Title: ${{ github.event.pull_request.title }}"
+          echo done

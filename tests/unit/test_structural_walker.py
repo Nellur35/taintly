@@ -229,3 +229,108 @@ def test_plain_scalar_with_colon_in_value_walks_correctly():
     leaves = _leaves(src, query="homepage")
     assert len(leaves) == 1
     assert leaves[0].value == "https://example.com"
+
+
+# ---------------------------------------------------------------------------
+# Subtask 1 — flow-style mappings nested in flow-style sequences
+# (Phase 2 follow-up: ``_consume_flow`` did not push a frame for
+# nested flow containers, so leaves inside the nested mapping
+# vanished.  These tests lock in the recursion fix.)
+# ---------------------------------------------------------------------------
+
+
+def test_flow_mapping_inside_flow_sequence_yields_keyed_leaves():
+    """``steps: [{uses: actions/checkout@v4}]`` must yield a
+    LEAF_SCALAR at path ('jobs', 'build', 'steps', 0, 'uses')."""
+    src = (
+        "on: push\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps: [{uses: actions/checkout@v4}, {run: echo build}]\n"
+    )
+    paths = _paths(src)
+    assert ("jobs", "build", "steps", 0, "uses") in paths, paths
+    assert ("jobs", "build", "steps", 1, "run") in paths, paths
+
+
+def test_flow_mapping_inside_flow_sequence_glob_matches():
+    """The path glob ``**.uses`` must match flow-mapping uses keys."""
+    src = (
+        "jobs:\n"
+        "  a:\n"
+        "    steps: [{uses: x/y@v1}]\n"
+        "  b:\n"
+        "    steps: [{uses: x/z@v2}]\n"
+    )
+    leaves = _leaves(src, query="**.uses")
+    values = [e.value for e in leaves]
+    assert values == ["x/y@v1", "x/z@v2"], values
+
+
+def test_flow_sequence_inside_flow_mapping():
+    """The opposite case — a flow sequence as a value inside a
+    flow mapping — also needs to push and pop a frame correctly."""
+    src = "outer: {tags: [a, b, c], name: x}\n"
+    paths = set(_paths(src))
+    assert ("outer", "tags", 0) in paths
+    assert ("outer", "tags", 2) in paths
+    assert ("outer", "name") in paths
+
+
+def test_anchor_body_with_flow_content_resolves_correctly():
+    """An anchor whose body contains flow-style content gets
+    captured correctly across the ``_consume_flow`` recursion
+    boundary.  Probes the interaction between anchor capture and
+    the recursive flow handling fixed in this subtask.
+    """
+    src = (
+        "tagged_step: &step\n"
+        "  uses: actions/checkout@v4\n"
+        "  with: {ref: main, fetch-depth: 0}\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - <<: *step\n"
+    )
+    paths = set(_paths(src))
+    # The merge-key replay must preserve the with: flow-mapping's
+    # leaves at the alias's structural path.
+    assert ("jobs", "build", "steps", 0, "uses") in paths, paths
+    assert ("jobs", "build", "steps", 0, "with", "ref") in paths, paths
+    assert ("jobs", "build", "steps", 0, "with", "fetch-depth") in paths, paths
+
+
+# ---------------------------------------------------------------------------
+# Subtask 2 — block-scalar per-line breakdown
+# ---------------------------------------------------------------------------
+
+
+def test_block_scalar_carries_per_line_breakdown():
+    """A ``run: |`` block scalar exposes its body lines via
+    ``Event.block_lines`` so rules can find specific lines, not
+    just the header.  Required for SEC4-GH-004 to land findings
+    on the dangerous-interpolation line, not the block-scalar
+    header line above it.
+    """
+    src = (
+        "steps:\n"
+        "  - run: |\n"
+        "      echo first\n"
+        "      echo second\n"
+        "      echo third\n"
+    )
+    leaves = _leaves(src)
+    block = next(
+        e for e in leaves if e.path == ("steps", 0, "run")
+    )
+    assert block.value_kind == "block_literal"
+    assert block.line == 2  # the ``run: |`` header line
+    assert block.block_lines is not None
+    line_numbers = [n for n, _ in block.block_lines]
+    assert line_numbers == [3, 4, 5]
+    line_texts = [t for _, t in block.block_lines]
+    assert "echo first" in line_texts[0]
+    assert "echo second" in line_texts[1]
+    assert "echo third" in line_texts[2]

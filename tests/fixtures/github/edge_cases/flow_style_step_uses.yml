@@ -1,0 +1,11 @@
+# Flow-style step list — uncommon but valid YAML.  Phase 2's
+# walker bug caused the structural form of SEC3-GH-001 to miss the
+# unpinned action reference inside the flow-mapping step; the
+# Subtask 1 recursion fix restores correct firing.  Locks in the
+# repaired behaviour.
+on: push
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{uses: actions/checkout@v4}, {run: echo build}]

@@ -114,3 +114,74 @@ Without one of these, the parking decision stands.
   the Phase 2 rule choice.
 - `scripts/no_rules_change_gate.py` — the rule-output stability
   gate that surfaced the CRLF precision change.
+
+## Addendum — corrective measurement and follow-up
+
+After Phase 2 shipped, an adversarial-fixture measurement against
+YAML shapes the schema-bounded reader's spec called supported
+surfaced three behaviour differences vs. the regex form that the
+Phase 2 audit corpus had not exercised.  The Phase 2 audit corpus
+contained zero anchors, zero merge keys, and zero flow-style step
+sequences across all 17 fixtures for the three migrated rules, so
+the +0.0pp Δ F1 measurement on it could not have distinguished the
+regex form from the structural form on those shapes.
+
+Three behaviour differences and their resolutions:
+
+- **Real precision improvement** (kept and locked in): merge keys
+  on `runs-on:` now produce findings at every effectively-merged
+  job, not just the anchor definition.  A YAML file defining
+  `runs-on: self-hosted` once in an anchor body and merging that
+  anchor into two jobs produces three SEC7-GH-001 findings
+  (anchor body + both merge sites) under the structural form;
+  the regex form fired only on the anchor body.  Locked in by
+  `tests/fixtures/github/edge_cases/runs_on_via_merge_key.yml`
+  and a line-level regression test at
+  `tests/unit/test_structural_pattern_merge_keys.py`.
+
+- **Real precision regression, fixed**: flow-style step lists
+  (`steps: [{uses: ...}, ...]`) yielded no leaves for the inner
+  mapping's keys.  `_consume_flow` incremented its depth counter
+  on nested `FLOW_OPEN_*` tokens but never pushed a frame or
+  recursed, so `KEY` tokens inside the nested mapping had no
+  surrounding mapping frame to attach to and the rule glob
+  `**.uses` never matched.  Rebuilt `_consume_flow` around
+  recursion: nested flow containers reserve their slot in the
+  outer container (next sequence index OR pending mapping key),
+  pre-set the inner container's base key, and recurse.  Locked
+  in by `tests/fixtures/github/edge_cases/flow_style_step_uses.yml`
+  (positive) and `flow_style_step_uses_pinned.yml` (negative)
+  plus three walker-level tests in `test_structural_walker.py`.
+
+- **Triage regression, fixed**: multi-line `run: |` block scalars
+  reported findings at the block-scalar header line rather than
+  the line containing the dangerous match.  `LEAF_SCALAR` events
+  for block scalars now carry a `block_lines` field — a tuple
+  of `(source_line, body_text)` pairs — so consumers can run a
+  predicate per body line and emit findings at the specific
+  source line a match comes from.  `StructuralPattern` uses
+  this; `Event.block_lines` defaults to `None` so existing
+  call sites continue to construct events without modification.
+  Locked in by
+  `tests/fixtures/github/edge_cases/block_scalar_run_with_pr_title.yml`
+  and three line-level tests in
+  `tests/unit/test_structural_pattern_block_scalars.py`.
+
+### Phase 3 status
+
+The +0.0pp Δ F1 against the Phase 2 audit corpus briefly suggested
+a "park reader" outcome.  The corrected picture (one real win,
+one real bug, one triage regression — all addressed in this PR)
+plus the observation that the audit corpus contained none of the
+YAML shapes the structural reader was built for makes parking no
+longer the best read of the data.  Whether to expand to more
+migrations remains gated on:
+
+1. A migration of at least one TAINT-class rule (where structural
+   access has the highest theoretical payoff for nested-variable
+   analysis).
+2. A measurement on an expanded fixture set that exercises the
+   shapes the reader is for, including the five new fixtures
+   under `tests/fixtures/github/edge_cases/`.
+
+Phase 3 stays open pending that experiment.
