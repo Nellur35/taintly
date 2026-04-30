@@ -1,5 +1,5 @@
 {
-  "github/edge_cases/crlf_endings.yml": "c296ab193c8f60cc79158abb5f9c4bb98cfa3dfd3437bda40b98d4bedfc38917",
+  "github/edge_cases/crlf_endings.yml": "833aa4ded1cd21f230b234031da7d3d21e153efd02cfe454ec12dd4e1dbaad74",
   "github/edge_cases/deeply_nested.yml": "412246bdafef258c173a6522d31b79b1006b1b6373d600a5bd01b05d79c420d8",
   "github/edge_cases/empty.yml": "59a7f58f5617966d456a05d08e6d69cb2d2d93ac583c1ce1c70dbcab658b5fe6",
   "github/safe/anchor_merge_inject.yml": "37e636ea5a9060abfaa67328adcbe37e59d32c00134e2fd8e4193f67f71d1954",

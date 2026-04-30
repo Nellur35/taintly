@@ -7,6 +7,7 @@ from taintly.models import (
     Rule,
     Severity,
 )
+from taintly.structural_pattern import StructuralPattern
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -161,9 +162,19 @@ RULES: list[Rule] = [
             "Self-hosted runners are not ephemeral by default. They persist state between "
             "workflow runs — a compromised job can leave malware or stolen credentials for the next job."
         ),
-        pattern=RegexPattern(
-            match=r"runs-on:.*self-hosted",
-            exclude=[r"^\s*#"],
+        # Phase 2 migration: was ``RegexPattern(match=r"runs-on:.*self-hosted", ...)``;
+        # the structural form queries the ``runs-on`` key at any
+        # depth and fires when the value contains ``self-hosted``.
+        # Handles string, flow-sequence, and block-sequence shapes
+        # uniformly because the walker emits a leaf per scalar
+        # element regardless of the surrounding container shape.
+        pattern=StructuralPattern(
+            # Both globs needed: ``runs-on: self-hosted`` (string
+            # leaf at ``**.runs-on``) and ``runs-on: [self-hosted,
+            # linux]`` (sequence-element leaves at
+            # ``**.runs-on[*]``).
+            path=["**.runs-on", "**.runs-on[*]"],
+            predicate=lambda v, _vk, _p: "self-hosted" in v,
         ),
         remediation="Use ephemeral runners (--ephemeral flag) or GitHub-hosted runners.",
         reference="https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners",

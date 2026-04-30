@@ -16,6 +16,80 @@ from taintly.models import (
     Severity,
 )
 from taintly.platform import github_sha_verify
+from taintly.structural_pattern import StructuralPattern
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 migration helpers — regex-equivalent predicates the
+# StructuralPattern rules call.  Kept module-local so the migration
+# is reviewable as a single contract: regex on the left, predicate
+# on the right, side-by-side semantics.
+# ---------------------------------------------------------------------------
+
+_FULL_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
+_BRANCH_REF_NAMES = frozenset({"main", "master", "develop", "dev"})
+
+# Attacker-controlled GitHub-context expressions that turn an
+# unguarded ``run:`` interpolation into shell injection.  Equivalent
+# to the SEC4-GH-004 regex's allowlist plus ``github.head_ref``.
+_DANGEROUS_GITHUB_CONTEXT_RE = re.compile(
+    r"\$\{\{\s*github\.("
+    r"event\.("
+    r"issue\.(title|body)|"
+    r"pull_request\.(title|body)|"
+    r"comment\.body|"
+    r"review\.body|"
+    r"head_commit\.(message|author\.(email|name))|"
+    r"commits|"
+    r"pages"
+    r")|"
+    r"head_ref"
+    r")"
+)
+
+
+def _has_dangerous_github_context(value: str, _value_kind: str, _path: tuple) -> bool:
+    """Predicate for SEC4-GH-004 (script injection).
+
+    The ``**.run`` path query already filters to step ``run:``
+    keys, so this predicate only needs to detect the dangerous
+    GitHub-context expressions inside the shell-string value.
+    The original regex's exclusion for "value is just the
+    expression alone passed to a non-shell key" is not needed
+    here — the path filter does the structural job the regex was
+    approximating.
+    """
+    return bool(_DANGEROUS_GITHUB_CONTEXT_RE.search(value))
+
+
+def _is_unpinned_uses_value(value: str, _value_kind: str, _path: tuple) -> bool:
+    """Predicate for SEC3-GH-001 (unpinned action).
+
+    Equivalent to the regex
+    ``uses:\\s*([^@\\s]+)@(?![a-f0-9]{40}\\b)(\\S+)`` plus the
+    historical exclude list (``./``, ``../``, ``docker://``,
+    branch-ref dedup with SEC3-GH-002).
+    """
+    v = value.strip()
+    if not v or "@" not in v:
+        return False
+    # Local action references (./local-action, ../shared) — not
+    # remote, not a supply-chain risk in this rule's scope.
+    if v.startswith(("./", "../")):
+        return False
+    if v.startswith("docker://"):
+        return False
+    head, _, ref = v.partition("@")
+    if not ref:
+        return False
+    # Branch refs are SEC3-GH-002's CRITICAL scope; don't double-
+    # report at HIGH here.
+    ref_token = ref.split()[0].split("#")[0]
+    if ref_token in _BRANCH_REF_NAMES:
+        return False
+    if _FULL_SHA_RE.match(ref_token):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -102,17 +176,13 @@ RULES: list[Rule] = [
             "force-pushed to point at malicious code — a technique used in documented "
             "supply chain attacks against popular GitHub Actions (Trivy, Checkmarx, tj-actions)."
         ),
-        pattern=RegexPattern(
-            match=r"uses:\s*([^@\s]+)@(?![a-f0-9]{40}\b)(\S+)",
-            exclude=[
-                r"^\s*#",
-                r"docker://",
-                r"uses:\s*\./",
-                r"uses:\s*\.\./",
-                # Dedup: branch refs (main/master/develop/dev) are already reported
-                # at CRITICAL by SEC3-GH-002. Don't double-count as HIGH here too.
-                r"uses:\s*[^@\s]+@(main|master|develop|dev)(\s|#|$)",
-            ],
+        # Phase 2 migration: was ``RegexPattern`` with five
+        # excludes; now a path-glob query plus a Python predicate
+        # that encodes the same semantics.  See
+        # ``_is_unpinned_uses_value`` above for the conditions.
+        pattern=StructuralPattern(
+            path="**.uses",
+            predicate=_is_unpinned_uses_value,
         ),
         remediation="Pin to full 40-char commit SHA: uses: org/action@<sha> # vtag",
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions",
@@ -618,17 +688,20 @@ RULES: list[Rule] = [
             "Attacker can craft PR titles, issue bodies, branch names, or commit messages "
             "containing shell commands that execute in the runner context."
         ),
-        pattern=RegexPattern(
-            match=r"\$\{\{\s*github\.(event\.(issue\.(title|body)|pull_request\.(title|body)|comment\.body|review\.body|head_commit\.(message|author\.(email|name))|commits|pages)|head_ref)",
-            exclude=[
-                r"^\s*#",
-                r"^\s*if:",
-                # Exclude lines where the attacker-controlled value is the entire value of a YAML
-                # key — e.g. `ref: ${{ github.head_ref }}` in a `with:` block passes a string to
-                # an action, it does NOT execute shell code. The dangerous pattern is embedding
-                # ${{ }} inside a larger string that gets passed to `run:`.
-                r"""^\s*[\w.-]+:\s*["']?\$\{\{[^}]*\}\}["']?\s*(#.*)?$""",
-            ],
+        # Phase 2 migration: was a per-line ``RegexPattern`` with
+        # three exclude regexes (comment, ``if:`` context,
+        # value-is-the-whole-expression-passing-through).  The
+        # structural form scopes the query to ``run:`` keys
+        # directly — the path filter does the structural job the
+        # original excludes were approximating.  Inside multi-line
+        # ``run: |`` block scalars the structural form fires once
+        # at the block-header line rather than once per dangerous
+        # interpolation; this is a deliberate shape change
+        # surfaced via the no-rules-change gate and documented in
+        # the Phase 2 PR body.
+        pattern=StructuralPattern(
+            path="**.run",
+            predicate=_has_dangerous_github_context,
         ),
         remediation=(
             "Pass the value through an environment variable so the "
