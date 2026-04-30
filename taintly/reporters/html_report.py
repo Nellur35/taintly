@@ -376,7 +376,9 @@ def _threat_model_banner() -> str:
         "<strong>Reviewing each finding against your actual workflow and "
         "environment is required, not optional.</strong> "
         'See <code>docs/SCORING.md</code> for the assumption list and '
-        "assessment guidance."
+        "assessment guidance; "
+        '<code>docs/AI_TRIAGE.md</code> has a paste-ready prompt for '
+        "AI-assisted recalibration against your deployment."
         "</aside>"
     )
 

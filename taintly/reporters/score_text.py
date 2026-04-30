@@ -55,6 +55,7 @@ def format_score(report: ScoreReport, use_color: bool = True) -> str:
         "Assessing fit to your deployment is required, not optional."
     )
     lines.append("  See docs/SCORING.md.")
+    lines.append("  AI-assisted triage prompt: docs/AI_TRIAGE.md.")
     if report.distinct_risks or report.review_needed:
         bits = [f"{report.distinct_risks} confirmed cluster(s)"]
         if report.review_needed:

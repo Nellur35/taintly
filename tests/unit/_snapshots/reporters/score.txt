@@ -1,0 +1,25 @@
+
+=== CI/CD SECURITY SCORE ===
+
+  Score: 72/100 (C)
+  Threat model: public-OSS deployment (fork PRs reachable, runners shared, secrets repo-scoped).
+  Findings are exploitability-weighted against this model. Assessing fit to your deployment is required, not optional.
+  See docs/SCORING.md.
+  AI-assisted triage prompt: docs/AI_TRIAGE.md.
+  Distinct risks: 2 confirmed cluster(s), 1 review-needed
+
+Deductions:
+  Clusters:   2 distinct      ->   18.0 pts
+  CRITICAL:   1 finding(s)  ->    0.0 pts  (unclassified)
+  HIGH:       1 finding(s)  ->    0.0 pts  (unclassified)
+  MEDIUM:     2 finding(s)  ->    6.0 pts  (unclassified)
+
+Bonuses:
+  X  No critical findings             0
+  X  All actions pinned to SHA        0
+  X  All permissions explicit          0
+
+Breakdown by category:
+
+Security debt profile:
+  Action pinning                         - Weak  (1 finding(s), expl:high)
