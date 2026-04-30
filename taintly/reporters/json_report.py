@@ -43,6 +43,10 @@ def format_json(report: AuditReport, score_report: "ScoreReport | None" = None) 
         # ``user_assessment_required: true`` is a constant for the
         # public-OSS profile — the tool always requires user
         # assessment for fit, regardless of the score number.
+        # ``triage_doc`` points at a paste-ready AI-recalibration
+        # prompt; flat sibling of ``threat_model`` rather than nested
+        # to avoid breaking aggregators that already parse the prior
+        # field shapes.
         # New fields added at the end so existing JSON consumers that
         # parse only the prior keys keep working unchanged.
         data["score"] = {
@@ -52,6 +56,7 @@ def format_json(report: AuditReport, score_report: "ScoreReport | None" = None) 
             "review_needed": score_report.review_needed,
             "threat_model": "public-oss-default",
             "user_assessment_required": True,
+            "triage_doc": "docs/AI_TRIAGE.md",
         }
 
     return json.dumps(data, indent=2)

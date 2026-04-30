@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from taintly.models import AuditReport, Finding, Severity
+from taintly.scorer import DebtDimension, ScoreReport
 
 # pytest-snapshot ships the ``snapshot`` fixture; if it's not installed
 # (CI matrix that strips dev deps) skip the whole module rather than
@@ -210,6 +211,47 @@ def canonical_report() -> AuditReport:
     return report
 
 
+@pytest.fixture
+def canonical_score_report() -> ScoreReport:
+    """A ScoreReport fixture that exercises the threat-model disclosure
+    block in the score-text, JSON, and HTML reporters.
+
+    Field values are fixed literals so the snapshot is deterministic.
+    """
+    return ScoreReport(
+        total_score=72,
+        grade="C",
+        deductions={
+            "CLUSTERS": 18.0,
+            "CRITICAL": 0.0,
+            "HIGH": 0.0,
+            "MEDIUM": 6.0,
+            "LOW": 4.0,
+        },
+        bonuses={
+            "no_criticals": 0,
+            "all_actions_pinned": 0,
+            "all_permissions": 0,
+        },
+        categories=[],
+        finding_count=5,
+        files_scanned=4,
+        counts={"CRITICAL": 1, "HIGH": 1, "MEDIUM": 2},
+        distinct_risks=2,
+        review_needed=1,
+        debt_profile=[
+            DebtDimension(
+                family_id="supply-chain",
+                title="Action pinning",
+                label="Weak",
+                finding_count=1,
+                top_exploitability="high",
+                top_severity="CRITICAL",
+            ),
+        ],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Per-format snapshot tests
 # ---------------------------------------------------------------------------
@@ -290,3 +332,55 @@ def test_html_reporter_snapshot(canonical_report, snapshot, monkeypatch):
     rendered = html_mod.format_html(canonical_report, score_report=None)
     snapshot.snapshot_dir = SNAPSHOT_DIR
     snapshot.assert_match(rendered + "\n", "report.html")
+
+
+# ---------------------------------------------------------------------------
+# Score-rendering snapshots — exercise the threat-model disclosure block
+# (including the AI-triage pointer) that's silenced when score_report=None.
+# ---------------------------------------------------------------------------
+
+
+def test_score_text_snapshot(canonical_score_report, snapshot):
+    """The score-text reporter renders the threat-model disclosure
+    inline with the score line.  This snapshot pins the disclosure
+    wording, the AI-triage pointer, and the score-card layout.
+    """
+    from taintly.reporters.score_text import format_score
+
+    rendered = format_score(canonical_score_report, use_color=False)
+    snapshot.snapshot_dir = SNAPSHOT_DIR
+    snapshot.assert_match(rendered + "\n", "score.txt")
+
+
+def test_json_with_score_snapshot(canonical_report, canonical_score_report, snapshot):
+    """JSON's score block includes the disclosure fields (``threat_model``,
+    ``user_assessment_required``, ``triage_doc``).  This snapshot pins
+    the field set and order so aggregator consumers see breakage on any
+    rename or reorder.
+    """
+    from taintly.reporters.json_report import format_json
+
+    rendered = format_json(canonical_report, score_report=canonical_score_report)
+    snapshot.snapshot_dir = SNAPSHOT_DIR
+    snapshot.assert_match(rendered + "\n", "report_with_score.json")
+
+
+def test_html_with_score_snapshot(canonical_report, canonical_score_report, snapshot, monkeypatch):
+    """HTML rendered with a score includes the threat-model banner
+    (above the summary card).  This snapshot pins the banner wording,
+    including the new AI-triage pointer sentence.
+    """
+    from datetime import datetime as real_datetime
+
+    from taintly.reporters import html_report as html_mod
+
+    class _FrozenDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ARG003
+            return real_datetime.fromisoformat(_FROZEN_TIMESTAMP)
+
+    monkeypatch.setattr(html_mod, "datetime", _FrozenDatetime)
+
+    rendered = html_mod.format_html(canonical_report, score_report=canonical_score_report)
+    snapshot.snapshot_dir = SNAPSHOT_DIR
+    snapshot.assert_match(rendered + "\n", "report_with_score.html")

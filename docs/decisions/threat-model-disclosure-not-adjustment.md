@@ -78,3 +78,9 @@ a policy claim.
   disclosure adjacent to the score (or above the summary card in
   HTML; placement differs by surface and the difference is
   intentional).
+- `docs/decisions/ai-assisted-triage-pointer.md` — separate
+  decision recording why taintly ships a pointer to a paste-ready
+  AI-recalibration prompt (`docs/AI_TRIAGE.md`).  That prompt is
+  one way users may discharge the assessment this decision assigns
+  to them; this decision stands on its own merits regardless of
+  whether the pointer exists.
