@@ -44,6 +44,14 @@ Each supported feature has at least one named test in
   (`test_simple_mapping`, `test_nested_mapping_with_sequence`).
 - Flow-style sequences and mappings
   (`test_flow_sequence`, `test_flow_mapping`).
+- Flow-style mappings nested inside flow-style sequences and
+  vice versa, with leaves emitted at the correct indexed/keyed
+  paths
+  (`test_flow_mapping_inside_flow_sequence_yields_keyed_leaves`,
+  `test_flow_sequence_inside_flow_mapping`).  Earlier behaviour
+  silently dropped leaves inside nested flow containers; the
+  Phase 2 follow-up rebuilt `_consume_flow` around recursion to
+  push and pop a frame per nested container.
 - Plain scalars including the colon-in-value case
   (`test_plain_scalar_with_colon_in_value`).
 - URLs as plain scalars (`test_plain_scalar_with_url_value`).
@@ -61,6 +69,15 @@ Each supported feature has at least one named test in
   `test_block_scalar_chomping_strip`,
   `test_block_scalar_chomping_keep`,
   `test_block_scalar_explicit_indent_indicator`).
+- Block scalars carry per-line breakdown via the `block_lines`
+  field on `LEAF_SCALAR` events, so consumers can land findings
+  at the specific source line containing a match rather than at
+  the block-scalar header
+  (`test_block_scalar_carries_per_line_breakdown`).
+  `StructuralPattern` uses this to run its predicate against
+  each body line individually for block-scalar leaves; the
+  Phase 2-shipped behaviour of reporting at the header line is
+  superseded.
 - Comments to end-of-line (`test_comment_to_eol`,
   `test_comment_only_line`).
 - Anchors, aliases, merge keys (`test_anchor_and_alias`,

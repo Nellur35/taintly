@@ -57,6 +57,14 @@ class Event:
     value: Optional[str] = None
     value_kind: Optional[str] = None
     message: Optional[str] = None
+    # For block-scalar leaves only: a per-body-line breakdown so
+    # consumers can land findings at the specific line containing
+    # a match rather than at the block-scalar header.  Tuple of
+    # ``(source_line_number, body_text)`` pairs.  ``None`` for
+    # non-block-scalar events; defaulted so existing call sites
+    # (scalar emitter, flow handler, merge-key replay, error path)
+    # continue to construct events without modification.
+    block_lines: Optional[tuple[tuple[int, str], ...]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -183,8 +191,14 @@ class _Walker:
             _Frame(key=None, indent=-1, container="mapping")
         ]
         self._open_key: Optional[Token] = None
-        # Block-scalar state.
-        self._block_buffer: Optional[list[str]] = None
+        # Block-scalar state.  Each buffer entry is
+        # ``(source_line_number, body_text)`` so the flushed
+        # Event can carry a per-line breakdown via
+        # ``Event.block_lines`` — consumers (e.g.,
+        # StructuralPattern's per-line emission for SEC4-GH-004)
+        # can land findings at the specific source line a match
+        # comes from rather than at the block-scalar header.
+        self._block_buffer: Optional[list[tuple[int, str]]] = None
         self._block_anchor_line = 0
         self._block_path: tuple[object, ...] = ()
         # Anchor capture.
@@ -196,6 +210,11 @@ class _Walker:
         # regardless of its line-indent.  Cleared by the next
         # non-KEY non-COMMENT token.
         self._post_dash_attach: bool = False
+        # ``_consume_flow`` writes the index AFTER the matching
+        # close brace here so the outer caller (``run`` and the
+        # recursive wrapper for nested flow) resume from the
+        # right token.
+        self._flow_end_idx: int = 0
 
     # ------------------------------------------------------------------
 
@@ -257,7 +276,7 @@ class _Walker:
 
             if tok.kind == TokenKind.SCALAR_BLOCK_LINE:
                 if self._block_buffer is not None:
-                    self._block_buffer.append(tok.value)
+                    self._block_buffer.append((tok.line, tok.value))
                 i += 1
                 continue
 
@@ -352,19 +371,13 @@ class _Walker:
                 TokenKind.FLOW_OPEN_MAP,
             ):
                 # Phase 1 flow handling: consume the bracketed run
-                # and emit indexed/keyed leaves.
+                # and emit indexed/keyed leaves.  ``_consume_flow``
+                # advances ``self._flow_end_idx`` to the token
+                # AFTER the matching close brace (handling any
+                # nested flow containers via recursion), so the
+                # outer loop just reads that index.
                 yield from self._consume_flow(tokens, i)
-                # Move past the matching close bracket.
-                depth = 1 if tok.kind == TokenKind.FLOW_OPEN_SEQ else 1
-                j = i + 1
-                while j < len(tokens) and depth > 0:
-                    k = tokens[j].kind
-                    if k in (TokenKind.FLOW_OPEN_SEQ, TokenKind.FLOW_OPEN_MAP):
-                        depth += 1
-                    elif k in (TokenKind.FLOW_CLOSE_SEQ, TokenKind.FLOW_CLOSE_MAP):
-                        depth -= 1
-                    j += 1
-                i = j
+                i = self._flow_end_idx
                 continue
 
             i += 1
@@ -528,15 +541,19 @@ class _Walker:
         self._block_buffer = []
 
     def _flush_block(self) -> Event:
-        body = "\n".join(self._block_buffer or [])
+        buffer = self._block_buffer or []
+        body = "\n".join(text for _line, text in buffer)
         # Trim trailing empty lines that come from the splitlines
         # artefact at end-of-file.
         body = body.rstrip("\n")
-        if self._block_buffer:
+        if buffer:
             # Preserve a single trailing newline for ``|``-style
             # literal scalars (default chomping clip).
             if not body.endswith("\n"):
                 body = body + "\n"
+        # Per-line breakdown for consumers that need to land
+        # findings at the line a match actually came from.
+        block_lines: tuple[tuple[int, str], ...] = tuple(buffer)
         path = self._block_path
         line = self._block_anchor_line
         self._block_buffer = None
@@ -549,6 +566,7 @@ class _Walker:
             1,
             value=body,
             value_kind="block_literal",
+            block_lines=block_lines,
         )
 
     # ------------------------------------------------------------------
@@ -579,15 +597,40 @@ class _Walker:
     # Flow style
     # ------------------------------------------------------------------
 
-    def _consume_flow(self, tokens: list[Token], start: int) -> Iterator[Event]:
-        """Consume a flow sequence / mapping starting at tokens[start]
-        (which is FLOW_OPEN_SEQ or FLOW_OPEN_MAP).  Yields LEAF_SCALAR
-        events with indexed (sequence) or keyed (mapping) paths.
+    def _consume_flow(
+        self,
+        tokens: list[Token],
+        start: int,
+        *,
+        pre_key: Optional[object] = None,
+    ) -> Iterator[Event]:
+        """Consume one flow sequence or mapping starting at
+        ``tokens[start]`` (FLOW_OPEN_SEQ or FLOW_OPEN_MAP).
+
+        Yields LEAF_SCALAR events for the run.  Sets
+        ``self._flow_end_idx`` to the index AFTER the matching
+        close brace so the caller resumes from there.
+
+        Nested flow containers are handled by recursion: when a
+        nested ``FLOW_OPEN_*`` is encountered, the outer
+        container's slot (next sequence index OR pending mapping
+        key) is captured first, then the nested flow is consumed
+        with ``pre_key`` carrying that slot.  The recursive call
+        pushes its own frame keyed by ``pre_key``, so leaves
+        inside the nested container resolve at the correct path
+        — this is the fix for the Phase 2 bug where
+        ``steps: [{uses: ...}]`` produced no leaves at the
+        ``uses`` key.
         """
         first = tokens[start]
-        # Open a frame for the flow container, keyed by the open key.
-        if self._open_key is not None:
-            base_key: object = self._open_key.value
+        # Determine the key under which this flow container's
+        # leaves nest.  ``pre_key`` from a recursive call wins;
+        # otherwise the outer ``_open_key`` (set by a preceding
+        # block-style KEY) supplies the base key.
+        if pre_key is not None:
+            base_key: object = pre_key
+        elif self._open_key is not None:
+            base_key = self._open_key.value
             self._open_key = None
         else:
             base_key = None
@@ -596,36 +639,46 @@ class _Walker:
         self._stack.append(
             _Frame(key=base_key, indent=first.indent, container=container)
         )
-        seq_frame = self._stack[-1]
-        depth = 1
+        my_frame = self._stack[-1]
         i = start + 1
         flow_pending_key: Optional[str] = None
 
-        while i < len(tokens) and depth > 0:
+        while i < len(tokens):
             t = tokens[i]
-            if t.kind in (TokenKind.INDENT, TokenKind.COMMENT):
-                i += 1
-                continue
-            if t.kind in (TokenKind.FLOW_OPEN_SEQ, TokenKind.FLOW_OPEN_MAP):
-                depth += 1
-                i += 1
-                continue
             if t.kind in (TokenKind.FLOW_CLOSE_SEQ, TokenKind.FLOW_CLOSE_MAP):
-                depth -= 1
                 i += 1
-                continue
-            if t.kind == TokenKind.FLOW_COMMA:
+                break
+            if t.kind in (TokenKind.INDENT, TokenKind.COMMENT, TokenKind.FLOW_COMMA):
                 i += 1
                 continue
             if t.kind == TokenKind.KEY:
                 flow_pending_key = t.value
                 i += 1
                 continue
+            if t.kind in (TokenKind.FLOW_OPEN_SEQ, TokenKind.FLOW_OPEN_MAP):
+                # Nested flow container.  Reserve this slot in the
+                # outer container BEFORE recursing so the inner
+                # container's frame is keyed correctly.  The
+                # recursive call pushes and pops its own frame and
+                # advances ``self._flow_end_idx`` past the
+                # matching close.
+                inner_pre_key: Optional[object]
+                if container == "sequence":
+                    inner_pre_key = my_frame.next_index
+                    my_frame.next_index += 1
+                else:
+                    inner_pre_key = flow_pending_key
+                    flow_pending_key = None
+                yield from self._consume_flow(
+                    tokens, i, pre_key=inner_pre_key
+                )
+                i = self._flow_end_idx
+                continue
             if t.kind in (TokenKind.SCALAR_PLAIN, TokenKind.SCALAR_QUOTED):
                 vk = "plain" if t.kind == TokenKind.SCALAR_PLAIN else "quoted"
                 if container == "sequence":
-                    idx = seq_frame.next_index
-                    seq_frame.next_index += 1
+                    idx = my_frame.next_index
+                    my_frame.next_index += 1
                     path = self._current_path() + (idx,)
                 else:
                     if flow_pending_key is None:
@@ -644,6 +697,8 @@ class _Walker:
                 self._record_anchor_leaf(path, t.value, vk)
             i += 1
 
-        # Pop the flow container frame.
-        if self._stack and self._stack[-1] is seq_frame:
+        # Pop the flow container frame and record where the caller
+        # should resume.
+        if self._stack and self._stack[-1] is my_frame:
             self._stack.pop()
+        self._flow_end_idx = i

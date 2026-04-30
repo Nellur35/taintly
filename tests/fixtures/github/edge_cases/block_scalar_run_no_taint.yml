@@ -1,0 +1,15 @@
+# Same multi-line block-scalar shape as
+# ``block_scalar_run_with_pr_title.yml`` but with no
+# attacker-controlled context interpolation — must NOT fire
+# SEC4-GH-004.  Symmetric assertion confirming the per-line
+# emission isn't false-firing.
+on: pull_request_target
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Processing PR..."
+          echo "Title: pinned-title-here"
+          echo done

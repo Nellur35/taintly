@@ -1,7 +1,12 @@
 {
+  "github/edge_cases/block_scalar_run_no_taint.yml": "8ed519c0c3df87a3cd83c3a4e1d38e9570100666ce689a9d9bceb780154ef2cc",
+  "github/edge_cases/block_scalar_run_with_pr_title.yml": "e4cb3d44328a29d0e208192276a119fb61229e4aefbcb6f48d4c14e23f0c438a",
   "github/edge_cases/crlf_endings.yml": "833aa4ded1cd21f230b234031da7d3d21e153efd02cfe454ec12dd4e1dbaad74",
   "github/edge_cases/deeply_nested.yml": "412246bdafef258c173a6522d31b79b1006b1b6373d600a5bd01b05d79c420d8",
   "github/edge_cases/empty.yml": "59a7f58f5617966d456a05d08e6d69cb2d2d93ac583c1ce1c70dbcab658b5fe6",
+  "github/edge_cases/flow_style_step_uses.yml": "35c4f0ecd2e218220342cbcbdd57118b2cf136f49e025209c86b5c7670b41377",
+  "github/edge_cases/flow_style_step_uses_pinned.yml": "cc7ac1d127a023d2bb491d0901e9f8937d9ac751a7bdcf283e69b8d95d7ee8a0",
+  "github/edge_cases/runs_on_via_merge_key.yml": "bfd6ff965f9c11aeacbfaf68afceb3fecca0859cbc10b3232bf84834c53cd7b6",
   "github/safe/anchor_merge_inject.yml": "37e636ea5a9060abfaa67328adcbe37e59d32c00134e2fd8e4193f67f71d1954",
   "github/safe/fully_hardened.yml": "22dfdec189a2800d7ee8d05d541545a8d0cd50812b05596b93c10398e301227d",
   "github/safe/oidc_cargo_publish.yml": "877066eae138b92cc90aa025c891f68cc0feeed71ff0e6a8c3942e0b8e0bcb5c",

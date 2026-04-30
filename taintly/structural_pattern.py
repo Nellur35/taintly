@@ -84,6 +84,35 @@ class StructuralPattern:
                 any_leaf_seen = True
                 value = ev.value or ""
                 value_kind = ev.value_kind or "plain"
+
+                # Block-scalar leaves carry a per-line breakdown.
+                # When present, run the predicate against each body
+                # line individually and emit findings at the
+                # specific source line a match comes from — not
+                # at the block-scalar header line.  Preserves the
+                # pre-Phase-2 regex form's triage UX (the finding
+                # points at the line containing the dangerous
+                # substring, not the ``run: |`` line above it).
+                if ev.block_lines:
+                    for sub_line, sub_text in ev.block_lines:
+                        try:
+                            sub_hit = self.predicate(
+                                sub_text, value_kind, ev.path
+                            )
+                        except Exception:
+                            sub_hit = False
+                        if not sub_hit:
+                            continue
+                        sub_snippet = self._render_snippet(
+                            sub_text, value_kind, ev.path, sub_line, lines
+                        )
+                        key = (sub_line, sub_snippet)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        results.append((sub_line, sub_snippet))
+                    continue
+
                 try:
                     hit = self.predicate(value, value_kind, ev.path)
                 except Exception:
