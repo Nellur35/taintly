@@ -26,6 +26,7 @@ from .config import (
     find_config,
     load_config,
 )
+from .deployment_context import apply_context_notes_to_findings, load_deployment_context
 from .engine import detect_platform, scan_file, scan_repo
 from .models import Platform, Severity
 from .reporters._encoding import ensure_utf8_stdout
@@ -897,9 +898,11 @@ def main():
                 )
 
     reports = scan_repo(args.path, all_rules, platform)
+    deployment_context = load_deployment_context(args.path)
 
     all_findings = []
     for report in reports:
+        apply_context_notes_to_findings(report.findings, deployment_context)
         report.findings = apply_config_ignores(report.findings, audit_config.ignores, args.path)
         report.filter_severity(effective_min_sev)
         all_findings.extend(report.findings)

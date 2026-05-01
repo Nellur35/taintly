@@ -107,7 +107,10 @@
       "finding_family": "supply_chain_immutability",
       "confidence": "high",
       "exploitability": "high",
-      "review_needed": false
+      "review_needed": false,
+      "context_notes": [],
+      "context_tags": [],
+      "triage_needed": false
     },
     {
       "rule_id": "PSE-GH-001",
@@ -131,7 +134,10 @@
       "finding_family": "agent_credential_chain",
       "confidence": "medium",
       "exploitability": "high",
-      "review_needed": false
+      "review_needed": false,
+      "context_notes": [],
+      "context_tags": [],
+      "triage_needed": false
     },
     {
       "rule_id": "SEC2-GH-002",
@@ -154,7 +160,10 @@
       "finding_family": "excessive_permissions",
       "confidence": "high",
       "exploitability": "medium",
-      "review_needed": false
+      "review_needed": false,
+      "context_notes": [],
+      "context_tags": [],
+      "triage_needed": false
     },
     {
       "rule_id": "TAINT-GH-001",
@@ -176,7 +185,10 @@
       "finding_family": "taint_to_run_block",
       "confidence": "medium",
       "exploitability": "medium",
-      "review_needed": true
+      "review_needed": true,
+      "context_notes": [],
+      "context_tags": [],
+      "triage_needed": false
     },
     {
       "rule_id": "ENGINE-ERR",
@@ -196,7 +208,10 @@
       "finding_family": "",
       "confidence": "high",
       "exploitability": "medium",
-      "review_needed": false
+      "review_needed": false,
+      "context_notes": [],
+      "context_tags": [],
+      "triage_needed": false
     }
   ],
   "errors": [
@@ -218,7 +233,10 @@
       "finding_family": "",
       "confidence": "high",
       "exploitability": "medium",
-      "review_needed": false
+      "review_needed": false,
+      "context_notes": [],
+      "context_tags": [],
+      "triage_needed": false
     }
   ]
 }
