@@ -226,7 +226,6 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-timeout = 30
 # Strictness gates — every flag below catches a different silent-rot
 # failure mode:
 #  - filterwarnings=error  : DeprecationWarning / ResourceWarning in
@@ -239,6 +238,9 @@ timeout = 30
 #    treated as a regression, not a silent success.
 addopts = "-v --tb=short --strict-markers --strict-config"
 xfail_strict = true
+markers = [
+    "timeout(seconds): optional pytest-timeout marker; tests that use it also carry subprocess-level timeouts",
+]
 filterwarnings = [
     "error",
     # Allowlist — each entry needs a reason comment. If a new warning

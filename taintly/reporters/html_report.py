@@ -51,6 +51,8 @@ def _relpath_for_display(file: str, repo_path: str) -> str:
     """
     if not repo_path or not file:
         return file
+    if not os.path.isabs(file):
+        return file.replace(os.sep, "/")
     try:
         rel = os.path.relpath(file, repo_path)
     except (ValueError, OSError):
