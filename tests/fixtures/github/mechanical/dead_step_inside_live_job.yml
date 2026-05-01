@@ -1,0 +1,9 @@
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - if: false
+        run: echo "${{ github.event.pull_request.title }}"
+      - run: echo "${{ github.event.pull_request.body }}"

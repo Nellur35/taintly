@@ -1,0 +1,10 @@
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: string
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: deploy.sh ${{ inputs.environment }}

@@ -1,0 +1,8 @@
+on:
+  push:
+jobs:
+  release:
+    if: github.repository == 'other/repo'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ github.event.inputs.version }}"
