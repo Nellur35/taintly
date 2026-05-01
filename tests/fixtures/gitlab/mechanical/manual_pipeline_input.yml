@@ -1,0 +1,6 @@
+manual_release:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: manual
+  script:
+    - echo $CI_COMMIT_REF_NAME

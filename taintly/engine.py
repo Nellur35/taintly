@@ -7,6 +7,7 @@ import os
 import re
 
 from .families import classify_rule, default_confidence, default_review_needed
+from .gitlabguard import GitLabContext, find_dead_gitlab_job_ranges
 from .models import (
     _MAX_SAFE_TEXT_LEN,
     AuditReport,
@@ -98,6 +99,7 @@ def scan_file(
     rules: list[Rule],
     _content: str | None = None,
     repoctx: StaticGuardContext | None = None,
+    gitlabctx: GitLabContext | None = None,
 ) -> list[Finding]:
     """Scan a single file against a list of rules.
 
@@ -238,6 +240,8 @@ def scan_file(
                 )
 
     _suppress_dead_findings(findings, content, repoctx)
+    if any(rule.platform == Platform.GITLAB for rule in rules):
+        _suppress_gitlab_dead_findings(findings, content, gitlabctx)
     _downgrade_maintainer_gated_findings(findings, content)
     return findings
 
@@ -245,6 +249,22 @@ def scan_file(
 # ---------------------------------------------------------------------------
 # Post-detection severity calibration
 # ---------------------------------------------------------------------------
+
+
+def _suppress_gitlab_dead_findings(
+    findings: list[Finding], content: str, gitlabctx: GitLabContext | None
+) -> None:
+    """Drop findings inside GitLab jobs proven dead by static rules logic."""
+    if not findings:
+        return
+    dead_ranges = find_dead_gitlab_job_ranges(content, gitlabctx)
+    if not dead_ranges:
+        return
+    findings[:] = [
+        f
+        for f in findings
+        if f.line <= 0 or not any(start <= f.line <= end for start, end in dead_ranges)
+    ]
 
 # ``on:`` events whose firing is restricted to maintainers — pushing
 # tags, creating releases, scheduling cron, or invoking
@@ -600,8 +620,11 @@ def scan_repo(
                 ctx_rules_by_family.setdefault(r.finding_family, []).append(r)
         report.families_with_ctx_coverage = set(ctx_rules_by_family)
 
+        gitlabctx = GitLabContext() if plat == Platform.GITLAB else None
         for fpath in files:
-            all_findings.extend(scan_file(fpath, platform_rules, repoctx=repoctx))
+            all_findings.extend(
+                scan_file(fpath, platform_rules, repoctx=repoctx, gitlabctx=gitlabctx)
+            )
             # Surface-evaluation pass: re-read the file once and
             # check each ContextPattern's anchor regex.  Only families
             # whose anchors found a candidate get added — so a family

@@ -1,0 +1,6 @@
+dead_job:
+  rules:
+    - if: "true"
+      when: never
+  script:
+    - echo $CI_COMMIT_REF_NAME
