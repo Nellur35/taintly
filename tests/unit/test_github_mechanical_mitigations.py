@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from taintly.engine import scan_file
 from taintly.models import Severity
 from taintly.staticguard import WorkflowContext
@@ -13,6 +15,26 @@ def _write_workflow(tmp_path: Path, content: str) -> Path:
     path = workflow_dir / "mechanical.yml"
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def _sec4_gh_008_findings(path: Path, github_rules):
+    return [f for f in scan_file(str(path), github_rules) if f.rule_id == "SEC4-GH-008"]
+
+
+def _workflow_dispatch_input(extra_trigger: str = "") -> str:
+    return (
+        "on:\n"
+        "  workflow_dispatch:\n"
+        "    inputs:\n"
+        "      environment:\n"
+        "        type: string\n"
+        f"{extra_trigger}"
+        "jobs:\n"
+        "  deploy:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: deploy.sh ${{ inputs.environment }}\n"
+    )
 
 
 def test_dead_job_suppresses_findings(github_rules, tmp_path):
@@ -97,33 +119,43 @@ def test_runtime_guard_does_not_suppress_findings(github_rules, tmp_path):
 def test_workflow_dispatch_input_downgrades_when_maintainer_only(github_rules, tmp_path):
     path = _write_workflow(
         tmp_path,
-        "on:\n"
-        "  workflow_dispatch:\n"
-        "    inputs:\n"
-        "      environment:\n"
-        "        type: string\n"
-        "jobs:\n"
-        "  deploy:\n"
-        "    runs-on: ubuntu-latest\n"
-        "    steps:\n"
-        "      - run: deploy.sh ${{ inputs.environment }}\n",
+        _workflow_dispatch_input(),
     )
 
-    findings = [f for f in scan_file(str(path), github_rules) if f.rule_id == "SEC4-GH-008"]
+    findings = _sec4_gh_008_findings(path, github_rules)
 
     assert findings
     assert {f.severity for f in findings} == {Severity.MEDIUM}
 
 
-def test_workflow_dispatch_input_stays_high_with_fork_reachable_trigger(github_rules, tmp_path):
+@pytest.mark.parametrize(
+    "extra_trigger",
+    [
+        "  pull_request:\n",
+        "  pull_request_target:\n",
+        "  pull_request_review:\n",
+        "  workflow_run:\n",
+        "  workflow_call:\n",
+    ],
+)
+def test_workflow_dispatch_input_stays_high_with_fork_reachable_trigger(
+    github_rules, tmp_path, extra_trigger
+):
     path = _write_workflow(
         tmp_path,
-        "on:\n"
-        "  workflow_dispatch:\n"
-        "    inputs:\n"
-        "      environment:\n"
-        "        type: string\n"
-        "  pull_request:\n"
+        _workflow_dispatch_input(extra_trigger),
+    )
+
+    findings = _sec4_gh_008_findings(path, github_rules)
+
+    assert findings
+    assert {f.severity for f in findings} == {Severity.HIGH}
+
+
+def test_workflow_dispatch_input_stays_high_with_inline_array_trigger(github_rules, tmp_path):
+    path = _write_workflow(
+        tmp_path,
+        "on: [workflow_dispatch, pull_request]\n"
         "jobs:\n"
         "  deploy:\n"
         "    runs-on: ubuntu-latest\n"
@@ -131,7 +163,63 @@ def test_workflow_dispatch_input_stays_high_with_fork_reachable_trigger(github_r
         "      - run: deploy.sh ${{ inputs.environment }}\n",
     )
 
-    findings = [f for f in scan_file(str(path), github_rules) if f.rule_id == "SEC4-GH-008"]
+    findings = _sec4_gh_008_findings(path, github_rules)
 
     assert findings
     assert {f.severity for f in findings} == {Severity.HIGH}
+
+
+def test_inline_workflow_dispatch_ref_name_stays_high_conservatively(github_rules, tmp_path):
+    path = _write_workflow(
+        tmp_path,
+        "on: workflow_dispatch\n"
+        "jobs:\n"
+        "  release:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo Building $GITHUB_REF_NAME\n",
+    )
+
+    findings = [f for f in scan_file(str(path), github_rules) if f.rule_id == "SEC4-GH-018"]
+
+    assert findings
+    assert {f.severity for f in findings} == {Severity.HIGH}
+
+
+def test_github_ref_name_downgrades_when_maintainer_only(github_rules, tmp_path):
+    path = _write_workflow(
+        tmp_path,
+        "on:\n"
+        "  workflow_dispatch:\n"
+        "jobs:\n"
+        "  release:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo Building $GITHUB_REF_NAME\n",
+    )
+
+    findings = [f for f in scan_file(str(path), github_rules) if f.rule_id == "SEC4-GH-018"]
+
+    assert findings
+    assert {f.severity for f in findings} == {Severity.MEDIUM}
+
+
+def test_compound_repo_comparison_guard_does_not_suppress_findings(github_rules, tmp_path):
+    path = _write_workflow(
+        tmp_path,
+        "on:\n"
+        "  pull_request:\n"
+        "jobs:\n"
+        "  test:\n"
+        "    if: github.repository == 'Nellur35/taintly' && success()\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo \"${{ github.event.pull_request.title }}\"\n",
+    )
+    ctx = WorkflowContext(repository="Nellur35/taintly", repository_owner="Nellur35")
+
+    findings = [
+        f for f in scan_file(str(path), github_rules, repoctx=ctx) if f.rule_id == "SEC4-GH-004"
+    ]
+
+    assert findings

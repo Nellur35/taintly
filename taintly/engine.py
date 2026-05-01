@@ -269,7 +269,7 @@ _MAINTAINER_GATED_TRIGGER_RE = re.compile(
 )
 _FORK_REACHABLE_TRIGGER_RE = re.compile(
     r"(?m)^\s*("
-    r"pull_request"  # covers pull_request and pull_request_target / _review etc.
+    r"pull_request(?:_target|_review|_review_comment)?"
     r"|issue_comment"
     r"|issues"
     r"|discussion"
