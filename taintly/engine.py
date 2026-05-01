@@ -8,6 +8,7 @@ import re
 
 from .families import classify_rule, default_confidence, default_review_needed
 from .gitlabguard import GitLabContext, find_dead_gitlab_job_ranges
+from .jenkinsguard import JenkinsContext, find_dead_jenkins_stage_ranges
 from .models import (
     _MAX_SAFE_TEXT_LEN,
     AuditReport,
@@ -100,6 +101,7 @@ def scan_file(
     _content: str | None = None,
     repoctx: StaticGuardContext | None = None,
     gitlabctx: GitLabContext | None = None,
+    jenkinsctx: JenkinsContext | None = None,
 ) -> list[Finding]:
     """Scan a single file against a list of rules.
 
@@ -242,6 +244,8 @@ def scan_file(
     _suppress_dead_findings(findings, content, repoctx)
     if any(rule.platform == Platform.GITLAB for rule in rules):
         _suppress_gitlab_dead_findings(findings, content, gitlabctx)
+    if any(rule.platform == Platform.JENKINS for rule in rules):
+        _suppress_jenkins_dead_findings(findings, content, jenkinsctx)
     _downgrade_maintainer_gated_findings(findings, content)
     return findings
 
@@ -250,7 +254,6 @@ def scan_file(
 # Post-detection severity calibration
 # ---------------------------------------------------------------------------
 
-
 def _suppress_gitlab_dead_findings(
     findings: list[Finding], content: str, gitlabctx: GitLabContext | None
 ) -> None:
@@ -258,6 +261,22 @@ def _suppress_gitlab_dead_findings(
     if not findings:
         return
     dead_ranges = find_dead_gitlab_job_ranges(content, gitlabctx)
+    if not dead_ranges:
+        return
+    findings[:] = [
+        f
+        for f in findings
+        if f.line <= 0 or not any(start <= f.line <= end for start, end in dead_ranges)
+    ]
+
+
+def _suppress_jenkins_dead_findings(
+    findings: list[Finding], content: str, jenkinsctx: JenkinsContext | None
+) -> None:
+    """Drop findings inside Jenkins stages proven dead by literal when logic."""
+    if not findings:
+        return
+    dead_ranges = find_dead_jenkins_stage_ranges(content, jenkinsctx)
     if not dead_ranges:
         return
     findings[:] = [
@@ -621,9 +640,16 @@ def scan_repo(
         report.families_with_ctx_coverage = set(ctx_rules_by_family)
 
         gitlabctx = GitLabContext() if plat == Platform.GITLAB else None
+        jenkinsctx = JenkinsContext() if plat == Platform.JENKINS else None
         for fpath in files:
             all_findings.extend(
-                scan_file(fpath, platform_rules, repoctx=repoctx, gitlabctx=gitlabctx)
+                scan_file(
+                    fpath,
+                    platform_rules,
+                    repoctx=repoctx,
+                    gitlabctx=gitlabctx,
+                    jenkinsctx=jenkinsctx,
+                )
             )
             # Surface-evaluation pass: re-read the file once and
             # check each ContextPattern's anchor regex.  Only families
