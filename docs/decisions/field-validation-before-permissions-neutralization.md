@@ -7,7 +7,8 @@ Accepted for Phase 8.
 ## Decision
 
 Run empirical field validation before implementing permissions-neutralization
-behavior.
+behavior, but keep field-validation operations and generated evidence in
+`taintly-private`.
 
 Phase 5 stays design-only until reviewed corpus evidence satisfies the
 reopening thresholds in `docs/decisions/permissions-neutralization-design.md`.
@@ -28,29 +29,30 @@ Field validation gives the project a reviewable basis for:
 - whether reporting terminology confused reviewers,
 - whether permissions-neutralization has enough evidence to reopen.
 
-## Scope
+## Public scope
 
-Phase 8 adds:
+Public `taintly` keeps only the sanitized methodology:
 
-- a small local-corpus validation harness,
-- machine-readable summary output,
-- a Markdown review queue for human triage,
-- initial local evidence from available CI-heavy repositories.
+- the decision that field evidence must come before permissions-neutralization,
+- the safety contract for future suppression candidates,
+- reopening criteria for Phase 5,
+- the public/private repository boundary.
+
+The validation harness, reviewer notes, raw outputs, corpus inventories, and
+Phase 8 reopening evidence belong in `taintly-private`.
 
 Phase 8 does not add runtime scanner behavior, new suppression rules, or score
-changes.
+changes in public `taintly`.
 
 ## Privacy and ethics boundary
 
-Committed field-validation artifacts must not publish third-party repository
-identities, local filesystem paths, filenames, or raw per-repository finding
-inventories. Evidence is for scanner tuning, not public calling-out of scanned
-repositories.
+Public `taintly` must not publish third-party repository identities, local
+filesystem paths, filenames, raw per-repository finding inventories, or
+reviewer adjudication notes. Evidence is for scanner tuning, not public
+calling-out of scanned repositories.
 
-The validation harness therefore writes stable target aliases by default
-(`github-target-01`, `gitlab-target-01`, etc.) and redacts sampled snippets and
-file identities in committed artifacts. Full raw outputs may be used locally for
-private review, but they should not be committed.
+Full raw outputs may be used in `taintly-private` for private review, but they
+must not be committed to public `taintly`.
 
 ## Scanner contract check
 
@@ -80,5 +82,5 @@ evidence meets the thresholds already documented in the Phase 5 design:
 - No new suppression behavior added.
 - Findings remain reportable when semantics are uncertain.
 - Evidence artifacts distinguish scan output from human assessment.
-- Committed artifacts use target aliases and redacted samples only.
+- Public artifacts contain methodology only, not corpus evidence.
 - Any future Phase 5 work cites reviewed corpus evidence, not intuition.

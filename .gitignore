@@ -20,3 +20,14 @@ coverage.xml
 # Subagent worktree infrastructure — created by Claude Code when
 # isolation="worktree" is used. Pure runtime state, never versioned.
 .claude/
+
+# Field-validation outputs belong in taintly-private. Public taintly may
+# keep sanitized methodology docs, but not generated corpus evidence,
+# raw scan inventories, reviewer notes, or third-party repo results.
+docs/field-validation/
+field-validation/
+corpus-output/
+corpus-outputs/
+review-notes/
+*.field-validation.json
+*.field-validation.md
