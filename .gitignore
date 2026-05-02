@@ -21,7 +21,8 @@ coverage.xml
 # isolation="worktree" is used. Pure runtime state, never versioned.
 .claude/
 
-# Local validation and review artifacts are not product assets.
+# Generated validation artifacts, corpus outputs, reviewer notes,
+# and third-party-identifying scan evidence are not product assets.
 docs/field-validation/
 field-validation/
 corpus-output/
