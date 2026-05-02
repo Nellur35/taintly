@@ -41,7 +41,8 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Optional
 
 # Module-level enable flag.  CLI flips this when
 # ``--check-imposter-commits`` is passed; the rule's pattern reads it

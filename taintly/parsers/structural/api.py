@@ -20,18 +20,20 @@ Usage::
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Optional
 
 from .schemas import detect_schema_for_path
-from .walker import Event, EventKind, walk as _walk
+from .walker import Event, EventKind
+from .walker import walk as _walk
 
 
 def walk_workflow(
     filepath: str,
     *,
     query: Optional[str] = None,
-    schema: Optional[str] = None,  # noqa: ARG001 — reserved for Phase 2
+    schema: Optional[str] = None,
     content: Optional[str] = None,
     recover: bool = True,
 ) -> Iterator[Event]:
@@ -67,4 +69,4 @@ def walk_workflow(
     yield from _walk(content, query=query, recover=recover)
 
 
-__all__ = ["walk_workflow", "Event", "EventKind"]
+__all__ = ["Event", "EventKind", "walk_workflow"]

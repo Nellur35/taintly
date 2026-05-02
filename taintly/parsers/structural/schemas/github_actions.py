@@ -27,7 +27,6 @@ SCHEMA: dict[str, ValueShape] = {
     "defaults": ValueShape.STRING_OR_MAPPING,
     "defaults.run.shell": ValueShape.STRING,
     "defaults.run.working-directory": ValueShape.STRING,
-
     # ``on:`` events
     "on.push": ValueShape.STRING_OR_MAPPING,
     "on.push.branches": ValueShape.SEQUENCE_OF_STRING,
@@ -45,7 +44,6 @@ SCHEMA: dict[str, ValueShape] = {
     "on.schedule": ValueShape.STRING_OR_MAPPING,
     "on.issue_comment": ValueShape.STRING_OR_MAPPING,
     "on.pull_request_review": ValueShape.STRING_OR_MAPPING,
-
     # ``jobs:``
     "jobs.*.name": ValueShape.STRING,
     "jobs.*.runs-on": ValueShape.STRING_OR_SEQUENCE_OF_STRING,
@@ -65,7 +63,6 @@ SCHEMA: dict[str, ValueShape] = {
     "jobs.*.concurrency": ValueShape.STRING_OR_MAPPING,
     "jobs.*.concurrency.group": ValueShape.STRING,
     "jobs.*.concurrency.cancel-in-progress": ValueShape.BOOLEAN,
-
     # Steps
     "jobs.*.steps[*].name": ValueShape.STRING,
     "jobs.*.steps[*].id": ValueShape.STRING,
@@ -78,7 +75,6 @@ SCHEMA: dict[str, ValueShape] = {
     "jobs.*.steps[*].working-directory": ValueShape.STRING,
     "jobs.*.steps[*].timeout-minutes": ValueShape.NUMBER,
     "jobs.*.steps[*].continue-on-error": ValueShape.BOOLEAN,
-
     # Container / services
     "jobs.*.container": ValueShape.STRING_OR_MAPPING,
     "jobs.*.container.image": ValueShape.STRING,

@@ -34,9 +34,9 @@ to regex):
 
 from __future__ import annotations
 
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterator
 
 
 class TokenKind(Enum):
@@ -136,9 +136,7 @@ class _Tokenizer:
             # Reject directives and document separators.
             stripped_full = raw.lstrip()
             if stripped_full.startswith("%"):
-                raise TokenizerError(
-                    line_no, f"directive not supported: {stripped_full[:20]!r}"
-                )
+                raise TokenizerError(line_no, f"directive not supported: {stripped_full[:20]!r}")
             if stripped_full.startswith("---") and stripped_full[3:4] in ("", " ", "\t"):
                 raise TokenizerError(line_no, "document separator '---' not supported")
             if stripped_full.startswith("..."):
@@ -157,9 +155,7 @@ class _Tokenizer:
     # Block scalar continuation
     # ------------------------------------------------------------------
 
-    def _tokenize_block_scalar_continuation(
-        self, raw: str, line_no: int
-    ) -> Iterator[Token]:
+    def _tokenize_block_scalar_continuation(self, raw: str, line_no: int) -> Iterator[Token]:
         # Empty / blank lines belong to the block scalar regardless
         # of indent.
         if not raw.strip():
@@ -189,7 +185,7 @@ class _Tokenizer:
             self._block_scalar_min_indent_seen = -1
             return
 
-        body = raw[self._block_scalar_indent:]
+        body = raw[self._block_scalar_indent :]
         yield Token(
             TokenKind.SCALAR_BLOCK_LINE,
             line=line_no,
@@ -204,9 +200,7 @@ class _Tokenizer:
 
     def _tokenize_line(self, raw: str, line_no: int) -> Iterator[Token]:
         indent = len(raw) - len(raw.lstrip())
-        yield Token(
-            TokenKind.INDENT, line_no, column=1, value=" " * indent, indent=indent
-        )
+        yield Token(TokenKind.INDENT, line_no, column=1, value=" " * indent, indent=indent)
         pos = indent
         n = len(raw)
 
@@ -248,36 +242,26 @@ class _Tokenizer:
             # Flow open / close.
             if ch == "[":
                 self._flow_depth += 1
-                yield Token(
-                    TokenKind.FLOW_OPEN_SEQ, line_no, pos + 1, "[", indent
-                )
+                yield Token(TokenKind.FLOW_OPEN_SEQ, line_no, pos + 1, "[", indent)
                 pos += 1
                 continue
             if ch == "{":
                 self._flow_depth += 1
-                yield Token(
-                    TokenKind.FLOW_OPEN_MAP, line_no, pos + 1, "{", indent
-                )
+                yield Token(TokenKind.FLOW_OPEN_MAP, line_no, pos + 1, "{", indent)
                 pos += 1
                 continue
             if ch == "]":
                 self._flow_depth = max(0, self._flow_depth - 1)
-                yield Token(
-                    TokenKind.FLOW_CLOSE_SEQ, line_no, pos + 1, "]", indent
-                )
+                yield Token(TokenKind.FLOW_CLOSE_SEQ, line_no, pos + 1, "]", indent)
                 pos += 1
                 continue
             if ch == "}":
                 self._flow_depth = max(0, self._flow_depth - 1)
-                yield Token(
-                    TokenKind.FLOW_CLOSE_MAP, line_no, pos + 1, "}", indent
-                )
+                yield Token(TokenKind.FLOW_CLOSE_MAP, line_no, pos + 1, "}", indent)
                 pos += 1
                 continue
             if ch == ",":
-                yield Token(
-                    TokenKind.FLOW_COMMA, line_no, pos + 1, ",", indent
-                )
+                yield Token(TokenKind.FLOW_COMMA, line_no, pos + 1, ",", indent)
                 pos += 1
                 continue
 
@@ -286,9 +270,7 @@ class _Tokenizer:
                 end = pos + 1
                 while end < n and raw[end] not in " \t,]}":
                     end += 1
-                yield Token(
-                    TokenKind.ANCHOR, line_no, pos + 1, raw[pos:end], indent
-                )
+                yield Token(TokenKind.ANCHOR, line_no, pos + 1, raw[pos:end], indent)
                 pos = end
                 continue
 
@@ -297,17 +279,13 @@ class _Tokenizer:
                 end = pos + 1
                 while end < n and raw[end] not in " \t,]}":
                     end += 1
-                yield Token(
-                    TokenKind.ALIAS, line_no, pos + 1, raw[pos:end], indent
-                )
+                yield Token(TokenKind.ALIAS, line_no, pos + 1, raw[pos:end], indent)
                 pos = end
                 continue
 
             # Merge key: ``<<:`` (only valid as a mapping key).
-            if ch == "<" and raw[pos:pos + 3] == "<<:":
-                yield Token(
-                    TokenKind.MERGE_KEY, line_no, pos + 1, "<<", indent
-                )
+            if ch == "<" and raw[pos : pos + 3] == "<<:":
+                yield Token(TokenKind.MERGE_KEY, line_no, pos + 1, "<<", indent)
                 # Consume the ``<<`` and the trailing ``:`` plus any
                 # following whitespace.  The merge key has no
                 # implicit "key" identity beyond its marker — the
@@ -319,15 +297,11 @@ class _Tokenizer:
 
             # Reject custom tags: ``!`` / ``!!``.
             if ch == "!":
-                raise TokenizerError(
-                    line_no, "custom tags ('!') not supported"
-                )
+                raise TokenizerError(line_no, "custom tags ('!') not supported")
 
             # Reject complex keys: ``? `` at start of value position.
             if ch == "?" and (pos + 1 == n or raw[pos + 1] in (" ", "\t")):
-                raise TokenizerError(
-                    line_no, "explicit/complex keys ('?') not supported"
-                )
+                raise TokenizerError(line_no, "explicit/complex keys ('?') not supported")
 
             # Block-scalar header: ``|`` or ``>`` at end of line
             # (possibly with chomping/indent indicators) — but only
@@ -355,8 +329,10 @@ class _Tokenizer:
                 trailing = end
                 while trailing < n and raw[trailing] == " ":
                     trailing += 1
-                if trailing < n and raw[trailing] == ":" and (
-                    trailing + 1 == n or raw[trailing + 1] in (" ", "\t")
+                if (
+                    trailing < n
+                    and raw[trailing] == ":"
+                    and (trailing + 1 == n or raw[trailing + 1] in (" ", "\t"))
                 ):
                     yield Token(
                         TokenKind.KEY,
@@ -384,9 +360,7 @@ class _Tokenizer:
     # Quoted scalar
     # ------------------------------------------------------------------
 
-    def _read_quoted_scalar(
-        self, raw: str, start: int, line_no: int
-    ) -> tuple[int, str]:
+    def _read_quoted_scalar(self, raw: str, start: int, line_no: int) -> tuple[int, str]:
         quote = raw[start]
         pos = start + 1
         n = len(raw)
@@ -408,7 +382,7 @@ class _Tokenizer:
             # leaves them as raw text; the value-coercion layer
             # owns interpretation).
             if ch == "\\" and pos + 1 < n:
-                out.append(raw[pos:pos + 2])
+                out.append(raw[pos : pos + 2])
                 pos += 2
                 continue
             if ch == '"':
@@ -426,7 +400,7 @@ class _Tokenizer:
 
     def _read_plain_token(
         self, raw: str, start: int, line_no: int, indent: int
-    ) -> Iterator[Token]:
+    ) -> Generator[Token, None, int]:
         """Read a plain-scalar token, disambiguating key vs scalar.
 
         Key detection: a plain run terminated by ``:`` followed by
@@ -451,9 +425,7 @@ class _Tokenizer:
                 break
             if ch == "#" and pos > 0 and raw[pos - 1] == " ":
                 break
-            if ch == ":" and (
-                pos + 1 == n or raw[pos + 1] in (" ", "\t")
-            ):
+            if ch == ":" and (pos + 1 == n or raw[pos + 1] in (" ", "\t")):
                 # Key-marker colon found.
                 key_end = pos
                 key_value = raw[start:key_end].rstrip()

@@ -28,7 +28,7 @@ ones.
 from __future__ import annotations
 
 import re
-from typing import Mapping
+from collections.abc import Mapping
 
 # Module-level enabled flag.  CLI flips this when
 # --respect-zizmor-ignores is passed; engine consults it during

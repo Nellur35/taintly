@@ -18,7 +18,6 @@ from taintly.models import (
 from taintly.platform import github_sha_verify
 from taintly.structural_pattern import StructuralPattern
 
-
 # ---------------------------------------------------------------------------
 # Phase 2 migration helpers — regex-equivalent predicates the
 # StructuralPattern rules call.  Kept module-local so the migration
@@ -48,7 +47,7 @@ _DANGEROUS_GITHUB_CONTEXT_RE = re.compile(
 )
 
 
-def _has_dangerous_github_context(value: str, _value_kind: str, _path: tuple) -> bool:
+def _has_dangerous_github_context(value: str, _value_kind: str, _path: tuple[object, ...]) -> bool:
     """Predicate for SEC4-GH-004 (script injection).
 
     The ``**.run`` path query already filters to step ``run:``
@@ -62,7 +61,7 @@ def _has_dangerous_github_context(value: str, _value_kind: str, _path: tuple) ->
     return bool(_DANGEROUS_GITHUB_CONTEXT_RE.search(value))
 
 
-def _is_unpinned_uses_value(value: str, _value_kind: str, _path: tuple) -> bool:
+def _is_unpinned_uses_value(value: str, _value_kind: str, _path: tuple[object, ...]) -> bool:
     """Predicate for SEC3-GH-001 (unpinned action).
 
     Equivalent to the regex
@@ -87,9 +86,7 @@ def _is_unpinned_uses_value(value: str, _value_kind: str, _path: tuple) -> bool:
     ref_token = ref.split()[0].split("#")[0]
     if ref_token in _BRANCH_REF_NAMES:
         return False
-    if _FULL_SHA_RE.match(ref_token):
-        return False
-    return True
+    return not _FULL_SHA_RE.match(ref_token)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +130,7 @@ class ImposterCommitPattern:
     (which caches verdicts process-wide).
     """
 
-    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
         if not github_sha_verify.is_enabled():
             return []
         results: list[tuple[int, str]] = []

@@ -5,8 +5,8 @@ from __future__ import annotations
 import glob
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from .families import classify_rule, default_confidence, default_review_needed
 from .gitlabguard import GitLabContext, find_dead_gitlab_job_ranges
@@ -190,9 +190,7 @@ def scan_file(
                 if matches and getattr(rule, "anchor_aware", False):
                     expanded_content, expanded_lines = _get_expanded()
                     if expanded_content != content:
-                        expanded_matches = rule.pattern.check(
-                            expanded_content, expanded_lines
-                        )
+                        expanded_matches = rule.pattern.check(expanded_content, expanded_lines)
                         expanded_lineset = {ln for ln, _ in expanded_matches}
                         matches = [
                             (ln, snip)
@@ -271,29 +269,21 @@ class _PostProcessContext:
 _PostProcessor = Callable[[list[Finding], _PostProcessContext], None]
 
 
-def _github_dead_postprocessor(
-    findings: list[Finding], ctx: _PostProcessContext
-) -> None:
+def _github_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
     _suppress_dead_findings(findings, ctx.content, ctx.repoctx)
 
 
-def _gitlab_dead_postprocessor(
-    findings: list[Finding], ctx: _PostProcessContext
-) -> None:
+def _gitlab_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
     if any(rule.platform == Platform.GITLAB for rule in ctx.rules):
         _suppress_gitlab_dead_findings(findings, ctx.content, ctx.gitlabctx)
 
 
-def _jenkins_dead_postprocessor(
-    findings: list[Finding], ctx: _PostProcessContext
-) -> None:
+def _jenkins_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
     if any(rule.platform == Platform.JENKINS for rule in ctx.rules):
         _suppress_jenkins_dead_findings(findings, ctx.content, ctx.jenkinsctx)
 
 
-def _maintainer_downgrade_postprocessor(
-    findings: list[Finding], ctx: _PostProcessContext
-) -> None:
+def _maintainer_downgrade_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
     _downgrade_maintainer_gated_findings(findings, ctx.content)
 
 
@@ -323,6 +313,7 @@ def _run_post_processors(
     )
     for processor in POST_PROCESSORS:
         processor(findings, ctx)
+
 
 def _suppress_gitlab_dead_findings(
     findings: list[Finding], content: str, gitlabctx: GitLabContext | None
@@ -354,6 +345,7 @@ def _suppress_jenkins_dead_findings(
         for f in findings
         if f.line <= 0 or not any(start <= f.line <= end for start, end in dead_ranges)
     ]
+
 
 # ``on:`` events whose firing is restricted to maintainers — pushing
 # tags, creating releases, scheduling cron, or invoking
@@ -389,9 +381,7 @@ _FORK_REACHABLE_TRIGGER_RE = re.compile(
 )
 # Single-line shape: ``on: push`` / ``on: [push, pull_request]``.
 _INLINE_TRIGGER_RE = re.compile(r"^on:\s*(\[[^\]]+\]|\w+)\s*$", re.MULTILINE)
-_REF_NAME_REF_RE = re.compile(
-    r"\$\{?\s*GITHUB_REF_NAME\b|github\.ref_name\b", re.IGNORECASE
-)
+_REF_NAME_REF_RE = re.compile(r"\$\{?\s*GITHUB_REF_NAME\b|github\.ref_name\b", re.IGNORECASE)
 _INPUTS_REF_RE = re.compile(
     r"\$\{\{\s*(?:github\.event\.inputs|inputs)\.[a-zA-Z0-9_]+\s*\}\}",
     re.IGNORECASE,
@@ -437,9 +427,7 @@ def _suppress_dead_findings(
     ]
 
 
-def _downgrade_maintainer_gated_findings(
-    findings: list[Finding], content: str
-) -> None:
+def _downgrade_maintainer_gated_findings(findings: list[Finding], content: str) -> None:
     """Mutate ``findings`` in place: for findings in the
     script-injection family that cite ``$GITHUB_REF_NAME`` (or
     ``github.ref_name``) on a workflow whose triggers are all
@@ -570,7 +558,7 @@ def _file_matches_platform(filepath: str, platform: Platform) -> bool:
             or name.endswith(".jenkinsfile")
             or name.endswith(".groovy")
         )
-    return False
+    raise ValueError(f"unsupported platform: {platform}")
 
 
 def detect_platform(repo_path: str) -> Platform | None:
@@ -710,7 +698,7 @@ def scan_repo(
 
         ctx_rules_by_family: dict[str, list[Rule]] = {}
         for r in platform_rules:
-            if isinstance(r.pattern, _ContextPattern) and getattr(r, "finding_family", ""):
+            if isinstance(r.pattern, _ContextPattern) and r.finding_family:
                 ctx_rules_by_family.setdefault(r.finding_family, []).append(r)
         report.families_with_ctx_coverage = set(ctx_rules_by_family)
 
@@ -741,7 +729,11 @@ def scan_repo(
                     if family in report.families_with_surface:
                         continue
                     for r in fam_rules:
-                        if r.pattern.count_anchor_matches(_content, _lines) > 0:
+                        pattern = r.pattern
+                        if (
+                            isinstance(pattern, _ContextPattern)
+                            and pattern.count_anchor_matches(_content, _lines) > 0
+                        ):
                             report.families_with_surface.add(family)
                             break
         # PSE-GH-002: enrich PSE-GH-001 findings by classifying any

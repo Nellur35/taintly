@@ -401,7 +401,7 @@ RULES: list[Rule] = [
             exclude=[
                 r"^\s*//",  # Groovy line comment
                 r"^\s*/\*",  # `/*` block-comment opener (single-line
-                             # `/* ... */` or multi-line opener)
+                # `/* ... */` or multi-line opener)
                 r"^\s*\*",  # Javadoc-style block-comment body
                 r"^\s*#",  # Shell-style comment (rare in Groovy)
                 # Prose "make sure" — inherited idiom from LOTP-JK-001
@@ -616,7 +616,7 @@ RULES: list[Rule] = [
             exclude=[
                 r"^\s*//",
                 r"^\s*/\*",  # `/*` block-comment opener (single-line
-                             # `/* ... */` or multi-line opener)
+                # `/* ... */` or multi-line opener)
                 r"^\s*\*",
                 r"^\s*#",
                 # Package-install lines.  The install is caught by
@@ -779,7 +779,7 @@ RULES: list[Rule] = [
             exclude=[
                 r"^\s*//",
                 r"^\s*/\*",  # `/*` block-comment opener (single-line
-                             # `/* ... */` or multi-line opener)
+                # `/* ... */` or multi-line opener)
                 r"^\s*\*",
                 r"^\s*#",
                 # Official provider hosts — don't fire on the safe form.

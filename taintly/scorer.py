@@ -144,6 +144,7 @@ def _platform_from_rule_id(rule_id: str) -> Platform | None:
         return Platform.JENKINS
     return None
 
+
 # ---------------------------------------------------------------------------
 # OWASP category metadata — weights must sum to ≤ 100 (leave headroom for rounding)
 # ---------------------------------------------------------------------------
@@ -369,14 +370,15 @@ def compute_score(
     # rule pack would never have evaluated against.
     fired_rule_ids = {f.rule_id for f in findings}
     if platforms_scanned is None:
-        inferred = {_platform_from_rule_id(f.rule_id) for f in findings}
-        inferred.discard(None)
+        inferred = {
+            platform
+            for platform in (_platform_from_rule_id(f.rule_id) for f in findings)
+            if platform is not None
+        }
         platforms_scanned = inferred or {Platform.GITHUB, Platform.GITLAB, Platform.JENKINS}
 
     bonus_no_criticals = (
-        _BONUS_NO_CRITICALS
-        if n_critical == 0 and n_high < _BONUS_NO_CRITICALS_HIGH_CAP
-        else 0
+        _BONUS_NO_CRITICALS if n_critical == 0 and n_high < _BONUS_NO_CRITICALS_HIGH_CAP else 0
     )
 
     # all_pinned: for every scanned platform that HAS a pin rule, that

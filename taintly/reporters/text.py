@@ -109,10 +109,10 @@ def _top_risk(findings: list[Finding]) -> Finding | None:
 # lines from the quick-win surface.
 _FOREIGN_SUPPRESSION_MARKER_RE = re.compile(
     r"#\s*(?:"
-    r"zizmor\s*:\s*ignore"      # zizmor (GitHub Actions auditor)
-    r"|checkov\s*:\s*skip"      # checkov (IaC scanner)
-    r"|nosec\b"                 # bandit
-    r"|nosemgrep\b"             # semgrep
+    r"zizmor\s*:\s*ignore"  # zizmor (GitHub Actions auditor)
+    r"|checkov\s*:\s*skip"  # checkov (IaC scanner)
+    r"|nosec\b"  # bandit
+    r"|nosemgrep\b"  # semgrep
     r")",
     re.IGNORECASE,
 )
@@ -343,9 +343,7 @@ def format_text(
     engine_errors = report.engine_errors()
     if engine_errors:
         warn_color = c.get(Severity.HIGH, "") if use_color else ""
-        out.append(
-            f"{warn_color}{b}! Coverage degraded on {len(engine_errors)} file(s){r}"
-        )
+        out.append(f"{warn_color}{b}! Coverage degraded on {len(engine_errors)} file(s){r}")
         for f in engine_errors[:5]:
             out.append(f"  {arrow_char()} {f.file}: {f.title}")
         if len(engine_errors) > 5:

@@ -1,9 +1,9 @@
 """Public segmentation primitives.
 
-  * :func:`for_each_job` walks job segments at 1-based line ranges.
-  * :func:`for_each_step` walks the per-step entries inside a job.
-  * Both yield typed records (``JobSegment`` / ``StepSegment``) with
-    ``name``, ``start_line``, ``end_line``, and ``body_lines``.
+* :func:`for_each_job` walks job segments at 1-based line ranges.
+* :func:`for_each_step` walks the per-step entries inside a job.
+* Both yield typed records (``JobSegment`` / ``StepSegment``) with
+  ``name``, ``start_line``, ``end_line``, and ``body_lines``.
 """
 
 from __future__ import annotations

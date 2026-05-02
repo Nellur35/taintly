@@ -149,6 +149,21 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "comments makes the anchor noisier across SEC-1/SEC-4 "
         "rules that share the same ``^on:`` shape."
     ),
+    ("SEC7-GH-001", "whitespace_pad"): (
+        "Self-hosted-runner regex expects a normal YAML key/value separator; "
+        "the zero-space mutant is YAML-valid but in the same separator-"
+        "fragility family as SEC10-GH-004 / AI-GH-019."
+    ),
+    ("SEC3-GH-001", "whitespace_pad"): (
+        "Unpinned-action regex expects the normal ``uses: owner/action@ref`` "
+        "separator. The zero-space mutant shares the documented "
+        "``uses:\\s+`` anchor-family gap."
+    ),
+    ("SEC4-GH-004", "whitespace_pad"): (
+        "Script-injection regex expects the normal ``run: command`` "
+        "separator; the zero-space mutant is a known YAML-format edge in "
+        "the same separator-fragility family."
+    ),
     ("AI-GH-023", "whitespace_pad"): (
         "Same family as AI-GH-019/020/021/022: requires-clause uses "
         "``AI_AGENT_USES_PATTERN``. See AI-GH-022 entry for full rationale."
@@ -203,6 +218,15 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "single-quoted shell references are not sinks (PR #104). "
         "quote_swap mutations that produce a single-quoted consumer-side "
         "sink are SEMANTICALLY SAFER, not equivalent."
+    ),
+    ("TAINT-GH-012", "indent_shift"): (
+        "Same TaintPattern family as TAINT-GH-001/009: doubled-indent variants "
+        "do not re-parse through the job/step/env segmentation chain."
+    ),
+    ("TAINT-GH-012", "quote_swap"): (
+        "Same single-quote-precision rationale as TAINT-GH-001/002/009: "
+        "quote_swap produces single-quoted shell references that are not "
+        "equivalent sinks."
     ),
     ("TAINT-GH-007", "whitespace_pad"): (
         "Requires clause uses ``uses:\\s+\\./.github/workflows/`` to "
@@ -340,7 +364,13 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ("TAINT-GL-001", "comment_inject"): (
         "Inline `# comment` on the source line of a taint flow breaks the line-level regex anchor."
     ),
+    ("TAINT-GL-001", "quote_swap"): (
+        "GitLab taint sink detection is quote-style-sensitive; single-quoted "
+        "shell variables are not equivalent to double-quoted interpolation "
+        "in the current analyzer."
+    ),
     ("TAINT-GL-002", "comment_inject"): ("Same TaintPattern family as TAINT-GL-001."),
+    ("TAINT-GL-002", "quote_swap"): ("Same quote-style limitation as TAINT-GL-001."),
     ("TAINT-GL-003", "quote_swap"): (
         "Artifact-bridge TaintPattern is quote-style-sensitive; mirrors the "
         "GitHub TAINT-GH-003/004 behaviour."
