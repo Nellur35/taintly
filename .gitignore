@@ -21,9 +21,7 @@ coverage.xml
 # isolation="worktree" is used. Pure runtime state, never versioned.
 .claude/
 
-# Field-validation outputs belong in taintly-private. Public taintly may
-# keep sanitized methodology docs, but not generated corpus evidence,
-# raw scan inventories, reviewer notes, or third-party repo results.
+# Local validation and review artifacts are not product assets.
 docs/field-validation/
 field-validation/
 corpus-output/
