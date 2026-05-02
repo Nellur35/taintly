@@ -70,20 +70,25 @@ def _scan_corpus() -> dict[str, str]:
             continue
         for ext in (".yml", ".yaml", ".Jenkinsfile"):
             for path in sorted(plat_dir.rglob(f"*{ext}")):
-                rel = str(path.relative_to(fixtures_root))
+                rel = path.relative_to(fixtures_root).as_posix()
                 try:
                     findings = scan_file(str(path), rules)
-                except Exception as e:  # noqa: BLE001 — gate is best-effort
+                except Exception as e:
                     out[rel] = f"ERROR: {type(e).__name__}: {e}"
                     continue
                 out[rel] = _findings_signature(findings)
     # Also scan the special Jenkinsfile (no extension) directly.
-    for jf in (fixtures_root / "jenkins").rglob("Jenkinsfile*") if (fixtures_root / "jenkins").exists() else []:
+    for jf in (
+        (fixtures_root / "jenkins").rglob("Jenkinsfile*")
+        if (fixtures_root / "jenkins").exists()
+        else []
+    ):
         if jf.is_file():
-            rel = str(jf.relative_to(fixtures_root))
+            rel = jf.relative_to(fixtures_root).as_posix()
             if rel in out:
                 continue
             from taintly.engine import scan_file as _scan
+
             findings = _scan(str(jf), rules)
             out[rel] = _findings_signature(findings)
     return out
@@ -106,8 +111,7 @@ def main() -> int:
     # Check mode (default).
     if not BASELINE.exists():
         print(
-            f"FAIL: baseline {BASELINE} does not exist.  "
-            f"Run with --update to seed.",
+            f"FAIL: baseline {BASELINE} does not exist.  Run with --update to seed.",
             file=sys.stderr,
         )
         return 2
@@ -116,9 +120,7 @@ def main() -> int:
     diffs: list[str] = []
     for path, sig in current.items():
         if expected.get(path) != sig:
-            diffs.append(
-                f"  {path}: baseline={expected.get(path)!r} current={sig!r}"
-            )
+            diffs.append(f"  {path}: baseline={expected.get(path)!r} current={sig!r}")
     for path in expected:
         if path not in current:
             diffs.append(f"  {path}: baseline present but file missing")
