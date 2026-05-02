@@ -88,6 +88,29 @@ def test_workflow_dispatch_input_downgrades_when_maintainer_only(github_rules, t
     assert all("Maintainer-gated trigger path" in f.calibration_reason for f in findings)
 
 
+def test_dead_path_suppression_happens_before_maintainer_gated_downgrade(
+    github_rules, tmp_path
+):
+    path = _write_workflow(
+        tmp_path,
+        "on:\n"
+        "  workflow_dispatch:\n"
+        "    inputs:\n"
+        "      environment:\n"
+        "        type: string\n"
+        "jobs:\n"
+        "  deploy:\n"
+        "    if: false\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: deploy.sh ${{ inputs.environment }}\n",
+    )
+
+    findings = _sec4_gh_008_findings(path, github_rules)
+
+    assert findings == []
+
+
 @pytest.mark.parametrize(
     "extra_trigger",
     [
