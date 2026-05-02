@@ -126,6 +126,7 @@ def test_workflow_dispatch_input_downgrades_when_maintainer_only(github_rules, t
 
     assert findings
     assert {f.severity for f in findings} == {Severity.MEDIUM}
+    assert all("Maintainer-gated trigger path" in f.calibration_reason for f in findings)
 
 
 @pytest.mark.parametrize(
@@ -202,6 +203,7 @@ def test_github_ref_name_downgrades_when_maintainer_only(github_rules, tmp_path)
 
     assert findings
     assert {f.severity for f in findings} == {Severity.MEDIUM}
+    assert all("Maintainer-gated trigger path" in f.calibration_reason for f in findings)
 
 
 def test_compound_repo_comparison_guard_does_not_suppress_findings(github_rules, tmp_path):

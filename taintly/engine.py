@@ -5,6 +5,8 @@ from __future__ import annotations
 import glob
 import os
 import re
+from dataclasses import dataclass
+from typing import Callable
 
 from .families import classify_rule, default_confidence, default_review_needed
 from .gitlabguard import GitLabContext, find_dead_gitlab_job_ranges
@@ -241,18 +243,86 @@ def scan_file(
                     )
                 )
 
-    _suppress_dead_findings(findings, content, repoctx)
-    if any(rule.platform == Platform.GITLAB for rule in rules):
-        _suppress_gitlab_dead_findings(findings, content, gitlabctx)
-    if any(rule.platform == Platform.JENKINS for rule in rules):
-        _suppress_jenkins_dead_findings(findings, content, jenkinsctx)
-    _downgrade_maintainer_gated_findings(findings, content)
+    _run_post_processors(
+        findings,
+        rules=rules,
+        content=content,
+        repoctx=repoctx,
+        gitlabctx=gitlabctx,
+        jenkinsctx=jenkinsctx,
+    )
     return findings
 
 
 # ---------------------------------------------------------------------------
 # Post-detection severity calibration
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _PostProcessContext:
+    rules: list[Rule]
+    content: str
+    repoctx: StaticGuardContext | None = None
+    gitlabctx: GitLabContext | None = None
+    jenkinsctx: JenkinsContext | None = None
+
+
+_PostProcessor = Callable[[list[Finding], _PostProcessContext], None]
+
+
+def _github_dead_postprocessor(
+    findings: list[Finding], ctx: _PostProcessContext
+) -> None:
+    _suppress_dead_findings(findings, ctx.content, ctx.repoctx)
+
+
+def _gitlab_dead_postprocessor(
+    findings: list[Finding], ctx: _PostProcessContext
+) -> None:
+    if any(rule.platform == Platform.GITLAB for rule in ctx.rules):
+        _suppress_gitlab_dead_findings(findings, ctx.content, ctx.gitlabctx)
+
+
+def _jenkins_dead_postprocessor(
+    findings: list[Finding], ctx: _PostProcessContext
+) -> None:
+    if any(rule.platform == Platform.JENKINS for rule in ctx.rules):
+        _suppress_jenkins_dead_findings(findings, ctx.content, ctx.jenkinsctx)
+
+
+def _maintainer_downgrade_postprocessor(
+    findings: list[Finding], ctx: _PostProcessContext
+) -> None:
+    _downgrade_maintainer_gated_findings(findings, ctx.content)
+
+
+POST_PROCESSORS: tuple[_PostProcessor, ...] = (
+    _github_dead_postprocessor,
+    _gitlab_dead_postprocessor,
+    _jenkins_dead_postprocessor,
+    _maintainer_downgrade_postprocessor,
+)
+
+
+def _run_post_processors(
+    findings: list[Finding],
+    *,
+    rules: list[Rule],
+    content: str,
+    repoctx: StaticGuardContext | None,
+    gitlabctx: GitLabContext | None,
+    jenkinsctx: JenkinsContext | None,
+) -> None:
+    ctx = _PostProcessContext(
+        rules=rules,
+        content=content,
+        repoctx=repoctx,
+        gitlabctx=gitlabctx,
+        jenkinsctx=jenkinsctx,
+    )
+    for processor in POST_PROCESSORS:
+        processor(findings, ctx)
 
 def _suppress_gitlab_dead_findings(
     findings: list[Finding], content: str, gitlabctx: GitLabContext | None
@@ -400,7 +470,12 @@ def _downgrade_maintainer_gated_findings(
             continue
         new_sev = _downgrade.get(f.severity)
         if new_sev is not None and new_sev != f.severity:
+            old_sev = f.severity
             f.severity = new_sev
+            f.calibration_reason = (
+                "Maintainer-gated trigger path downgraded severity "
+                f"from {old_sev.value} to {new_sev.value}."
+            )
 
 
 def _matches_maintainer_downgrade_pattern(finding: Finding) -> bool:
