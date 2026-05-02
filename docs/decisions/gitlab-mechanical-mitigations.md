@@ -17,11 +17,16 @@ fall inside a job proven dead.
 - Dead-job suppression when a matching rule uses `when: never`.
 - Runtime fallback for missing context, unsupported variables, compound
   expressions, function-like expressions, regex expressions, and manual jobs.
+- Conservative ordered-rules handling: an earlier `rules:` entry whose
+  condition is runtime/unknown blocks dead-job proof from later entries,
+  because GitLab stops at the first matching rule and v1 does not prove whether
+  that earlier rule will match.
 
 ## What is deferred
 
 - Full GitLab expression parsing.
-- Ordered rule-result modeling beyond the `when: never` dead-job case.
+- Full ordered rule-result modeling beyond the conservative `when: never`
+  dead-job case.
 - Manual pipeline input severity calibration.
 - Deployment-aware rescoring.
 - Cross-file include expansion for GitLab CI.
