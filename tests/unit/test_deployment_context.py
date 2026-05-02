@@ -42,6 +42,52 @@ def test_load_deployment_context_from_repo_file(tmp_path):
     assert ctx.secret_scoping == "oidc_only"
 
 
+def test_load_deployment_context_from_single_file_path(tmp_path):
+    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("on: push\n", encoding="utf-8")
+    (tmp_path / ".taintly-context.yml").write_text("external_prs: blocked\n", encoding="utf-8")
+
+    ctx = load_deployment_context(str(workflow))
+
+    assert ctx.external_prs == "blocked"
+
+
+def test_load_deployment_context_from_nested_directory(tmp_path):
+    nested = tmp_path / ".github" / "workflows"
+    nested.mkdir(parents=True)
+    (tmp_path / ".taintly-context.yml").write_text(
+        "secret_scoping: oidc_only\n", encoding="utf-8"
+    )
+
+    ctx = load_deployment_context(str(nested))
+
+    assert ctx.secret_scoping == "oidc_only"
+
+
+def test_load_deployment_context_from_path_below_repo_root(tmp_path):
+    nested = tmp_path / "services" / "api" / "ci"
+    nested.mkdir(parents=True)
+    (tmp_path / ".taintly-context.yml").write_text(
+        "runner_topology: isolated_self_hosted\n", encoding="utf-8"
+    )
+
+    ctx = load_deployment_context(str(nested))
+
+    assert ctx.runner_topology == "isolated_self_hosted"
+
+
+def test_invalid_context_value_warns_and_falls_back_to_unknown(tmp_path, capsys):
+    (tmp_path / ".taintly-context.yml").write_text(
+        "external_prs: maybe\n", encoding="utf-8"
+    )
+
+    ctx = load_deployment_context(str(tmp_path))
+
+    assert ctx.external_prs == "unknown"
+    assert "context warning" in capsys.readouterr().err
+
+
 def test_context_notes_do_not_mutate_severity():
     finding = _finding()
 
@@ -49,6 +95,19 @@ def test_context_notes_do_not_mutate_severity():
 
     assert finding.severity == Severity.HIGH
     assert finding.triage_needed is True
+    assert finding.context_tags == ["external_prs:blocked"]
+    assert finding.context_notes == [
+        "Exploitability may be over-weighted for deployments without open external PRs."
+    ]
+
+
+def test_apply_context_notes_is_idempotent():
+    finding = _finding()
+    ctx = DeploymentContext(external_prs="blocked")
+
+    apply_context_notes(finding, ctx)
+    apply_context_notes(finding, ctx)
+
     assert finding.context_tags == ["external_prs:blocked"]
     assert finding.context_notes == [
         "Exploitability may be over-weighted for deployments without open external PRs."

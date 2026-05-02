@@ -898,10 +898,13 @@ def main():
                 )
 
     reports = scan_repo(args.path, all_rules, platform)
-    deployment_context = load_deployment_context(args.path)
 
     all_findings = []
+    deployment_contexts: dict[str, object] = {}
     for report in reports:
+        deployment_context = deployment_contexts.setdefault(
+            report.repo_path, load_deployment_context(report.repo_path)
+        )
         apply_context_notes_to_findings(report.findings, deployment_context)
         report.findings = apply_config_ignores(report.findings, audit_config.ignores, args.path)
         report.filter_severity(effective_min_sev)

@@ -34,8 +34,8 @@ class DeploymentContext:
 
 
 def load_deployment_context(repo_path: str) -> DeploymentContext:
-    path = os.path.join(repo_path, CONTEXT_FILENAME)
-    if not os.path.isfile(path):
+    path = _find_context_file(repo_path)
+    if path is None:
         return DeploymentContext()
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -43,6 +43,20 @@ def load_deployment_context(repo_path: str) -> DeploymentContext:
     except OSError as exc:
         raise ConfigError(f"could not read {CONTEXT_FILENAME}: {exc}") from exc
     return _validate_context(raw)
+
+
+def _find_context_file(scan_path: str) -> str | None:
+    current = os.path.abspath(scan_path)
+    if os.path.isfile(current):
+        current = os.path.dirname(current)
+    while True:
+        path = os.path.join(current, CONTEXT_FILENAME)
+        if os.path.isfile(path):
+            return path
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
 
 
 def apply_context_notes_to_findings(findings: list[Any], ctx: DeploymentContext) -> None:
