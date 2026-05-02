@@ -424,6 +424,10 @@ def _format_finding(f: Finding, c: dict[Severity, str], r: str, b: str, dim: str
         out.append(f"    Threat: {f.threat_narrative}")
     for note in f.context_notes:
         out.append(f"    Context: {note}")
+    if f.suppression_reason:
+        out.append(f"    Suppression: {f.suppression_reason}")
+    if f.calibration_reason:
+        out.append(f"    Calibration: {f.calibration_reason}")
     if f.remediation:
         out.append(f"    Fix:  {f.remediation.split(chr(10))[0]}")
     tags = []
@@ -481,6 +485,10 @@ def _format_collapsed_group(
         out.append(f"    Threat: {sample.threat_narrative}")
     for note in sample.context_notes:
         out.append(f"    Context: {note}")
+    if sample.suppression_reason:
+        out.append(f"    Suppression: {sample.suppression_reason}")
+    if sample.calibration_reason:
+        out.append(f"    Calibration: {sample.calibration_reason}")
     if sample.remediation:
         out.append(f"    Fix:    {sample.remediation.split(chr(10))[0]}")
     tags = []

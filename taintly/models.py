@@ -858,6 +858,10 @@ class Finding:
     """Stable tags explaining which deployment-context facts contributed notes."""
     triage_needed: bool = False
     """True when deployment context should be reviewed alongside this finding."""
+    suppression_reason: str = ""
+    """Reason a related finding was suppressed or neutralized, when reported."""
+    calibration_reason: str = ""
+    """Reason severity or exploitability presentation was calibrated."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -882,6 +886,8 @@ class Finding:
             "context_notes": self.context_notes,
             "context_tags": self.context_tags,
             "triage_needed": self.triage_needed,
+            "suppression_reason": self.suppression_reason,
+            "calibration_reason": self.calibration_reason,
         }
 
 

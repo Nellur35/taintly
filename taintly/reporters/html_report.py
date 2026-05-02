@@ -530,11 +530,7 @@ def _cluster_card(cluster: FindingCluster, repo_path: str = "") -> str:
     # Loop form kept: the multi-line HTML template below reads far
     # better than a nested list-comprehension expression.
     for f in sorted_findings:
-        note = ""
-        if f.context_notes:
-            note = " " + " ".join(
-                f'<span class="tag">{_e(n)}</span>' for n in f.context_notes
-            )
+        note = _decision_tags(f)
         rows.append(
             "<tr>"
             f"<td>{_severity_badge(f.severity)}</td>"
@@ -673,11 +669,7 @@ def _flat_findings_section(report: AuditReport) -> str:
     rows: list[str] = []
     # Loop-form readability beats list-comp here (multi-line HTML).
     for f in sorted_findings:
-        note = ""
-        if f.context_notes:
-            note = " " + " ".join(
-                f'<span class="tag">{_e(n)}</span>' for n in f.context_notes
-            )
+        note = _decision_tags(f)
         rows.append(
             "<tr>"
             f"<td>{_severity_badge(f.severity)}</td>"
@@ -696,6 +688,20 @@ def _flat_findings_section(report: AuditReport) -> str:
         f"<tbody>{''.join(rows)}</tbody></table>"
         "</details></section>"
     )
+
+
+def _decision_tags(f: Finding) -> str:
+    notes: list[str] = []
+    notes.extend(f.context_notes or [])
+    if f.suppression_reason:
+        notes.append(f"Suppression: {f.suppression_reason}")
+    if f.calibration_reason:
+        notes.append(f"Calibration: {f.calibration_reason}")
+    if f.triage_needed:
+        notes.append("Triage needed")
+    if not notes:
+        return ""
+    return " " + " ".join(f'<span class="tag">{_e(n)}</span>' for n in notes)
 
 
 # ---------------------------------------------------------------------------

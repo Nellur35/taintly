@@ -21,6 +21,7 @@ import pytest
 
 from taintly.models import AuditReport, Finding, Severity
 from taintly.reporters.csv_report import format_csv
+from taintly.reporters.html_report import format_html
 from taintly.reporters.json_report import format_json
 from taintly.reporters.sarif import format_sarif
 from taintly.reporters.text import format_text
@@ -320,6 +321,52 @@ def test_csv_special_chars_dont_corrupt(tmp_path):
     rows = list(reader)
     assert len(rows) == 1
     assert rows[0]["rule_id"] == "SEC4-GH-004"
+
+
+def test_reporters_surface_decision_metadata():
+    report = AuditReport(repo_path="/repo", platform="github")
+    report.add(
+        Finding(
+            rule_id="SEC4-GH-008",
+            severity=Severity.HIGH,
+            title="Workflow dispatch input reaches shell",
+            description="Input reaches shell.",
+            file=".github/workflows/ci.yml",
+            line=12,
+            snippet="run: echo ${{ inputs.name }}",
+            context_notes=["Deployment blocks external pull requests."],
+            context_tags=["external_prs:blocked"],
+            triage_needed=True,
+            suppression_reason="Dead step suppressed before this result.",
+            calibration_reason="Maintainer-gated input path.",
+        )
+    )
+    report.summarize()
+
+    text = format_text(report, use_color=False)
+    assert "Context: Deployment blocks external pull requests." in text
+    assert "Suppression: Dead step suppressed before this result." in text
+    assert "Calibration: Maintainer-gated input path." in text
+
+    row = next(csv.DictReader(io.StringIO(format_csv(report))))
+    assert row["context_notes"] == "Deployment blocks external pull requests."
+    assert row["context_tags"] == "external_prs:blocked"
+    assert row["triage_needed"] == "True"
+    assert row["suppression_reason"] == "Dead step suppressed before this result."
+    assert row["calibration_reason"] == "Maintainer-gated input path."
+
+    sarif = json.loads(format_sarif(report))
+    props = sarif["runs"][0]["results"][0]["properties"]
+    assert props["context_notes"] == ["Deployment blocks external pull requests."]
+    assert props["context_tags"] == ["external_prs:blocked"]
+    assert props["triage_needed"] is True
+    assert props["suppression_reason"] == "Dead step suppressed before this result."
+    assert props["calibration_reason"] == "Maintainer-gated input path."
+
+    html = format_html(report)
+    assert "Deployment blocks external pull requests." in html
+    assert "Suppression: Dead step suppressed before this result." in html
+    assert "Calibration: Maintainer-gated input path." in html
 
 
 # =============================================================================

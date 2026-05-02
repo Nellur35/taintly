@@ -193,7 +193,16 @@
           "properties": {
             "finding_family": "agent_credential_chain",
             "confidence": "medium",
-            "exploitability": "high"
+            "exploitability": "high",
+            "context_notes": [
+              "Exploitability may differ because external pull requests are blocked."
+            ],
+            "context_tags": [
+              "external_prs:blocked"
+            ],
+            "triage_needed": true,
+            "suppression_reason": "Dead-path siblings were removed before reporting.",
+            "calibration_reason": "Maintainer-only trigger path lowers exploitability."
           }
         },
         {

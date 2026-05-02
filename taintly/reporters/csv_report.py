@@ -24,6 +24,8 @@ _FIELDS = [
     "context_notes",
     "context_tags",
     "triage_needed",
+    "suppression_reason",
+    "calibration_reason",
 ]
 
 

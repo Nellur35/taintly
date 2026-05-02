@@ -138,6 +138,13 @@ def canonical_report() -> AuditReport:
             confidence="medium",
             exploitability="high",
             review_needed=False,
+            context_notes=[
+                "Exploitability may differ because external pull requests are blocked."
+            ],
+            context_tags=["external_prs:blocked"],
+            triage_needed=True,
+            suppression_reason="Dead-path siblings were removed before reporting.",
+            calibration_reason="Maintainer-only trigger path lowers exploitability.",
         )
     )
 

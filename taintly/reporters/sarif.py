@@ -113,6 +113,10 @@ def format_sarif(report: AuditReport) -> str:
             properties["context_tags"] = f.context_tags
         if f.triage_needed:
             properties["triage_needed"] = True
+        if f.suppression_reason:
+            properties["suppression_reason"] = f.suppression_reason
+        if f.calibration_reason:
+            properties["calibration_reason"] = f.calibration_reason
 
         # SARIF `result` objects are heterogeneously nested (message,
         # locations array of physical/logical location trees, optional

@@ -289,6 +289,11 @@ Each finding carries three signals:
 | Confidence | How sure the detector is it found a real instance |
 | Exploitability | How much damage is reachable in this particular workflow |
 
+Machine-readable reporters also carry decision metadata when available:
+`context_notes`, `context_tags`, `triage_needed`, `suppression_reason`,
+and `calibration_reason`. Reporters render these engine decisions; they
+do not recompute risk.
+
 `--score` prints a 0–100 grade and a debt profile labelling each family Strong, Moderate, Weak, Needs review, or Not applicable. "Not applicable" is reserved for families whose rules had no candidate location to evaluate in this scan — distinct from "Strong" (rules ran, nothing was wrong).
 
 ## Coverage

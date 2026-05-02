@@ -110,7 +110,9 @@
       "review_needed": false,
       "context_notes": [],
       "context_tags": [],
-      "triage_needed": false
+      "triage_needed": false,
+      "suppression_reason": "",
+      "calibration_reason": ""
     },
     {
       "rule_id": "PSE-GH-001",
@@ -135,9 +137,15 @@
       "confidence": "medium",
       "exploitability": "high",
       "review_needed": false,
-      "context_notes": [],
-      "context_tags": [],
-      "triage_needed": false
+      "context_notes": [
+        "Exploitability may differ because external pull requests are blocked."
+      ],
+      "context_tags": [
+        "external_prs:blocked"
+      ],
+      "triage_needed": true,
+      "suppression_reason": "Dead-path siblings were removed before reporting.",
+      "calibration_reason": "Maintainer-only trigger path lowers exploitability."
     },
     {
       "rule_id": "SEC2-GH-002",
@@ -163,7 +171,9 @@
       "review_needed": false,
       "context_notes": [],
       "context_tags": [],
-      "triage_needed": false
+      "triage_needed": false,
+      "suppression_reason": "",
+      "calibration_reason": ""
     },
     {
       "rule_id": "TAINT-GH-001",
@@ -188,7 +198,9 @@
       "review_needed": true,
       "context_notes": [],
       "context_tags": [],
-      "triage_needed": false
+      "triage_needed": false,
+      "suppression_reason": "",
+      "calibration_reason": ""
     },
     {
       "rule_id": "ENGINE-ERR",
@@ -211,7 +223,9 @@
       "review_needed": false,
       "context_notes": [],
       "context_tags": [],
-      "triage_needed": false
+      "triage_needed": false,
+      "suppression_reason": "",
+      "calibration_reason": ""
     }
   ],
   "errors": [
@@ -236,7 +250,9 @@
       "review_needed": false,
       "context_notes": [],
       "context_tags": [],
-      "triage_needed": false
+      "triage_needed": false,
+      "suppression_reason": "",
+      "calibration_reason": ""
     }
   ],
   "score": {
