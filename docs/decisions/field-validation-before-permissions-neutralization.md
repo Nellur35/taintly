@@ -40,6 +40,18 @@ Phase 8 adds:
 Phase 8 does not add runtime scanner behavior, new suppression rules, or score
 changes.
 
+## Privacy and ethics boundary
+
+Committed field-validation artifacts must not publish third-party repository
+identities, local filesystem paths, filenames, or raw per-repository finding
+inventories. Evidence is for scanner tuning, not public calling-out of scanned
+repositories.
+
+The validation harness therefore writes stable target aliases by default
+(`github-target-01`, `gitlab-target-01`, etc.) and redacts sampled snippets and
+file identities in committed artifacts. Full raw outputs may be used locally for
+private review, but they should not be committed.
+
 ## Scanner contract check
 
 Every proposed future suppression must answer:
@@ -68,4 +80,5 @@ evidence meets the thresholds already documented in the Phase 5 design:
 - No new suppression behavior added.
 - Findings remain reportable when semantics are uncertain.
 - Evidence artifacts distinguish scan output from human assessment.
+- Committed artifacts use target aliases and redacted samples only.
 - Any future Phase 5 work cites reviewed corpus evidence, not intuition.

@@ -1,6 +1,8 @@
 # Phase 8 field-validation evidence
 
-Status: initial local corpus run. Human assessment fields remain unreviewed.
+Status: sanitized local corpus example. Human assessment fields remain unreviewed.
+
+Repository identities, local paths, filenames, and snippets are redacted from committed artifacts.
 
 ## Corpus summary
 
@@ -10,12 +12,12 @@ Status: initial local corpus run. Human assessment fields remain unreviewed.
 
 | Target | Platform | Files | Findings | Critical | High | Medium | Low | Review-needed | Context notes | Calibration | Engine errors |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| github-actions-goat | github | 24 | 214 | 7 | 74 | 65 | 26 | 44 | 0 | 0 | 0 |
-| harden-runner | github | 9 | 64 | 0 | 15 | 15 | 14 | 20 | 0 | 1 | 0 |
-| cicd-goat-awesome-app | gitlab | 1 | 2 | 0 | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
-| cicd-goat-nest-of-gold | gitlab | 1 | 4 | 0 | 1 | 3 | 0 | 0 | 0 | 0 | 0 |
-| cicd-goat-caterpillar | jenkins | 1 | 3 | 0 | 0 | 2 | 1 | 0 | 0 | 0 | 0 |
-| cicd-goat-white-rabbit | jenkins | 1 | 2 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 0 |
+| github-target-01 | github | 24 | 214 | 7 | 74 | 65 | 26 | 44 | 0 | 0 | 0 |
+| github-target-02 | github | 9 | 64 | 0 | 15 | 15 | 14 | 20 | 0 | 1 | 0 |
+| gitlab-target-01 | gitlab | 1 | 2 | 0 | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
+| gitlab-target-02 | gitlab | 1 | 4 | 0 | 1 | 3 | 0 | 0 | 0 | 0 | 0 |
+| jenkins-target-01 | jenkins | 1 | 3 | 0 | 0 | 2 | 1 | 0 | 0 | 0 | 0 |
+| jenkins-target-02 | jenkins | 1 | 2 | 0 | 0 | 1 | 1 | 0 | 0 | 0 | 0 |
 
 ## Review method
 
@@ -31,7 +33,7 @@ Do not treat this document as a suppression source. It is evidence for future wo
 
 ## Top rule clusters
 
-### github-actions-goat
+### github-target-01
 
 - `SEC3-GH-001`: 72
 - `SEC3-GH-006`: 42
@@ -44,7 +46,7 @@ Do not treat this document as a suppression source. It is evidence for future wo
 - `SEC3-GH-004`: 3
 - `SEC4-GH-002`: 2
 
-### harden-runner
+### github-target-02
 
 - `SEC3-GH-006`: 20
 - `SEC10-GH-001`: 14
@@ -55,88 +57,88 @@ Do not treat this document as a suppression source. It is evidence for future wo
 - `SEC1-GH-001`: 1
 - `SEC4-GH-008`: 1
 
-### cicd-goat-awesome-app
+### gitlab-target-01
 
 - `SEC10-GL-002`: 1
 - `SEC3-GL-005`: 1
 
-### cicd-goat-nest-of-gold
+### gitlab-target-02
 
 - `SEC1-GL-001`: 1
 - `SEC10-GL-002`: 1
 - `SEC3-GL-005`: 1
 - `SEC5-GL-001`: 1
 
-### cicd-goat-caterpillar
+### jenkins-target-01
 
 - `SEC1-JK-002`: 1
 - `SEC5-JK-001`: 1
 - `SEC7-JK-001`: 1
 
-### cicd-goat-white-rabbit
+### jenkins-target-02
 
 - `SEC1-JK-002`: 1
 - `SEC7-JK-001`: 1
 
 ## Sample review queue
 
-### github-actions-goat
+### github-target-01
 
 | Assessment | Rule | Severity | Family | File | Line | Snippet | Note |
 | --- | --- | --- | --- | --- | ---: | --- | --- |
-| unreviewed | `SEC10-GH-001` | LOW | resource_controls | PRTargetWorkflow.yml | 12 | `runs-on: ubuntu-latest` |  |
-| unreviewed | `SEC2-GH-002` | MEDIUM | identity_access | PRTargetWorkflow.yml | 1 | `(pattern not found: ^\s*permissions:)` |  |
-| unreviewed | `SEC3-GH-001` | HIGH | supply_chain_immutability | PRTargetWorkflow.yml | 16 | `uses: actions/checkout@v4` |  |
-| unreviewed | `SEC4-GH-002` | HIGH | privileged_pr_trigger | PRTargetWorkflow.yml | 4 | `pull_request_target:` |  |
-| unreviewed | `SEC4-GH-005` | MEDIUM | credential_persistence | PRTargetWorkflow.yml | 16 | `uses: actions/checkout@v4` |  |
-| unreviewed | `SEC10-GH-001` | LOW | resource_controls | anomalous-outbound-calls.yaml | 7 | `runs-on: ubuntu-latest` |  |
-| unreviewed | `SEC2-GH-002` | MEDIUM | identity_access | anomalous-outbound-calls.yaml | 1 | `(pattern not found: ^\s*permissions:)` |  |
-| unreviewed | `SEC3-GH-001` | HIGH | supply_chain_immutability | anomalous-outbound-calls.yaml | 10 | `uses: step-security/harden-runner@v2` |  |
-| unreviewed | `SEC3-GH-006` | INFO | Mutable dependency references | anomalous-outbound-calls.yaml | 10 | `uses: step-security/harden-runner@v2` |  |
-| unreviewed | `SEC10-GH-001` | LOW | resource_controls | arc-codecov-simulation.yml | 7 | `runs-on: self-hosted` |  |
+| unreviewed | `SEC10-GH-001` | LOW | resource_controls | file-001 | 12 | `<redacted>` |  |
+| unreviewed | `SEC2-GH-002` | MEDIUM | identity_access | file-001 | 1 | `<redacted>` |  |
+| unreviewed | `SEC3-GH-001` | HIGH | supply_chain_immutability | file-001 | 16 | `<redacted>` |  |
+| unreviewed | `SEC4-GH-002` | HIGH | privileged_pr_trigger | file-001 | 4 | `<redacted>` |  |
+| unreviewed | `SEC4-GH-005` | MEDIUM | credential_persistence | file-001 | 16 | `<redacted>` |  |
+| unreviewed | `SEC10-GH-001` | LOW | resource_controls | file-002 | 7 | `<redacted>` |  |
+| unreviewed | `SEC2-GH-002` | MEDIUM | identity_access | file-002 | 1 | `<redacted>` |  |
+| unreviewed | `SEC3-GH-001` | HIGH | supply_chain_immutability | file-002 | 10 | `<redacted>` |  |
+| unreviewed | `SEC3-GH-006` | INFO | Mutable dependency references | file-002 | 10 | `<redacted>` |  |
+| unreviewed | `SEC10-GH-001` | LOW | resource_controls | file-003 | 7 | `<redacted>` |  |
 
-### harden-runner
-
-| Assessment | Rule | Severity | Family | File | Line | Snippet | Note |
-| --- | --- | --- | --- | --- | ---: | --- | --- |
-| unreviewed | `SEC10-GH-001` | LOW | resource_controls | canary.yml | 21 | `runs-on: ubuntu-latest` |  |
-| unreviewed | `SEC3-GH-006` | INFO | Mutable dependency references | canary.yml | 25 | `- uses: step-security/harden-runner@5c7944e73c4c2a096b17a9cb74d65b6c2bbafbde # v1` |  |
-| unreviewed | `SEC3-GH-006` | INFO | Mutable dependency references | canary.yml | 34 | `uses: step-security/publish-action@b438f840875fdcb7d1de4fc3d1d30e86cf6acb5d` |  |
-| unreviewed | `SEC3-GH-005` | HIGH | supply_chain_immutability | canary.yml | 40 | `uses: docker://ghcr.io/step-security/integration-test/int:latest` |  |
-| unreviewed | `SEC3-GH-005` | HIGH | supply_chain_immutability | canary.yml | 46 | `uses: docker://ghcr.io/step-security/integration-test/int:latest` |  |
-| unreviewed | `SEC4-GH-005` | MEDIUM | credential_persistence | canary.yml | 32 | `- uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v2` |  |
-| unreviewed | `SEC4-GH-008` | MEDIUM | script_injection | canary.yml | 20 | `name: Update the rc tag to ${{ github.event.inputs.COMMIT_SHA }} commit` |  |
-| unreviewed | `SEC10-GH-001` | LOW | resource_controls | codeql-analysis.yml | 29 | `runs-on: ubuntu-latest` |  |
-| unreviewed | `SEC3-GH-006` | INFO | Mutable dependency references | codeql-analysis.yml | 44 | `uses: step-security/harden-runner@5c7944e73c4c2a096b17a9cb74d65b6c2bbafbde` |  |
-| unreviewed | `SEC4-GH-005` | MEDIUM | credential_persistence | codeql-analysis.yml | 49 | `uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11` |  |
-
-### cicd-goat-awesome-app
+### github-target-02
 
 | Assessment | Rule | Severity | Family | File | Line | Snippet | Note |
 | --- | --- | --- | --- | --- | ---: | --- | --- |
-| unreviewed | `SEC3-GL-005` | HIGH | supply_chain_immutability | .gitlab-ci.yml | 1 | `image: "python:3.9.15-alpine3.16"` |  |
-| unreviewed | `SEC10-GL-002` | MEDIUM | logging_visibility | .gitlab-ci.yml | 1 | `(pattern not found: THIS_RULE_NEVER_MATCHES_INTENTIONALLY_DISABLED)` |  |
+| unreviewed | `SEC10-GH-001` | LOW | resource_controls | file-001 | 21 | `<redacted>` |  |
+| unreviewed | `SEC3-GH-006` | INFO | Mutable dependency references | file-001 | 25 | `<redacted>` |  |
+| unreviewed | `SEC3-GH-006` | INFO | Mutable dependency references | file-001 | 34 | `<redacted>` |  |
+| unreviewed | `SEC3-GH-005` | HIGH | supply_chain_immutability | file-001 | 40 | `<redacted>` |  |
+| unreviewed | `SEC3-GH-005` | HIGH | supply_chain_immutability | file-001 | 46 | `<redacted>` |  |
+| unreviewed | `SEC4-GH-005` | MEDIUM | credential_persistence | file-001 | 32 | `<redacted>` |  |
+| unreviewed | `SEC4-GH-008` | MEDIUM | script_injection | file-001 | 20 | `<redacted>` |  |
+| unreviewed | `SEC10-GH-001` | LOW | resource_controls | file-002 | 29 | `<redacted>` |  |
+| unreviewed | `SEC3-GH-006` | INFO | Mutable dependency references | file-002 | 44 | `<redacted>` |  |
+| unreviewed | `SEC4-GH-005` | MEDIUM | credential_persistence | file-002 | 49 | `<redacted>` |  |
 
-### cicd-goat-nest-of-gold
-
-| Assessment | Rule | Severity | Family | File | Line | Snippet | Note |
-| --- | --- | --- | --- | --- | ---: | --- | --- |
-| unreviewed | `SEC1-GL-001` | MEDIUM | resource_controls | .gitlab-ci.yml | 19 | `environment: production` |  |
-| unreviewed | `SEC5-GL-001` | MEDIUM | identity_access | .gitlab-ci.yml | 19 | `environment: production` |  |
-| unreviewed | `SEC3-GL-005` | HIGH | supply_chain_immutability | .gitlab-ci.yml | 1 | `image: "python:3.9.15-alpine3.16"` |  |
-| unreviewed | `SEC10-GL-002` | MEDIUM | logging_visibility | .gitlab-ci.yml | 1 | `(pattern not found: THIS_RULE_NEVER_MATCHES_INTENTIONALLY_DISABLED)` |  |
-
-### cicd-goat-caterpillar
-
-| Assessment | Rule | Severity | Family | File | Line | Snippet | Note |
-| --- | --- | --- | --- | --- | ---: | --- | --- |
-| unreviewed | `SEC7-JK-001` | MEDIUM | ungoverned_services | Jenkinsfile | 2 | `agent any` |  |
-| unreviewed | `SEC5-JK-001` | MEDIUM | identity_access | Jenkinsfile | 29 | `stage('deploy') {` |  |
-| unreviewed | `SEC1-JK-002` | LOW | resource_controls | Jenkinsfile | 1 | `pipeline {` |  |
-
-### cicd-goat-white-rabbit
+### gitlab-target-01
 
 | Assessment | Rule | Severity | Family | File | Line | Snippet | Note |
 | --- | --- | --- | --- | --- | ---: | --- | --- |
-| unreviewed | `SEC7-JK-001` | MEDIUM | ungoverned_services | Jenkinsfile | 2 | `agent any` |  |
-| unreviewed | `SEC1-JK-002` | LOW | resource_controls | Jenkinsfile | 1 | `pipeline {` |  |
+| unreviewed | `SEC3-GL-005` | HIGH | supply_chain_immutability | file-001 | 1 | `<redacted>` |  |
+| unreviewed | `SEC10-GL-002` | MEDIUM | logging_visibility | file-001 | 1 | `<redacted>` |  |
+
+### gitlab-target-02
+
+| Assessment | Rule | Severity | Family | File | Line | Snippet | Note |
+| --- | --- | --- | --- | --- | ---: | --- | --- |
+| unreviewed | `SEC1-GL-001` | MEDIUM | resource_controls | file-001 | 19 | `<redacted>` |  |
+| unreviewed | `SEC5-GL-001` | MEDIUM | identity_access | file-001 | 19 | `<redacted>` |  |
+| unreviewed | `SEC3-GL-005` | HIGH | supply_chain_immutability | file-001 | 1 | `<redacted>` |  |
+| unreviewed | `SEC10-GL-002` | MEDIUM | logging_visibility | file-001 | 1 | `<redacted>` |  |
+
+### jenkins-target-01
+
+| Assessment | Rule | Severity | Family | File | Line | Snippet | Note |
+| --- | --- | --- | --- | --- | ---: | --- | --- |
+| unreviewed | `SEC7-JK-001` | MEDIUM | ungoverned_services | file-001 | 2 | `<redacted>` |  |
+| unreviewed | `SEC5-JK-001` | MEDIUM | identity_access | file-001 | 29 | `<redacted>` |  |
+| unreviewed | `SEC1-JK-002` | LOW | resource_controls | file-001 | 1 | `<redacted>` |  |
+
+### jenkins-target-02
+
+| Assessment | Rule | Severity | Family | File | Line | Snippet | Note |
+| --- | --- | --- | --- | --- | ---: | --- | --- |
+| unreviewed | `SEC7-JK-001` | MEDIUM | ungoverned_services | file-001 | 2 | `<redacted>` |  |
+| unreviewed | `SEC1-JK-002` | LOW | resource_controls | file-001 | 1 | `<redacted>` |  |

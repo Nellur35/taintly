@@ -8,110 +8,108 @@
       "engine_error_count": 0,
       "files_scanned": 24,
       "findings_total": 214,
-      "name": "github-actions-goat",
-      "path": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\github-actions-goat-public",
       "platform": "github",
       "review_needed_count": 44,
       "sample_findings": [
         {
           "assessment": "unreviewed",
           "family": "resource_controls",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\github-actions-goat-public\\.github\\workflows\\PRTargetWorkflow.yml",
+          "file_alias": "file-001",
           "line": 12,
           "review_note": "",
           "rule_id": "SEC10-GH-001",
           "severity": "LOW",
-          "snippet": "runs-on: ubuntu-latest"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "identity_access",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\github-actions-goat-public\\.github\\workflows\\PRTargetWorkflow.yml",
+          "file_alias": "file-001",
           "line": 1,
           "review_note": "",
           "rule_id": "SEC2-GH-002",
           "severity": "MEDIUM",
-          "snippet": "(pattern not found: ^\\s*permissions:)"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "supply_chain_immutability",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\github-actions-goat-public\\.github\\workflows\\PRTargetWorkflow.yml",
+          "file_alias": "file-001",
           "line": 16,
           "review_note": "",
           "rule_id": "SEC3-GH-001",
           "severity": "HIGH",
-          "snippet": "uses: actions/checkout@v4"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "privileged_pr_trigger",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\github-actions-goat-public\\.github\\workflows\\PRTargetWorkflow.yml",
+          "file_alias": "file-001",
           "line": 4,
           "review_note": "",
           "rule_id": "SEC4-GH-002",
           "severity": "HIGH",
-          "snippet": "pull_request_target:"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "credential_persistence",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\github-actions-goat-public\\.github\\workflows\\PRTargetWorkflow.yml",
+          "file_alias": "file-001",
           "line": 16,
           "review_note": "",
           "rule_id": "SEC4-GH-005",
           "severity": "MEDIUM",
-          "snippet": "uses: actions/checkout@v4"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "resource_controls",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\github-actions-goat-public\\.github\\workflows\\anomalous-outbound-calls.yaml",
+          "file_alias": "file-002",
           "line": 7,
           "review_note": "",
           "rule_id": "SEC10-GH-001",
           "severity": "LOW",
-          "snippet": "runs-on: ubuntu-latest"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "identity_access",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\github-actions-goat-public\\.github\\workflows\\anomalous-outbound-calls.yaml",
+          "file_alias": "file-002",
           "line": 1,
           "review_note": "",
           "rule_id": "SEC2-GH-002",
           "severity": "MEDIUM",
-          "snippet": "(pattern not found: ^\\s*permissions:)"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "supply_chain_immutability",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\github-actions-goat-public\\.github\\workflows\\anomalous-outbound-calls.yaml",
+          "file_alias": "file-002",
           "line": 10,
           "review_note": "",
           "rule_id": "SEC3-GH-001",
           "severity": "HIGH",
-          "snippet": "uses: step-security/harden-runner@v2"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "Mutable dependency references",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\github-actions-goat-public\\.github\\workflows\\anomalous-outbound-calls.yaml",
+          "file_alias": "file-002",
           "line": 10,
           "review_note": "",
           "rule_id": "SEC3-GH-006",
           "severity": "INFO",
-          "snippet": "uses: step-security/harden-runner@v2"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "resource_controls",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\github-actions-goat-public\\.github\\workflows\\arc-codecov-simulation.yml",
+          "file_alias": "file-003",
           "line": 7,
           "review_note": "",
           "rule_id": "SEC10-GH-001",
           "severity": "LOW",
-          "snippet": "runs-on: self-hosted"
+          "snippet": "<redacted>"
         }
       ],
       "severity_counts": {
@@ -122,6 +120,7 @@
         "MEDIUM": 65
       },
       "surviving_suppression_reason_count": 0,
+      "target_id": "github-target-01",
       "top_families": {
         "Mutable dependency references": 42,
         "credential_persistence": 38,
@@ -152,110 +151,108 @@
       "engine_error_count": 0,
       "files_scanned": 9,
       "findings_total": 64,
-      "name": "harden-runner",
-      "path": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\harden-runner-public",
       "platform": "github",
       "review_needed_count": 20,
       "sample_findings": [
         {
           "assessment": "unreviewed",
           "family": "resource_controls",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\harden-runner-public\\.github\\workflows\\canary.yml",
+          "file_alias": "file-001",
           "line": 21,
           "review_note": "",
           "rule_id": "SEC10-GH-001",
           "severity": "LOW",
-          "snippet": "runs-on: ubuntu-latest"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "Mutable dependency references",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\harden-runner-public\\.github\\workflows\\canary.yml",
+          "file_alias": "file-001",
           "line": 25,
           "review_note": "",
           "rule_id": "SEC3-GH-006",
           "severity": "INFO",
-          "snippet": "- uses: step-security/harden-runner@5c7944e73c4c2a096b17a9cb74d65b6c2bbafbde # v1"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "Mutable dependency references",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\harden-runner-public\\.github\\workflows\\canary.yml",
+          "file_alias": "file-001",
           "line": 34,
           "review_note": "",
           "rule_id": "SEC3-GH-006",
           "severity": "INFO",
-          "snippet": "uses: step-security/publish-action@b438f840875fdcb7d1de4fc3d1d30e86cf6acb5d"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "supply_chain_immutability",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\harden-runner-public\\.github\\workflows\\canary.yml",
+          "file_alias": "file-001",
           "line": 40,
           "review_note": "",
           "rule_id": "SEC3-GH-005",
           "severity": "HIGH",
-          "snippet": "uses: docker://ghcr.io/step-security/integration-test/int:latest"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "supply_chain_immutability",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\harden-runner-public\\.github\\workflows\\canary.yml",
+          "file_alias": "file-001",
           "line": 46,
           "review_note": "",
           "rule_id": "SEC3-GH-005",
           "severity": "HIGH",
-          "snippet": "uses: docker://ghcr.io/step-security/integration-test/int:latest"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "credential_persistence",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\harden-runner-public\\.github\\workflows\\canary.yml",
+          "file_alias": "file-001",
           "line": 32,
           "review_note": "",
           "rule_id": "SEC4-GH-005",
           "severity": "MEDIUM",
-          "snippet": "- uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v2"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "script_injection",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\harden-runner-public\\.github\\workflows\\canary.yml",
+          "file_alias": "file-001",
           "line": 20,
           "review_note": "",
           "rule_id": "SEC4-GH-008",
           "severity": "MEDIUM",
-          "snippet": "name: Update the rc tag to ${{ github.event.inputs.COMMIT_SHA }} commit"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "resource_controls",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\harden-runner-public\\.github\\workflows\\codeql-analysis.yml",
+          "file_alias": "file-002",
           "line": 29,
           "review_note": "",
           "rule_id": "SEC10-GH-001",
           "severity": "LOW",
-          "snippet": "runs-on: ubuntu-latest"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "Mutable dependency references",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\harden-runner-public\\.github\\workflows\\codeql-analysis.yml",
+          "file_alias": "file-002",
           "line": 44,
           "review_note": "",
           "rule_id": "SEC3-GH-006",
           "severity": "INFO",
-          "snippet": "uses: step-security/harden-runner@5c7944e73c4c2a096b17a9cb74d65b6c2bbafbde"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "credential_persistence",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\harden-runner-public\\.github\\workflows\\codeql-analysis.yml",
+          "file_alias": "file-002",
           "line": 49,
           "review_note": "",
           "rule_id": "SEC4-GH-005",
           "severity": "MEDIUM",
-          "snippet": "uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11"
+          "snippet": "<redacted>"
         }
       ],
       "severity_counts": {
@@ -266,6 +263,7 @@
         "MEDIUM": 15
       },
       "surviving_suppression_reason_count": 0,
+      "target_id": "github-target-02",
       "top_families": {
         "Mutable dependency references": 20,
         "credential_persistence": 11,
@@ -292,30 +290,28 @@
       "engine_error_count": 0,
       "files_scanned": 1,
       "findings_total": 2,
-      "name": "cicd-goat-awesome-app",
-      "path": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitlab\\repositories\\awesome-app",
       "platform": "gitlab",
       "review_needed_count": 0,
       "sample_findings": [
         {
           "assessment": "unreviewed",
           "family": "supply_chain_immutability",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitlab\\repositories\\awesome-app\\.gitlab-ci.yml",
+          "file_alias": "file-001",
           "line": 1,
           "review_note": "",
           "rule_id": "SEC3-GL-005",
           "severity": "HIGH",
-          "snippet": "image: \"python:3.9.15-alpine3.16\""
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "logging_visibility",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitlab\\repositories\\awesome-app\\.gitlab-ci.yml",
+          "file_alias": "file-001",
           "line": 1,
           "review_note": "",
           "rule_id": "SEC10-GL-002",
           "severity": "MEDIUM",
-          "snippet": "(pattern not found: THIS_RULE_NEVER_MATCHES_INTENTIONALLY_DISABLED)"
+          "snippet": "<redacted>"
         }
       ],
       "severity_counts": {
@@ -326,6 +322,7 @@
         "MEDIUM": 1
       },
       "surviving_suppression_reason_count": 0,
+      "target_id": "gitlab-target-01",
       "top_families": {
         "logging_visibility": 1,
         "supply_chain_immutability": 1
@@ -342,50 +339,48 @@
       "engine_error_count": 0,
       "files_scanned": 1,
       "findings_total": 4,
-      "name": "cicd-goat-nest-of-gold",
-      "path": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitlab\\repositories\\nest-of-gold",
       "platform": "gitlab",
       "review_needed_count": 0,
       "sample_findings": [
         {
           "assessment": "unreviewed",
           "family": "resource_controls",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitlab\\repositories\\nest-of-gold\\.gitlab-ci.yml",
+          "file_alias": "file-001",
           "line": 19,
           "review_note": "",
           "rule_id": "SEC1-GL-001",
           "severity": "MEDIUM",
-          "snippet": "environment: production"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "identity_access",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitlab\\repositories\\nest-of-gold\\.gitlab-ci.yml",
+          "file_alias": "file-001",
           "line": 19,
           "review_note": "",
           "rule_id": "SEC5-GL-001",
           "severity": "MEDIUM",
-          "snippet": "environment: production"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "supply_chain_immutability",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitlab\\repositories\\nest-of-gold\\.gitlab-ci.yml",
+          "file_alias": "file-001",
           "line": 1,
           "review_note": "",
           "rule_id": "SEC3-GL-005",
           "severity": "HIGH",
-          "snippet": "image: \"python:3.9.15-alpine3.16\""
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "logging_visibility",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitlab\\repositories\\nest-of-gold\\.gitlab-ci.yml",
+          "file_alias": "file-001",
           "line": 1,
           "review_note": "",
           "rule_id": "SEC10-GL-002",
           "severity": "MEDIUM",
-          "snippet": "(pattern not found: THIS_RULE_NEVER_MATCHES_INTENTIONALLY_DISABLED)"
+          "snippet": "<redacted>"
         }
       ],
       "severity_counts": {
@@ -396,6 +391,7 @@
         "MEDIUM": 3
       },
       "surviving_suppression_reason_count": 0,
+      "target_id": "gitlab-target-02",
       "top_families": {
         "identity_access": 1,
         "logging_visibility": 1,
@@ -416,40 +412,38 @@
       "engine_error_count": 0,
       "files_scanned": 1,
       "findings_total": 3,
-      "name": "cicd-goat-caterpillar",
-      "path": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitea\\repositories\\caterpillar",
       "platform": "jenkins",
       "review_needed_count": 0,
       "sample_findings": [
         {
           "assessment": "unreviewed",
           "family": "ungoverned_services",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitea\\repositories\\caterpillar\\Jenkinsfile",
+          "file_alias": "file-001",
           "line": 2,
           "review_note": "",
           "rule_id": "SEC7-JK-001",
           "severity": "MEDIUM",
-          "snippet": "agent any"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "identity_access",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitea\\repositories\\caterpillar\\Jenkinsfile",
+          "file_alias": "file-001",
           "line": 29,
           "review_note": "",
           "rule_id": "SEC5-JK-001",
           "severity": "MEDIUM",
-          "snippet": "stage('deploy') {"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "resource_controls",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitea\\repositories\\caterpillar\\Jenkinsfile",
+          "file_alias": "file-001",
           "line": 1,
           "review_note": "",
           "rule_id": "SEC1-JK-002",
           "severity": "LOW",
-          "snippet": "pipeline {"
+          "snippet": "<redacted>"
         }
       ],
       "severity_counts": {
@@ -460,6 +454,7 @@
         "MEDIUM": 2
       },
       "surviving_suppression_reason_count": 0,
+      "target_id": "jenkins-target-01",
       "top_families": {
         "identity_access": 1,
         "resource_controls": 1,
@@ -478,30 +473,28 @@
       "engine_error_count": 0,
       "files_scanned": 1,
       "findings_total": 2,
-      "name": "cicd-goat-white-rabbit",
-      "path": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitea\\repositories\\white-rabbit",
       "platform": "jenkins",
       "review_needed_count": 0,
       "sample_findings": [
         {
           "assessment": "unreviewed",
           "family": "ungoverned_services",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitea\\repositories\\white-rabbit\\Jenkinsfile",
+          "file_alias": "file-001",
           "line": 2,
           "review_note": "",
           "rule_id": "SEC7-JK-001",
           "severity": "MEDIUM",
-          "snippet": "agent any"
+          "snippet": "<redacted>"
         },
         {
           "assessment": "unreviewed",
           "family": "resource_controls",
-          "file": "C:\\Users\\asafy\\Documents\\Codex\\2026-05-01\\need-to-connect-you-to-my\\cicd-goat-public\\gitea\\repositories\\white-rabbit\\Jenkinsfile",
+          "file_alias": "file-001",
           "line": 1,
           "review_note": "",
           "rule_id": "SEC1-JK-002",
           "severity": "LOW",
-          "snippet": "pipeline {"
+          "snippet": "<redacted>"
         }
       ],
       "severity_counts": {
@@ -512,6 +505,7 @@
         "MEDIUM": 1
       },
       "surviving_suppression_reason_count": 0,
+      "target_id": "jenkins-target-02",
       "top_families": {
         "resource_controls": 1,
         "ungoverned_services": 1

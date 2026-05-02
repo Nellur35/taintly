@@ -26,36 +26,57 @@ class Target:
     name: str
     platform: str
     path: Path
+    alias: str
 
 
 def _parse_target(raw: str) -> Target:
     parts = raw.split("=", 2)
     if len(parts) != 3:
         raise argparse.ArgumentTypeError(
-            "--target must use name=platform=path, for example goat=github=../repo"
+            "--target must use name=platform=path, for example sample=github=../repo"
         )
     name, platform, path = parts
     if platform not in {"github", "gitlab", "jenkins"}:
         raise argparse.ArgumentTypeError(f"unsupported platform: {platform}")
-    return Target(name=name, platform=platform, path=Path(path).resolve())
+    return Target(name=name, platform=platform, path=Path(path).resolve(), alias="")
 
 
 def _counter_dict(counter: Counter[str]) -> dict[str, int]:
     return dict(sorted(counter.items(), key=lambda item: (-item[1], item[0])))
 
 
+def _alias_targets(targets: list[Target]) -> list[Target]:
+    counts: Counter[str] = Counter()
+    out: list[Target] = []
+    for target in targets:
+        counts[target.platform] += 1
+        out.append(
+            Target(
+                name=target.name,
+                platform=target.platform,
+                path=target.path,
+                alias=f"{target.platform}-target-{counts[target.platform]:02d}",
+            )
+        )
+    return out
+
+
 def _sample_findings(findings: list[Any], limit: int) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    file_aliases: dict[str, str] = {}
     for finding in findings[:limit]:
+        file_key = str(finding.file)
+        if file_key not in file_aliases:
+            file_aliases[file_key] = f"file-{len(file_aliases) + 1:03d}"
         out.append(
             {
                 "assessment": "unreviewed",
                 "rule_id": finding.rule_id,
                 "severity": finding.severity.value,
                 "family": finding.finding_family,
-                "file": finding.file,
+                "file_alias": file_aliases[file_key],
                 "line": finding.line,
-                "snippet": finding.snippet,
+                "snippet": "<redacted>",
                 "review_note": "",
             }
         )
@@ -91,9 +112,8 @@ def scan_target(target: Target, sample_limit: int) -> dict[str, Any]:
     rule_counts = Counter(f.rule_id for f in all_findings)
 
     return {
-        "name": target.name,
+        "target_id": target.alias,
         "platform": target.platform,
-        "path": str(target.path),
         "files_scanned": files_scanned,
         "findings_total": len(all_findings),
         "severity_counts": {
@@ -121,7 +141,9 @@ def _render_markdown(results: list[dict[str, Any]]) -> str:
     lines = [
         "# Phase 8 field-validation evidence",
         "",
-        "Status: initial local corpus run. Human assessment fields remain unreviewed.",
+        "Status: sanitized local corpus example. Human assessment fields remain unreviewed.",
+        "",
+        "Repository identities, local paths, filenames, and snippets are redacted from committed artifacts.",
         "",
         "## Corpus summary",
         "",
@@ -137,7 +159,7 @@ def _render_markdown(results: list[dict[str, Any]]) -> str:
         lines.append(
             "| {name} | {platform} | {files} | {total} | {critical} | {high} | "
             "{medium} | {low} | {review} | {context} | {calibration} | {errors} |".format(
-                name=result["name"],
+                name=result["target_id"],
                 platform=result["platform"],
                 files=result["files_scanned"],
                 total=result["findings_total"],
@@ -172,14 +194,14 @@ def _render_markdown(results: list[dict[str, Any]]) -> str:
         ]
     )
     for result in results:
-        lines.extend([f"### {result['name']}", ""])
+        lines.extend([f"### {result['target_id']}", ""])
         for rule_id, count in list(result["top_rules"].items())[:10]:
             lines.append(f"- `{rule_id}`: {count}")
         lines.append("")
 
     lines.extend(["## Sample review queue", ""])
     for result in results:
-        lines.extend([f"### {result['name']}", ""])
+        lines.extend([f"### {result['target_id']}", ""])
         sample = result["sample_findings"]
         if not sample:
             lines.extend(["No findings sampled.", ""])
@@ -191,7 +213,6 @@ def _render_markdown(results: list[dict[str, Any]]) -> str:
             ]
         )
         for finding in sample:
-            file_name = Path(finding["file"]).name
             snippet = str(finding["snippet"]).replace("|", "\\|")
             lines.append(
                 "| {assessment} | `{rule}` | {severity} | {family} | {file} | {line} | `{snippet}` |  |".format(
@@ -199,7 +220,7 @@ def _render_markdown(results: list[dict[str, Any]]) -> str:
                     rule=finding["rule_id"],
                     severity=finding["severity"],
                     family=finding["family"],
-                    file=file_name,
+                    file=finding["file_alias"],
                     line=finding["line"],
                     snippet=snippet[:120],
                 )
@@ -229,7 +250,8 @@ def main() -> int:
     parser.add_argument("--sample-limit", type=int, default=12)
     args = parser.parse_args()
 
-    results = [scan_target(target, args.sample_limit) for target in args.target]
+    targets = _alias_targets(args.target)
+    results = [scan_target(target, args.sample_limit) for target in targets]
     args.out_dir.mkdir(parents=True, exist_ok=True)
     json_path = args.out_dir / "phase-8-local-corpus-summary.json"
     md_path = args.out_dir / "phase-8-local-corpus-review.md"
