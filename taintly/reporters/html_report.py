@@ -30,7 +30,7 @@ from html import escape
 from typing import TYPE_CHECKING
 
 from taintly.families import FindingCluster, cluster_findings
-from taintly.models import AuditReport, Severity
+from taintly.models import AuditReport, Finding, Severity
 from taintly.reporters.text import _AUTO_FIXABLE_RULES, _quick_win
 
 if TYPE_CHECKING:
@@ -370,16 +370,16 @@ def _threat_model_banner() -> str:
     return (
         '<aside class="taintly-scope-banner" role="note" '
         'aria-label="Scoring threat model disclosure">'
-        '<strong>Scoring threat model: public-OSS deployment.</strong> '
+        "<strong>Scoring threat model: public-OSS deployment.</strong> "
         "Findings are exploitability-weighted against a default model in which "
         "fork PRs are reachable, runners are shared, and secrets are repo-scoped. "
         "If your deployment differs (internal-only, OIDC-only, isolated runners, "
         "etc.) some findings may be over- or under-weighted for your situation. "
         "<strong>Reviewing each finding against your actual workflow and "
         "environment is required, not optional.</strong> "
-        'See <code>docs/SCORING.md</code> for the assumption list and '
+        "See <code>docs/SCORING.md</code> for the assumption list and "
         "assessment guidance; "
-        '<code>docs/AI_TRIAGE.md</code> has a paste-ready prompt for '
+        "<code>docs/AI_TRIAGE.md</code> has a paste-ready prompt for "
         "AI-assisted recalibration against your deployment."
         "</aside>"
     )
@@ -521,8 +521,7 @@ def _cluster_card(cluster: FindingCluster, repo_path: str = "") -> str:
         extra_class = " review-needed"
 
     rules_str = ", ".join(
-        f'<a href="#rule-{_e(rid)}"><code>{_e(rid)}</code></a>'
-        for rid in sorted(cluster.rule_ids)
+        f'<a href="#rule-{_e(rid)}"><code>{_e(rid)}</code></a>' for rid in sorted(cluster.rule_ids)
     )
 
     rows: list[str] = []
@@ -607,7 +606,7 @@ def _rule_reference_section(report: AuditReport) -> str:
         return ""
 
     # Deduplicate while preserving the first occurrence's metadata.
-    seen: dict[str, "Finding"] = {}  # noqa: F821 — quoted for forward use
+    seen: dict[str, Finding] = {}
     for f in report.findings:
         if f.rule_id not in seen:
             seen[f.rule_id] = f
@@ -632,9 +631,7 @@ def _rule_reference_section(report: AuditReport) -> str:
             # promise (test_no_external_resource_links) prohibits
             # ``href="http..."`` so the document never gestures at
             # outbound traffic on render.  Users copy the URL.
-            body_parts.append(
-                f'<p class="rule-ref">Reference: <code>{_e(f.reference)}</code></p>'
-            )
+            body_parts.append(f'<p class="rule-ref">Reference: <code>{_e(f.reference)}</code></p>')
         body_html = "".join(body_parts) or "<p>(no further reference)</p>"
 
         blocks.append(

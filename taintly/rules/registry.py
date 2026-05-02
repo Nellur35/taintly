@@ -72,9 +72,7 @@ def load_rules_for_platform(platform: Platform) -> list[Rule]:
     _IMPORT_FAILURES.clear()
     base = Path(__file__).parent
     pkg_dir = _PLATFORM_DIR[platform]
-    rules = _discover_rules_in_package(
-        str(base / pkg_dir), f"taintly.rules.{pkg_dir}"
-    )
+    rules = _discover_rules_in_package(str(base / pkg_dir), f"taintly.rules.{pkg_dir}")
     if _IMPORT_FAILURES:
         print(
             f"ERROR: {len(_IMPORT_FAILURES)} rule module(s) failed to load: "

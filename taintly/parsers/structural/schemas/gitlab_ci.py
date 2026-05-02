@@ -24,7 +24,6 @@ SCHEMA: dict[str, ValueShape] = {
     "default.cache": ValueShape.STRING_OR_MAPPING,
     "workflow": ValueShape.STRING_OR_MAPPING,
     "workflow.rules": ValueShape.STRING_OR_SEQUENCE_OR_MAPPING,
-
     # Per-job (``jobs.*`` is a glob even though GitLab jobs aren't
     # under a ``jobs:`` key — the structural reader normalises top-
     # level non-reserved mapping entries as job entries via the

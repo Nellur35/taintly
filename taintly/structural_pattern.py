@@ -21,8 +21,9 @@ Phase 2 contract:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Optional
 
 from .parsers.structural import EventKind, walk_workflow
 
@@ -96,9 +97,7 @@ class StructuralPattern:
                 if ev.block_lines:
                     for sub_line, sub_text in ev.block_lines:
                         try:
-                            sub_hit = self.predicate(
-                                sub_text, value_kind, ev.path
-                            )
+                            sub_hit = self.predicate(sub_text, value_kind, ev.path)
                         except Exception:
                             sub_hit = False
                         if not sub_hit:
@@ -118,9 +117,7 @@ class StructuralPattern:
                 except Exception:
                     hit = False
                 if hit:
-                    snippet = self._render_snippet(
-                        value, value_kind, ev.path, ev.line, lines
-                    )
+                    snippet = self._render_snippet(value, value_kind, ev.path, ev.line, lines)
                     key = (ev.line, snippet)
                     if key in seen:
                         continue

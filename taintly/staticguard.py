@@ -89,7 +89,9 @@ def find_dead_line_ranges(
 
     ranges: list[tuple[int, int]] = []
     jobs_start, jobs_end, jobs_indent = jobs_range
-    for job_start, job_end, job_indent in _child_mapping_ranges(lines, jobs_start + 1, jobs_end, jobs_indent):
+    for job_start, job_end, job_indent in _child_mapping_ranges(
+        lines, jobs_start + 1, jobs_end, jobs_indent
+    ):
         job_if = _find_direct_if(lines, job_start + 1, job_end, job_indent)
         if evaluate_if(job_if, ctx) is Verdict.STATIC_FALSE:
             ranges.append((job_start + 1, job_end))
@@ -99,7 +101,9 @@ def find_dead_line_ranges(
         if steps_range is None:
             continue
         steps_start, steps_end, steps_indent = steps_range
-        for step_start, step_end, step_indent in _list_item_ranges(lines, steps_start + 1, steps_end, steps_indent):
+        for step_start, step_end, step_indent in _list_item_ranges(
+            lines, steps_start + 1, steps_end, steps_indent
+        ):
             step_if = _find_step_if(lines, step_start, step_end, step_indent)
             if evaluate_if(step_if, ctx) is Verdict.STATIC_FALSE:
                 ranges.append((step_start + 1, step_end))
@@ -110,7 +114,7 @@ def find_dead_line_ranges(
 def detect_github_workflow_context(repo_path: str) -> WorkflowContext:
     """Best-effort repository identity from ``git remote get-url origin``."""
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 B607 - fixed git command, no shell.
             ["git", "-C", repo_path, "remote", "get-url", "origin"],
             capture_output=True,
             text=True,

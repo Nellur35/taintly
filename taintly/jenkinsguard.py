@@ -51,7 +51,7 @@ def find_dead_jenkins_stage_ranges(
     for stage_start, stage_end in _stage_blocks(content):
         stage_body = content[stage_start:stage_end]
         when_block = _extract_when_block(stage_body)
-        stage = {"when": when_block} if when_block is not None else {}
+        stage: dict[str, object] = {"when": when_block} if when_block is not None else {}
         if evaluate_jenkins_when(stage, ctx) is GuardVerdict.DEAD:
             ranges.append(
                 (

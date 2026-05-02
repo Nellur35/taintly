@@ -64,6 +64,7 @@ def _sink_is_safely_quoted(snippet: str, var_name: str) -> bool:
             return False
     return found_any
 
+
 # ---------------------------------------------------------------------------
 # Pattern adapter
 # ---------------------------------------------------------------------------
@@ -280,13 +281,7 @@ RULES = [
                 "    - git checkout $HEAD\n"
             ),
             # eval re-parses the value — quoting doesn't help.
-            (
-                "variables:\n"
-                "  MSG: $CI_COMMIT_MESSAGE\n"
-                "test:\n"
-                "  before_script:\n"
-                '    - eval "$MSG"\n'
-            ),
+            ('variables:\n  MSG: $CI_COMMIT_MESSAGE\ntest:\n  before_script:\n    - eval "$MSG"\n'),
         ],
         test_negative=[
             # Safely double-quoted reference (post-audit). POSIX

@@ -37,9 +37,7 @@ def assert_snippet_matches_line(line_num: int, snippet: str, lines: list[str]) -
     test) skip those rule classes by name before invoking this.
     """
     if not (1 <= line_num <= len(lines)):
-        raise AssertionError(
-            f"line_num={line_num} out of range for {len(lines)} lines"
-        )
+        raise AssertionError(f"line_num={line_num} out of range for {len(lines)} lines")
     src = lines[line_num - 1].strip()
     snip = (snippet or "").strip()
     if not snip:
@@ -49,7 +47,5 @@ def assert_snippet_matches_line(line_num: int, snippet: str, lines: list[str]) -
     # snippet must come from the cited line, not a different one.
     if snip not in src and src not in snip:
         raise AssertionError(
-            f"snippet/line mismatch at line {line_num}:\n"
-            f"  snippet: {snip!r}\n"
-            f"  line:    {src!r}"
+            f"snippet/line mismatch at line {line_num}:\n  snippet: {snip!r}\n  line:    {src!r}"
         )

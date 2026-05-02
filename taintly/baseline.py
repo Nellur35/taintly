@@ -173,9 +173,11 @@ def load_baseline(path: str) -> Baseline:
     snippets_raw = data.get("snippets", {})
     snippets: dict[str, str] = {}
     if isinstance(snippets_raw, dict):
-        for k, v in snippets_raw.items():
-            if isinstance(k, str) and len(k) == 64 and isinstance(v, str):
-                snippets[k] = v
+        snippets = {
+            k: v
+            for k, v in snippets_raw.items()
+            if isinstance(k, str) and len(k) == 64 and isinstance(v, str)
+        }
 
     return Baseline(
         version=BASELINE_VERSION,
@@ -274,7 +276,7 @@ def classify_diff_kind(
 
     # Did baseline contain a finding with the same rule_id + same package?
     rule_id = getattr(new_finding, "rule_id", "")
-    for old_fp, old_snip in baseline_snippets.items():
+    for old_snip in baseline_snippets.values():
         old_uses = _USES_REF_FOR_DIFF.search(old_snip or "")
         if not old_uses:
             continue

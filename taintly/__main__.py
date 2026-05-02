@@ -26,7 +26,11 @@ from .config import (
     find_config,
     load_config,
 )
-from .deployment_context import apply_context_notes_to_findings, load_deployment_context
+from .deployment_context import (
+    DeploymentContext,
+    apply_context_notes_to_findings,
+    load_deployment_context,
+)
 from .engine import detect_platform, scan_file, scan_repo
 from .models import Platform, Severity
 from .reporters._encoding import ensure_utf8_stdout
@@ -39,7 +43,6 @@ from .reporters.text import format_text
 from .rules.registry import load_all_rules, load_rules_for_platform
 from .scorer import compute_score
 from .testing.self_test import format_test_results, run_mutation_tests, run_self_test
-
 
 # Map AuditReport.platform string to the Platform enum the scorer
 # uses for bonus gating. Keeps the call sites readable.
@@ -656,7 +659,13 @@ def main():
         report.summarize()
 
         score_report = (
-            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report), families_with_surface=report.families_with_surface, families_with_ctx_coverage=report.families_with_ctx_coverage)
+            compute_score(
+                report.findings,
+                files_scanned=report.files_scanned,
+                platforms_scanned=_platforms_for_reports(report),
+                families_with_surface=report.families_with_surface,
+                families_with_ctx_coverage=report.families_with_ctx_coverage,
+            )
             if (args.score or args.format == "html")
             else None
         )
@@ -728,7 +737,13 @@ def main():
         report.filter_severity(effective_min_sev)
         report.summarize()
         score_report = (
-            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report), families_with_surface=report.families_with_surface, families_with_ctx_coverage=report.families_with_ctx_coverage)
+            compute_score(
+                report.findings,
+                files_scanned=report.files_scanned,
+                platforms_scanned=_platforms_for_reports(report),
+                families_with_surface=report.families_with_surface,
+                families_with_ctx_coverage=report.families_with_ctx_coverage,
+            )
             if (args.score or args.format == "html")
             else None
         )
@@ -797,7 +812,13 @@ def main():
         report.filter_severity(effective_min_sev)
         report.summarize()
         score_report = (
-            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report), families_with_surface=report.families_with_surface, families_with_ctx_coverage=report.families_with_ctx_coverage)
+            compute_score(
+                report.findings,
+                files_scanned=report.files_scanned,
+                platforms_scanned=_platforms_for_reports(report),
+                families_with_surface=report.families_with_surface,
+                families_with_ctx_coverage=report.families_with_ctx_coverage,
+            )
             if (args.score or args.format == "html")
             else None
         )
@@ -833,7 +854,13 @@ def main():
         report.filter_severity(effective_min_sev)
         report.summarize()
         score_report = (
-            compute_score(report.findings, files_scanned=report.files_scanned, platforms_scanned=_platforms_for_reports(report), families_with_surface=report.families_with_surface, families_with_ctx_coverage=report.families_with_ctx_coverage)
+            compute_score(
+                report.findings,
+                files_scanned=report.files_scanned,
+                platforms_scanned=_platforms_for_reports(report),
+                families_with_surface=report.families_with_surface,
+                families_with_ctx_coverage=report.families_with_ctx_coverage,
+            )
             if (args.score or args.format == "html")
             else None
         )
@@ -900,7 +927,7 @@ def main():
     reports = scan_repo(args.path, all_rules, platform)
 
     all_findings = []
-    deployment_contexts: dict[str, object] = {}
+    deployment_contexts: dict[str, DeploymentContext] = {}
     for report in reports:
         deployment_context = deployment_contexts.setdefault(
             report.repo_path, load_deployment_context(report.repo_path)
@@ -969,9 +996,7 @@ def main():
             # an entirely new third-party action or a routine version
             # bump on one they already approved.
             for f in new_findings:
-                kind = classify_diff_kind(
-                    f, baseline.fingerprints, baseline.snippets, args.path
-                )
+                kind = classify_diff_kind(f, baseline.fingerprints, baseline.snippets, args.path)
                 if kind == "sha_bump":
                     f.title = "[SHA BUMP] " + f.title
                 elif kind == "new_dependency":

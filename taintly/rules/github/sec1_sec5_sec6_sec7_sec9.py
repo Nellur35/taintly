@@ -19,7 +19,6 @@ from taintly.models import (
     Severity,
 )
 
-
 # ---------------------------------------------------------------------------
 # SEC1-GH-001 — job-scoped variant of SequencePattern
 # ---------------------------------------------------------------------------
@@ -65,7 +64,7 @@ class _JobScopedSequencePattern:
         self._lookahead = lookahead_lines
         self._excludes = [re.compile(e) for e in (exclude or [])]
 
-    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
         # Find the ``jobs:`` line.  When absent, the pattern degrades
         # to whole-file coverage to preserve the original behaviour.
         jobs_line_idx: int | None = None
@@ -1723,9 +1722,7 @@ RULES: list[Rule] = [
             # the rule shouldn't flag.  Step-scope suppression would
             # require an engine-level model change; revisit if the
             # broad-suppression FP rate is observed in the wild.
-            anchor_job_exclude=(
-                r"env:\s*\n[\s\S]*?\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"
-            ),
+            anchor_job_exclude=(r"env:\s*\n[\s\S]*?\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"),
             exclude=[r"^\s*#"],
         ),
         remediation=(

@@ -35,11 +35,12 @@ from __future__ import annotations
 
 import fnmatch
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterator, Optional
+from typing import Optional
 
-from .tokenizer import Token, TokenKind, TokenizerError, tokenize
+from .tokenizer import Token, TokenizerError, TokenKind, tokenize
 
 
 class EventKind(Enum):
@@ -80,9 +81,7 @@ def _glob_to_segments(glob: str) -> list[str]:
     return [s for s in normalised.split(".") if s]
 
 
-def _path_match_recursive(
-    path: tuple[object, ...], pi: int, segs: list[str], si: int
-) -> bool:
+def _path_match_recursive(path: tuple[object, ...], pi: int, segs: list[str], si: int) -> bool:
     while si < len(segs) and pi < len(path):
         seg = segs[si]
         if seg == "**":
@@ -187,9 +186,7 @@ class _Walker:
     def __init__(self, content: str, *, recover: bool) -> None:
         self._content = content
         self._recover = recover
-        self._stack: list[_Frame] = [
-            _Frame(key=None, indent=-1, container="mapping")
-        ]
+        self._stack: list[_Frame] = [_Frame(key=None, indent=-1, container="mapping")]
         self._open_key: Optional[Token] = None
         # Block-scalar state.  Each buffer entry is
         # ``(source_line_number, body_text)`` so the flushed
@@ -224,9 +221,7 @@ class _Walker:
         except TokenizerError as e:
             if not self._recover:
                 raise
-            yield Event(
-                EventKind.CUTOFF, (), e.line, 1, message=str(e)
-            )
+            yield Event(EventKind.CUTOFF, (), e.line, 1, message=str(e))
             return
 
         # Group tokens by line so per-line semantics (e.g.
@@ -285,9 +280,7 @@ class _Walker:
                 # path (or the current frame if no open key).
                 name = tok.value.lstrip("&")
                 self._capturing = name
-                self._anchors[name] = _Anchor(
-                    root_indent=tok.indent
-                )
+                self._anchors[name] = _Anchor(root_indent=tok.indent)
                 self._capture_root_path_len = len(self._current_path())
                 if self._open_key is not None:
                     self._capture_root_path_len += 1
@@ -320,10 +313,7 @@ class _Walker:
                         # frame for that open key so the replay
                         # base reflects what the maintainer
                         # actually wrote.
-                        if (
-                            self._open_key is not None
-                            and tok.indent > self._open_key.indent
-                        ):
+                        if self._open_key is not None and tok.indent > self._open_key.indent:
                             self._stack.append(
                                 _Frame(
                                     key=self._open_key.value,
@@ -457,10 +447,7 @@ class _Walker:
         # this indent.
         top = self._stack[-1]
         if not (top.container == "sequence" and top.indent == indent):
-            if (
-                self._open_key is not None
-                and indent > self._open_key.indent
-            ):
+            if self._open_key is not None and indent > self._open_key.indent:
                 self._stack.append(
                     _Frame(
                         key=self._open_key.value,
@@ -470,9 +457,7 @@ class _Walker:
                 )
                 self._open_key = None
             else:
-                self._stack.append(
-                    _Frame(key=None, indent=indent, container="sequence")
-                )
+                self._stack.append(_Frame(key=None, indent=indent, container="sequence"))
             top = self._stack[-1]
 
         # Reserve the next sequence index and push a mapping
@@ -482,14 +467,10 @@ class _Walker:
         # flag.
         idx = top.next_index
         top.next_index += 1
-        self._stack.append(
-            _Frame(key=idx, indent=indent + 1, container="mapping")
-        )
+        self._stack.append(_Frame(key=idx, indent=indent + 1, container="mapping"))
         self._post_dash_attach = True
 
-    def _emit_value(
-        self, tok: Token, value: str, value_kind: str
-    ) -> Optional[Event]:
+    def _emit_value(self, tok: Token, value: str, value_kind: str) -> Optional[Event]:
         # Sequence-element scalar: when there's no open key and the
         # top frame is a mapping that was just opened at a sequence
         # element index whose body is a single bare scalar (e.g.,
@@ -586,7 +567,7 @@ class _Walker:
             return
         # Capture relative to the anchor's root.
         if len(path) >= self._capture_root_path_len:
-            rel = path[self._capture_root_path_len:]
+            rel = path[self._capture_root_path_len :]
         else:
             rel = path
         if rel:
@@ -636,9 +617,7 @@ class _Walker:
             base_key = None
 
         container = "sequence" if first.kind == TokenKind.FLOW_OPEN_SEQ else "mapping"
-        self._stack.append(
-            _Frame(key=base_key, indent=first.indent, container=container)
-        )
+        self._stack.append(_Frame(key=base_key, indent=first.indent, container=container))
         my_frame = self._stack[-1]
         i = start + 1
         flow_pending_key: Optional[str] = None
@@ -669,9 +648,7 @@ class _Walker:
                 else:
                     inner_pre_key = flow_pending_key
                     flow_pending_key = None
-                yield from self._consume_flow(
-                    tokens, i, pre_key=inner_pre_key
-                )
+                yield from self._consume_flow(tokens, i, pre_key=inner_pre_key)
                 i = self._flow_end_idx
                 continue
             if t.kind in (TokenKind.SCALAR_PLAIN, TokenKind.SCALAR_QUOTED):

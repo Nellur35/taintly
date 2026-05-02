@@ -14,4 +14,4 @@ and the schema-lookup performance choice.
 from .api import walk_workflow
 from .walker import Event, EventKind
 
-__all__ = ["walk_workflow", "Event", "EventKind"]
+__all__ = ["Event", "EventKind", "walk_workflow"]

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from taintly.scorer import ScoreReport
 
 
-def format_json(report: AuditReport, score_report: "ScoreReport | None" = None) -> str:
+def format_json(report: AuditReport, score_report: ScoreReport | None = None) -> str:
     """Render an AuditReport as pretty-printed JSON."""
     clusters = cluster_findings(report.findings)
     confirmed_clusters = [cl for cl in clusters if not cl.review_needed]
@@ -23,7 +23,7 @@ def format_json(report: AuditReport, score_report: "ScoreReport | None" = None) 
     # ping the findings stream by ``rule_id``.  The same Findings
     # remain in ``findings`` for backwards compatibility — pre-v1.1
     # consumers parsing only ``findings`` keep working unchanged.
-    data: dict = {
+    data: dict[str, object] = {
         "repo_path": report.repo_path,
         "platform": report.platform,
         "files_scanned": report.files_scanned,

@@ -44,10 +44,11 @@ _COMPARE_RE = re.compile(
 )
 
 
-def evaluate_gitlab_rules(
-    job: dict[str, object], ctx: GitLabContext | None = None
-) -> GuardVerdict:
-    for rule in job.get("rules", []):
+def evaluate_gitlab_rules(job: dict[str, object], ctx: GitLabContext | None = None) -> GuardVerdict:
+    rules = job.get("rules", [])
+    if not isinstance(rules, list):
+        return GuardVerdict.RUNTIME
+    for rule in rules:
         if not isinstance(rule, dict):
             continue
         if str(rule.get("when", "")).strip().lower() != "never":
@@ -104,11 +105,11 @@ def find_dead_gitlab_job_ranges(
 def _value_for(token: str, ctx: GitLabContext | None) -> str | None:
     if ctx is None:
         return None
-    if token == "CI_PIPELINE_SOURCE":
+    if token == "CI_PIPELINE_SOURCE":  # nosec B105 - GitLab env var name, not a credential.
         return ctx.pipeline_source
-    if token == "CI_COMMIT_BRANCH":
+    if token == "CI_COMMIT_BRANCH":  # nosec B105 - GitLab env var name, not a credential.
         return ctx.commit_branch
-    if token == "CI_DEFAULT_BRANCH":
+    if token == "CI_DEFAULT_BRANCH":  # nosec B105 - GitLab env var name, not a credential.
         return ctx.default_branch
     return token
 

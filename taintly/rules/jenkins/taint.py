@@ -147,7 +147,7 @@ RULES: list[Rule] = [
                 r"^\s*//",
                 # Docstring / javadoc continuation
                 r"^\s*/\*",  # `/*` block-comment opener (single-line
-                             # `/* ... */` or multi-line opener)
+                # `/* ... */` or multi-line opener)
                 r"^\s*\*",
                 # Heredoc-style: tracked as a separate follow-up rule,
                 # so don't fire on the opening delimiter of a
@@ -322,7 +322,7 @@ RULES: list[Rule] = [
                 # Groovy comments.
                 r"^\s*//",
                 r"^\s*/\*",  # `/*` block-comment opener (single-line
-                             # `/* ... */` or multi-line opener)
+                # `/* ... */` or multi-line opener)
                 r"^\s*\*",
             ],
             scope="file",

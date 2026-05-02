@@ -708,9 +708,7 @@ RULES: list[Rule] = [
             "SEC4-GH-020."
         ),
         pattern=RegexPattern(
-            match=(
-                r"\$\{?(GITHUB_REF_NAME|GITHUB_HEAD_REF|GITHUB_ACTOR)\}?"
-            ),
+            match=(r"\$\{?(GITHUB_REF_NAME|GITHUB_HEAD_REF|GITHUB_ACTOR)\}?"),
             exclude=[
                 r"^\s*#",
                 r"^\s*[\w_]+:\s*\$\{?GITHUB_",  # YAML key-value assignment
@@ -776,10 +774,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC4-GH-020",
-        title=(
-            "Maintainer-controlled GitHub auto-env var used unquoted in shell "
-            "(hygiene)"
-        ),
+        title=("Maintainer-controlled GitHub auto-env var used unquoted in shell (hygiene)"),
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",

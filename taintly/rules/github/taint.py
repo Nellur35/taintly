@@ -2154,7 +2154,7 @@ RULES = [
             "A tainted GitHub-Actions context (PR title/body, comment "
             "body, head_ref, ...) flows through a step or job env var "
             "into a run: block where every reference is safely "
-            "double-quoted (``\"$VAR\"`` / ``\"${VAR}\"``) and the "
+            'double-quoted (``"$VAR"`` / ``"${VAR}"``) and the '
             "line contains no eval-class re-parsing command. Direct "
             "shell injection at this sink is not possible — the value "
             "passes as a single literal argument. The finding stays "
@@ -2241,8 +2241,8 @@ RULES = [
         threat_narrative=(
             "POSIX shell parameter expansion does not re-tokenise the "
             "value's contents inside double quotes, so a tainted env "
-            "var consumed via ``echo \"$VAR\"`` or "
-            "``[[ \"$VAR\" == ... ]]`` does not produce direct command "
+            'var consumed via ``echo "$VAR"`` or '
+            '``[[ "$VAR" == ... ]]`` does not produce direct command '
             "injection. The lint stays in the report so reviewers can "
             "verify the value isn't fed to a downstream re-parser later "
             "in the script (eval, sh -c, source) where the safety would "
@@ -2284,8 +2284,7 @@ RULES = [
     Rule(
         id="TAINT-GH-013",
         title=(
-            "Template expression interpolated into actions/github-script "
-            "body (JS injection sink)"
+            "Template expression interpolated into actions/github-script body (JS injection sink)"
         ),
         severity=Severity.HIGH,
         platform=Platform.GITHUB,

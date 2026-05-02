@@ -163,7 +163,7 @@ RULES: list[Rule] = [
             "(TOKEN, SECRET, PASSWORD/PASS, KEY, AUTH, CRED, BEARER, APIKEY, etc.) "
             "rather than firing on every echo of every shell variable inside a "
             "withCredentials block — the pre-audit pattern was field-test FP-prone "
-            "on lines like `echo \"$illegal_filename\"` whose variable wasn't a "
+            'on lines like `echo "$illegal_filename"` whose variable wasn\'t a '
             "secret at all."
         ),
         pattern=ContextPattern(

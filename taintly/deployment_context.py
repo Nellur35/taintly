@@ -72,15 +72,19 @@ def apply_context_notes(finding: Any, ctx: DeploymentContext) -> None:
     family = getattr(finding, "finding_family", "")
 
     if family == "privileged_pr_trigger" and ctx.external_prs in {"blocked", "restricted"}:
-        notes.append("Exploitability may be over-weighted for deployments without open external PRs.")
+        notes.append(
+            "Exploitability may be over-weighted for deployments without open external PRs."
+        )
         tags.add(f"external_prs:{ctx.external_prs}")
 
-    if family == "credential_persistence" and ctx.secret_scoping == "oidc_only":
+    if family == "credential_persistence" and ctx.secret_scoping == "oidc_only":  # nosec B105 - context enum value, not a credential.
         notes.append("Long-lived credential assumptions may not hold for OIDC-only deployments.")
         tags.add("secret_scoping:oidc_only")
 
     if family == "ungoverned_services" and ctx.runner_topology == "isolated_self_hosted":
-        notes.append("Runner exposure may be lower when self-hosted runners are isolated per trust boundary.")
+        notes.append(
+            "Runner exposure may be lower when self-hosted runners are isolated per trust boundary."
+        )
         tags.add("runner_topology:isolated_self_hosted")
 
     if notes:
