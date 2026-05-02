@@ -5,8 +5,12 @@ from __future__ import annotations
 import glob
 import os
 import re
+from dataclasses import dataclass
+from typing import Callable
 
 from .families import classify_rule, default_confidence, default_review_needed
+from .gitlabguard import GitLabContext, find_dead_gitlab_job_ranges
+from .jenkinsguard import JenkinsContext, find_dead_jenkins_stage_ranges
 from .models import (
     _MAX_SAFE_TEXT_LEN,
     AuditReport,
@@ -18,6 +22,8 @@ from .models import (
 )
 from .parsers.anchor_expander import expand_anchors
 from .pse_enrichment import enrich_pse_findings
+from .staticguard import WorkflowContext as StaticGuardContext
+from .staticguard import detect_github_workflow_context, find_dead_line_ranges
 from .workflow_context import analyze as analyze_workflow
 from .workflow_context import compute_exploitability
 from .workflow_corpus import CorpusPattern, build_corpus
@@ -91,7 +97,14 @@ def _is_suppressed(line: str, rule_id: str) -> bool:
     return False
 
 
-def scan_file(filepath: str, rules: list[Rule], _content: str | None = None) -> list[Finding]:
+def scan_file(
+    filepath: str,
+    rules: list[Rule],
+    _content: str | None = None,
+    repoctx: StaticGuardContext | None = None,
+    gitlabctx: GitLabContext | None = None,
+    jenkinsctx: JenkinsContext | None = None,
+) -> list[Finding]:
     """Scan a single file against a list of rules.
 
     If _content is provided, use it directly instead of reading from disk.
@@ -230,13 +243,117 @@ def scan_file(filepath: str, rules: list[Rule], _content: str | None = None) -> 
                     )
                 )
 
-    _downgrade_maintainer_gated_ref_name_findings(findings, content)
+    _run_post_processors(
+        findings,
+        rules=rules,
+        content=content,
+        repoctx=repoctx,
+        gitlabctx=gitlabctx,
+        jenkinsctx=jenkinsctx,
+    )
     return findings
 
 
 # ---------------------------------------------------------------------------
 # Post-detection severity calibration
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _PostProcessContext:
+    rules: list[Rule]
+    content: str
+    repoctx: StaticGuardContext | None = None
+    gitlabctx: GitLabContext | None = None
+    jenkinsctx: JenkinsContext | None = None
+
+
+_PostProcessor = Callable[[list[Finding], _PostProcessContext], None]
+
+
+def _github_dead_postprocessor(
+    findings: list[Finding], ctx: _PostProcessContext
+) -> None:
+    _suppress_dead_findings(findings, ctx.content, ctx.repoctx)
+
+
+def _gitlab_dead_postprocessor(
+    findings: list[Finding], ctx: _PostProcessContext
+) -> None:
+    if any(rule.platform == Platform.GITLAB for rule in ctx.rules):
+        _suppress_gitlab_dead_findings(findings, ctx.content, ctx.gitlabctx)
+
+
+def _jenkins_dead_postprocessor(
+    findings: list[Finding], ctx: _PostProcessContext
+) -> None:
+    if any(rule.platform == Platform.JENKINS for rule in ctx.rules):
+        _suppress_jenkins_dead_findings(findings, ctx.content, ctx.jenkinsctx)
+
+
+def _maintainer_downgrade_postprocessor(
+    findings: list[Finding], ctx: _PostProcessContext
+) -> None:
+    _downgrade_maintainer_gated_findings(findings, ctx.content)
+
+
+POST_PROCESSORS: tuple[_PostProcessor, ...] = (
+    _github_dead_postprocessor,
+    _gitlab_dead_postprocessor,
+    _jenkins_dead_postprocessor,
+    _maintainer_downgrade_postprocessor,
+)
+
+
+def _run_post_processors(
+    findings: list[Finding],
+    *,
+    rules: list[Rule],
+    content: str,
+    repoctx: StaticGuardContext | None,
+    gitlabctx: GitLabContext | None,
+    jenkinsctx: JenkinsContext | None,
+) -> None:
+    ctx = _PostProcessContext(
+        rules=rules,
+        content=content,
+        repoctx=repoctx,
+        gitlabctx=gitlabctx,
+        jenkinsctx=jenkinsctx,
+    )
+    for processor in POST_PROCESSORS:
+        processor(findings, ctx)
+
+def _suppress_gitlab_dead_findings(
+    findings: list[Finding], content: str, gitlabctx: GitLabContext | None
+) -> None:
+    """Drop findings inside GitLab jobs proven dead by static rules logic."""
+    if not findings:
+        return
+    dead_ranges = find_dead_gitlab_job_ranges(content, gitlabctx)
+    if not dead_ranges:
+        return
+    findings[:] = [
+        f
+        for f in findings
+        if f.line <= 0 or not any(start <= f.line <= end for start, end in dead_ranges)
+    ]
+
+
+def _suppress_jenkins_dead_findings(
+    findings: list[Finding], content: str, jenkinsctx: JenkinsContext | None
+) -> None:
+    """Drop findings inside Jenkins stages proven dead by literal when logic."""
+    if not findings:
+        return
+    dead_ranges = find_dead_jenkins_stage_ranges(content, jenkinsctx)
+    if not dead_ranges:
+        return
+    findings[:] = [
+        f
+        for f in findings
+        if f.line <= 0 or not any(start <= f.line <= end for start, end in dead_ranges)
+    ]
 
 # ``on:`` events whose firing is restricted to maintainers — pushing
 # tags, creating releases, scheduling cron, or invoking
@@ -261,7 +378,7 @@ _MAINTAINER_GATED_TRIGGER_RE = re.compile(
 )
 _FORK_REACHABLE_TRIGGER_RE = re.compile(
     r"(?m)^\s*("
-    r"pull_request"  # covers pull_request and pull_request_target / _review etc.
+    r"pull_request(?:_target|_review|_review_comment)?"
     r"|issue_comment"
     r"|issues"
     r"|discussion"
@@ -274,6 +391,14 @@ _FORK_REACHABLE_TRIGGER_RE = re.compile(
 _INLINE_TRIGGER_RE = re.compile(r"^on:\s*(\[[^\]]+\]|\w+)\s*$", re.MULTILINE)
 _REF_NAME_REF_RE = re.compile(
     r"\$\{?\s*GITHUB_REF_NAME\b|github\.ref_name\b", re.IGNORECASE
+)
+_INPUTS_REF_RE = re.compile(
+    r"\$\{\{\s*(?:github\.event\.inputs|inputs)\.[a-zA-Z0-9_]+\s*\}\}",
+    re.IGNORECASE,
+)
+_MAINTAINER_DOWNGRADE_PATTERNS: tuple[tuple[str | None, str, re.Pattern[str]], ...] = (
+    (None, "script_injection", _REF_NAME_REF_RE),
+    ("SEC4-GH-008", "script_injection", _INPUTS_REF_RE),
 )
 
 
@@ -296,7 +421,23 @@ def _is_maintainer_gated_only(content: str) -> bool:
     return bool(_MAINTAINER_GATED_TRIGGER_RE.search(content))
 
 
-def _downgrade_maintainer_gated_ref_name_findings(
+def _suppress_dead_findings(
+    findings: list[Finding], content: str, repoctx: StaticGuardContext | None
+) -> None:
+    """Remove findings whose line is inside a statically dead job/step."""
+    if not findings:
+        return
+    dead_ranges = find_dead_line_ranges(content, repoctx)
+    if not dead_ranges:
+        return
+    findings[:] = [
+        f
+        for f in findings
+        if f.line <= 0 or not any(start <= f.line <= end for start, end in dead_ranges)
+    ]
+
+
+def _downgrade_maintainer_gated_findings(
     findings: list[Finding], content: str
 ) -> None:
     """Mutate ``findings`` in place: for findings in the
@@ -325,13 +466,27 @@ def _downgrade_maintainer_gated_ref_name_findings(
     }
 
     for f in findings:
-        if getattr(f, "finding_family", "") != "script_injection":
-            continue
-        if not _REF_NAME_REF_RE.search(f.snippet or ""):
+        if not _matches_maintainer_downgrade_pattern(f):
             continue
         new_sev = _downgrade.get(f.severity)
         if new_sev is not None and new_sev != f.severity:
+            old_sev = f.severity
             f.severity = new_sev
+            f.calibration_reason = (
+                "Maintainer-gated trigger path downgraded severity "
+                f"from {old_sev.value} to {new_sev.value}."
+            )
+
+
+def _matches_maintainer_downgrade_pattern(finding: Finding) -> bool:
+    for rule_id, family, pattern in _MAINTAINER_DOWNGRADE_PATTERNS:
+        if rule_id is not None and finding.rule_id != rule_id:
+            continue
+        if getattr(finding, "finding_family", "") != family:
+            continue
+        if pattern.search(finding.snippet or ""):
+            return True
+    return False
 
 
 def _normalize_input_path(path: str) -> tuple[str, list[str]]:
@@ -544,6 +699,7 @@ def scan_repo(
         report.rules_loaded = len(platform_rules)
 
         all_findings: list[Finding] = []
+        repoctx = detect_github_workflow_context(repo_path) if plat == Platform.GITHUB else None
         # ContextPattern rules whose finding_family is set are the
         # subset we can answer "did this family have a candidate
         # location?" for.  We compute anchor-match counts per file
@@ -558,8 +714,18 @@ def scan_repo(
                 ctx_rules_by_family.setdefault(r.finding_family, []).append(r)
         report.families_with_ctx_coverage = set(ctx_rules_by_family)
 
+        gitlabctx = GitLabContext() if plat == Platform.GITLAB else None
+        jenkinsctx = JenkinsContext() if plat == Platform.JENKINS else None
         for fpath in files:
-            all_findings.extend(scan_file(fpath, platform_rules))
+            all_findings.extend(
+                scan_file(
+                    fpath,
+                    platform_rules,
+                    repoctx=repoctx,
+                    gitlabctx=gitlabctx,
+                    jenkinsctx=jenkinsctx,
+                )
+            )
             # Surface-evaluation pass: re-read the file once and
             # check each ContextPattern's anchor regex.  Only families
             # whose anchors found a candidate get added — so a family

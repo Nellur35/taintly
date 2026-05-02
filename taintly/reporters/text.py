@@ -410,6 +410,8 @@ def _format_finding(f: Finding, c: dict[Severity, str], r: str, b: str, dim: str
         markers.append(f"confidence:{f.confidence}")
     if f.exploitability and f.exploitability != "medium":
         markers.append(f"exploitability:{f.exploitability}")
+    if f.triage_needed:
+        markers.append("triage-needed")
     suffix = f" {dim}[{', '.join(markers)}]{r}" if markers else ""
     out = [
         f"  {c[f.severity]}[{f.severity.value}]{r} {b}{f.rule_id}{r}: {f.title}{suffix}",
@@ -420,6 +422,12 @@ def _format_finding(f: Finding, c: dict[Severity, str], r: str, b: str, dim: str
     out.append(f"    {f.description[:200]}")
     if f.threat_narrative:
         out.append(f"    Threat: {f.threat_narrative}")
+    for note in f.context_notes:
+        out.append(f"    Context: {note}")
+    if f.suppression_reason:
+        out.append(f"    Suppression: {f.suppression_reason}")
+    if f.calibration_reason:
+        out.append(f"    Calibration: {f.calibration_reason}")
     if f.remediation:
         out.append(f"    Fix:  {f.remediation.split(chr(10))[0]}")
     tags = []
@@ -459,6 +467,8 @@ def _format_collapsed_group(
         markers.append(f"confidence:{sample.confidence}")
     if sample.exploitability and sample.exploitability != "medium":
         markers.append(f"exploitability:{sample.exploitability}")
+    if sample.triage_needed:
+        markers.append("triage-needed")
     suffix = f" {dim}[{', '.join(markers)}]{r}" if markers else ""
 
     out = [
@@ -473,6 +483,12 @@ def _format_collapsed_group(
     out.append(f"    {sample.description[:200]}")
     if sample.threat_narrative:
         out.append(f"    Threat: {sample.threat_narrative}")
+    for note in sample.context_notes:
+        out.append(f"    Context: {note}")
+    if sample.suppression_reason:
+        out.append(f"    Suppression: {sample.suppression_reason}")
+    if sample.calibration_reason:
+        out.append(f"    Calibration: {sample.calibration_reason}")
     if sample.remediation:
         out.append(f"    Fix:    {sample.remediation.split(chr(10))[0]}")
     tags = []

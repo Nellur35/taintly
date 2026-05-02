@@ -530,12 +530,13 @@ def _cluster_card(cluster: FindingCluster, repo_path: str = "") -> str:
     # Loop form kept: the multi-line HTML template below reads far
     # better than a nested list-comprehension expression.
     for f in sorted_findings:
+        note = _decision_tags(f)
         rows.append(
             "<tr>"
             f"<td>{_severity_badge(f.severity)}</td>"
             f'<td><a href="#rule-{_e(f.rule_id)}"><code>{_e(f.rule_id)}</code></a></td>'
             f'<td class="file">{_e(_relpath_for_display(f.file, repo_path))}:{_e(f.line)}</td>'
-            f"<td>{_e(f.title)}</td>"
+            f"<td>{_e(f.title)}{note}</td>"
             "</tr>"
         )
 
@@ -668,12 +669,13 @@ def _flat_findings_section(report: AuditReport) -> str:
     rows: list[str] = []
     # Loop-form readability beats list-comp here (multi-line HTML).
     for f in sorted_findings:
+        note = _decision_tags(f)
         rows.append(
             "<tr>"
             f"<td>{_severity_badge(f.severity)}</td>"
             f'<td><a href="#rule-{_e(f.rule_id)}"><code>{_e(f.rule_id)}</code></a></td>'
             f"<td><code>{_e(_relpath_for_display(f.file, report.repo_path))}:{_e(f.line)}</code></td>"
-            f"<td>{_e(f.title)}</td>"
+            f"<td>{_e(f.title)}{note}</td>"
             "</tr>"
         )
     return (
@@ -686,6 +688,20 @@ def _flat_findings_section(report: AuditReport) -> str:
         f"<tbody>{''.join(rows)}</tbody></table>"
         "</details></section>"
     )
+
+
+def _decision_tags(f: Finding) -> str:
+    notes: list[str] = []
+    notes.extend(f.context_notes or [])
+    if f.suppression_reason:
+        notes.append(f"Suppression: {f.suppression_reason}")
+    if f.calibration_reason:
+        notes.append(f"Calibration: {f.calibration_reason}")
+    if f.triage_needed:
+        notes.append("Triage needed")
+    if not notes:
+        return ""
+    return " " + " ".join(f'<span class="tag">{_e(n)}</span>' for n in notes)
 
 
 # ---------------------------------------------------------------------------

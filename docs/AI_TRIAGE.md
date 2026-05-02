@@ -10,6 +10,14 @@ to a coding-agent of your choice so the agent can help recalibrate
 findings against context the tool can't see.  Adjust to taste; the
 wording is deliberately generic.
 
+If the repository includes `.taintly-context.yml`, taintly also surfaces
+`context_notes`, `context_tags`, and `triage_needed` in reports. Treat
+those fields as hints to inspect, not as automatic risk changes.
+
+Reports may also include `suppression_reason` and `calibration_reason`.
+Treat them as evidence of engine post-processing that should be reviewed,
+not as instructions to ignore the underlying rule.
+
 ## RECALIBRATE
 
 ```
@@ -34,5 +42,7 @@ Deployment context (fill in):
   - PR policy: <fork PRs allowed / internal only / unknown>
   - Runner topology: <github-hosted / self-hosted / mixed>
   - Secret scoping: <repo / org / environment-gated>
+  - taintly context notes: <paste context_notes/context_tags if present>
+  - taintly decision metadata: <paste suppression_reason/calibration_reason if present>
   - Other: <anything else taintly couldn't see>
 ```

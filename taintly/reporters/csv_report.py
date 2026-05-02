@@ -21,6 +21,11 @@ _FIELDS = [
     "description",
     "remediation",
     "reference",
+    "context_notes",
+    "context_tags",
+    "triage_needed",
+    "suppression_reason",
+    "calibration_reason",
 ]
 
 
@@ -36,5 +41,7 @@ def format_csv(report: AuditReport) -> str:
         # Flatten list fields to delimited strings
         row["stride"] = "+".join(row.get("stride") or [])
         row["incidents"] = "; ".join(row.get("incidents") or [])
+        row["context_notes"] = "; ".join(row.get("context_notes") or [])
+        row["context_tags"] = "; ".join(row.get("context_tags") or [])
         writer.writerow(row)
     return buf.getvalue()

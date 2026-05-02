@@ -55,11 +55,14 @@ Quick win
     OWASP:CICD-SEC-3 | STRIDE:T
     Incidents: tj-actions/changed-files (CVE-2025-30066)
 
-  [HIGH] PSE-GH-001: AI agent with cloud-credential grant on a fork-reachable event [confidence:medium, exploitability:high]
+  [HIGH] PSE-GH-001: AI agent with cloud-credential grant on a fork-reachable event [confidence:medium, exploitability:high, triage-needed]
     File: .github/workflows/agent.yml:24
     Code:       - uses: anthropics/claude-code-action@v1
     Permission Slip Effect: a fork-reachable trigger, an AI agent action, and a cloud-credential grant co-exist.  An attacker who steers the agent via prompt injection holds a valid OIDC token.
     Threat: Attacker mints OIDC token via prompt injection.
+    Context: Exploitability may differ because external pull requests are blocked.
+    Suppression: Dead-path siblings were removed before reporting.
+    Calibration: Maintainer-only trigger path lowers exploitability.
     Fix:  Break at least one leg of the triangle:
     OWASP:CICD-SEC-4 | STRIDE:E+T+I
 

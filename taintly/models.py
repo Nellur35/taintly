@@ -852,6 +852,16 @@ class Finding:
     review_needed: bool = False
     """True if this pattern deserves human review before strong conclusion
     (separates review-needed items from confirmed risks in the reporter)."""
+    context_notes: list[str] = field(default_factory=list)
+    """Deployment-context interpretation notes. These do not change severity."""
+    context_tags: list[str] = field(default_factory=list)
+    """Stable tags explaining which deployment-context facts contributed notes."""
+    triage_needed: bool = False
+    """True when deployment context should be reviewed alongside this finding."""
+    suppression_reason: str = ""
+    """Reason a related finding was suppressed or neutralized, when reported."""
+    calibration_reason: str = ""
+    """Reason severity or exploitability presentation was calibrated."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -873,6 +883,11 @@ class Finding:
             "confidence": self.confidence,
             "exploitability": self.exploitability,
             "review_needed": self.review_needed,
+            "context_notes": self.context_notes,
+            "context_tags": self.context_tags,
+            "triage_needed": self.triage_needed,
+            "suppression_reason": self.suppression_reason,
+            "calibration_reason": self.calibration_reason,
         }
 
 
