@@ -1,0 +1,20 @@
+# Same shape, but every job inherits if: false via merge-key anchor.
+# The structural reader resolves the merge key, so whole-dead
+# inherits that capability.
+defaults: &dead
+  if: false
+  runs-on: ubuntu-latest
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+jobs:
+  job_one:
+    <<: *dead
+    steps:
+      - run: echo dead
+  job_two:
+    <<: *dead
+    steps:
+      - run: echo also_dead

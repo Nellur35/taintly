@@ -1,0 +1,16 @@
+# Mix of dead and live jobs -> NOT whole-dead.  Trigger-level
+# findings still fire; per-job suppression handles the dead job's
+# body.  Counter-fixture for whole_dead_workflow.yml.
+on:
+  pull_request_target:
+    types: [labeled]
+jobs:
+  dead_path:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ github.event.pull_request.title }}"
+  live_path:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ github.event.pull_request.body }}"

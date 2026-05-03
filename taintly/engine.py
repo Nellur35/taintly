@@ -23,7 +23,11 @@ from .models import (
 from .parsers.anchor_expander import expand_anchors
 from .pse_enrichment import enrich_pse_findings
 from .staticguard import WorkflowContext as StaticGuardContext
-from .staticguard import detect_github_workflow_context, find_dead_line_ranges
+from .staticguard import (
+    detect_github_workflow_context,
+    find_dead_line_ranges,
+    is_workflow_whole_dead,
+)
 from .workflow_context import analyze as analyze_workflow
 from .workflow_context import compute_exploitability
 from .workflow_corpus import CorpusPattern, build_corpus
@@ -270,8 +274,17 @@ _PostProcessor = Callable[[list[Finding], _PostProcessContext], None]
 
 
 def _github_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
-    if any(rule.platform == Platform.GITHUB for rule in ctx.rules):
-        _suppress_dead_findings(findings, ctx.content, ctx.repoctx)
+    if not any(rule.platform == Platform.GITHUB for rule in ctx.rules):
+        return
+    # Whole-workflow short-circuit: if every job in the file is
+    # statically dead, the entire file is moot.  Suppress all findings
+    # (including trigger-level ones that the per-job pass deliberately
+    # leaves alone).  Per-job suppression handles the remaining cases:
+    # live-jobs-with-dead-steps, mixed-dead-and-live-jobs.
+    if is_workflow_whole_dead(ctx.content, ctx.repoctx):
+        findings.clear()
+        return
+    _suppress_dead_findings(findings, ctx.content, ctx.repoctx)
 
 
 def _gitlab_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
