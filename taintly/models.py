@@ -59,6 +59,43 @@ class scan_session:
         signal.signal(signal.SIGALRM, self._old_handler)
 
 
+_MATCH_TEXT_MAX_LEN = 200
+
+
+def _compute_match_text(snippet: str) -> str:
+    """Strip inline YAML comments from ``snippet`` and bound the length.
+
+    The result is intended for downstream tooling that passes finding
+    data into LLM contexts (the AI-triage workflow): YAML comments
+    are author-controlled bytes that an LLM has no way to distinguish
+    from user instructions, so removing them at the serialization
+    boundary keeps untrusted text out of the LLM's prompt context.
+
+    The helper handles single- and double-quoted strings and GitHub
+    Actions ``${{ ... }}`` expressions correctly via the existing
+    :func:`taintly.yaml_path._strip_inline_comment` parser.  Multi-
+    line snippets are handled line by line; the result is bounded
+    to ``_MATCH_TEXT_MAX_LEN`` characters.
+    """
+    if not snippet:
+        return ""
+    # Late import: ``yaml_path`` and ``models`` are sibling modules
+    # and the strip helper is cheap, but keeping the import lazy
+    # avoids a circular-import risk if ``yaml_path`` ever needs to
+    # consult ``models``.
+    from taintly.yaml_path import _strip_inline_comment
+
+    cleaned_lines: list[str] = []
+    for line in snippet.splitlines() or [snippet]:
+        cleaned = _strip_inline_comment(line).rstrip()
+        if cleaned:
+            cleaned_lines.append(cleaned)
+    cleaned = " ".join(cleaned_lines).strip()
+    if len(cleaned) > _MATCH_TEXT_MAX_LEN:
+        cleaned = cleaned[: _MATCH_TEXT_MAX_LEN - 1] + "…"
+    return cleaned
+
+
 def _safe_search(compiled_pattern, text: str):
     """Run a compiled regex search with ReDoS / CPU-exhaustion protection.
 
@@ -954,6 +991,17 @@ class Finding:
             "file": self.file,
             "line": self.line,
             "snippet": self.snippet,
+            # ``match_text`` is the comment-stripped, length-bounded
+            # form of ``snippet`` intended for downstream tooling that
+            # passes finding data into LLM contexts (the AI-triage
+            # workflow at ``docs/AI_TRIAGE.md``).  Stripping inline
+            # YAML comments before serialization keeps workflow
+            # comments from carrying through into untrusted LLM
+            # context — comments are author-controlled bytes and an
+            # LLM has no way to distinguish prose from instructions
+            # otherwise.  ``snippet`` keeps its existing contract for
+            # consumers that want the verbatim source line.
+            "match_text": _compute_match_text(self.snippet),
             "remediation": self.remediation,
             "reference": self.reference,
             "owasp_cicd": self.owasp_cicd,
