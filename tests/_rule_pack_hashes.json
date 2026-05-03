@@ -46,7 +46,7 @@
   "github/vulnerable/secret_in_with_input.yml": "322a0c4517051c29c35bcb9681979e7394f92f869e6bf28596b75f805cb564d7",
   "github/vulnerable/tag_push_unquoted_ref_name.yml": "d1d43b32784f4e2d52558a49b35d6d04cb3d17759c271bcad717343d4f81899d",
   "github/vulnerable/taint_agent_output.yml": "1be833dcc9b26552c88b1c21abd4be78d6bde9ee6b1bf1e8744ca146a6769ee2",
-  "github/vulnerable/workflow_run_no_conclusion.yml": "7267be4fa068277593ac26496a69aa9b7fb1597fb13043524f7da35bac72d3e3",
+  "github/vulnerable/workflow_run_no_conclusion.yml": "795c074f68e24e3436df169ba4ff4b92a9cba5512af1a631a84d972bbc467f22",
   "github/vulnerable/write_all_permissions.yml": "0616566c60a0fcae07ef300afcbf04cf358737a1271134872ae29dd2d05532f7",
   "gitlab/mechanical/dead_job_literal_never.yml": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "gitlab/mechanical/manual_pipeline_input.yml": "8a5581ed855abe4c191c70e4d2f3875de90e558a3a476e9fa9851f6dbac3acba",

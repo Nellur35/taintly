@@ -44,7 +44,13 @@ _DANGEROUS_GITHUB_CONTEXT_RE = re.compile(
     r"review\.body|"
     r"head_commit\.(message|author\.(email|name))|"
     r"commits|"
-    r"pages"
+    r"pages|"
+    # ``workflow_run.head_branch`` is the branch name of the
+    # upstream workflow's checkout.  For workflow_run triggered
+    # by a fork PR's workflow, it carries the fork's branch
+    # name -- attacker-controlled at the same layer as
+    # ``head_ref``.
+    r"workflow_run\.head_branch"
     r")|"
     r"head_ref"
     r")"
