@@ -40,12 +40,34 @@ def test_specific_zizmor_id_with_known_mapping_suppresses_only_mapped_taintly_ru
     assert not zizmor_compat.is_zizmor_suppressed(line, "SEC4-GH-002")
 
 
-def test_specific_zizmor_id_with_unknown_mapping_broad_suppresses():
-    # Unknown id falls through to broad-line suppression so a
-    # maintainer's mark under a foreign tool isn't lost.
+def test_specific_zizmor_id_with_unknown_mapping_does_not_suppress():
+    """An unmapped id in the bracketed form does not suppress.
+
+    The bracketed form advertises an explicit mapping; honouring it
+    for unmapped ids would scope the effect to whatever zizmor adds
+    later, which the maintainer can't have known when writing the
+    marker.  Maintainers who want a broad-line suppression use the
+    unbracketed ``# zizmor: ignore`` form (covered by
+    ``test_generic_zizmor_ignore_suppresses_any_taintly_rule``).
+    """
     line = "      - run: echo hi # zizmor: ignore[future-rule-id]"
+    assert not zizmor_compat.is_zizmor_suppressed(line, "SEC3-GH-001")
+    assert not zizmor_compat.is_zizmor_suppressed(line, "SEC4-GH-004")
+
+
+def test_mixed_known_and_unknown_ids_suppress_only_mapped():
+    """Multi-id markers with one known and one unknown id suppress
+    only the rules mapped by the known id.  Unknown ids do not
+    broaden the scope."""
+    line = (
+        "      - uses: actions/checkout@v4 "
+        "# zizmor: ignore[unpinned-uses,future-rule-id]"
+    )
+    # unpinned-uses maps to SEC3-GH-001 / SEC3-GH-002 → suppressed.
     assert zizmor_compat.is_zizmor_suppressed(line, "SEC3-GH-001")
-    assert zizmor_compat.is_zizmor_suppressed(line, "SEC4-GH-004")
+    assert zizmor_compat.is_zizmor_suppressed(line, "SEC3-GH-002")
+    # The unmapped id alongside doesn't extend coverage to other rules.
+    assert not zizmor_compat.is_zizmor_suppressed(line, "SEC4-GH-004")
 
 
 def test_multi_id_zizmor_ignore_suppresses_either_mapping():
