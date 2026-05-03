@@ -102,3 +102,51 @@ actually does something" or "the equivalent form actually produces
 the same result." Those tests now live in
 `tests/unit/test_staticguard.py` and
 `tests/integration/test_github_repo_flag_scan_path.py`.
+
+## Addendum — whole-workflow suppression for fully-dead workflows
+
+The original taxonomy entry deferred whole-workflow suppression:
+when every job in a workflow is statically dead (`if: false` or
+repo-mismatch), per-job suppression removes findings inside the
+job bodies but leaves trigger-level findings on the `on:` block
+alone.  The reopening criterion was field-testing evidence —
+enough real-world FPs in this shape to justify the soundness
+margin.
+
+Field testing on real-world repositories produced trigger-level
+FPs across multiple workflows that share this exact shape: each
+workflow has a fully-dead job whose body is suppressed correctly,
+but the `on:` block's `pull_request_target:` declaration produces
+SEC4-GH-001 / SEC4-GH-002 findings despite the workflow never
+being able to run.  That meets the threshold.
+
+The follow-up adds `is_workflow_whole_dead` to
+`taintly/staticguard.py`.  The function enumerates every job in a
+workflow via the structural reader and returns `True` only when
+every job's `if:` guard evaluates to STATIC_FALSE.  The engine's
+GitHub post-processor calls it before per-job suppression; when
+true, all findings in the file are cleared.
+
+The conservatism principle holds by construction:
+
+- A workflow is "whole-dead" only when every job is STATIC_FALSE.
+- Any RUNTIME job (the default for runtime-dependent expressions
+  like `${{ inputs.deploy }}` or function calls) prevents
+  whole-dead classification.
+- Any STATIC_TRUE job (a guard that resolves true purely from
+  literals — e.g., `if: github.repository == 'self'` when the
+  repository matches) prevents whole-dead classification.
+- A workflow with no jobs is not "whole-dead" — there is nothing
+  to call dead.
+
+The static evaluator's own conservatism (literal-only,
+repo-match only when context is known) carries through.  A
+workflow with three `if: false` jobs and one `if: ${{ inputs.deploy
+}}` job is not whole-dead, even though the fourth job's RUNTIME
+outcome is unknown.
+
+The platform analog for GitLab and Jenkins is intentionally not
+shipped here.  Each platform's "whole-dead" condition has different
+semantics (GitLab `rules:` chains, Jenkins declarative `when {}`
+blocks).  When field testing surfaces equivalent FP volume in
+either platform's corpus, those follow-ups have clear shape.

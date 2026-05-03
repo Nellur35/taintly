@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from taintly.staticguard import Verdict, WorkflowContext, evaluate_if, find_dead_line_ranges
+from taintly.staticguard import (
+    Verdict,
+    WorkflowContext,
+    evaluate_if,
+    find_dead_line_ranges,
+    is_workflow_whole_dead,
+)
 
 
 def test_evaluate_if_static_true_cases():
@@ -153,3 +159,119 @@ def test_anchor_defined_if_runtime_does_not_suppress():
         "      - run: echo hi\n"
     )
     assert find_dead_line_ranges(content) == []
+
+
+def test_whole_dead_all_jobs_literal_false():
+    """Every job has ``if: false`` -> whole workflow is dead."""
+    content = (
+        "on: pull_request_target\n"
+        "jobs:\n"
+        "  a:\n"
+        "    if: false\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo a\n"
+        "  b:\n"
+        "    if: false\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo b\n"
+    )
+    assert is_workflow_whole_dead(content) is True
+
+
+def test_whole_dead_some_jobs_live():
+    """One unconditional job -> not whole-dead."""
+    content = (
+        "on: pull_request_target\n"
+        "jobs:\n"
+        "  dead:\n"
+        "    if: false\n"
+        "    steps:\n"
+        "      - run: echo dead\n"
+        "  live:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo live\n"
+    )
+    assert is_workflow_whole_dead(content) is False
+
+
+def test_whole_dead_runtime_guard_blocks():
+    """A job with a RUNTIME guard prevents whole-dead classification."""
+    content = (
+        "on: workflow_dispatch\n"
+        "jobs:\n"
+        "  conditional:\n"
+        "    if: ${{ inputs.deploy }}\n"
+        "    steps:\n"
+        "      - run: echo deploy\n"
+        "  always_dead:\n"
+        "    if: false\n"
+        "    steps:\n"
+        "      - run: echo dead\n"
+    )
+    assert is_workflow_whole_dead(content) is False
+
+
+def test_whole_dead_repo_mismatch_with_ctx():
+    """Repo-mismatch guards count as STATIC_FALSE when ctx mismatches."""
+    content = (
+        "on: pull_request_target\n"
+        "jobs:\n"
+        "  a:\n"
+        "    if: github.repository_owner == 'someone-else'\n"
+        "    steps:\n"
+        "      - run: echo a\n"
+        "  b:\n"
+        "    if: false\n"
+        "    steps:\n"
+        "      - run: echo b\n"
+    )
+    ctx = WorkflowContext(repository="me/myrepo", repository_owner="me")
+    assert is_workflow_whole_dead(content, ctx) is True
+
+
+def test_whole_dead_repo_match_with_ctx_blocks():
+    """A repo-match guard evaluates STATIC_TRUE -> not whole-dead."""
+    content = (
+        "on: pull_request_target\n"
+        "jobs:\n"
+        "  a:\n"
+        "    if: github.repository_owner == 'me'\n"
+        "    steps:\n"
+        "      - run: echo a\n"
+    )
+    ctx = WorkflowContext(repository="me/myrepo", repository_owner="me")
+    assert is_workflow_whole_dead(content, ctx) is False
+
+
+def test_whole_dead_no_jobs_block():
+    """A file with no ``jobs:`` block is not 'whole-dead'."""
+    content = "on:\n  workflow_call: {}\n"
+    assert is_workflow_whole_dead(content) is False
+
+
+def test_whole_dead_inherited_via_anchor():
+    """Merge-key-inherited ``if: false`` counts toward whole-dead.
+
+    The structural reader resolves merge keys (verified at file
+    scope by the per-job suppression tests); whole-dead inherits
+    that capability for free.
+    """
+    content = (
+        "defaults: &dead\n"
+        "  if: false\n"
+        "  runs-on: ubuntu-latest\n"
+        "\n"
+        "jobs:\n"
+        "  a:\n"
+        "    <<: *dead\n"
+        "    steps:\n"
+        "      - run: echo a\n"
+        "  b:\n"
+        "    <<: *dead\n"
+        "    steps:\n"
+        "      - run: echo b\n"
+    )
+    assert is_workflow_whole_dead(content) is True

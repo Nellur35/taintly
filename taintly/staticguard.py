@@ -143,6 +143,54 @@ def find_dead_line_ranges(
     return ranges
 
 
+def is_workflow_whole_dead(
+    content: str, ctx: WorkflowContext | None = None
+) -> bool:
+    """Return ``True`` if every job in the workflow is statically dead.
+
+    Walks the workflow via the structural reader, collects each job's
+    ``if:`` guard (or ``None`` when the job is unconditional), evaluates
+    each guard with :func:`evaluate_if`, and returns ``True`` iff:
+
+    1. The workflow has at least one job (an empty ``jobs:`` map is
+       not "whole-dead", it's "no jobs to suppress").
+    2. Every job's guard evaluates to STATIC_FALSE.
+
+    A workflow with no ``jobs:`` block (e.g., ``workflow_call``-only
+    definitions, or syntactically incomplete files) returns ``False``
+    — there is nothing to call dead.
+
+    Conservatism: any RUNTIME or STATIC_TRUE job means ``False`` is
+    returned and the existing per-job suppression path handles the
+    file normally.  The static evaluator's literal-only / repo-match
+    semantics carry through.
+    """
+    from .parsers.structural import EventKind, walk_workflow
+
+    job_ifs: dict[str, str | None] = {}
+    for event in walk_workflow(filepath="anonymous.yml", content=content, recover=True):
+        if event.kind is not EventKind.LEAF_SCALAR:
+            continue
+        path = event.path
+        if not path or path[0] != "jobs" or len(path) < 2:
+            continue
+        job_id = path[1]
+        if not isinstance(job_id, str):
+            continue
+        if job_id not in job_ifs:
+            job_ifs[job_id] = None
+        if len(path) == 3 and path[2] == "if":
+            job_ifs[job_id] = event.value
+
+    if not job_ifs:
+        return False
+
+    return all(
+        evaluate_if(if_expr, ctx) is Verdict.STATIC_FALSE
+        for if_expr in job_ifs.values()
+    )
+
+
 def detect_github_workflow_context(repo_path: str) -> WorkflowContext:
     """Best-effort repository identity from ``git remote get-url origin``."""
     try:
