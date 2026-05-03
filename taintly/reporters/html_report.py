@@ -31,7 +31,11 @@ from typing import TYPE_CHECKING
 
 from taintly.families import FindingCluster, cluster_findings
 from taintly.models import AuditReport, Finding, Severity
-from taintly.reporters.text import _AUTO_FIXABLE_RULES, _quick_win
+from taintly.reporters.text import (
+    _AUTO_FIXABLE_RULES,
+    INVENTORY_RULE_IDS,
+    _quick_win,
+)
 
 if TYPE_CHECKING:
     from taintly.scorer import ScoreReport
@@ -407,17 +411,26 @@ def _summary(
 
     confirmed = sum(1 for c in clusters if not c.review_needed)
     review = sum(1 for c in clusters if c.review_needed)
+    # Split: vulnerability findings vs third-party inventory items.
+    # Inventory items surface CI surface-area to review periodically
+    # at the user's chosen cadence; they are not findings to fix.
+    vuln_findings = [f for f in report.findings if f.rule_id not in INVENTORY_RULE_IDS]
+    inventory_count = len(report.findings) - len(vuln_findings)
     parts.append('<div class="summary-stats">')
     parts.append(_stat(confirmed, "distinct risks"))
     if review:
         parts.append(_stat(review, "review-needed"))
-    parts.append(_stat(len(report.findings), "total findings"))
+    parts.append(_stat(len(vuln_findings), "findings"))
+    if inventory_count:
+        parts.append(_stat(inventory_count, "third-party in CI"))
     parts.append(_stat(report.files_scanned, "files scanned"))
     parts.append("</div>")
 
     sev_bits: list[str] = []
     for sev in Severity:
-        c = report.summary.get(sev.value, 0)
+        # Severity counts over vulnerability findings only — INFO
+        # inventory items don't pad the INFO column.
+        c = sum(1 for f in vuln_findings if f.severity is sev)
         if c:
             sev_bits.append(f"{_severity_badge(sev)} <strong>{_e(c)}</strong>")
     if sev_bits:

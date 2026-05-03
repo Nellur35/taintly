@@ -115,6 +115,33 @@ def find_dead_gitlab_job_ranges(
     return ranges
 
 
+def is_pipeline_whole_dead(
+    content: str, ctx: GitLabContext | None = None
+) -> bool:
+    """Return ``True`` if every job in the pipeline is statically dead.
+
+    Walks the pipeline, evaluates each job's ``rules`` chain with
+    :func:`evaluate_gitlab_rules`, and returns ``True`` iff:
+
+    1. The pipeline has at least one job (an empty file or a file
+       with no jobs is not "whole-dead").
+    2. Every job evaluates to ``GuardVerdict.DEAD``.
+
+    Conservatism: any RUNTIME job (the default for rules that depend
+    on runtime variables like ``$CI_PIPELINE_SOURCE`` when the
+    context is not populated) prevents whole-dead classification.
+    """
+    lines = content.splitlines()
+    jobs = list(_top_level_jobs(lines))
+    if not jobs:
+        return False
+    for start, end, _name in jobs:
+        job = _extract_job_rules(lines, start, end)
+        if evaluate_gitlab_rules(job, ctx) is not GuardVerdict.DEAD:
+            return False
+    return True
+
+
 def _value_for(token: str, ctx: GitLabContext | None) -> str | None:
     if ctx is None:
         return None

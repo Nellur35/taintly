@@ -72,7 +72,13 @@ def evaluate_if(expr: str | None, ctx: WorkflowContext | None = None) -> Verdict
     if left is None or right is None:
         return Verdict.RUNTIME
 
-    equal = left.lower() == right.lower()
+    # GitHub Actions' ``==`` operator is case-sensitive on string
+    # comparisons.  Coercing both sides with ``.lower()`` would
+    # cause false negatives on suppression when ctx and literal
+    # differ only in case (conservative — never over-suppresses,
+    # but misses dead-job suppression on case-mismatched literals
+    # that GHA would have evaluated false at runtime).
+    equal = left == right
     if comparison.group(2) == "!=":
         equal = not equal
     return Verdict.STATIC_TRUE if equal else Verdict.STATIC_FALSE

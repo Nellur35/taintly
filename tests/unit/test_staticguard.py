@@ -30,6 +30,42 @@ def test_evaluate_if_repo_identity_comparison():
     assert evaluate_if("github.repository_owner != 'other'", ctx) is Verdict.STATIC_TRUE
 
 
+def test_comparison_is_case_sensitive():
+    """GitHub Actions' ``==`` on strings is case-sensitive.
+
+    A pre-existing ``.lower()`` coercion in the comparison evaluator
+    would treat ``MyOrg`` and ``myorg`` as equal, causing false
+    negatives on suppression when ctx and literal differ only in
+    case.  The fix matches GHA's actual semantics.
+    """
+    ctx = WorkflowContext(repository="MyOrg/MyRepo", repository_owner="MyOrg")
+    # Exact match → STATIC_TRUE
+    assert evaluate_if("github.repository_owner == 'MyOrg'", ctx) is Verdict.STATIC_TRUE
+    # Case mismatch → STATIC_FALSE (GHA would evaluate false at runtime)
+    assert evaluate_if("github.repository_owner == 'myorg'", ctx) is Verdict.STATIC_FALSE
+    assert evaluate_if("github.repository_owner == 'MYORG'", ctx) is Verdict.STATIC_FALSE
+
+
+def test_comparison_case_sensitive_drives_whole_dead():
+    """Whole-workflow suppression fires on a case-mismatched literal.
+
+    ctx owner is ``MyOrg``; the workflow gates on ``'myorg'``.  Real
+    GHA would evaluate the comparison false (case-mismatch), so the
+    sole job is dead and the whole workflow is suppressible.
+    """
+    ctx = WorkflowContext(repository="MyOrg/MyRepo", repository_owner="MyOrg")
+    content = (
+        "on: pull_request_target\n"
+        "jobs:\n"
+        "  a:\n"
+        "    if: github.repository_owner == 'myorg'\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+    )
+    assert is_workflow_whole_dead(content, ctx) is True
+
+
 def test_evaluate_if_runtime_fallback():
     ctx = WorkflowContext(repository="Nellur35/taintly", repository_owner="Nellur35")
 

@@ -14,6 +14,21 @@ if TYPE_CHECKING:
     from taintly.scorer import ScoreReport
 
 
+# Rule IDs whose findings are inventory items, not security findings to
+# investigate.  These rules surface third-party dependencies in CI
+# surface area at INFO severity with ``review_needed=True``.  They are
+# designed to be snapshotted with ``--baseline`` and reviewed
+# periodically by the user at their own cadence — the tool does not
+# recommend a frequency.
+INVENTORY_RULE_IDS: frozenset[str] = frozenset(
+    {
+        "SEC3-GH-006",
+        "SEC3-GL-006",
+        "SEC3-JK-005",
+    }
+)
+
+
 COLORS = {
     Severity.CRITICAL: "\033[91m",
     Severity.HIGH: "\033[93m",
@@ -243,11 +258,22 @@ def _format_executive_summary(
 
     out.append(f"{b}Summary{r}")
     out.append(f"  Files scanned:  {report.files_scanned}")
-    out.append(f"  Total findings: {len(report.findings)}")
-    # Distinct-risk count: the report should lead with "how many root-cause
-    # clusters matter", not "how many rules fired".  This is the single most
-    # important signal once a user gets past the summary line.
-    clusters = cluster_findings(report.findings) if report.findings else []
+    # Split: vulnerability findings vs third-party inventory items.
+    # Inventory items surface CI surface-area to review periodically at
+    # the user's chosen cadence; they are not findings to fix.
+    vuln_findings = [f for f in report.findings if f.rule_id not in INVENTORY_RULE_IDS]
+    inventory_findings = [f for f in report.findings if f.rule_id in INVENTORY_RULE_IDS]
+    out.append(f"  Findings:       {len(vuln_findings)}")
+    if inventory_findings:
+        out.append(
+            f"  Third-party in CI: {len(inventory_findings)}  "
+            f"(review periodically; snapshot with --baseline)"
+        )
+    # Distinct-risk count: clusters from vulnerability findings only,
+    # excluding inventory items so the "X confirmed" lead-line means
+    # "X security clusters", not "X clusters including supply-chain
+    # inventory the user has already chosen to live with".
+    clusters = cluster_findings(vuln_findings) if vuln_findings else []
     if clusters:
         distinct = len([cl for cl in clusters if not cl.review_needed])
         review = len([cl for cl in clusters if cl.review_needed])
@@ -259,7 +285,9 @@ def _format_executive_summary(
         out.append(f"  Score:          {score_report.total_score}/100 ({score_report.grade})")
     sev_bits = []
     for sev in Severity:
-        count = report.summary.get(sev.value, 0)
+        # Severity breakdown over vulnerability findings only — INFO
+        # inventory items don't pad the INFO column.
+        count = sum(1 for f in vuln_findings if f.severity is sev)
         if count:
             sev_bits.append(f"{c[sev]}{sev.value}:{count}{r}")
     if sev_bits:

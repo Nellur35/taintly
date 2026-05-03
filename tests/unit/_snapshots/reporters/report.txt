@@ -11,7 +11,7 @@ Rules:      215
 
 Summary
   Files scanned:  4
-  Total findings: 5
+  Findings:       5
   Distinct risks: 4 confirmed, 1 review-needed
   By severity:    CRITICAL:1  HIGH:1  MEDIUM:1  LOW:2
 

@@ -436,7 +436,86 @@ def test_text_summary_includes_files_and_totals():
     report = _multi_finding_report()
     output = format_text(report, use_color=False)
     assert "Files scanned:  2" in output
-    assert "Total findings: 3" in output
+    assert "Findings:       3" in output
+    # No inventory items in this fixture; the inventory line must be absent.
+    assert "Third-party in CI" not in output
+
+
+def _inventory_split_report():
+    """Report with both vulnerability findings and inventory items."""
+    report = AuditReport(repo_path="/repo", platform="github")
+    report.files_scanned = 4
+    report.add(
+        Finding(
+            rule_id="SEC4-GH-001",
+            severity=Severity.CRITICAL,
+            title="pull_request_target with checkout",
+            description="PPE",
+            file=".github/workflows/a.yml",
+            line=10,
+            remediation="x",
+            owasp_cicd="CICD-SEC-4",
+        )
+    )
+    report.add(
+        Finding(
+            rule_id="SEC10-GH-001",
+            severity=Severity.LOW,
+            title="Logging gap",
+            description="d",
+            file=".github/workflows/a.yml",
+            line=15,
+            remediation="x",
+            owasp_cicd="CICD-SEC-10",
+        )
+    )
+    for i in range(3):
+        report.add(
+            Finding(
+                rule_id="SEC3-GH-006",
+                severity=Severity.INFO,
+                title="Third-party action used (inventory; review-needed)",
+                description="d",
+                file=f".github/workflows/{i}.yml",
+                line=5,
+                remediation="x",
+                owasp_cicd="CICD-SEC-3",
+                review_needed=True,
+            )
+        )
+    report.summarize()
+    return report
+
+
+def test_text_summary_separates_findings_from_inventory():
+    """Inventory items appear under their own count, not folded in."""
+    output = format_text(_inventory_split_report(), use_color=False)
+    assert "Findings:       2" in output, (
+        f"Vulnerability findings count must exclude inventory; got:\n{output}"
+    )
+    assert "Third-party in CI: 3" in output
+    assert "review periodically" in output
+    assert "snapshot with --baseline" in output
+    # The literal phrase must no longer appear in the summary block.
+    assert "Total findings:" not in output
+
+
+def test_text_summary_severity_breakdown_excludes_inventory():
+    """``By severity`` counts vulnerability findings only."""
+    output = format_text(_inventory_split_report(), use_color=False)
+    assert "CRITICAL:1" in output
+    assert "LOW:1" in output
+    # Inventory items are INFO; INFO must not appear because no
+    # vulnerability finding has INFO severity in this fixture.
+    assert "INFO:" not in output
+
+
+def test_text_summary_no_inventory_section_when_zero():
+    """Inventory line is omitted entirely when no inventory items."""
+    report = _multi_finding_report()
+    output = format_text(report, use_color=False)
+    assert "Findings:       3" in output
+    assert "Third-party in CI" not in output
 
 
 def test_text_top_issues_groups_by_rule_id():

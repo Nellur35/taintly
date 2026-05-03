@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from taintly.families import cluster_findings
 from taintly.models import AuditReport
+from taintly.reporters.text import INVENTORY_RULE_IDS
 
 if TYPE_CHECKING:
     from taintly.scorer import ScoreReport
@@ -18,6 +19,15 @@ def format_json(report: AuditReport, score_report: ScoreReport | None = None) ->
     confirmed_clusters = [cl for cl in clusters if not cl.review_needed]
     review_clusters = [cl for cl in clusters if cl.review_needed]
 
+    # Split: vulnerability findings vs third-party inventory items.
+    # Two top-level counts let consumers see at a glance how many
+    # items are findings to fix vs CI surface-area to review at the
+    # user's chosen cadence.  The findings list itself stays
+    # unchanged; downstream tooling filters on ``rule_id`` if it
+    # wants to separate them programmatically.
+    findings_count = sum(1 for f in report.findings if f.rule_id not in INVENTORY_RULE_IDS)
+    inventory_count = sum(1 for f in report.findings if f.rule_id in INVENTORY_RULE_IDS)
+
     # ``errors`` mirrors ENGINE-ERR findings into a top-level array so
     # downstream tooling can detect silent coverage loss without grep-
     # ping the findings stream by ``rule_id``.  The same Findings
@@ -28,6 +38,8 @@ def format_json(report: AuditReport, score_report: ScoreReport | None = None) ->
         "platform": report.platform,
         "files_scanned": report.files_scanned,
         "summary": report.summary,
+        "findings_count": findings_count,
+        "inventory_count": inventory_count,
         "distinct_risk_count": len(confirmed_clusters),
         "review_needed_count": len(review_clusters),
         "families": [cl.to_dict() for cl in clusters],
