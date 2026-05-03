@@ -177,6 +177,59 @@ def scan_file(
             )
         )
 
+    # File-level CUTOFF disclosure.  StructuralPattern rules emit
+    # their own per-rule cutoff markers, but other rule types
+    # (RegexPattern, ContextPattern, AbsencePattern) silently no-op
+    # on the post-cutoff portion of the file.  Surfacing a single
+    # file-level warning ensures the disclosure is visible regardless
+    # of which rule types ran, so reviewers know the scan's coverage
+    # was bounded by the unparseable construct.  Only YAML files go
+    # through the structural reader; Jenkinsfiles use a different
+    # path and don't produce CUTOFF events.
+    fname = os.path.basename(filepath).lower()
+    if fname.endswith((".yml", ".yaml")):
+        try:
+            from .parsers.structural import EventKind as _EventKind
+            from .parsers.structural import walk_workflow as _walk
+
+            for _ev in _walk(filepath, content=content, recover=True):
+                if _ev.kind is _EventKind.CUTOFF:
+                    # ENGINE-ERR is the documented rule_id for "scanner
+                    # processed the file but coverage degraded" -- the
+                    # file-size cap above uses the same id for the same
+                    # class of non-fatal coverage loss.  The severity-
+                    # filter exemption and the ``engine_errors`` accessor
+                    # already surface ENGINE-ERR consistently across
+                    # JSON / SARIF / text reporters.
+                    findings.append(
+                        Finding(
+                            rule_id="ENGINE-ERR",
+                            severity=Severity.LOW,
+                            title=(
+                                "Structural coverage degraded: file partially "
+                                f"unparseable from line {_ev.line}"
+                            ),
+                            description=(
+                                "The structural reader stopped at "
+                                f"line {_ev.line} due to an unsupported YAML "
+                                "construct.  Per-line rules continue to run "
+                                "across the whole file, but rules that depend "
+                                "on the structural reader (path-based "
+                                "queries, anchor / merge-key resolution, "
+                                "step enumeration) cannot evaluate the "
+                                "post-cutoff portion of the file.  If the "
+                                "construct is intentional, no action needed; "
+                                "if it's accidental, fixing the YAML restores "
+                                "full coverage."
+                            ),
+                            file=filepath,
+                            line=_ev.line,
+                        )
+                    )
+                    break
+        except Exception:  # nosec B110 — defensive; never block the scan path on disclosure failure.
+            pass
+
     wf_ctx = analyze_workflow(content, file=filepath)
 
     # Anchor-merge expansion: pre-compute lazily so rules that don't
