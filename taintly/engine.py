@@ -9,8 +9,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .families import classify_rule, default_confidence, default_review_needed
-from .gitlabguard import GitLabContext, find_dead_gitlab_job_ranges
-from .jenkinsguard import JenkinsContext, find_dead_jenkins_stage_ranges
+from .gitlabguard import (
+    GitLabContext,
+    find_dead_gitlab_job_ranges,
+    is_pipeline_whole_dead,
+)
+from .jenkinsguard import (
+    JenkinsContext,
+    find_dead_jenkins_stage_ranges,
+    is_jenkinsfile_whole_dead,
+)
 from .models import (
     _MAX_SAFE_TEXT_LEN,
     AuditReport,
@@ -288,13 +296,24 @@ def _github_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext
 
 
 def _gitlab_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
-    if any(rule.platform == Platform.GITLAB for rule in ctx.rules):
-        _suppress_gitlab_dead_findings(findings, ctx.content, ctx.gitlabctx)
+    if not any(rule.platform == Platform.GITLAB for rule in ctx.rules):
+        return
+    # Whole-pipeline short-circuit: if every job is statically dead,
+    # the entire file is moot.  Suppress all findings (including
+    # pipeline-level ones the per-job pass deliberately leaves alone).
+    if is_pipeline_whole_dead(ctx.content, ctx.gitlabctx):
+        findings.clear()
+        return
+    _suppress_gitlab_dead_findings(findings, ctx.content, ctx.gitlabctx)
 
 
 def _jenkins_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
-    if any(rule.platform == Platform.JENKINS for rule in ctx.rules):
-        _suppress_jenkins_dead_findings(findings, ctx.content, ctx.jenkinsctx)
+    if not any(rule.platform == Platform.JENKINS for rule in ctx.rules):
+        return
+    if is_jenkinsfile_whole_dead(ctx.content, ctx.jenkinsctx):
+        findings.clear()
+        return
+    _suppress_jenkins_dead_findings(findings, ctx.content, ctx.jenkinsctx)
 
 
 def _maintainer_downgrade_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:

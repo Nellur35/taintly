@@ -80,7 +80,7 @@
   "gitlab/vulnerable/unquoted_commit_message.yml": "e20db4d036d1a95e51ebfe0ee0a64007e25597ec7c2a4d4d66d51ce7654677ca",
   "gitlab/vulnerable/unquoted_ref_name.yml": "719bd43c58fe8b8e93324c87c5c1fa0394680bc3064279e1cd8c5102a27ea7cd",
   "gitlab/vulnerable/wget_pipe_bash.yml": "442b11f8f53a99869844eb7252b8d7faa1351ccf81e0b8fd04c63064295460f9",
-  "jenkins/mechanical/dead_stage_literal_false.Jenkinsfile": "2f9bc6d1cd17b04fa4661c479fa6a408a00a1ccb650c0ce526ab5c1d242d1919",
+  "jenkins/mechanical/dead_stage_literal_false.Jenkinsfile": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "jenkins/mechanical/parameter_stage.Jenkinsfile": "e57f7ba1e3520413768cb78eb42f9e85acdbc6b1387296ec27d807988e753fad",
   "jenkins/mechanical/runtime_when.Jenkinsfile": "e57f7ba1e3520413768cb78eb42f9e85acdbc6b1387296ec27d807988e753fad",
   "jenkins/realistic/java_library_ci.Jenkinsfile": "aeb0bd03fc94eee5fa6d382411d86a2a4641d27ff8e3a8cb4db528eb84cc061d",

@@ -7,6 +7,7 @@ from taintly.gitlabguard import (
     evaluate_gitlab_if,
     evaluate_gitlab_rules,
     find_dead_gitlab_job_ranges,
+    is_pipeline_whole_dead,
 )
 
 
@@ -117,3 +118,71 @@ def test_find_dead_gitlab_job_ranges_for_literal_when_never():
     ).lstrip()
 
     assert find_dead_gitlab_job_ranges(content) == [(4, 9)]
+
+
+def test_pipeline_whole_dead_all_when_never():
+    """Every job has bare ``when: never`` -> whole pipeline is dead."""
+    content = dedent(
+        """
+        stages:
+          - test
+
+        job_a:
+          stage: test
+          rules:
+            - when: never
+          script: [echo a]
+
+        job_b:
+          stage: test
+          rules:
+            - when: never
+          script: [echo b]
+        """
+    ).lstrip()
+    assert is_pipeline_whole_dead(content) is True
+
+
+def test_pipeline_whole_dead_mixed_blocks():
+    """One unconditional job -> not whole-dead."""
+    content = dedent(
+        """
+        stages:
+          - test
+
+        dead:
+          stage: test
+          rules:
+            - when: never
+          script: [echo dead]
+
+        live:
+          stage: test
+          script: [echo live]
+        """
+    ).lstrip()
+    assert is_pipeline_whole_dead(content) is False
+
+
+def test_pipeline_whole_dead_empty_yields_false():
+    """A file with no jobs is not 'whole-dead'."""
+    assert is_pipeline_whole_dead("stages: [test]\n") is False
+
+
+def test_pipeline_whole_dead_runtime_blocks():
+    """A job with a RUNTIME guard prevents whole-dead classification."""
+    content = dedent(
+        """
+        conditional:
+          rules:
+            - if: '$CI_PIPELINE_SOURCE == "schedule"'
+              when: never
+          script: [echo a]
+
+        always_dead:
+          rules:
+            - when: never
+          script: [echo b]
+        """
+    ).lstrip()
+    assert is_pipeline_whole_dead(content) is False

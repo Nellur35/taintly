@@ -150,3 +150,40 @@ shipped here.  Each platform's "whole-dead" condition has different
 semantics (GitLab `rules:` chains, Jenkins declarative `when {}`
 blocks).  When field testing surfaces equivalent FP volume in
 either platform's corpus, those follow-ups have clear shape.
+
+## Addendum — whole-pipeline suppression for GitLab and Jenkins
+
+The previous addendum deferred the GitLab and Jenkins analogs of
+whole-workflow suppression pending field-test evidence and
+platform-specific semantic clarity.  Both shipped together in this
+follow-up.
+
+GitLab: `is_pipeline_whole_dead` in `taintly/gitlabguard.py` walks
+every job in `.gitlab-ci.yml` and returns true iff every job's
+`rules:` chain evaluates to `GuardVerdict.DEAD`.  The dead
+determination respects GitLab's rule-chain semantics: a bare
+`when: never` rule means "skip"; an `if: 'false'; when: never`
+chain matches no rule and falls through to the default
+`when: on_success`, which is LIVE — so that shape correctly
+prevents whole-dead classification.
+
+Jenkins: `is_jenkinsfile_whole_dead` in
+`taintly/jenkinsguard.py` walks every stage in a declarative
+pipeline and returns true iff every stage's `when` block
+evaluates to `GuardVerdict.DEAD`.  Scripted Groovy pipelines
+(without an explicit `stages { ... }` block) return false —
+there is no structural enumeration target for them and the
+conservative answer is "not whole-dead."
+
+Each platform's postprocessor calls its whole-pipeline check
+before per-job/per-stage suppression: `findings.clear()`
+short-circuits the file when whole-dead.  Conservatism holds by
+construction — any RUNTIME job/stage prevents whole-dead
+classification.
+
+The platform contexts (`GitLabContext`, `JenkinsContext`) remain
+unwired — their fields exist for extensibility (e.g.,
+`$CI_PIPELINE_SOURCE`, build-parameter values) but the engine
+does not currently populate them.  When field testing surfaces a
+meaningful volume of context-dependent suppression cases on
+either platform, those wirings are clear follow-ups.
