@@ -174,6 +174,14 @@ _TAINTED_CONTEXTS = [
     r"github\.event\.head_commit\.message",
     r"github\.event\.head_commit\.author\.name",
     r"github\.event\.head_commit\.author\.email",
+    # ``commits`` is the push-event array of commits; element fields
+    # (``[0].message``, ``[0].author.name``) carry the same attacker
+    # bytes as ``head_commit``.  Word-boundary matching downstream
+    # catches array-index accesses.  ``pages`` is the gollum-event
+    # array of wiki updates; ``[0].title`` / ``[0].summary`` are
+    # attacker-controlled (anyone with wiki access).
+    r"github\.event\.commits",
+    r"github\.event\.pages",
     r"github\.head_ref",
     r"github\.event\.workflow_run\.head_branch",
 ]
