@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -23,20 +24,36 @@ class ExprVerdict(Enum):
 class GitLabContext:
     """Pipeline context for context-aware GitLab CI rule evaluation.
 
-    Fields exist for extensibility: when populated, they let
-    :func:`evaluate_gitlab_if` resolve comparisons such as
-    ``$CI_PIPELINE_SOURCE == 'schedule'`` to STATIC_TRUE / STATIC_FALSE
-    instead of falling through to RUNTIME.  The engine does not
-    currently populate these fields on the scan path; conservatism
-    therefore applies and only literal ``when: never`` rules suppress.
-    Populate when corpus evidence shows context-aware suppression is
-    needed and a concrete source for each field (CI env vars, CLI
-    flag, ``.gitlab-ci.yml`` ``workflow:rules``) is settled.
+    Populated fields let :func:`evaluate_gitlab_if` resolve
+    comparisons such as ``$CI_PIPELINE_SOURCE == 'schedule'`` to
+    STATIC_TRUE / STATIC_FALSE instead of falling through to RUNTIME.
+    When taintly runs *inside* a GitLab CI pipeline,
+    :func:`detect_gitlab_context` reads the corresponding predefined
+    variables from the environment so the conservative-by-default
+    suppression naturally upgrades to context-aware on real
+    pipelines without any flag.  Outside a CI context all fields
+    stay ``None`` and the conservative path is preserved.
     """
 
     pipeline_source: str | None = None
     commit_branch: str | None = None
     default_branch: str | None = None
+
+
+def detect_gitlab_context() -> GitLabContext:
+    """Best-effort GitLab CI context from the process environment.
+
+    Populates fields from the standard GitLab CI predefined
+    variables when present (i.e. when taintly itself runs inside a
+    GitLab CI job).  Outside that environment every field stays
+    ``None`` and the result is indistinguishable from
+    ``GitLabContext()``.
+    """
+    return GitLabContext(
+        pipeline_source=os.environ.get("CI_PIPELINE_SOURCE") or None,
+        commit_branch=os.environ.get("CI_COMMIT_BRANCH") or None,
+        default_branch=os.environ.get("CI_DEFAULT_BRANCH") or None,
+    )
 
 
 _RESERVED_TOP_LEVEL = {

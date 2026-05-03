@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from .families import classify_rule, default_confidence, default_review_needed
 from .gitlabguard import (
     GitLabContext,
+    detect_gitlab_context,
     find_dead_gitlab_job_ranges,
     is_pipeline_whole_dead,
 )
@@ -749,7 +750,17 @@ def scan_repo(
                 ctx_rules_by_family.setdefault(r.finding_family, []).append(r)
         report.families_with_ctx_coverage = set(ctx_rules_by_family)
 
-        gitlabctx = GitLabContext() if plat == Platform.GITLAB else None
+        # Auto-detect GitLab context from CI predefined variables when
+        # taintly itself runs inside a GitLab CI job.  Outside that
+        # environment every field is None and the result is
+        # indistinguishable from ``GitLabContext()``, preserving the
+        # conservative-by-default suppression path.
+        gitlabctx = detect_gitlab_context() if plat == Platform.GITLAB else None
+        # Jenkins parameter_values has no consumer in the evaluator
+        # today (``evaluate_jenkins_when`` discards ctx).  Populating
+        # from the environment would be speculative without effect;
+        # leave the field empty until a context-aware evaluator
+        # lands.
         jenkinsctx = JenkinsContext() if plat == Platform.JENKINS else None
         for fpath in files:
             all_findings.extend(

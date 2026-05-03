@@ -165,7 +165,7 @@ _TAINTED_CONTEXTS = [
     r"github\.event\.pull_request\.title",
     r"github\.event\.pull_request\.body",
     r"github\.event\.pull_request\.head\.ref",
-    r"github\.event\.pull_request\.head_ref",
+    r"github\.event\.pull_request\.head\.label",
     r"github\.event\.pull_request\.user\.login",
     r"github\.event\.issue\.title",
     r"github\.event\.issue\.body",

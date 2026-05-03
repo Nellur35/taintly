@@ -73,23 +73,25 @@ RULES: list[Rule] = [
         owasp_cicd="CICD-SEC-4",
         description=(
             "User-controlled GitLab predefined variables (CI_COMMIT_MESSAGE, "
-            "CI_MERGE_REQUEST_TITLE, CI_MERGE_REQUEST_DESCRIPTION, CI_COMMIT_BRANCH, "
+            "CI_COMMIT_TITLE, CI_COMMIT_AUTHOR, CI_MERGE_REQUEST_TITLE, "
+            "CI_MERGE_REQUEST_DESCRIPTION, CI_COMMIT_BRANCH, "
             "CI_MERGE_REQUEST_SOURCE_BRANCH_NAME) are used unquoted in shell scripts. "
-            "These values are attacker-controlled — branch names and commit messages can "
-            "contain shell metacharacters, enabling command injection when unquoted. "
-            "Variables wrapped in double quotes are excluded (though sanitization is still "
-            "recommended for values passed to subcommands)."
+            "These values are attacker-controlled — branch names, commit titles, commit "
+            "author identities, and message bodies can contain shell metacharacters, "
+            "enabling command injection when unquoted. Variables wrapped in double quotes "
+            "are excluded (though sanitization is still recommended for values passed to "
+            "subcommands)."
         ),
         pattern=RegexPattern(
-            match=r"\$\{?(CI_COMMIT_MESSAGE|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?",
+            match=r"\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?",
             exclude=[
                 r"^\s*#",
                 r"^\s*[\w_]+:\s*\$\{?CI_",  # YAML key-value assignment starting with $CI_
                 r"^\s*[\w_]+:\s*'[^']*\$",  # YAML key-value where value is a single-quoted string (variable inside string literal, not in shell)
                 r"^\s*[\w_]+:\s*\"[^\"]*\$",  # YAML key-value where value is a double-quoted string
                 r"^\s*-?\s*if:",  # rules:if blocks — evaluated by GitLab engine, not shell
-                r'"\$\{?(CI_COMMIT_MESSAGE|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?"',  # double-quoted usage in shell
-                r"'\$\{?(CI_COMMIT_MESSAGE|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?'",  # single-quoted shell usage: `$VAR` is literal, no expansion
+                r'"\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?"',  # double-quoted usage in shell
+                r"'\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?'",  # single-quoted shell usage: `$VAR` is literal, no expansion
             ],
             # Quoted-marker heredoc bodies (<<'EOF' / <<"EOF" / <<\EOF)
             # suppress $VAR expansion per Bash §3.6.6; skip those lines.
@@ -108,6 +110,8 @@ RULES: list[Rule] = [
             "    - echo $CI_COMMIT_MESSAGE",
             "    - git tag $CI_MERGE_REQUEST_TITLE",
             "    - deploy.sh $CI_COMMIT_BRANCH",
+            "    - echo $CI_COMMIT_TITLE",
+            "    - echo $CI_COMMIT_AUTHOR",
         ],
         test_negative=[
             "    # uses $CI_COMMIT_MESSAGE for logging",
@@ -117,6 +121,8 @@ RULES: list[Rule] = [
             '    - echo "$CI_COMMIT_MESSAGE"',
             '    - deploy.sh "$CI_COMMIT_BRANCH"',
             '    - git tag "$CI_MERGE_REQUEST_TITLE"',
+            '    - echo "$CI_COMMIT_TITLE"',
+            '    - echo "$CI_COMMIT_AUTHOR"',
         ],
         stride=["T", "E"],
         threat_narrative=(

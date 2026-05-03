@@ -29,13 +29,17 @@ _FULL_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
 _BRANCH_REF_NAMES = frozenset({"main", "master", "develop", "dev"})
 
 # Attacker-controlled GitHub-context expressions that turn an
-# unguarded ``run:`` interpolation into shell injection.  Equivalent
-# to the SEC4-GH-004 regex's allowlist plus ``github.head_ref``.
+# unguarded ``run:`` interpolation into shell injection.  Kept in
+# sync with ``_TAINTED_CONTEXTS`` in ``taintly/taint.py``: any
+# attacker-controlled context shape catchable by the cross-step
+# taint analyzer must also be catchable directly here, otherwise
+# the same byte appearing inline (without an intermediate ``env:``
+# hop) goes unflagged.
 _DANGEROUS_GITHUB_CONTEXT_RE = re.compile(
     r"\$\{\{\s*github\.("
     r"event\.("
     r"issue\.(title|body)|"
-    r"pull_request\.(title|body)|"
+    r"pull_request\.(title|body|head\.(ref|label)|user\.login)|"
     r"comment\.body|"
     r"review\.body|"
     r"head_commit\.(message|author\.(email|name))|"
@@ -717,6 +721,9 @@ RULES: list[Rule] = [
             '        run: echo "${{ github.event.pull_request.title }}"',
             '        run: echo "${{ github.event.issue.body }}"',
             "        run: git checkout ${{ github.head_ref }}",
+            "        run: git checkout ${{ github.event.pull_request.head.ref }}",
+            '        run: echo "${{ github.event.pull_request.head.label }}"',
+            '        run: echo "${{ github.event.pull_request.user.login }}"',
         ],
         test_negative=[
             '        if: github.event.pull_request.title != ""',
