@@ -275,3 +275,140 @@ def test_audit_report_no_findings_is_clean():
     report.summarize()
     assert report.summary["total"] == 0
     assert all(report.summary[s] == 0 for s in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"])
+
+
+# =============================================================================
+# _split_into_step_segments + anchor_step_exclude
+# =============================================================================
+
+
+from taintly.models import _split_into_step_segments
+
+
+def test_split_into_step_segments_single_step():
+    content = (
+        "on: push\n"
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - name: a\n"
+        "        run: echo a\n"
+    )
+    segments = _split_into_step_segments(content)
+    assert len(segments) == 1
+    _start, lines = segments[0]
+    body = "\n".join(lines)
+    assert "name: a" in body
+    assert "run: echo a" in body
+
+
+def test_split_into_step_segments_multiple_steps_same_job():
+    content = (
+        "on: push\n"
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - name: step_a\n"
+        "        run: echo a\n"
+        "      - name: step_b\n"
+        "        run: echo b\n"
+    )
+    segments = _split_into_step_segments(content)
+    assert len(segments) == 2
+    body_a = "\n".join(segments[0][1])
+    body_b = "\n".join(segments[1][1])
+    assert "step_a" in body_a and "step_b" not in body_a
+    assert "step_b" in body_b and "step_a" not in body_b
+
+
+def test_split_into_step_segments_steps_across_jobs():
+    content = (
+        "jobs:\n"
+        "  job_a:\n"
+        "    steps:\n"
+        "      - run: echo job_a_step\n"
+        "  job_b:\n"
+        "    steps:\n"
+        "      - run: echo job_b_step\n"
+    )
+    segments = _split_into_step_segments(content)
+    assert len(segments) == 2
+    bodies = ["\n".join(seg[1]) for seg in segments]
+    assert any("job_a_step" in b for b in bodies)
+    assert any("job_b_step" in b for b in bodies)
+
+
+def test_split_into_step_segments_no_steps():
+    content = "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+    segments = _split_into_step_segments(content)
+    assert segments == []
+
+
+def test_split_into_step_segments_no_jobs_block():
+    content = "on:\n  workflow_call: {}\n"
+    segments = _split_into_step_segments(content)
+    assert segments == []
+
+
+def test_anchor_step_exclude_suppresses_when_step_matches():
+    """When a step contains the safe pattern, the anchor match
+    within that step is suppressed."""
+    pattern = ContextPattern(
+        anchor=r"token:\s*\$\{\{\s*secrets\.\w+\s*\}\}",
+        requires=r"with:",
+        anchor_step_exclude=(
+            r"env:\s*\n\s*\w+:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
+        ),
+    )
+    content = (
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - name: safe\n"
+        "        with:\n"
+        "          token: ${{ secrets.X }}\n"
+        "        env:\n"
+        "          GH_TOKEN: ${{ secrets.X }}\n"
+    )
+    lines = content.splitlines()
+    assert pattern.check(content, lines) == []
+
+
+def test_anchor_step_exclude_does_not_suppress_sibling_step_match():
+    """An env-routed secret in a sibling step does not affect
+    the matched step's suppression."""
+    pattern = ContextPattern(
+        anchor=r"token:\s*\$\{\{\s*secrets\.\w+\s*\}\}",
+        requires=r"with:",
+        anchor_step_exclude=(
+            r"env:\s*\n\s*\w+:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
+        ),
+    )
+    content = (
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - name: matched_step\n"
+        "        with:\n"
+        "          token: ${{ secrets.X }}\n"
+        "      - name: unrelated_step\n"
+        "        env:\n"
+        "          DUMMY: ${{ secrets.GITHUB_TOKEN }}\n"
+    )
+    lines = content.splitlines()
+    matches = pattern.check(content, lines)
+    assert len(matches) == 1
+    assert "secrets.X" in matches[0][1]
+
+
+def test_anchor_step_exclude_compiles_without_crash_when_unused():
+    """Rules that compile the field but don't trigger anchor matches
+    don't crash on workflows without steps."""
+    pattern = ContextPattern(
+        anchor=r"token:",
+        requires=r"with:",
+        anchor_step_exclude=r"env:",
+    )
+    content = "jobs:\n  build:\n    steps:\n      - run: echo hi\n"
+    lines = content.splitlines()
+    assert pattern.check(content, lines) == []
