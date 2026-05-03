@@ -1710,19 +1710,14 @@ RULES: list[Rule] = [
                 r"(?:token|key|secret|password|pass)"
                 r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
             ),
-            # Job-scope suppression: when the same job has an ``env:``
-            # block routing any secret, the safe pattern is in use
-            # somewhere — suppress.  This trades a small amount of
-            # precision (a job that with-inputs ``secrets.A`` while
-            # env-exporting ``secrets.B`` in a sibling step would
-            # suppress) for the avoidance of the dominant false
-            # positive: workflows that DO route secrets through
-            # ``env:`` but reference them in ``with:`` via ``env.X``
-            # would otherwise still trip the anchor regex on lines
-            # the rule shouldn't flag.  Step-scope suppression would
-            # require an engine-level model change; revisit if the
-            # broad-suppression FP rate is observed in the wild.
-            anchor_job_exclude=(r"env:\s*\n[\s\S]*?\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"),
+            # Step-scope suppression: when this step's ``env:`` block
+            # routes a secret, the safe pattern is in use at the
+            # step level — suppress.  The redactor registration is
+            # per-step, so co-locating the safe-pattern signal at
+            # step granularity matches the runner's actual masking
+            # semantics: a secret declared in step A's env block is
+            # masked for step A's logs only.
+            anchor_step_exclude=(r"env:\s*\n[\s\S]*?\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"),
             exclude=[r"^\s*#"],
         ),
         remediation=(
@@ -1766,6 +1761,18 @@ RULES: list[Rule] = [
                 "    steps:\n      - uses: docker/login-action@v3\n"
                 "        with:\n"
                 "          password: ${{ secrets.REGISTRY_PASSWORD }}"
+            ),
+            # Step-scope sample: the matched step has no env: block
+            # of its own; an unrelated sibling step's env: routing
+            # does not co-locate the safe-pattern signal.
+            (
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/some-action@v1\n"
+                "        with:\n"
+                "          token: ${{ secrets.GH_TOKEN }}\n"
+                "      - uses: some-org/log@v1\n"
+                "        env:\n"
+                "          DUMMY: ${{ secrets.GITHUB_TOKEN }}"
             ),
         ],
         test_negative=[

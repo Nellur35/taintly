@@ -414,6 +414,62 @@ def _split_into_job_segments(lines: list[str]) -> list[tuple[int, list[str]]]:
     return segments if len(segments) > 1 else [(0, lines)]
 
 
+def _split_into_step_segments(content: str) -> list[tuple[int, list[str]]]:
+    """Split a workflow file into per-step segments.
+
+    Returns a list of (start_line_index, segment_lines) pairs, one
+    per step across all jobs in the file.  ``start_line_index`` is
+    the 0-based index of the first content line of the step in the
+    original file; ``segment_lines`` is the slice of original lines
+    bounded by the step's first and last leaf events as observed by
+    the structural reader.
+
+    Used by ``ContextPattern.anchor_step_exclude`` to scope
+    safe-pattern co-location checks to the step containing the
+    anchor match (rather than the whole job).  Mirrors the shape
+    of ``_split_into_job_segments`` but at step granularity.
+
+    Step enumeration goes through the structural reader so YAML
+    anchors and merge keys are resolved correctly: a step inheriting
+    its body via ``<<: *anchor`` is recognised as one step, not
+    skipped.  Files with no ``jobs:`` block (or no ``steps:`` under
+    any job) return an empty list.
+    """
+    from .parsers.structural import EventKind, walk_workflow
+
+    lines = content.splitlines()
+    # Map (job_id, step_idx) -> [min_line, max_line], 1-based as the
+    # structural reader emits them.  Convert to 0-based indices on
+    # output to match _split_into_job_segments's contract.
+    step_bounds: dict[tuple[str, int], list[int]] = {}
+    for event in walk_workflow(filepath="anonymous.yml", content=content, recover=True):
+        if event.kind is not EventKind.LEAF_SCALAR:
+            continue
+        path = event.path
+        if (
+            len(path) >= 5
+            and path[0] == "jobs"
+            and isinstance(path[1], str)
+            and path[2] == "steps"
+            and isinstance(path[3], int)
+        ):
+            key = (path[1], path[3])
+            slot = step_bounds.get(key)
+            if slot is None:
+                step_bounds[key] = [event.line, event.line]
+            else:
+                slot[0] = min(slot[0], event.line)
+                slot[1] = max(slot[1], event.line)
+
+    # Stable order: by job-id then step-index, mirroring file order.
+    segments: list[tuple[int, list[str]]] = []
+    for (_job_id, _step_idx), (start_1b, end_1b) in sorted(step_bounds.items()):
+        start_0b = max(0, start_1b - 1)
+        end_0b_inclusive = max(start_0b, end_1b - 1)
+        segments.append((start_0b, lines[start_0b : end_0b_inclusive + 1]))
+    return segments
+
+
 @dataclass
 class ContextPattern:
     """Trigger when BOTH anchor AND requires patterns exist in the same file.
@@ -438,6 +494,12 @@ class ContextPattern:
     anchor_job_exclude: str = (
         ""  # If set, suppress anchor matches found in a job segment that contains this pattern
     )
+    # If set, suppress anchor matches found within a step whose body
+    # matches this pattern.  Use when the safe-pattern signal must be
+    # co-located with the matched line at step granularity rather
+    # than spread across the job: a sibling step's content cannot
+    # influence whether the matched step is suppressed.
+    anchor_step_exclude: str = ""
 
     def __post_init__(self):
         self._anchor_re = re.compile(self.anchor)
@@ -448,6 +510,9 @@ class ContextPattern:
         self._excludes = [re.compile(e) for e in self.exclude]
         self._anchor_job_exclude_re = (
             re.compile(self.anchor_job_exclude) if self.anchor_job_exclude else None
+        )
+        self._anchor_step_exclude_re = (
+            re.compile(self.anchor_step_exclude) if self.anchor_step_exclude else None
         )
 
     # CONTRACT: returns (line_num, snippet) where snippet is the
@@ -474,6 +539,16 @@ class ContextPattern:
                 for j in range(len(seg_lines)):
                     job_content_by_line[seg_start + j] = seg_content
 
+        # Build per-line step-segment content map for step-scope
+        # suppression.  Built lazily; rules without
+        # ``anchor_step_exclude`` pay zero cost.
+        step_content_by_line: dict[int, str] = {}
+        if self._anchor_step_exclude_re:
+            for seg_start, seg_lines in _split_into_step_segments(content):
+                seg_content = "\n".join(seg_lines)
+                for j in range(len(seg_lines)):
+                    step_content_by_line[seg_start + j] = seg_content
+
         results = []
         for i, line in enumerate(lines):
             if any(ex.search(line) for ex in self._excludes):
@@ -482,6 +557,13 @@ class ContextPattern:
                 if self._anchor_job_exclude_re:
                     seg_content = job_content_by_line.get(i, "")
                     if seg_content and _safe_search(self._anchor_job_exclude_re, seg_content):
+                        continue
+                # Step-scope suppression check.  When both job- and
+                # step-scope are set on the same rule, both must
+                # permit the match (i.e. neither suppresses it).
+                if self._anchor_step_exclude_re:
+                    seg_content = step_content_by_line.get(i, "")
+                    if seg_content and _safe_search(self._anchor_step_exclude_re, seg_content):
                         continue
                 results.append((i + 1, line.strip()))
         return results
