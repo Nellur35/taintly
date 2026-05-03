@@ -448,3 +448,95 @@ def test_lazy_loading_skips_other_platforms():
     """)
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert "OK" in r.stdout, f"stdout={r.stdout!r}, stderr={r.stderr!r}"
+
+
+# =============================================================================
+# Structural CUTOFF disclosure
+# =============================================================================
+
+
+def test_structural_cutoff_emits_file_level_engine_err(tmp_path, github_rules):
+    """When the structural reader hits CUTOFF mid-file, scan_file
+    surfaces a single file-level ENGINE-ERR documenting the
+    coverage degradation.
+
+    Per-rule structural-pattern markers continue to fire for the
+    rules that ran; the file-level finding ensures the disclosure
+    is visible regardless of which rule types the file exercised.
+    """
+    from taintly.engine import scan_file
+
+    wf = tmp_path / "wf.yml"
+    # ``%YAML`` directive is the simplest CUTOFF trigger -- the
+    # tokenizer treats it as an unsupported construct in recover
+    # mode (verified at tests/unit/test_structural_walker.py:183).
+    wf.write_text(
+        "name: ci\n"
+        "%YAML 1.2\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+    )
+    findings = scan_file(str(wf), github_rules)
+    cutoff_findings = [
+        f for f in findings
+        if f.rule_id == "ENGINE-ERR"
+        and "Structural coverage degraded" in f.title
+    ]
+    assert len(cutoff_findings) == 1, (
+        f"expected exactly one CUTOFF disclosure; got "
+        f"{[(f.rule_id, f.title) for f in findings if f.rule_id == 'ENGINE-ERR']}"
+    )
+    assert cutoff_findings[0].line == 2  # the directive line
+
+
+def test_clean_yaml_does_not_emit_cutoff_disclosure(tmp_path, github_rules):
+    """A well-formed workflow doesn't produce a CUTOFF ENGINE-ERR."""
+    from taintly.engine import scan_file
+
+    wf = tmp_path / "wf.yml"
+    wf.write_text(
+        "on: push\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+    )
+    findings = scan_file(str(wf), github_rules)
+    cutoff = [
+        f for f in findings
+        if f.rule_id == "ENGINE-ERR"
+        and "Structural coverage degraded" in f.title
+    ]
+    assert cutoff == []
+
+
+def test_jenkinsfile_does_not_run_cutoff_check(tmp_path, jenkins_rules):
+    """Jenkinsfiles don't go through the structural reader; the
+    CUTOFF check is gated on YAML extensions and must not fire on
+    Jenkinsfile inputs (which would always produce a spurious
+    cutoff because the structural reader doesn't handle Groovy).
+    """
+    from taintly.engine import scan_file
+
+    jf = tmp_path / "Jenkinsfile"
+    jf.write_text(
+        "pipeline {\n"
+        "  agent any\n"
+        "  stages {\n"
+        "    stage('build') {\n"
+        "      steps { sh 'echo hi' }\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    findings = scan_file(str(jf), jenkins_rules)
+    cutoff = [
+        f for f in findings
+        if f.rule_id == "ENGINE-ERR"
+        and "Structural coverage degraded" in f.title
+    ]
+    assert cutoff == []
