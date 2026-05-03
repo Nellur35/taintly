@@ -1261,3 +1261,93 @@ def test_posix_redirected_stdout_keeps_unicode(monkeypatch):
         assert enc.arrow_char() == "→"
     finally:
         enc.force_ascii(False)
+
+
+# =============================================================================
+# Disclosure block (config exclusions, repo identity source, GitLab CI ctx)
+# =============================================================================
+
+
+def test_summary_discloses_config_excluded_rules():
+    """``.taintly.yml`` exclusions appear in the summary so reviewers
+    can see what the local config disabled."""
+    report = AuditReport(repo_path="/r", platform="github")
+    report.files_scanned = 1
+    report.excluded_rules_from_config = ["SEC4-GH-004", "SEC2-GH-002"]
+    report.summarize()
+    output = format_text(report, use_color=False)
+    assert "Config exclusions: 2 rule(s) from .taintly.yml" in output
+    assert "SEC4-GH-004" in output
+    assert "SEC2-GH-002" in output
+
+
+def test_summary_omits_config_exclusions_line_when_empty():
+    """No exclusions -> no disclosure line."""
+    report = AuditReport(repo_path="/r", platform="github")
+    report.files_scanned = 1
+    report.summarize()
+    output = format_text(report, use_color=False)
+    assert "Config exclusions" not in output
+
+
+def test_summary_discloses_explicit_repo_identity():
+    report = AuditReport(repo_path="/r", platform="github")
+    report.files_scanned = 1
+    report.repo_identity_source = "explicit"
+    report.repo_identity_value = "me/myrepo"
+    report.summarize()
+    output = format_text(report, use_color=False)
+    assert "Repository identity: explicit (me/myrepo) via --github-repo" in output
+
+
+def test_summary_discloses_auto_detected_repo_identity():
+    report = AuditReport(repo_path="/r", platform="github")
+    report.files_scanned = 1
+    report.repo_identity_source = "auto"
+    report.repo_identity_value = "owner/repo"
+    report.summarize()
+    output = format_text(report, use_color=False)
+    assert "Repository identity: auto-detected from git remote (owner/repo)" in output
+    assert "pass --github-repo to override" in output
+
+
+def test_summary_discloses_unset_repo_identity_on_github():
+    report = AuditReport(repo_path="/r", platform="github")
+    report.files_scanned = 1
+    report.repo_identity_source = "unset"
+    report.summarize()
+    output = format_text(report, use_color=False)
+    assert "Repository identity: unknown" in output
+    assert "repo-mismatch suppression disabled" in output
+
+
+def test_summary_skips_repo_identity_disclosure_on_non_github():
+    """Non-GitHub platforms don't surface a repo-identity line."""
+    report = AuditReport(repo_path="/r", platform="gitlab")
+    report.files_scanned = 1
+    report.repo_identity_source = "unset"
+    report.summarize()
+    output = format_text(report, use_color=False)
+    assert "Repository identity" not in output
+
+
+def test_summary_discloses_gitlab_ctx_when_detected():
+    report = AuditReport(repo_path="/r", platform="gitlab")
+    report.files_scanned = 1
+    report.gitlab_ctx_detected = {
+        "pipeline_source": "schedule",
+        "commit_branch": "main",
+    }
+    report.summarize()
+    output = format_text(report, use_color=False)
+    assert "GitLab CI context: auto-detected" in output
+    assert "PIPELINE_SOURCE=schedule" in output
+    assert "COMMIT_BRANCH=main" in output
+
+
+def test_summary_omits_gitlab_ctx_line_when_empty():
+    report = AuditReport(repo_path="/r", platform="gitlab")
+    report.files_scanned = 1
+    report.summarize()
+    output = format_text(report, use_color=False)
+    assert "GitLab CI context" not in output

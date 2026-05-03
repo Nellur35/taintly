@@ -230,6 +230,18 @@ def main():
         help="Exclude a rule ID from the scan (repeatable, e.g. --exclude-rule SEC2-GH-002)",
     )
     parser.add_argument(
+        "--strict-config",
+        action="store_true",
+        help=(
+            "Exit non-zero if the local ``.taintly.yml`` excludes any rule "
+            "from the scan.  Recommended for invocations on protected "
+            "branches where checked-in exclusions should be visible to "
+            "reviewers (the summary block lists excluded rules in any "
+            "case; ``--strict-config`` makes the presence of any "
+            "exclusion fail the scan)."
+        ),
+    )
+    parser.add_argument(
         "--score",
         action="store_true",
         help="Compute a 0-100 security score and per-category breakdown after scanning",
@@ -470,7 +482,9 @@ def main():
             all_rules = load_all_rules()
 
     # Apply rule exclusions (CLI + config, merged)
-    excluded = set(args.exclude_rule or []) | set(audit_config.exclude_rules)
+    cli_excluded = set(args.exclude_rule or [])
+    config_excluded = set(audit_config.exclude_rules)
+    excluded = cli_excluded | config_excluded
     if args.no_taint:
         # --no-taint is a targeted off-switch for the shallow taint analysis
         # rule only.  Taint defaults to on per the v2 plan; users who find it
@@ -479,6 +493,18 @@ def main():
         excluded.add("TAINT-GH-001")
     if excluded:
         all_rules = [r for r in all_rules if r.id not in excluded]
+    # ``--strict-config`` makes the presence of any config-driven
+    # exclusion fail the scan.  The intent is for protected-branch CI
+    # invocations: the summary always lists excluded rules, but
+    # strict mode escalates that disclosure to a non-zero exit.
+    if args.strict_config and config_excluded:
+        rules_list = ", ".join(sorted(config_excluded))
+        print(
+            f"taintly: --strict-config set; .taintly.yml excludes "
+            f"{len(config_excluded)} rule(s) ({rules_list}). Exit.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
 
     # Integration test mode
     if args.integration_test:
@@ -946,6 +972,15 @@ def main():
         platform,
         explicit_github_repoctx=explicit_repoctx,
     )
+
+    # Surface config-driven exclusions on every report so the summary
+    # reporter can disclose them.  CLI-only exclusions are operator
+    # choices and not surfaced; config exclusions are
+    # repository-checked-in trust events that reviewers should see.
+    if config_excluded:
+        sorted_config_exc = sorted(config_excluded)
+        for report in reports:
+            report.excluded_rules_from_config = sorted_config_exc
 
     all_findings = []
     deployment_contexts: dict[str, DeploymentContext] = {}

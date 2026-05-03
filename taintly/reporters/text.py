@@ -244,6 +244,43 @@ def _format_top_distinct_risks(
     return out
 
 
+def _format_disclosure_block(report: AuditReport) -> list[str]:
+    """Surface trust events that affected the scan: config-driven
+    rule exclusions, repository-identity source, and auto-detected
+    GitLab CI context.  Each line is omitted when the underlying
+    state is its conservative default, so default-configuration
+    scans see the same compact summary as before.
+    """
+    out: list[str] = []
+    if report.excluded_rules_from_config:
+        rules_list = ", ".join(report.excluded_rules_from_config)
+        out.append(
+            f"  Config exclusions: {len(report.excluded_rules_from_config)} "
+            f"rule(s) from .taintly.yml ({rules_list})"
+        )
+    if report.repo_identity_source == "explicit":
+        out.append(
+            f"  Repository identity: explicit ({report.repo_identity_value}) "
+            "via --github-repo"
+        )
+    elif report.repo_identity_source == "auto":
+        out.append(
+            f"  Repository identity: auto-detected from git remote "
+            f"({report.repo_identity_value}) — pass --github-repo to override"
+        )
+    elif report.platform == "github" and report.repo_identity_source == "unset":
+        out.append(
+            "  Repository identity: unknown (no git remote, no --github-repo) "
+            "— repo-mismatch suppression disabled"
+        )
+    if report.gitlab_ctx_detected:
+        ctx_pairs = ", ".join(
+            f"{k.upper()}={v}" for k, v in sorted(report.gitlab_ctx_detected.items())
+        )
+        out.append(f"  GitLab CI context: auto-detected ({ctx_pairs})")
+    return out
+
+
 def _format_executive_summary(
     report: AuditReport,
     c: dict[Severity, str],
@@ -292,6 +329,7 @@ def _format_executive_summary(
             sev_bits.append(f"{c[sev]}{sev.value}:{count}{r}")
     if sev_bits:
         out.append(f"  By severity:    {'  '.join(sev_bits)}")
+    out.extend(_format_disclosure_block(report))
     out.append("")
 
     # Top distinct risks (root-cause clustered) — the primary value-add of
@@ -384,6 +422,11 @@ def format_text(
 
     if not report.findings or all(f.rule_id == "ENGINE-ERR" for f in report.findings):
         out.append(f"  {check_char()} No findings.")
+        # Even on a clean scan, surface trust events that affected the
+        # scope of what was checked: a "no findings" report on a config
+        # that excludes rules is meaningfully different from "no
+        # findings" on a config that excludes nothing.
+        out.extend(_format_disclosure_block(report))
         return to_ascii("\n".join(out))
 
     # Executive summary (score, counts, top issues, top risk, quick win)
