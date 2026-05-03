@@ -733,7 +733,17 @@ def scan_repo(
 
         all_findings: list[Finding] = []
         if plat == Platform.GITHUB:
-            repoctx = explicit_github_repoctx or detect_github_workflow_context(repo_path)
+            if explicit_github_repoctx is not None:
+                repoctx = explicit_github_repoctx
+                report.repo_identity_source = "explicit"
+            else:
+                repoctx = detect_github_workflow_context(repo_path)
+                if repoctx.repository:
+                    report.repo_identity_source = "auto"
+                else:
+                    report.repo_identity_source = "unset"
+            if repoctx.repository:
+                report.repo_identity_value = repoctx.repository
         else:
             repoctx = None
         # ContextPattern rules whose finding_family is set are the
@@ -755,7 +765,14 @@ def scan_repo(
         # environment every field is None and the result is
         # indistinguishable from ``GitLabContext()``, preserving the
         # conservative-by-default suppression path.
-        gitlabctx = detect_gitlab_context() if plat == Platform.GITLAB else None
+        if plat == Platform.GITLAB:
+            gitlabctx = detect_gitlab_context()
+            for field_name in ("pipeline_source", "commit_branch", "default_branch"):
+                value = getattr(gitlabctx, field_name)
+                if value:
+                    report.gitlab_ctx_detected[field_name] = value
+        else:
+            gitlabctx = None
         # Jenkins parameter_values has no consumer in the evaluator
         # today (``evaluate_jenkins_when`` discards ctx).  Populating
         # from the environment would be speculative without effect;

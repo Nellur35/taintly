@@ -997,6 +997,29 @@ class AuditReport:
     # anchor match maps to "Not applicable"; a family with no
     # ContextPattern coverage keeps the existing "Strong" default.
     families_with_ctx_coverage: set[str] = field(default_factory=set)
+    # Rule IDs excluded from the scan via ``.taintly.yml``'s
+    # ``exclude-rules:`` list.  Surfaced in the summary so reviewers
+    # can see which rules the local config disabled.  CLI-only
+    # exclusions (``--exclude-rule``) are not included here — those
+    # are operator choices, not artifacts of the repository's
+    # checked-in config.
+    excluded_rules_from_config: list[str] = field(default_factory=list)
+    # Source of the static-guard ``WorkflowContext`` for this scan,
+    # surfaced in the summary so reviewers can see whether
+    # repo-mismatch suppression evaluated against an auto-detected
+    # remote, an explicit ``--github-repo`` flag, or stayed
+    # unconfigured.  Possible values: ``"explicit"`` (CLI flag),
+    # ``"auto"`` (git remote detection succeeded), ``"unset"`` (no
+    # source — repo-mismatch suppression disabled).  GitHub-only.
+    repo_identity_source: str = "unset"
+    # Repository identity actually resolved (``OWNER/REPO``) when
+    # ``repo_identity_source`` is ``explicit`` or ``auto``.
+    repo_identity_value: str = ""
+    # GitLab CI predefined-variables that were auto-detected from
+    # the environment (when taintly itself runs inside a GitLab CI
+    # job).  Surfaced so reviewers can see which context drove
+    # ``is_pipeline_whole_dead`` and the rule-chain evaluator.
+    gitlab_ctx_detected: dict[str, str] = field(default_factory=dict)
 
     def add(self, finding: Finding):
         self.findings.append(finding)
