@@ -1,0 +1,43 @@
+# CODEOWNERS for taintly
+#
+# These paths require maintainer review before merge.  The
+# threshold is "code that affects whether a finding fires or
+# whether it is suppressed" plus the trust-anchor surfaces
+# (config loading, suppression interop with foreign tools,
+# threat-model documentation).
+#
+# Convention follows other repositories: the latest matching
+# entry wins, so the order matters and the file is grouped from
+# generic to specific.
+
+# Default reviewer for everything not otherwise listed.
+*                                          @Nellur35
+
+# Suppression and severity logic.
+/taintly/suppressions/                     @Nellur35
+/taintly/staticguard.py                    @Nellur35
+/taintly/gitlabguard.py                    @Nellur35
+/taintly/jenkinsguard.py                   @Nellur35
+
+# Engine post-processors and trust-anchor loaders.
+/taintly/engine.py                         @Nellur35
+/taintly/config.py                         @Nellur35
+/taintly/baseline.py                       @Nellur35
+
+# Cross-step taint analyzer and the rules whose detection
+# depends on it.
+/taintly/taint.py                          @Nellur35
+/taintly/rules/github/taint.py             @Nellur35
+/taintly/rules/gitlab/taint.py             @Nellur35
+/taintly/rules/jenkins/taint.py            @Nellur35
+
+# Reporters serialize finding data into formats consumed by
+# downstream tooling (SARIF, JSON, AI-triage).  Schema-shape
+# changes are covered here.
+/taintly/reporters/                        @Nellur35
+
+# Threat-model and design-log entries: documentation that
+# settles project policy.
+/docs/SCORING.md                           @Nellur35
+/docs/AI_TRIAGE.md                         @Nellur35
+/docs/decisions/                           @Nellur35

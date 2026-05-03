@@ -117,7 +117,11 @@ def _iter_candidate_files(repo_path: str) -> list[str]:
     :data:`_MAX_POLICY_FILES` to bound the cost on monorepos.
     """
     out: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(repo_path):
+    # ``followlinks=False`` (the os.walk default) is set explicitly
+    # so a repository whose policy directory is a symlink pointing
+    # outside the repo is not silently scanned through the symlink.
+    # Documented policy: taintly does not follow symlinks.
+    for dirpath, dirnames, filenames in os.walk(repo_path, followlinks=False):
         # Prune in-place so os.walk doesn't recurse into junk dirs.
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
 
