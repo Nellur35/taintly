@@ -270,7 +270,8 @@ _PostProcessor = Callable[[list[Finding], _PostProcessContext], None]
 
 
 def _github_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
-    _suppress_dead_findings(findings, ctx.content, ctx.repoctx)
+    if any(rule.platform == Platform.GITHUB for rule in ctx.rules):
+        _suppress_dead_findings(findings, ctx.content, ctx.repoctx)
 
 
 def _gitlab_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
@@ -636,9 +637,20 @@ def discover_files(repo_path: str, platform: Platform) -> list[str]:
 
 
 def scan_repo(
-    repo_path: str, rules: list[Rule], platform: Platform | None = None
+    repo_path: str,
+    rules: list[Rule],
+    platform: Platform | None = None,
+    *,
+    explicit_github_repoctx: StaticGuardContext | None = None,
 ) -> list[AuditReport]:
-    """Scan an entire repository. Returns one report per platform detected."""
+    """Scan an entire repository. Returns one report per platform detected.
+
+    ``explicit_github_repoctx`` lets callers (the CLI's ``--github-repo``
+    flag, in particular) override ``git remote`` auto-detection for the
+    static-guard ``WorkflowContext`` on the GitHub scan path.  Useful
+    when the directory is not a git checkout or its remote is not named
+    ``origin``.  When omitted, auto-detection is used as before.
+    """
     import sys as _sys
 
     repo_path, explicit_files = _normalize_input_path(repo_path)
@@ -687,7 +699,10 @@ def scan_repo(
         report.rules_loaded = len(platform_rules)
 
         all_findings: list[Finding] = []
-        repoctx = detect_github_workflow_context(repo_path) if plat == Platform.GITHUB else None
+        if plat == Platform.GITHUB:
+            repoctx = explicit_github_repoctx or detect_github_workflow_context(repo_path)
+        else:
+            repoctx = None
         # ContextPattern rules whose finding_family is set are the
         # subset we can answer "did this family have a candidate
         # location?" for.  We compute anchor-match counts per file
