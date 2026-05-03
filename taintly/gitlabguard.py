@@ -21,6 +21,19 @@ class ExprVerdict(Enum):
 
 @dataclass(frozen=True)
 class GitLabContext:
+    """Pipeline context for context-aware GitLab CI rule evaluation.
+
+    Fields exist for extensibility: when populated, they let
+    :func:`evaluate_gitlab_if` resolve comparisons such as
+    ``$CI_PIPELINE_SOURCE == 'schedule'`` to STATIC_TRUE / STATIC_FALSE
+    instead of falling through to RUNTIME.  The engine does not
+    currently populate these fields on the scan path; conservatism
+    therefore applies and only literal ``when: never`` rules suppress.
+    Populate when corpus evidence shows context-aware suppression is
+    needed and a concrete source for each field (CI env vars, CLI
+    flag, ``.gitlab-ci.yml`` ``workflow:rules``) is settled.
+    """
+
     pipeline_source: str | None = None
     commit_branch: str | None = None
     default_branch: str | None = None

@@ -15,6 +15,19 @@ class GuardVerdict(Enum):
 
 @dataclass(frozen=True)
 class JenkinsContext:
+    """Pipeline context for context-aware Jenkins ``when`` evaluation.
+
+    The ``parameter_values`` field exists for extensibility: when
+    populated with the actual build-parameter values, an evaluator
+    could resolve ``when { expression { return params.FOO == 'bar' } }``
+    against the live values.  The engine does not currently populate
+    this field on the scan path; conservatism therefore applies and
+    only literal ``when { expression { return false } }`` (and the
+    ``not { expression { return true } }`` variant) suppress.  Populate
+    when corpus evidence demands context-aware suppression and a
+    concrete source for the parameter values is settled.
+    """
+
     parameter_values: dict[str, str] | None = None
 
 

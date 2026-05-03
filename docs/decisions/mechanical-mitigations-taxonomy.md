@@ -47,3 +47,58 @@ Reopen this taxonomy when field measurement shows any of the following:
 - A maintainer-gated downgrade hides a confirmed externally reachable exploit path.
 - A deployment-specific mitigation appears repeatedly enough to justify structured context input.
 - Capability neutralization can be mapped per rule with reviewable evidence and regression tests.
+
+## Addendum — wiring and coverage follow-up
+
+The initial implementation of mechanical-mitigation suppression
+shipped with several silent feature-incompleteness gaps surfaced
+by field testing:
+
+- The `--github-repo` CLI flag was registered for `--platform-audit`
+  only; the scan path used `git remote` auto-detection exclusively.
+  Users running on non-git directories or repositories whose remote
+  is not named `origin` saw no static-guard suppression and no
+  warning explaining why.
+- `evaluate_if` did not strip outer YAML quotes around `${{ }}`
+  expressions, so a syntactically equivalent but YAML-quoted `if:`
+  value (recommended by some style guides to disambiguate from
+  `${{` syntax) fell through to RUNTIME.
+- `find_dead_line_ranges` walked the file line-by-line to extract
+  job and step `if:` values, which does not resolve YAML anchors or
+  merge keys. Jobs inheriting `if:` via `<<: *anchor` were treated
+  as having no guard.
+- `_github_dead_postprocessor` ran on every scanned file, including
+  GitLab CI files and Jenkinsfiles, where the GitHub-shaped walk
+  produced no suppressions but performed wasted work and was
+  inconsistent with the GitLab and Jenkins postprocessors that gate
+  on platform.
+- `GitLabContext` and `JenkinsContext` dataclasses defined fields
+  that suggest context-aware suppression is wired up, but the
+  engine constructed both with all defaults on every scan; a reader
+  could reasonably assume otherwise.
+
+The follow-up addressed all of the above by extending the flag's
+semantics to cover the scan path (with explicit-flag-wins-over-
+auto-detection precedence), fixing the strip helper to unwrap
+YAML-quoted `${{ }}` expressions while leaving bare quoted strings
+as RUNTIME, migrating `find_dead_line_ranges` to the structural
+reader (which already resolves merge keys correctly), adding a
+platform guard to `_github_dead_postprocessor` parallel to the
+GitLab and Jenkins counterparts, and documenting the GitLab and
+Jenkins context dataclasses as currently-unwired with a note that
+they should be populated when corpus evidence demands.
+
+The conservatism principle held throughout: each gap was a false
+negative (failure to suppress where suppression was warranted),
+never a false positive. No silent loss of coverage was introduced;
+the fixes only added coverage that the architecture was designed
+to support.
+
+The lesson worth carrying forward: spec rounds for features with
+multiple input paths (CLI flag + auto-detection, multiple
+syntactic forms of the same construct) need explicit
+**negative-path verification** — tests that assert "the flag
+actually does something" or "the equivalent form actually produces
+the same result." Those tests now live in
+`tests/unit/test_staticguard.py` and
+`tests/integration/test_github_repo_flag_scan_path.py`.

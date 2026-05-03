@@ -194,7 +194,14 @@ def main():
     parser.add_argument(
         "--github-repo",
         metavar="OWNER/REPO",
-        help="Repository to target with --platform-audit (e.g. octocat/hello-world).",
+        help=(
+            "Repository identity in OWNER/REPO form. Used in two contexts: "
+            "(1) targets the repository for --platform-audit; "
+            "(2) provides explicit identity to the static-guard evaluator "
+            "on the scan path (overrides ``git remote`` auto-detection). "
+            "Useful when scanning a directory that isn't a git checkout "
+            "or whose remote is not named ``origin``."
+        ),
     )
     parser.add_argument(
         "--gitlab-project",
@@ -924,7 +931,21 @@ def main():
                     file=sys.stderr,
                 )
 
-    reports = scan_repo(args.path, all_rules, platform)
+    explicit_repoctx = None
+    if getattr(args, "github_repo", None) and "/" in args.github_repo:
+        from .staticguard import WorkflowContext
+
+        owner = args.github_repo.split("/", 1)[0]
+        explicit_repoctx = WorkflowContext(
+            repository=args.github_repo, repository_owner=owner
+        )
+
+    reports = scan_repo(
+        args.path,
+        all_rules,
+        platform,
+        explicit_github_repoctx=explicit_repoctx,
+    )
 
     all_findings = []
     deployment_contexts: dict[str, DeploymentContext] = {}
