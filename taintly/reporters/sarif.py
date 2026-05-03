@@ -7,6 +7,7 @@ from typing import Any
 
 from taintly import __version__
 from taintly.models import AuditReport, Severity
+from taintly.reporters.text import INVENTORY_RULE_IDS
 
 _LEVEL_MAP = {
     Severity.CRITICAL: "error",
@@ -118,6 +119,15 @@ def format_sarif(report: AuditReport) -> str:
         if f.calibration_reason:
             properties["calibration_reason"] = f.calibration_reason
 
+        # Inventory items (third-party CI surface area to review
+        # periodically) get SARIF ``kind: "review"`` so dashboards
+        # that distinguish review-tracked items from active findings
+        # can group them automatically.  The ``taintly_kind`` property
+        # is an explicit redundant signal for tool-specific filtering.
+        is_inventory = f.rule_id in INVENTORY_RULE_IDS
+        if is_inventory:
+            properties["taintly_kind"] = "inventory"
+
         # SARIF `result` objects are heterogeneously nested (message,
         # locations array of physical/logical location trees, optional
         # properties/fixes). Explicit `Any` values let mypy track the
@@ -140,6 +150,8 @@ def format_sarif(report: AuditReport) -> str:
                 }
             ],
         }
+        if is_inventory:
+            result["kind"] = "review"
         if f.snippet:
             result["locations"][0]["physicalLocation"]["region"]["snippet"] = {
                 "text": f.snippet[:500]
@@ -147,6 +159,14 @@ def format_sarif(report: AuditReport) -> str:
         if properties:
             result["properties"] = properties
         results.append(result)
+
+    # Top-level summary mirrors the JSON reporter's findings/inventory
+    # split so SARIF consumers (dashboards, aggregators) can show the
+    # two counts without enumerating ``results`` themselves.  Tool-
+    # specific properties on the run are preserved by both GitHub
+    # Advanced Security and GitLab's security dashboard.
+    findings_count = sum(1 for f in report.findings if f.rule_id not in INVENTORY_RULE_IDS)
+    inventory_count = sum(1 for f in report.findings if f.rule_id in INVENTORY_RULE_IDS)
 
     sarif = {
         "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
@@ -174,6 +194,10 @@ def format_sarif(report: AuditReport) -> str:
                         "toolExecutionNotifications": _build_notifications(report),
                     }
                 ],
+                "properties": {
+                    "findings_count": findings_count,
+                    "inventory_count": inventory_count,
+                },
             }
         ],
     }

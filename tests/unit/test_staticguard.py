@@ -288,6 +288,52 @@ def test_whole_dead_no_jobs_block():
     assert is_workflow_whole_dead(content) is False
 
 
+def test_evaluate_if_block_scalar_value():
+    """Block-scalar ``if`` values (``|`` / ``>``) carry a trailing
+    newline.  The strip helper tolerates it so suppression still
+    fires; lock that behaviour in."""
+    assert evaluate_if("false\n") is Verdict.STATIC_FALSE
+    assert evaluate_if("false\n\n") is Verdict.STATIC_FALSE
+    assert evaluate_if("  false  ") is Verdict.STATIC_FALSE
+
+
+def test_find_dead_line_ranges_block_scalar_if():
+    """A job whose ``if:`` is a block-scalar literal of ``false``
+    is dead.  Real-world workflows don't usually write this shape,
+    but neither the structural reader nor the strip helper should
+    mis-handle it."""
+    content = (
+        "on: push\n"
+        "jobs:\n"
+        "  job:\n"
+        "    if: |\n"
+        "      false\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo dead\n"
+    )
+    ranges = find_dead_line_ranges(content)
+    assert ranges, "Block-scalar if: false must produce a dead range"
+    assert any(8 in range(start, end + 1) for start, end in ranges), (
+        f"Dead range must cover the run line; got {ranges}"
+    )
+
+
+def test_find_dead_line_ranges_tab_indentation_does_not_crash():
+    """Tabs are invalid YAML; the structural reader handles them
+    gracefully.  ``_job_key_line_map`` returns no keys (its regex
+    only matches space indentation) but the leaf-line fallback
+    keeps suppression working with slightly tighter range bounds.
+    """
+    content = "jobs:\n\tdead:\n\t\tif: false\n\t\trun: echo dead\n"
+    # Should not raise; the precise range bounds are
+    # implementation-defined (leaf-line fallback when the key-line
+    # map is empty).  The contract this test locks in is "no crash,
+    # behaviour is conservative."
+    ranges = find_dead_line_ranges(content)
+    assert isinstance(ranges, list)
+
+
 def test_whole_dead_inherited_via_anchor():
     """Merge-key-inherited ``if: false`` counts toward whole-dead.
 

@@ -6,9 +6,11 @@ import csv
 import io
 
 from taintly.models import AuditReport
+from taintly.reporters.text import INVENTORY_RULE_IDS
 
 _FIELDS = [
     "rule_id",
+    "kind",
     "severity",
     "title",
     "file",
@@ -35,6 +37,10 @@ def format_csv(report: AuditReport) -> str:
     writer.writeheader()
     for f in report.findings:
         row = f.to_dict()
+        # ``kind`` distinguishes vulnerability findings from third-party
+        # inventory items so spreadsheet consumers can filter without
+        # carrying a hardcoded inventory rule list.
+        row["kind"] = "inventory" if f.rule_id in INVENTORY_RULE_IDS else "finding"
         # Truncate long fields for readability
         row["description"] = row["description"][:200]
         row["remediation"] = row["remediation"].split("\n")[0][:200]
