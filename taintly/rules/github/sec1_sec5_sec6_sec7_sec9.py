@@ -411,6 +411,104 @@ RULES: list[Rule] = [
         ),
     ),
     # =========================================================================
+    # SEC2-GH-003: Hardcoded container credentials in services / job container
+    # =========================================================================
+    # A workflow's ``services.<name>.credentials.password`` (or
+    # ``container.credentials.password`` at the job level) holds a
+    # literal string instead of a ``${{ secrets.X }}`` reference.
+    # The literal travels in the workflow YAML, in commit history,
+    # and through every fork — broader exposure than any actual
+    # secrets-storage channel.
+    #
+    # Industry peer audits (e.g. zizmor's
+    # ``hardcoded-container-credentials``) cover the same threat
+    # class.  Implementation here is independent.
+    Rule(
+        id="SEC2-GH-003",
+        title="Container credentials hardcoded in workflow YAML",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-2",
+        finding_family="credential_persistence",
+        description=(
+            "A ``services.<name>.credentials.password`` or "
+            "``container.credentials.password`` field contains a "
+            "literal string value rather than a ``${{ secrets.X }}`` "
+            "reference.  The credential is stored in the workflow "
+            "YAML, in every commit's history, and is visible to "
+            "every fork — far broader exposure than any GitHub "
+            "secrets channel.  Even ``actions/checkout`` is enough "
+            "to surface the value to an attacker who runs an arbitrary "
+            "step in the workflow.\n"
+            "\n"
+            "The same threat applies to ``username`` when paired with "
+            "a literal ``password``: the registry account is fully "
+            "characterised in the YAML.  Token-style credentials are "
+            "the canonical risk; literal ``username`` alone (without "
+            "a literal password) is hygiene-only."
+        ),
+        pattern=PathPattern(
+            # Match `password:` keys nested under either
+            # `jobs.<j>.services.<svc>.credentials` or
+            # `jobs.<j>.container.credentials` whose VALUE is NOT a
+            # GitHub Actions expression.  ``${{ ... }}`` is the safe
+            # form (env-var or secret reference); anything else is a
+            # hardcoded literal.
+            path=r"^jobs\.[^.]+\.(services\.[^.]+|container)\.credentials\.password$",
+            value=r"^(?!\s*\$\{\{).+",
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Move the password to a repository or organisation secret "
+            "and reference it via ``${{ secrets.NAME }}``:\n"
+            "  services:\n"
+            "    postgres:\n"
+            "      image: postgres:14\n"
+            "      credentials:\n"
+            "        username: postgres\n"
+            "        password: ${{ secrets.POSTGRES_PASSWORD }}\n"
+            "Rotate the leaked password.  Audit fork PRs and forks "
+            "of the repository: anyone who saw the workflow YAML "
+            "during the leak window has the credential."
+        ),
+        reference=(
+            "https://docs.github.com/en/actions/using-workflows/"
+            "workflow-syntax-for-github-actions#jobsjob_idservicescredentials"
+        ),
+        test_positive=[
+            "jobs:\n  test:\n    services:\n      db:\n        image: postgres:14\n"
+            "        credentials:\n          username: postgres\n          password: hunter2\n",
+            "jobs:\n  build:\n    container:\n      image: ghcr.io/example/runner\n"
+            "      credentials:\n        username: ci-bot\n          password: gh_pat_AAA111BBB222CCC\n".replace(
+                "          password", "        password"
+            ),
+        ],
+        test_negative=[
+            # Secret-referenced password — safe.
+            "jobs:\n  test:\n    services:\n      db:\n        image: postgres:14\n"
+            "        credentials:\n          username: postgres\n"
+            "          password: ${{ secrets.POSTGRES_PASSWORD }}\n",
+            # Container with secret-referenced password.
+            "jobs:\n  build:\n    container:\n      image: ghcr.io/example/runner\n"
+            "      credentials:\n        username: ci-bot\n"
+            "        password: ${{ secrets.GHCR_TOKEN }}\n",
+            # No credentials block at all.
+            "jobs:\n  test:\n    services:\n      db:\n        image: postgres:14\n",
+        ],
+        stride=["I", "S"],
+        threat_narrative=(
+            "An attacker browsing the workflow file (which is "
+            "publicly readable on every public repo, in every fork, "
+            "in every commit's history) recovers the literal "
+            "credential and uses it to push a backdoored image to the "
+            "private registry — or to authenticate as the registry "
+            "user account in any other system the user has access "
+            "to.  Unlike a leaked secret in CI logs (which has a "
+            "redaction layer), workflow-text leaks are immediate and "
+            "permanent."
+        ),
+    ),
+    # =========================================================================
     # CICD-SEC-5: Insufficient PBAC
     # =========================================================================
     Rule(
@@ -461,6 +559,12 @@ RULES: list[Rule] = [
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: twine upload --use-oidc dist/*",
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: cargo publish",
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: npm publish --provenance --access public",
+            # iter-5 (2026-05-04): three OIDC consumers added to the
+            # allowlist after sample-and-label found 12/17 FPs in
+            # the corpus baseline used these actions legitimately.
+            "permissions:\n  id-token: write\njobs:\n  scorecard:\n    steps:\n      - uses: ossf/scorecard-action@v2.4.0\n        with:\n          publish_results: true",
+            "permissions:\n  id-token: write\njobs:\n  pages:\n    steps:\n      - uses: actions/deploy-pages@v4",
+            "permissions:\n  id-token: write\njobs:\n  release:\n    steps:\n      - uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0",
         ],
         stride=["E"],
         threat_narrative=(
@@ -660,6 +764,14 @@ RULES: list[Rule] = [
             "        with:\n          token: ${{ secrets.GITHUB_TOKEN }}",
             '        with:\n          repoToken: "${{ secrets.GITHUB_TOKEN }}"',
             "        # run: curl ${{ secrets.TOKEN }}",
+            # iter-5 (2026-05-04): block-scalar list-item shape.
+            # ``secret-ids: |`` body lines pass each secret to the
+            # action as a literal string, same trust path as the
+            # ``key: ${{ secrets.X }}`` form.  Sample-and-label
+            # found 4 fires of this shape in the corpus baseline.
+            "        with:\n          secret-ids: |\n            ${{ secrets.AWS_KEY_1 }}\n            ${{ secrets.AWS_KEY_2 }}",
+            # Same shape with a YAML list-item dash prefix.
+            "        with:\n          tokens:\n            - ${{ secrets.GH_TOKEN }}\n            - ${{ secrets.NPM_TOKEN }}",
         ],
         stride=["I", "R"],
         threat_narrative=(

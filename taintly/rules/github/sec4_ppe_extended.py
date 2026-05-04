@@ -1339,4 +1339,92 @@ RULES: list[Rule] = [
         ),
         incidents=[],
     ),
+    # =========================================================================
+    # SEC4-GH-022: ``base64 -d | shell`` obfuscation in run-block
+    # =========================================================================
+    # Phase 8 (2026-05-04): a ``run:`` block decodes a base64-encoded
+    # string and pipes the decoded bytes directly into a shell or
+    # interpreter.  Encoded payloads are the canonical fingerprint of
+    # supply-chain attack code: diff reviewers and string-pattern
+    # scanners can't match the literal commands.  Industry peer audits
+    # (e.g. zizmor's ``obfuscation``) cover the same threat class.
+    Rule(
+        id="SEC4-GH-022",
+        title="Base64-decoded payload piped directly into shell or interpreter",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        finding_family="script_injection",
+        description=(
+            "A ``run:`` step decodes a base64 string and pipes the "
+            "decoded bytes directly into bash / sh / zsh / fish / "
+            "python / perl / ruby / node.  Encoded payloads bypass "
+            "diff-review heuristics and string-pattern scanners that "
+            "don't decode before matching.  An auditor reading the "
+            "workflow file sees only an opaque base64 blob; the "
+            "actual code executes after decoding.\n"
+            "\n"
+            "Includes equivalent forms: ``base64 -d`` / "
+            "``base64 --decode``, ``openssl enc -d -base64`` piped to "
+            "a shell, and PowerShell ``[Convert]::FromBase64String`` "
+            "piped to ``Invoke-Expression``."
+        ),
+        pattern=RegexPattern(
+            match=(
+                # Form 1: <something> | base64 -d | bash (or any
+                # interpreter).  ``\b`` after the interpreter list
+                # prevents a partial match of ``sh`` inside
+                # ``sha256sum`` / ``shasum`` / ``shellcheck`` etc.
+                r"\|\s*base64\s+(-d|--decode)\s*\|\s*(bash|sh|zsh|fish|python|perl|ruby|node)\b"
+                # Form 2: openssl enc -d -base64 piped to shell.
+                # Same ``\b`` rationale for the interpreter list.
+                r"|\bopenssl\s+enc\s+(-d|-base64|-d\s+-base64|-base64\s+-d)[^|\n]*\|\s*(bash|sh|zsh|python|perl)\b"
+                # Form 3: PowerShell base64-decode then iex.
+                r"|\[Convert\]::FromBase64String\([^)]+\)[^|\n]*\|\s*(?i:iex|Invoke-Expression)"
+            ),
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Never pipe a decoded payload to a shell.  If the encoded "
+            "data is legitimately needed (e.g. a binary blob the "
+            "workflow must write to disk), decode it to a file with "
+            "an audit trail and reference the decoded content "
+            "explicitly:\n"
+            "  - run: |\n"
+            '      echo "$ENCODED" | base64 -d > payload.bin\n'
+            "      sha256sum -c payload.sha256\n"
+            "      ./payload.bin\n"
+            "If you can't justify what the decoded bytes do without "
+            "running them, the workflow shouldn't be running them."
+        ),
+        reference="https://owasp.org/www-project-top-10-ci-cd-security-risks/",
+        test_positive=[
+            "        run: echo 'aHR0cHM6Ly9' | base64 -d | bash",
+            "        run: echo $X | base64 --decode | sh",
+            '        run: echo "${PAYLOAD}" | base64 -d | python',
+            "        run: openssl enc -d -base64 <<< $X | bash",
+        ],
+        test_negative=[
+            # Decode to a file (no pipe to shell) — safe.
+            "        run: echo $X | base64 -d > payload.bin",
+            # Encode (not decode) — different direction.
+            "        run: echo $PASSWORD | base64",
+            # Decode then sha256sum (verify, don't execute) — safe.
+            "        run: echo $X | base64 -d | sha256sum",
+            # Comment.
+            "        # run: echo $X | base64 -d | bash",
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "Encoded payloads are the canonical fingerprint of "
+            "supply-chain attack code in CI: the 2024 Ultralytics and "
+            "2026 Trivy compromises both used base64-encoded shells "
+            "to evade diff reviewers and static scanners.  Executing "
+            "any decoded payload gives an attacker arbitrary code "
+            "execution inside the runner with access to all secrets "
+            "and write permissions, while leaving the workflow file "
+            "looking like an opaque blob to a casual reviewer."
+        ),
+        incidents=["Ultralytics (Dec 2024)", "Trivy supply chain (Mar 2026)"],
+    ),
 ]
