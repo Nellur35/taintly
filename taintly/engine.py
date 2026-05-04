@@ -161,16 +161,19 @@ def scan_file(
                 rule_id="ENGINE-ERR",
                 severity=Severity.LOW,
                 title=(
-                    f"File size {len(content)} bytes exceeds scanner cap "
-                    f"({_MAX_SAFE_TEXT_LEN}); file-scope rule coverage degraded"
+                    f"File size {len(content)} bytes exceeds scanner per-chunk "
+                    f"cap ({_MAX_SAFE_TEXT_LEN}); content scanned in chunks"
                 ),
                 description=(
                     "To prevent regex denial-of-service on adversarial input, "
-                    "taintly skips full-content regex on files larger than "
-                    f"{_MAX_SAFE_TEXT_LEN} bytes. Per-line rules still run, but "
-                    "file-scope patterns (ContextPattern requires / "
-                    "AbsencePattern) will not report matches on this file. "
-                    "If this is a legitimate large CI config, split it via "
+                    "taintly's per-regex evaluation is bounded by a "
+                    f"{_MAX_SAFE_TEXT_LEN}-byte length cap. The chunked-search "
+                    "path scans large workflows in line-windowed chunks with "
+                    "overlap so file-scope rules (ContextPattern requires / "
+                    "AbsencePattern) still resolve. Coverage is preserved; "
+                    "this notice surfaces because the file is unusually large "
+                    "for a CI config. If you suspect a regex match that spans "
+                    "a chunk boundary was missed, split the workflow via "
                     "includes / reusable workflows."
                 ),
                 file=filepath,
