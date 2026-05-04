@@ -1049,4 +1049,69 @@ RULES: list[Rule] = [
         ),
         incidents=["Ultralytics (Dec 2024, GH analog)"],
     ),
+    # =========================================================================
+    # SEC4-GL-008: ``base64 -d | shell`` obfuscation in script block
+    # =========================================================================
+    # GitLab port of SEC4-GH-022 (Phase 8 Track C, 2026-05-04).
+    # Encoded payloads in ``script:`` blocks bypass diff-review
+    # heuristics and string-pattern scanners.  Same threat shape as
+    # the GitHub-Actions rule.
+    Rule(
+        id="SEC4-GL-008",
+        title="Base64-decoded payload piped directly into shell or interpreter (GitLab CI)",
+        severity=Severity.HIGH,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-4",
+        finding_family="script_injection",
+        description=(
+            "A GitLab CI ``script:`` step decodes a base64 string and "
+            "pipes the decoded bytes directly into bash / sh / zsh / "
+            "fish / python / perl / ruby / node.  Encoded payloads "
+            "bypass diff-review heuristics and string-pattern scanners "
+            "that don't decode before matching."
+        ),
+        pattern=RegexPattern(
+            match=(
+                # ``\b`` after the interpreter list prevents matching
+                # ``sh`` inside ``sha256sum`` / ``shasum``.
+                r"\|\s*base64\s+(-d|--decode)\s*\|\s*(bash|sh|zsh|fish|python|perl|ruby|node)\b"
+                r"|\bopenssl\s+enc\s+(-d|-base64|-d\s+-base64|-base64\s+-d)[^|\n]*\|\s*(bash|sh|zsh|python|perl)\b"
+            ),
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Never pipe a decoded payload to a shell.  If the encoded "
+            "data is legitimately needed, decode to a file, verify a "
+            "checksum, and only then execute:\n"
+            "  script:\n"
+            '    - echo "$ENCODED" | base64 -d > payload.bin\n'
+            "    - sha256sum -c payload.sha256\n"
+            "    - ./payload.bin"
+        ),
+        reference="https://owasp.org/www-project-top-10-ci-cd-security-risks/",
+        test_positive=[
+            "    - echo 'aHR0cHM6Ly9' | base64 -d | bash",
+            "    - echo $X | base64 --decode | sh",
+            '    - echo "${PAYLOAD}" | base64 -d | python',
+            "    - openssl enc -d -base64 <<< $X | bash",
+        ],
+        test_negative=[
+            "    - echo $X | base64 -d > payload.bin",
+            "    - echo $PASSWORD | base64",
+            "    - echo $X | base64 -d | sha256sum",
+            "    # - echo $X | base64 -d | bash",
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "Encoded payloads are the canonical fingerprint of "
+            "supply-chain attack code in CI: documented incidents in "
+            "GitHub Actions used base64-encoded shells to evade diff "
+            "reviewers and static scanners.  The same evasion shape "
+            "applies to GitLab CI ``script:`` blocks — executing any "
+            "decoded payload gives an attacker arbitrary code "
+            "execution with access to all CI variables and pipeline "
+            "secrets."
+        ),
+        incidents=["Ultralytics (Dec 2024, GH analog)", "Trivy supply chain (Mar 2026, GH analog)"],
+    ),
 ]

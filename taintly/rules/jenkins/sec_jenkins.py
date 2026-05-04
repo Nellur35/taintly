@@ -2421,4 +2421,71 @@ RULES: list[Rule] = [
         ),
         confidence="medium",
     ),
+    # =========================================================================
+    # SEC4-JK-006: ``base64 -d | shell`` obfuscation in pipeline shell call
+    # =========================================================================
+    # Jenkins port of SEC4-GH-022 / SEC4-GL-008 (Phase 8 Track C, 2026-05-04).
+    # Encoded payloads inside ``sh '...'`` (or ``bat``) calls bypass
+    # diff-review and string-pattern scanners.  Same threat shape as
+    # the GitHub Actions and GitLab CI rules; Jenkins's `sh ''` is the
+    # equivalent shell sink.
+    Rule(
+        id="SEC4-JK-006",
+        title="Base64-decoded payload piped directly into shell or interpreter (Jenkins)",
+        severity=Severity.HIGH,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-4",
+        finding_family="script_injection",
+        description=(
+            "A Jenkins pipeline ``sh '...'`` (or ``bat``) call decodes "
+            "a base64 string and pipes the decoded bytes directly into "
+            "bash / sh / zsh / fish / python / perl / ruby / node.  "
+            "Encoded payloads bypass diff-review heuristics and string-"
+            "pattern scanners that don't decode before matching."
+        ),
+        pattern=RegexPattern(
+            match=(
+                # Same regex shape as SEC4-GH-022 / SEC4-GL-008.
+                # ``\b`` after the interpreter list prevents matching
+                # ``sh`` inside ``sha256sum`` / ``shasum``.
+                r"\|\s*base64\s+(-d|--decode)\s*\|\s*(bash|sh|zsh|fish|python|perl|ruby|node)\b"
+                r"|\bopenssl\s+enc\s+(-d|-base64|-d\s+-base64|-base64\s+-d)[^|\n]*\|\s*(bash|sh|zsh|python|perl)\b"
+            ),
+            exclude=[r"^\s*//", r"^\s*#"],
+        ),
+        remediation=(
+            "Never pipe a decoded payload to a shell.  If the encoded "
+            "data is legitimately needed, decode to a file, verify a "
+            "checksum, and only then execute:\n"
+            "  sh '''\n"
+            '    echo "$ENCODED" | base64 -d > payload.bin\n'
+            "    sha256sum -c payload.sha256\n"
+            "    ./payload.bin\n"
+            "  '''"
+        ),
+        reference="https://owasp.org/www-project-top-10-ci-cd-security-risks/",
+        test_positive=[
+            "        sh 'echo aHR0cHM6Ly9 | base64 -d | bash'",
+            '        sh "echo $X | base64 --decode | sh"',
+            "        sh 'echo $PAYLOAD | base64 -d | python'",
+            "        sh 'openssl enc -d -base64 <<< $X | bash'",
+        ],
+        test_negative=[
+            "        sh 'echo $X | base64 -d > payload.bin'",
+            "        sh 'echo $PASSWORD | base64'",
+            "        sh 'echo $X | base64 -d | sha256sum'",
+            "        // sh 'echo $X | base64 -d | bash'",
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "Encoded payloads are the canonical fingerprint of supply-"
+            "chain attack code: documented incidents in GitHub Actions "
+            "used base64-encoded shells to evade diff reviewers and "
+            "static scanners.  Jenkins ``sh`` calls offer the same "
+            "evasion surface — executing any decoded payload gives an "
+            "attacker arbitrary code execution on the runner with "
+            "access to bound credentials and shared-library state."
+        ),
+        incidents=["Ultralytics (Dec 2024, GH analog)", "Trivy supply chain (Mar 2026, GH analog)"],
+    ),
 ]
