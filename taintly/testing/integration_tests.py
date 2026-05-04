@@ -580,7 +580,7 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
-            - uses: actions/setup-node@v3
+            - uses: tj-actions/changed-files@v44
             - run: npm test
 """,
         )
@@ -674,7 +674,7 @@ jobs:
     env:
       <<: *common_env
     steps:
-      - uses: actions/checkout@v4
+      - uses: tj-actions/changed-files@v44
       - run: npm ci
 """,
         )

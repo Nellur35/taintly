@@ -33,7 +33,7 @@ def test_generic_zizmor_ignore_suppresses_any_taintly_rule():
 
 def test_specific_zizmor_id_with_known_mapping_suppresses_only_mapped_taintly_rules():
     # ``unpinned-uses`` maps to SEC3-GH-001 / SEC3-GH-002.
-    line = "      - uses: actions/checkout@v4 # zizmor: ignore[unpinned-uses]"
+    line = "      - uses: tj-actions/changed-files@v44 # zizmor: ignore[unpinned-uses]"
     assert zizmor_compat.is_zizmor_suppressed(line, "SEC3-GH-001")
     assert zizmor_compat.is_zizmor_suppressed(line, "SEC3-GH-002")
     # Unrelated rule must NOT be suppressed by an unpinned-uses ignore.
@@ -59,10 +59,7 @@ def test_mixed_known_and_unknown_ids_suppress_only_mapped():
     """Multi-id markers with one known and one unknown id suppress
     only the rules mapped by the known id.  Unknown ids do not
     broaden the scope."""
-    line = (
-        "      - uses: actions/checkout@v4 "
-        "# zizmor: ignore[unpinned-uses,future-rule-id]"
-    )
+    line = "      - uses: actions/checkout@v4 # zizmor: ignore[unpinned-uses,future-rule-id]"
     # unpinned-uses maps to SEC3-GH-001 / SEC3-GH-002 → suppressed.
     assert zizmor_compat.is_zizmor_suppressed(line, "SEC3-GH-001")
     assert zizmor_compat.is_zizmor_suppressed(line, "SEC3-GH-002")
@@ -108,20 +105,18 @@ def test_zizmor_ignore_has_no_effect_when_flag_disabled(tmp_path: Path, gh_rules
     fixture = _write(
         tmp_path,
         "jobs:\n  build:\n    steps:\n"
-        "      - uses: actions/checkout@v4 # zizmor: ignore[unpinned-uses]\n",
+        "      - uses: tj-actions/changed-files@v44 # zizmor: ignore[unpinned-uses]\n",
     )
     findings = scan_file(str(fixture), gh_rules)
     assert any(f.rule_id == "SEC3-GH-001" for f in findings)
 
 
-def test_zizmor_ignore_suppresses_taintly_finding_when_flag_enabled(
-    tmp_path: Path, gh_rules
-):
+def test_zizmor_ignore_suppresses_taintly_finding_when_flag_enabled(tmp_path: Path, gh_rules):
     zizmor_compat.set_respect_zizmor_ignores(True)
     fixture = _write(
         tmp_path,
         "jobs:\n  build:\n    steps:\n"
-        "      - uses: actions/checkout@v4 # zizmor: ignore[unpinned-uses]\n",
+        "      - uses: tj-actions/changed-files@v44 # zizmor: ignore[unpinned-uses]\n",
     )
     findings = scan_file(str(fixture), gh_rules)
     assert not any(f.rule_id == "SEC3-GH-001" for f in findings), (
@@ -151,7 +146,7 @@ def test_unrelated_taintly_rule_not_suppressed_under_specific_zizmor_ignore(
         "  build:\n"
         "    permissions:\n      contents: read\n"
         "    steps:\n"
-        "      - uses: actions/checkout@v4 # zizmor: ignore[unpinned-uses]\n",
+        "      - uses: tj-actions/changed-files@v44 # zizmor: ignore[unpinned-uses]\n",
     )
     findings = scan_file(str(fixture), gh_rules)
     # SEC3-GH-001 suppressed.

@@ -18,6 +18,7 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
 
 # ---------------------------------------------------------------------------
 # SEC1-GH-001 — job-scoped variant of SequencePattern
@@ -135,6 +136,183 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
 )
 
 _OIDC_CONSUMER_REGEX: str = "|".join(_OIDC_CONSUMER_ALTERNATES)
+
+
+# ---------------------------------------------------------------------------
+# SEC6-GH-010 helpers — see the rule's docstring for the threat model.
+# ---------------------------------------------------------------------------
+
+# Action input slot names whose shape implies a credential.  Matched
+# case-insensitively, anchored start-and-end so ``api-key`` matches
+# but ``api-key-name`` does not (the latter is a label, not the
+# secret itself).
+_CREDENTIAL_INPUT_RE = re.compile(
+    r"^[\w-]*(?:token|key|secret|password|pass)$",
+    re.IGNORECASE,
+)
+
+# A scalar value that is exactly a single ``${{ secrets.X }}``
+# reference, possibly with surrounding whitespace.  We deliberately
+# do not match values that interpolate the secret into a larger
+# string — those are covered by SEC4-GH-004's script-injection rule
+# when the destination is a shell sink.
+_SECRETS_REF_VALUE_RE = re.compile(r"^\s*\$\{\{\s*secrets\.[A-Za-z_][\w-]*\s*\}\}\s*$")
+
+# Known-safe (action_name, input_slot) pairs.  An action listed here
+# documents the slot as its primary credential surface — passing the
+# secret directly as ``with: <slot>: ${{ secrets.X }}`` matches the
+# action's intended interface, and routing through ``env:`` first
+# offers no additional masking benefit (the action either logs its
+# inputs or it doesn't, regardless of how the value got into the
+# slot).
+#
+# Curated from the corpus baseline 2026-05-04 (35 repos, top SEC6-
+# GH-010 fires).  Each entry is the ``owner/repo`` form of the
+# action — sub-action paths (e.g. ``github/codeql-action/init``)
+# match by the leading two segments only; see
+# ``_action_name_from_uses``.
+_SAFE_ACTION_INPUT_PAIRS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # ---- Iteration 2 baseline (10 pairs) -----------------------
+        # GitHub-published stale-issue bot — repo-token IS its auth.
+        ("actions/stale", "repo-token"),
+        # PyPI publish action — password is the API token.
+        ("pypa/gh-action-pypi-publish", "password"),
+        # Container registry login — these slots ARE the credentials.
+        ("docker/login-action", "password"),
+        ("docker/login-action", "username"),
+        # AWS credentials login — keypair IS its auth.
+        ("aws-actions/configure-aws-credentials", "aws-secret-access-key"),
+        ("aws-actions/configure-aws-credentials", "aws-access-key-id"),
+        # Azure Active Directory login — client-secret IS its auth.
+        ("azure/login", "client-secret"),
+        # Google Cloud auth — credentials_json IS its auth.
+        ("google-github-actions/auth", "credentials_json"),
+        # GitHub-published CodeQL — token is the GITHUB_TOKEN passthrough.
+        ("github/codeql-action", "token"),
+        # Peter Evans — popular actions whose token slot is the
+        # action's documented auth.
+        ("peter-evans/create-pull-request", "token"),
+        ("peter-evans/create-or-update-comment", "token"),
+        # Snyk action — github-token is its auth.
+        ("snyk/actions", "github-token"),
+        # ---- Iteration 3 additions (12 pairs) ----------------------
+        # Identified via corpus sample-and-label of 26 SEC6-GH-010
+        # post-iteration-2 fires (2026-05-04, 17/26 = 65% FP rate).
+        # Each pair: action's documented single-purpose auth surface.
+        # First-party — actions/checkout's token slot IS the GitHub
+        # auth surface for git fetch/clone (GITHUB_TOKEN or PAT).
+        ("actions/checkout", "token"),
+        # First-party — actions/github-script's github-token is the
+        # only auth path; the script itself is the consumer (Octokit
+        # client), so env-routing offers no masking benefit.
+        ("actions/github-script", "github-token"),
+        # First-party — converts (app-id, private-key) to an
+        # installation token; private-key IS the credential.
+        ("actions/create-github-app-token", "private-key"),
+        # peaceiris/actions-gh-pages — single-purpose: push to
+        # gh-pages branch using the supplied token.
+        ("peaceiris/actions-gh-pages", "github_token"),
+        # ad-m/github-push-action — single-purpose: git push using
+        # the supplied token.
+        ("ad-m/github-push-action", "github_token"),
+        # codecov/codecov-action — token IS the Codecov upload
+        # credential; upstream zizmor's `secrets-outside-env` ignore
+        # confirms this is canonically expected.
+        ("codecov/codecov-action", "token"),
+        # ossf/scorecard-action — repo_token is the documented PAT
+        # slot for branch-protection / settings reads.
+        ("ossf/scorecard-action", "repo_token"),
+        # googleapis/release-please-action — release-please's
+        # documented auth surface.
+        ("googleapis/release-please-action", "token"),
+        # peter-evans/slash-command-dispatch — same trust tier as
+        # the existing peter-evans/* allowlist entries.
+        ("peter-evans/slash-command-dispatch", "token"),
+        # rustsec/audit-check — GITHUB_TOKEN passthrough for filing
+        # vulnerability issues; documented auth surface.
+        ("rustsec/audit-check", "token"),
+        # crazy-max/ghaction-import-gpg + crowdstrike's fork —
+        # single-purpose: import a GPG private key. The slot IS the
+        # input the action exists to consume.
+        ("crazy-max/ghaction-import-gpg", "gpg_private_key"),
+        ("crowdstrike/ghaction-import-gpg", "gpg_private_key"),
+        # github/issue-labeler — same trust tier as the existing
+        # github/codeql-action entry (both GitHub-published).
+        ("github/issue-labeler", "repo-token"),
+    }
+)
+
+
+def _action_name_from_uses(uses_value: str) -> str:
+    """Extract the canonical ``owner/repo`` action name from a
+    ``uses:`` value.
+
+    Drops the ``@<ref>`` suffix and any sub-action path segments
+    beyond the second ``/``.  Used to normalise the lookup key for
+    ``_SAFE_ACTION_INPUT_PAIRS`` so ``github/codeql-action/init@v3``
+    and ``github/codeql-action/analyze@v3`` both resolve to
+    ``github/codeql-action``.
+    """
+    if not uses_value:
+        return ""
+    head = uses_value.split("@", 1)[0].strip()
+    parts = head.split("/")
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return head
+
+
+def _is_unmasked_secret_input(
+    value: str,
+    _value_kind: str,
+    path: tuple[object, ...],
+    ctx: PredicateContext,
+) -> bool:
+    """Predicate for SEC6-GH-010 (Phase 8 iteration 2 form).
+
+    Fires when:
+
+    * the leaf is at ``jobs.<j>.steps[<i>].with.<input_slot>`` with
+      a credential-shape ``<input_slot>``
+    * the value is exactly ``${{ secrets.X }}``
+    * AND the step has no ``env:`` block routing any secret (the
+      runner registers env-block secret values with the log
+      redactor on process start; without an env entry, the with-
+      input value is unredacted in the action's stdout)
+    * AND the ``(action, input_slot)`` pair is not in the safe-
+      consumer allowlist
+    """
+    # Path shape: jobs.<job>.steps[<i>].with.<input_slot>
+    if (
+        len(path) != 6
+        or path[0] != "jobs"
+        or path[2] != "steps"
+        or not isinstance(path[3], int)
+        or path[4] != "with"
+        or not isinstance(path[5], str)
+    ):
+        return False
+    input_slot = path[5]
+    if not _CREDENTIAL_INPUT_RE.match(input_slot):
+        return False
+    if not _SECRETS_REF_VALUE_RE.match(value or ""):
+        return False
+    job_id = path[1]
+    step_i = path[3]
+    step_prefix: tuple[object, ...] = ("jobs", job_id, "steps", step_i)
+    # Step-scope env-block exception.  Any leaf under this step's
+    # ``env:`` block whose value is a secret reference indicates the
+    # safe pattern is in use at this step — the runner has
+    # registered at least one secret with the redactor on the
+    # step's process start.
+    for env_leaf in ctx.descendants(step_prefix + ("env",)):
+        if env_leaf.value and _SECRETS_REF_VALUE_RE.match(env_leaf.value):
+            return False
+    # Safe-consumer allowlist.
+    uses_value = ctx.get_value(step_prefix + ("uses",)) or ""
+    action_name = _action_name_from_uses(uses_value)
+    return (action_name, input_slot) not in _SAFE_ACTION_INPUT_PAIRS
 
 
 RULES: list[Rule] = [
@@ -1654,6 +1832,18 @@ RULES: list[Rule] = [
         confidence="medium",
     ),
     # =========================================================================
+    # SEC6-GH-010 helpers (defined module-local so the rule's pattern
+    # block reads as ``predicate=_is_unmasked_secret_input`` rather
+    # than carrying the allowlist lookup inline).
+    #
+    # Phase 8 iteration 2 (2026-05-04): converted from ContextPattern
+    # regex to WorkflowAwarePattern.  Adds a safe-consumer allowlist:
+    # action+input pairs whose documented purpose IS to consume the
+    # secret (the action's primary auth surface).  Routing those
+    # specific pairs through env: is over-defensive — the secret is
+    # already at its destination — and produces noise without
+    # precision gain.
+    # =========================================================================
     # SEC6-GH-010: Secret passed as action input without env-block masking
     # =========================================================================
     # GitHub auto-masks secrets that flow through a step's ``env:`` block:
@@ -1689,36 +1879,22 @@ RULES: list[Rule] = [
             "``${{ env.NAME }}`` — the env-block path is masked, the "
             "with-input is then a non-secret reference."
         ),
-        pattern=ContextPattern(
-            # Per-line anchor: a YAML key ending in a credential-shape
-            # token, mapped to a ``${{ secrets.X }}`` value.  The
-            # ``(?i)`` flag accepts both ``token:`` and ``Token:``
-            # spellings; the leading whitespace requirement excludes
-            # workflow-level keys.  The prefix portion is zero-or-more
-            # word/hyphen characters so bare ``token:`` / ``password:``
-            # match alongside hyphenated forms like ``api-key:``.
-            anchor=(
-                r"(?i)^\s+[\w-]*"
-                r"(?:token|key|secret|password|pass)"
-                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
-            ),
-            # The full file must contain at least one such pattern for
-            # the rule to fire — the anchor regex itself is the
-            # presence check.
-            requires=(
-                r"(?i)\s+[\w-]*"
-                r"(?:token|key|secret|password|pass)"
-                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
-            ),
-            # Step-scope suppression: when this step's ``env:`` block
-            # routes a secret, the safe pattern is in use at the
-            # step level — suppress.  The redactor registration is
-            # per-step, so co-locating the safe-pattern signal at
-            # step granularity matches the runner's actual masking
-            # semantics: a secret declared in step A's env block is
-            # masked for step A's logs only.
-            anchor_step_exclude=(r"env:\s*\n[\s\S]*?\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"),
-            exclude=[r"^\s*#"],
+        # Phase 8 iteration 2 (2026-05-04): converted from
+        # ContextPattern regex to WorkflowAwarePattern.  The
+        # workflow-aware predicate gives us:
+        #   1. exact path-shape filtering (only with: keys under a
+        #      step's ``with`` map) — the regex anchor was line-shape-
+        #      only and could match nested non-step contexts.
+        #   2. step-scope env-block detection via descendant lookup
+        #      — replaces a multi-line regex with deterministic
+        #      structural traversal.
+        #   3. safe-consumer allowlist keyed on ``(action, slot)`` —
+        #      drops noise on actions whose documented auth surface
+        #      IS the credential slot (docker/login-action.password,
+        #      pypa/gh-action-pypi-publish.password, etc.).
+        pattern=WorkflowAwarePattern(
+            path="jobs.*.steps[*].with.*",
+            predicate=_is_unmasked_secret_input,
         ),
         remediation=(
             "Route the secret through the step's ``env:`` block and\n"
@@ -1740,8 +1916,9 @@ RULES: list[Rule] = [
             "security-guides/using-secrets-in-github-actions#accessing-your-secrets"
         ),
         test_positive=[
-            # Bare with: token: ${{ secrets.X }} with no env: anywhere
-            # in the job — the dominant unsafe shape.
+            # Bare with: token: ${{ secrets.X }} on a non-allowlisted
+            # action with no env: in the step — the dominant unsafe
+            # shape.
             (
                 "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: some-org/some-action@v1\n"
@@ -1754,13 +1931,6 @@ RULES: list[Rule] = [
                 "    steps:\n      - uses: some-org/upload@v1\n"
                 "        with:\n"
                 "          api-key: ${{ secrets.API_KEY }}"
-            ),
-            # password input.
-            (
-                "jobs:\n  push:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n      - uses: docker/login-action@v3\n"
-                "        with:\n"
-                "          password: ${{ secrets.REGISTRY_PASSWORD }}"
             ),
             # Step-scope sample: the matched step has no env: block
             # of its own; an unrelated sibling step's env: routing
@@ -1776,7 +1946,8 @@ RULES: list[Rule] = [
             ),
         ],
         test_negative=[
-            # Same secret routed via env: — env-block exception fires.
+            # Same secret routed via env: — step-scope env-block
+            # exception fires.
             (
                 "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: some-org/some-action@v1\n"
@@ -1785,23 +1956,36 @@ RULES: list[Rule] = [
                 "        env:\n"
                 "          GH_TOKEN: ${{ secrets.GH_TOKEN }}"
             ),
-            # with: input value is a hardcoded string, not a secret —
-            # anchor regex doesn't match.
+            # with: input value is a hardcoded string, not a secret.
             (
                 "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: some-org/some-action@v1\n"
                 "        with:\n"
                 "          registry-url: https://registry.npmjs.org"
             ),
-            # with: input name is not credential-shape — anchor doesn't
-            # match.
+            # with: input name is not credential-shape.
             (
                 "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: some-org/some-action@v1\n"
                 "        with:\n"
                 "          repository: ${{ secrets.PRIVATE_REPO }}"
             ),
-            # Comment.
+            # Safe-consumer allowlist — docker/login-action's
+            # ``password`` slot IS its documented auth surface.
+            (
+                "jobs:\n  push:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: docker/login-action@v3\n"
+                "        with:\n"
+                "          password: ${{ secrets.REGISTRY_PASSWORD }}"
+            ),
+            # Safe-consumer allowlist — pypa/gh-action-pypi-publish.
+            (
+                "jobs:\n  release:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: pypa/gh-action-pypi-publish@v1\n"
+                "        with:\n"
+                "          password: ${{ secrets.PYPI_API_TOKEN }}"
+            ),
+            # Comment-only (path matching never reaches this leaf).
             "          # token: ${{ secrets.GH_TOKEN }}",
         ],
         stride=["I"],

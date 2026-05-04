@@ -5,6 +5,8 @@ These rules cover attack vectors beyond the basic pull_request_target PPE detect
 Most are directly traceable to documented CVEs and real exploitation campaigns.
 """
 
+import re
+
 from taintly.models import (
     _YAML_BOOL_TRUE,
     ContextPattern,
@@ -15,8 +17,126 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
+
+# ---------------------------------------------------------------------------
+# SEC4-GH-008 helpers — Phase 8 iteration 3 (2026-05-04).
+#
+# Sample-and-label of 30 corpus fires found 17/30 (57%) FP, all
+# concentrated in path-shape false positives the previous regex form
+# could not see: ``env:`` multi-expression concatenations,
+# job/step ``name:`` strings, ``concurrency.group:``, and ``with:``
+# slots whose action consumes them as plain strings (artifact name,
+# PR title, branch name, etc.).
+#
+# The threat shape is shell-source splicing — a value spliced into
+# bash / PowerShell / JS / inline-shell input where the runtime
+# parses metacharacters before quoting protects the value.  Path-
+# aware detection keeps every TP shape and drops every FP shape.
+# ---------------------------------------------------------------------------
+
+# Shell-form ``${{ inputs.X }}`` / ``${{ github.event.inputs.X }}``
+# reference inside a scalar value.
+_INPUTS_REF_RE_PRED = re.compile(
+    r"\$\{\{\s*(?:github\.event\.inputs|inputs)\.[a-zA-Z0-9_]+\s*\}\}",
+    re.IGNORECASE,
+)
+
+# (action, with-slot) pairs whose value the action passes to a shell /
+# script / interpreter at runtime.  Splicing ``${{ inputs.X }}`` into
+# these slots is shell-source splicing of attacker-controlled bytes,
+# same threat shape as ``run: echo ${{ inputs.X }}``.
+#
+# All other ``with:`` slots accept plain strings (artifact name, PR
+# title, branch ref, etc.) and are NOT shell sinks for this rule's
+# threat model.  Keep this list small and explicit; broadening
+# changes the rule's false-positive boundary.
+_SHELL_EXECUTING_ACTION_SLOTS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # GitHub-published — the Octokit script runs the value as JS.
+        ("actions/github-script", "script"),
+        # nick-fields/retry — three slots all eval a shell command.
+        ("nick-fields/retry", "command"),
+        ("nick-fields/retry", "new_command"),
+        ("nick-fields/retry", "on_retry_command"),
+        # Azure inline-script slots (case variants seen in the wild).
+        ("azure/CLI", "inlineScript"),
+        ("azure/cli", "inlineScript"),
+        ("azure/powershell", "inlineScript"),
+        # SSH / remote-shell action families.
+        ("appleboy/ssh-action", "script"),
+        ("garygrossgarten/github-action-ssh", "command"),
+    }
+)
+
+
+def _action_name_for_slot(uses_value: str) -> str:
+    """Drop the ``@<ref>`` suffix and any sub-action path beyond the
+    second ``/`` so ``github/codeql-action/init@v3`` resolves to
+    ``github/codeql-action`` (matches the lookup key in
+    ``_SHELL_EXECUTING_ACTION_SLOTS``)."""
+    if not uses_value:
+        return ""
+    head = uses_value.split("@", 1)[0].strip()
+    parts = head.split("/")
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return head
+
+
+def _is_dispatch_input_in_shell_sink(
+    value: str,
+    _value_kind: str,
+    path: tuple[object, ...],
+    ctx: PredicateContext,
+) -> bool:
+    """Predicate for SEC4-GH-008 (Phase 8 iteration 3 form).
+
+    Fires when an ``${{ inputs.X }}`` / ``${{ github.event.inputs.X }}``
+    reference reaches a shell sink:
+
+    * ``jobs.<job>.steps[<i>].run`` — direct shell body.
+    * ``jobs.<job>.steps[<i>].with.<slot>`` where the step's
+      ``uses:`` action is in ``_SHELL_EXECUTING_ACTION_SLOTS`` for
+      that slot (shell-executing action input).
+
+    Everything else (env-block, name, concurrency.group,
+    string-only ``with:`` slots) is path-shape FP — those values
+    never reach a shell parser, so the threat model doesn't apply.
+    """
+    if not _INPUTS_REF_RE_PRED.search(value or ""):
+        return False
+    # Comment-prefixed shell lines (inside ``run: |`` block scalars,
+    # the predicate is invoked per body line; a leading ``#`` is a
+    # shell comment — value won't execute).  Mirrors the original
+    # RegexPattern's ``^\s*#`` exclude.
+    if value.lstrip().startswith("#"):
+        return False
+    if (
+        len(path) >= 5
+        and path[0] == "jobs"
+        and path[2] == "steps"
+        and isinstance(path[3], int)
+        and path[-1] == "run"
+    ):
+        return True
+    if (
+        len(path) == 6
+        and path[0] == "jobs"
+        and path[2] == "steps"
+        and isinstance(path[3], int)
+        and path[4] == "with"
+        and isinstance(path[5], str)
+    ):
+        slot = path[5]
+        uses = ctx.step_uses(path) or ""
+        action_name = _action_name_for_slot(uses)
+        if (action_name, slot) in _SHELL_EXECUTING_ACTION_SLOTS:
+            return True
+    return False
+
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -136,16 +256,23 @@ RULES: list[Rule] = [
             "Manually triggered inputs are user-controlled and may contain shell metacharacters. "
             "Exploited in the Langflow and Ultralytics supply chain incidents (2024-2025)."
         ),
-        pattern=RegexPattern(
-            match=r"\$\{\{\s*(github\.event\.inputs|inputs)\.[a-zA-Z0-9_]+\s*\}\}",
-            exclude=[
-                r"^\s*#",
-                r"^\s*if:",
-                # Exclude lines where ${{ inputs.* }} is the entire value of a YAML key.
-                # env: MY_VAR: ${{ inputs.x }} is the RECOMMENDED safe pattern — don't flag it.
-                # with: param: ${{ inputs.x }} passes a string to an action, not a shell command.
-                r"""^\s*[\w.-]+:\s*["']?\$\{\{[^}]*\}\}["']?\s*(#.*)?$""",
+        # Phase 8 iteration 3 (2026-05-04): converted from
+        # RegexPattern to WorkflowAwarePattern with a path-aware
+        # predicate.  Sample-and-label of 30 corpus fires found
+        # 17/30 (57%) FP concentrated in path-shape false positives
+        # (env-block multi-expression concats, job/step ``name:``
+        # strings, ``concurrency.group:``, ``with:`` slots whose
+        # action consumes them as plain strings).  The threat shape
+        # is shell-source splicing — covered by ``run:`` and a
+        # narrow allowlist of shell-executing ``with:`` slots
+        # (actions/github-script.script, nick-fields/retry.command,
+        # azure/CLI.inlineScript, …).
+        pattern=WorkflowAwarePattern(
+            path=[
+                "jobs.*.steps[*].run",
+                "jobs.*.steps[*].with.*",
             ],
+            predicate=_is_dispatch_input_in_shell_sink,
         ),
         remediation=(
             "Never interpolate ${{ inputs.* }} directly into a run: body\n"
@@ -159,13 +286,114 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-scripts-to-handle-untrusted-input",
         test_positive=[
-            '        run: echo "${{ inputs.user_input }}"',
-            "        run: deploy.sh ${{ github.event.inputs.environment }}",
+            # Direct shell-source splicing into run: body.
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                '      - run: echo "${{ inputs.user_input }}"\n'
+            ),
+            # github.event.inputs alias — same threat shape.
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: deploy.sh ${{ github.event.inputs.environment }}\n"
+            ),
+            # Shell-executing with: slot — actions/github-script
+            # evaluates `script:` as JS source.
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/github-script@v7\n"
+                "        with:\n"
+                "          script: |\n"
+                "            console.log('${{ inputs.title }}')\n"
+            ),
+            # Shell-executing with: slot — nick-fields/retry runs
+            # `command:` as a shell.
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: nick-fields/retry@v3\n"
+                "        with:\n"
+                "          command: deploy.sh ${{ inputs.environment }}\n"
+            ),
         ],
         test_negative=[
-            "        if: inputs.deploy == true",
-            '        # run: echo "${{ inputs.user_input }}"',
-            '        run: echo "$MY_INPUT"',
+            # if: condition — engine-evaluated, not bash-evaluated.
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - if: inputs.deploy == 'true'\n"
+                "        run: echo go\n"
+            ),
+            # Comment-only line.
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: |\n"
+                '          # echo "${{ inputs.user_input }}"\n'
+                "          echo no-op\n"
+            ),
+            # env-routed — the recommended safe channel.
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
+                "    env:\n"
+                "      MY_INPUT: ${{ inputs.user_input }}\n"
+                "    steps:\n"
+                '      - run: echo "$MY_INPUT"\n'
+            ),
+            # env-routed inside a step.
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - env:\n"
+                "          MY_INPUT: ${{ inputs.user_input }}\n"
+                '        run: echo "$MY_INPUT"\n'
+            ),
+            # with: slot for a string-consuming action — artifact
+            # name is a string param, not a shell command.
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/upload-artifact@v4\n"
+                "        with:\n"
+                "          name: artifact-${{ inputs.repo }}\n"
+                "          path: ./out\n"
+            ),
+            # with: slot for create-pull-request — title is a
+            # display string, not shell.
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  pr:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: peter-evans/create-pull-request@v6\n"
+                "        with:\n"
+                "          title: Release ${{ inputs.version }}\n"
+            ),
+            # Job-level name: — UI display string.
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  deploy:\n    name: deploy-${{ inputs.suite }}\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: echo go\n"
+            ),
+            # concurrency.group — run-coalescing key, not shell.
+            (
+                "on: workflow_dispatch\n"
+                "concurrency:\n"
+                "  group: tgc-${{ inputs.repo }}-${{ inputs.pr }}\n"
+                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: echo go\n"
+            ),
         ],
         stride=["T", "E"],
         threat_narrative=(
