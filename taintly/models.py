@@ -120,10 +120,28 @@ def _safe_search_chunked(compiled_pattern, content: str):
         return _safe_search(compiled_pattern, content)
     # Line-windowed chunking.  splitlines(keepends=True) preserves
     # newline boundaries so reassembly produces the original text.
+    import time as _time
+
     lines = content.splitlines(keepends=True)
     pos = 0
     n = len(lines)
+    chunks_scanned = 0
+    deadline = _time.monotonic() + _CHUNKED_WALLCLOCK_BUDGET_S
     while pos < n:
+        # Adversarial-input safety: two bounds, either of which
+        # short-circuits the scan.
+        # (a) Chunk-count cap: real workflows fit in single-digit
+        #     chunks; ~_MAX_CHUNKS × cap bytes is far above any
+        #     realistic CI config.
+        # (b) Wallclock budget: pathological inputs (deeply-indented
+        #     fuzz fixtures, regex shapes that backtrack hard on
+        #     each 50KB chunk of nested whitespace) can multiply
+        #     per-chunk SIGALRM ceilings.  An overall wall-clock
+        #     budget contains the worst case end-to-end.
+        if chunks_scanned >= _MAX_CHUNKS:
+            return None
+        if _time.monotonic() >= deadline:
+            return None
         # Grow the window until either we hit the line budget or
         # adding the next line would exceed the byte cap.
         end = pos
@@ -141,6 +159,7 @@ def _safe_search_chunked(compiled_pattern, content: str):
             continue
         chunk = "".join(lines[pos:end])
         m = _safe_search(compiled_pattern, chunk)
+        chunks_scanned += 1
         if m:
             return m
         if end == n:
@@ -154,9 +173,16 @@ def _safe_search_chunked(compiled_pattern, content: str):
 # cap would allow more — protects against pathological files made
 # of trivially-short lines.  _CHUNK_OVERLAP_LINES is the trailing
 # context carried into the next chunk so multi-line requires
-# patterns straddling a boundary still resolve.
+# patterns straddling a boundary still resolve.  _MAX_CHUNKS bounds
+# the total number of chunks scanned per call so adversarial inputs
+# (e.g. deeply-indented YAML that produces ~250KB / 500 lines of
+# nested keys) don't multiply per-chunk regex cost without bound.
+# At default tuning, _MAX_CHUNKS × _MAX_SAFE_TEXT_LEN = ~1 MB —
+# every realistic CI config fits.
 _CHUNK_LINES = 2000
 _CHUNK_OVERLAP_LINES = 50
+_MAX_CHUNKS = 20
+_CHUNKED_WALLCLOCK_BUDGET_S = 3.0
 
 
 def _safe_search(compiled_pattern, text: str):
