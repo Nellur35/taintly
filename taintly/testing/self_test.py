@@ -182,6 +182,22 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "Same family as SEC8-GH-001; image-pin regex fragile to whitespace."
     ),
     ("SEC8-GH-003", "whitespace_pad"): ("Same family; fragile to whitespace around `:` separator."),
+    ("SEC6-GH-010", "whitespace_pad"): (
+        "Different family from the regex-fragility class above. The "
+        "regex itself handles the whitespace_pad mutation correctly: "
+        "anchor still matches the credential-shape line and exclude "
+        "still matches the env: block. The fragility is in the "
+        "structural reader's step-segmentation: it requires whitespace "
+        "around colons to recognise YAML mappings. The zero-space "
+        "mutant produces zero step segments, so anchor_step_exclude's "
+        "lookup returns empty content and the env-block exception "
+        "doesn't suppress. Real workflows always have a space after "
+        "`:`; broadening the structural reader to accept `key:value` "
+        "would change parsing semantics across every rule that uses "
+        "step-scope or job-scope segmentation, which is not worth the "
+        "fragility-trade. Documented as a known gap in the same "
+        "spirit as SEC10-GH-004 / AI-GH-019 / TAINT-GH-010."
+    ),
     ("SEC8-GH-004", "comment_inject"): (
         "Inline `# comment` trailing a `services:` line prevents match; "
         "rule doesn't strip trailing comments before anchoring."

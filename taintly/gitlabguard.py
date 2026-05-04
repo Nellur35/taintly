@@ -132,9 +132,7 @@ def find_dead_gitlab_job_ranges(
     return ranges
 
 
-def is_pipeline_whole_dead(
-    content: str, ctx: GitLabContext | None = None
-) -> bool:
+def is_pipeline_whole_dead(content: str, ctx: GitLabContext | None = None) -> bool:
     """Return ``True`` if every job in the pipeline is statically dead.
 
     Walks the pipeline, evaluates each job's ``rules`` chain with
