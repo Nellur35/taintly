@@ -80,6 +80,13 @@ def set_pattern_filepath_context(filepath: Optional[str]):
         _current_filepath.reset(token)
 
 
+# Sentinel for "cache miss" vs "cached None" on lazy fields where
+# ``None`` is itself a valid result.  Used by ``PredicateContext.
+# repo_root`` so a no-repo-found result is cached and the walk
+# isn't repeated on every predicate invocation in a non-repo file.
+_UNSET: object = object()
+
+
 @dataclass
 class PredicateContext:
     """Read-only workflow structural state, lazily indexed.
@@ -105,6 +112,12 @@ class PredicateContext:
     _caller_graph_cache: Optional[tuple[CallerInfo, ...]] = field(
         default=None, init=False, repr=False
     )
+    # Sentinel object used to distinguish "cache miss" from "cached
+    # None result" for ``repo_root``.  ``None`` is a valid cached
+    # return (no repo found / no filepath); without the sentinel a
+    # second call would re-walk the filesystem on every predicate
+    # invocation in a non-repo file.
+    _repo_root_cache: object = field(default=_UNSET, init=False, repr=False)
 
     # ------------------------------------------------------------------
     # Direct lookups
@@ -204,6 +217,54 @@ class PredicateContext:
     # ------------------------------------------------------------------
     # File-shape helpers
     # ------------------------------------------------------------------
+
+    def repo_root(self) -> Optional[Path]:
+        """Walk up from ``self.filepath`` looking for a directory that
+        contains ``.git/`` or ``.github/``.  Returns the first match or
+        ``None`` if not found within 10 levels (defensive cap).
+
+        Used by rules that need to inspect repo-root state rather than
+        workflow-internal state — e.g. the agent-instruction-file
+        presence check in AI-GH-036.
+
+        The 10-level cap prevents a runaway walk on a non-repo path
+        (a malformed absolute path, a sandbox tmpdir, a UNC root)
+        from looping forever.  The result is cached on the context
+        for the lifetime of one ``check()`` call so a per-leaf
+        predicate that calls this in a hot loop only walks the
+        filesystem once.
+        """
+        if self._repo_root_cache is not _UNSET:
+            return self._repo_root_cache  # type: ignore[return-value]
+        if not self.filepath:
+            self._repo_root_cache = None
+            return None
+        try:
+            current = Path(self.filepath).resolve()
+        except (OSError, ValueError):
+            self._repo_root_cache = None
+            return None
+        # If filepath resolves to a file, start the walk from its
+        # parent; if it's already a directory (defensive — engine
+        # always passes file paths), start from itself.
+        if current.is_file():
+            current = current.parent
+        for _ in range(10):
+            try:
+                if (current / ".git").exists() or (current / ".github").exists():
+                    self._repo_root_cache = current
+                    return current
+            except OSError:
+                # Permission denied, network share off, etc — give up.
+                self._repo_root_cache = None
+                return None
+            parent = current.parent
+            if parent == current:
+                # Reached filesystem root without a hit.
+                break
+            current = parent
+        self._repo_root_cache = None
+        return None
 
     # ------------------------------------------------------------------
     # Caller-graph helpers — Phase 8 iter-4 (2026-05-04).
