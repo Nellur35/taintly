@@ -124,6 +124,14 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
     r"pypa/gh-action-pypi-publish",
     r"sigstore/gh-action-sigstore",
     r"actions/attest-build-provenance",
+    # iter-5 (2026-05-04): three OIDC-consuming actions found
+    # legitimately requesting ``id-token: write`` in the corpus
+    # baseline that the previous list missed.  All three are
+    # documented OIDC-only flows where the token is the actual
+    # auth surface, not a misconfigured permission.
+    r"ossf/scorecard-action",
+    r"actions/deploy-pages",
+    r"slsa-framework/slsa-github-generator",
     # Shell-form.  ``--`` is two non-word characters, so a leading
     # ``\b`` would never match on the flag — the preceding space is
     # also non-word, so there is no word boundary between them.  The
@@ -615,6 +623,20 @@ RULES: list[Rule] = [
                 # environment variable (env:). The dangerous pattern is embedding ${{ }} inside a
                 # larger shell string (e.g. inside a `run:` command).
                 r"""^\s*[\w.-]+:\s*["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
+                # iter-5 (2026-05-04): exclude lines whose entire
+                # content is a bare ``${{ secrets.X }}`` reference
+                # (possibly quoted, possibly with a hyphen prefix
+                # for YAML list items).  This is the block-scalar
+                # action-input shape (e.g. ``secret-ids: |`` body
+                # lines in aws-actions/configure-aws-credentials):
+                # the value passes through to the action as a
+                # plain string, the same path covered by the
+                # ``key: ${{ secrets.X }}`` form above.  Sample-
+                # and-label found 4 fires of this exact shape in
+                # the corpus baseline; no neighboring TPs are at
+                # risk because real shell-injection contexts always
+                # carry other tokens on the same line.
+                r"""^\s*-?\s*["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
             ],
         ),
         remediation=(
