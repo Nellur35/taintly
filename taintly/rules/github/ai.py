@@ -67,11 +67,20 @@ _AGENT_INSTRUCTION_FILES: tuple[str, ...] = (
     "GEMINI.md",  # Gemini Code
     ".github/copilot-instructions.md",  # GitHub Copilot
     ".aider.conf.yml",  # Aider
+    # GitLab Duo — convention is evolving (Phase 8 Track C research,
+    # 2026-05-04). Probing is harmless when absent; if/when GitLab
+    # Duo formalises the path, repos that adopt it surface here
+    # without a rule change.
+    ".gitlab/duo/instructions.md",
 )
 
 _AGENT_INSTRUCTION_DIRS: tuple[str, ...] = (
     ".cursor/rules",  # Cursor (directory of rule files)
     ".windsurf",  # Windsurf
+    # gitlab-ci-local prompt-content directory (GitLab-side dev
+    # tooling that may host repo-author instructions consumed by
+    # AI agents running locally against the repo).
+    ".gitlab-ci-local",
 )
 
 # Self-test fixture marker: when no real filepath context is bound
