@@ -260,8 +260,7 @@ def _format_disclosure_block(report: AuditReport) -> list[str]:
         )
     if report.repo_identity_source == "explicit":
         out.append(
-            f"  Repository identity: explicit ({report.repo_identity_value}) "
-            "via --github-repo"
+            f"  Repository identity: explicit ({report.repo_identity_value}) via --github-repo"
         )
     elif report.repo_identity_source == "auto":
         out.append(

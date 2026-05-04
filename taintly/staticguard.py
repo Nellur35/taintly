@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import subprocess
 from enum import Enum
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 
 class Verdict(Enum):
@@ -100,7 +100,13 @@ def find_dead_line_ranges(
 
     job_key_lines = _job_key_line_map(content)
 
-    job_data: dict[str, dict] = {}
+    # Heterogeneous nested dict: top-level keys are str (job IDs);
+    # inner dicts mix str ("if"), int ("start"/"end"), and dict
+    # ("steps") values.  TypedDict would require restructuring; Any
+    # for the inner type is the minimal annotation that satisfies
+    # mypy's `Missing type parameters for generic type "dict"` check
+    # without changing runtime behaviour.
+    job_data: dict[str, dict[str, Any]] = {}
     for event in walk_workflow(filepath="anonymous.yml", content=content, recover=True):
         if event.kind is not EventKind.LEAF_SCALAR:
             continue
@@ -121,11 +127,7 @@ def find_dead_line_ranges(
         if len(path) == 3 and path[2] == "if":
             slot["if"] = event.value
 
-        if (
-            len(path) >= 5
-            and path[2] == "steps"
-            and isinstance(path[3], int)
-        ):
+        if len(path) >= 5 and path[2] == "steps" and isinstance(path[3], int):
             step_idx = path[3]
             step_slot = slot["steps"].setdefault(
                 step_idx,
@@ -149,9 +151,7 @@ def find_dead_line_ranges(
     return ranges
 
 
-def is_workflow_whole_dead(
-    content: str, ctx: WorkflowContext | None = None
-) -> bool:
+def is_workflow_whole_dead(content: str, ctx: WorkflowContext | None = None) -> bool:
     """Return ``True`` if every job in the workflow is statically dead.
 
     Walks the workflow via the structural reader, collects each job's
@@ -191,10 +191,7 @@ def is_workflow_whole_dead(
     if not job_ifs:
         return False
 
-    return all(
-        evaluate_if(if_expr, ctx) is Verdict.STATIC_FALSE
-        for if_expr in job_ifs.values()
-    )
+    return all(evaluate_if(if_expr, ctx) is Verdict.STATIC_FALSE for if_expr in job_ifs.values())
 
 
 def detect_github_workflow_context(repo_path: str) -> WorkflowContext:

@@ -75,9 +75,7 @@ def find_dead_jenkins_stage_ranges(
     return ranges
 
 
-def is_jenkinsfile_whole_dead(
-    content: str, ctx: JenkinsContext | None = None
-) -> bool:
+def is_jenkinsfile_whole_dead(content: str, ctx: JenkinsContext | None = None) -> bool:
     """Return ``True`` if every stage in the Jenkinsfile is statically dead.
 
     Walks the pipeline's stages, evaluates each stage's ``when`` block

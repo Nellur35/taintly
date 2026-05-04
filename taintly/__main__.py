@@ -962,9 +962,7 @@ def main():
         from .staticguard import WorkflowContext
 
         owner = args.github_repo.split("/", 1)[0]
-        explicit_repoctx = WorkflowContext(
-            repository=args.github_repo, repository_owner=owner
-        )
+        explicit_repoctx = WorkflowContext(repository=args.github_repo, repository_owner=owner)
 
     reports = scan_repo(
         args.path,
