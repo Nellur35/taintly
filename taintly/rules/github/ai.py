@@ -175,7 +175,7 @@ class _AgentInstructionFilePattern:
                     continue
                 if ev.path[0] == "on":
                     return ev.line
-        except Exception:
+        except Exception:  # nosec B110 - structural reader cutoff/error falls back to regex line-scan; broad catch is intentional and the fallback covers all known shapes
             pass
         # Regex fallback: top-level ``on:`` key on its own line, or
         # ``on:<value>`` with no space (the whitespace_pad mutant).
