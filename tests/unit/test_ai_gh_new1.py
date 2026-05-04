@@ -97,6 +97,40 @@ def test_fires_when_cursor_rules_dir_present(tmp_path):
     assert ".cursor/rules/" in hits[0].snippet
 
 
+def test_fires_when_gitlab_duo_instructions_present(tmp_path):
+    """``.gitlab/duo/instructions.md`` (GitLab Duo agent-instruction
+    file, added in PR #32 for Phase 8 Track C) fires via the
+    ``_AGENT_INSTRUCTION_FILES`` arm.  The probe walks up to the
+    repo root and verifies the path under it."""
+    workflow = _build_repo(
+        tmp_path,
+        {".gitlab/duo/instructions.md": "# duo instructions\n"},
+    )
+    findings = scan_file(str(workflow), [_AI_GH_036])
+    hits = _findings_for_036(findings)
+    assert len(hits) == 1
+    assert ".gitlab/duo/instructions.md" in hits[0].snippet
+
+
+def test_fires_when_gitlab_ci_local_dir_present(tmp_path):
+    """``.gitlab-ci-local/`` directory fires via the
+    ``_AGENT_INSTRUCTION_DIRS`` arm.  Directories are rendered with
+    a trailing slash in the snippet."""
+    (tmp_path / ".git").mkdir()
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    workflow = wf_dir / "ci.yml"
+    workflow.write_text("on: push\njobs: {}\n")
+    local_dir = tmp_path / ".gitlab-ci-local"
+    local_dir.mkdir()
+    (local_dir / "prompt.md").write_text("# local agent prompt\n")
+
+    findings = scan_file(str(workflow), [_AI_GH_036])
+    hits = _findings_for_036(findings)
+    assert len(hits) == 1
+    assert ".gitlab-ci-local/" in hits[0].snippet
+
+
 def test_no_fire_on_clean_repo(tmp_path):
     """A workflow file in a repo with NO agent-instruction file
     must not fire — the rule's only signal is the file's presence."""
