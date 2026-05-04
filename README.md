@@ -5,17 +5,17 @@
 
 Security scanner for CI/CD pipelines. Reads GitHub Actions, GitLab CI, and Jenkins configuration and reports misconfigurations mapped to the [OWASP CI/CD Top 10](https://owasp.org/www-project-top-10-ci-cd-security-risks/).
 
-- Multi-stage taint analysis with provenance — traces attacker-controlled values through `env`, `$GITHUB_ENV`, `$GITHUB_OUTPUT`, and AI-agent step outputs across steps, with full source-to-sink chains.
-- Contextual exploitability — same rule, different verdict depending on whether the job has secrets, write permissions, or a fork-reachable trigger.
-- AI / ML category — pickle deserialization, `trust_remote_code=True`, agent-output taint, MCP server hygiene.
+- Multi-stage taint analysis with provenance â€” traces attacker-controlled values through `env`, `$GITHUB_ENV`, `$GITHUB_OUTPUT`, and AI-agent step outputs across steps, with full source-to-sink chains.
+- Contextual exploitability â€” same rule, different verdict depending on whether the job has secrets, write permissions, or a fork-reachable trigger.
+- AI / ML category â€” pickle deserialization, `trust_remote_code=True`, agent-output taint, MCP server hygiene.
 
 Pure Python 3.10+. Zero runtime dependencies. No telemetry.
 
-**The score is computed against a fixed threat model:** public-OSS deployment, fork PRs reachable, runners shared, secrets repo-scoped, no OIDC-only posture. Whether a flagged pattern is actually exploitable in your deployment depends on context taintly cannot see — your network topology, your contributor policy, your runner posture. The score is a starting point for assessment, not a verdict. For details, see [docs/SCORING.md](docs/SCORING.md).
+**The score is computed against a fixed threat model:** public-OSS deployment, fork PRs reachable, runners shared, secrets repo-scoped, no OIDC-only posture. Whether a flagged pattern is actually exploitable in your deployment depends on context taintly cannot see â€” your network topology, your contributor policy, your runner posture. The score is a starting point for assessment, not a verdict. For details, see [docs/SCORING.md](docs/SCORING.md).
 
 ## Install
 
-Pure stdlib, zero deps — clone and run:
+Pure stdlib, zero deps â€” clone and run:
 
 ```bash
 git clone https://github.com/Nellur35/taintly.git
@@ -35,7 +35,7 @@ Common flags:
 
 | Flag | What it does |
 |---|---|
-| `--score` | Print a 0–100 grade and a debt profile |
+| `--score` | Print a 0â€“100 grade and a debt profile |
 | `--format {text,json,csv,sarif,html}` | Report format |
 | `--fix` / `--fix-dry-run` | Apply or preview safe auto-fixes |
 | `--platform-audit` | API-based posture check (with `--github-repo` or `--gitlab-project`) |
@@ -123,17 +123,17 @@ findings. Three patterns, each with a recipe.
 |------|---------|
 | `0` | Scan completed cleanly (no findings above the configured threshold, or `--fail-on` not set) |
 | `1` | Scan completed with HIGH-severity findings (or with findings at or above `--fail-on` severity) |
-| `2` | CLI argument error OR scan completed with CRITICAL-severity findings — distinguish via stderr (argparse usage on argument error vs. severity summary on findings) |
+| `2` | CLI argument error OR scan completed with CRITICAL-severity findings â€” distinguish via stderr (argparse usage on argument error vs. severity summary on findings) |
 | `3` | Configuration error (missing config file, invalid YAML, unknown rule ID) |
 | `10` | `--self-test` failed: a positive sample didn't fire, or a negative sample did, or `--integration-test` reported a non-bypass failure |
-| `11` | Scan completed but coverage was degraded — at least one `ENGINE-ERR` finding present (file unreadable, ReDoS cap hit, rule crashed) |
+| `11` | Scan completed but coverage was degraded â€” at least one `ENGINE-ERR` finding present (file unreadable, ReDoS cap hit, rule crashed) |
 | `12` | `--self-test --mutate` detected a surviving mutation |
 
 CI gates should distinguish `0` from non-zero. Treating any non-zero
 as "scan failed" is correct; treating non-zero as "findings exist" is
 wrong because it conflates findings with scanner errors.
 
-### Pattern A — fail-fast for clean codebases
+### Pattern A â€” fail-fast for clean codebases
 
 Run on every PR. Fail the build on any HIGH-or-above finding. No
 baseline. Works only if the codebase already has zero findings at the
@@ -156,7 +156,7 @@ jobs:
           fail-on: HIGH
 ```
 
-### Pattern B — diff-only for repos with existing findings
+### Pattern B â€” diff-only for repos with existing findings
 
 The realistic pattern for any non-greenfield codebase. Maintain a
 baseline file in the repo; per-PR runs only fail on **new** findings.
@@ -190,10 +190,10 @@ jobs:
 
 The baseline should be regenerated periodically (e.g., monthly) so
 fixed findings don't keep counting toward the silent-acceptance set.
-Don't regenerate it from a feature branch — the baseline represents
+Don't regenerate it from a feature branch â€” the baseline represents
 the team's agreed acceptance state of `main`.
 
-### Pattern C — scheduled deep scan
+### Pattern C â€” scheduled deep scan
 
 `--check-imposter-commits` and `--platform-audit` make network calls
 and shouldn't run on every PR (rate limits, latency). Run them weekly
@@ -266,11 +266,11 @@ appears anywhere in the repo's CI configuration.
 
 When using taintly in CI, three sources can configure it:
 
-1. **CLI flags** (highest priority) — what the workflow sets via
+1. **CLI flags** (highest priority) â€” what the workflow sets via
    `extra-args` or `with:`.
-2. **`.taintly.yml`** at the repo root — versioned config the team
+2. **`.taintly.yml`** at the repo root â€” versioned config the team
    agrees on.
-3. **Defaults** — what taintly does without configuration.
+3. **Defaults** â€” what taintly does without configuration.
 
 For CI gates, prefer `.taintly.yml` for stable settings (severity
 threshold, excluded rules) and CLI flags for run-specific behavior
@@ -294,7 +294,7 @@ Machine-readable reporters also carry decision metadata when available:
 and `calibration_reason`. Reporters render these engine decisions; they
 do not recompute risk.
 
-`--score` prints a 0–100 grade and a debt profile labelling each family Strong, Moderate, Weak, Needs review, or Not applicable. "Not applicable" is reserved for families whose rules had no candidate location to evaluate in this scan — distinct from "Strong" (rules ran, nothing was wrong).
+`--score` prints a 0â€“100 grade and a debt profile labelling each family Strong, Moderate, Weak, Needs review, or Not applicable. "Not applicable" is reserved for families whose rules had no candidate location to evaluate in this scan â€” distinct from "Strong" (rules ran, nothing was wrong).
 
 ## Coverage
 
@@ -305,18 +305,18 @@ do not recompute risk.
 <!-- AUTOGEN:coverage -->
 | Category | GitHub | GitLab | Jenkins |
 |----------|--------|--------|---------|
-| SEC-1 � Insufficient Flow Control | 1 | 2 | 2 |
-| SEC-2 � Inadequate IAM | 3 | 3 | 3 |
-| SEC-3 � Dependency Chain Abuse | 9 | 5 | 5 |
-| SEC-4 � Poisoned Pipeline Execution | 21 | 7 | 6 |
-| SEC-5 � Insufficient PBAC | 2 | 1 | 1 |
-| SEC-6 � Insufficient Credential Hygiene | 10 | 9 | 8 |
-| SEC-7 � Insecure System Configuration | 4 | 1 | 3 |
-| SEC-8 � Ungoverned 3rd Party Services | 4 | 3 | 4 |
-| SEC-9 � Improper Artifact Integrity | 6 | 3 | 3 |
-| SEC-10 � Insufficient Logging | 4 | 2 | 1 |
+| SEC-1 — Insufficient Flow Control | 1 | 2 | 2 |
+| SEC-2 — Inadequate IAM | 3 | 3 | 3 |
+| SEC-3 — Dependency Chain Abuse | 9 | 5 | 5 |
+| SEC-4 — Poisoned Pipeline Execution | 21 | 7 | 6 |
+| SEC-5 — Insufficient PBAC | 2 | 1 | 1 |
+| SEC-6 — Insufficient Credential Hygiene | 10 | 9 | 8 |
+| SEC-7 — Insecure System Configuration | 4 | 1 | 3 |
+| SEC-8 — Ungoverned 3rd Party Services | 4 | 3 | 4 |
+| SEC-9 — Improper Artifact Integrity | 6 | 3 | 3 |
+| SEC-10 — Insufficient Logging | 4 | 2 | 1 |
 | AI / ML | 36 | 16 | 12 |
-| TAINT � Multi-stage taint flows | 13 | 4 | 2 |
+| TAINT — Multi-stage taint flows | 13 | 4 | 2 |
 <!-- /AUTOGEN:coverage -->
 
 Plus 29 platform-posture rules in `--platform-audit` mode.
