@@ -167,13 +167,14 @@ def scan_file(
                 description=(
                     "To prevent regex denial-of-service on adversarial input, "
                     "taintly's per-regex evaluation is bounded by a "
-                    f"{_MAX_SAFE_TEXT_LEN}-byte length cap. The chunked-search "
-                    "path scans large workflows in line-windowed chunks with "
-                    "overlap so file-scope rules (ContextPattern requires / "
-                    "AbsencePattern) still resolve. Coverage is preserved; "
-                    "this notice surfaces because the file is unusually large "
-                    "for a CI config. If you suspect a regex match that spans "
-                    "a chunk boundary was missed, split the workflow via "
+                    f"{_MAX_SAFE_TEXT_LEN}-byte length cap. Phase 8 iter-4 "
+                    "(2026-05-04) added a chunked-search path so file-scope "
+                    "rules (ContextPattern requires / AbsencePattern) still "
+                    "scan large workflows in line-windowed chunks with "
+                    "overlap. Coverage is preserved; this notice surfaces "
+                    "only because the file is unusually large for a CI "
+                    "config. If you suspect a regex match that spans a "
+                    "chunk boundary was missed, split the workflow via "
                     "includes / reusable workflows."
                 ),
                 file=filepath,
@@ -246,7 +247,13 @@ def scan_file(
             _expanded_cache["v"] = (ec, ec.splitlines())
         return _expanded_cache["v"]
 
-    with scan_session():
+    # Bind ``filepath`` for any WorkflowAwarePattern rule dispatched
+    # below.  Other pattern types ignore the contextvar; only
+    # WorkflowAwarePattern's PredicateContext consumes it (for
+    # caller-graph / repo-root resolution — see TAINT-GH-007).
+    from taintly.workflow_aware_pattern import set_pattern_filepath_context
+
+    with scan_session(), set_pattern_filepath_context(filepath):
         for rule in rules:
             try:
                 matches = rule.pattern.check(content, lines)

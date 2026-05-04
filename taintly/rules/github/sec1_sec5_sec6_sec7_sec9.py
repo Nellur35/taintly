@@ -1413,6 +1413,109 @@ RULES: list[Rule] = [
         incidents=["PyTorch dependency confusion (Dec 2022)"],
     ),
     # =========================================================================
+    # SEC9-GH-006: pipe-bash / iex(Invoke-WebRequest) — runtime supply chain
+    # =========================================================================
+    # Phase 8 iter-4 (2026-05-04): port of taintly's existing
+    # SEC6-GL-006 (GitLab) and SEC9-JK-001 (Jenkins) rules to
+    # GitHub Actions, closing the platform-coverage gap.  Even
+    # when the workflow itself is hardened (SHA-pinned actions,
+    # pinned images), a ``run: ... | bash`` step downloads and
+    # executes content the workflow author never reviewed.  DNS
+    # hijack, CDN compromise, or supply-chain attack on the
+    # hosting domain replaces the payload silently.  Industry
+    # peer audits (e.g. zizmor's ``unpinned-tools``) cover the
+    # same threat class.
+    Rule(
+        id="SEC9-GH-006",
+        title="Workflow downloads and executes a remote script with no integrity check",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-9",
+        finding_family="supply_chain_immutability",
+        description=(
+            "A ``run:`` step downloads a script from the network and "
+            "pipes it directly into a shell or interpreter — "
+            "``curl ... | bash``, ``wget ... | sh``, "
+            "``bash <(curl ...)``, or PowerShell "
+            "``iex(Invoke-WebRequest ...)``.  The downloaded bytes "
+            "are executed before any review or checksum verification, "
+            "so whoever controls the URL controls the workflow.\n"
+            "\n"
+            "Distinct from SEC3-GH-001 (action pinning) and SEC3-GH-"
+            "005 (Docker image pinning) — those guard the workflow "
+            "definition; this rule guards the runtime tool chain "
+            "the workflow invokes."
+        ),
+        pattern=RegexPattern(
+            # Five idiomatic shapes: curl|sh, wget|sh, bash <(curl…),
+            # iex(Invoke-WebRequest…) or iex(iwr…), and the bare
+            # ``... | python -c '…'`` shape that downloads then evals.
+            match=(
+                r"(?:curl|wget)\s+[^|\n#]*\|\s*(?:bash|sh|zsh|fish|python|perl|ruby|node)"
+                r"|bash\s*<\s*\(\s*(?:curl|wget)"
+                r"|(?i:iex)\s*\(\s*(?:Invoke-WebRequest|iwr)\b"
+                r"|(?:curl|wget)\s+[^|\n#]*\|\s*python\s+-c\s+['\"]"
+            ),
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Download the script separately, verify its checksum, "
+            "and only then execute it:\n"
+            "  - run: |\n"
+            "      curl -fsSL https://example.com/install.sh -o install.sh\n"
+            "      echo '<sha256>  install.sh' | sha256sum -c -\n"
+            "      bash install.sh\n"
+            "Or vendor the install script into the repo and pin it "
+            "to a SHA.  For tool installation specifically, prefer "
+            "first-party setup actions (actions/setup-node, actions/"
+            "setup-python, etc.) over network installers."
+        ),
+        reference=(
+            "https://owasp.org/www-project-top-10-ci-cd-security-risks/"
+            "CICD-SEC-09-Improper-Artifact-Integrity-Validation"
+        ),
+        test_positive=[
+            "      - run: curl -fsSL https://get.example.com/install.sh | bash",
+            "      - run: wget -qO- https://install.example.com | sh",
+            "      - run: bash <(curl -s https://example.com/bootstrap.sh)",
+            "      - run: curl https://example.com/setup.sh | bash -s -- --auto",
+            "      - run: iex(Invoke-WebRequest -Uri https://chocolatey.org/install.ps1)",
+            "      - run: iex(iwr -Uri https://example.com/install.ps1)",
+        ],
+        test_negative=[
+            # Download to disk, no pipe.
+            "      - run: curl -fsSL https://example.com/install.sh -o install.sh",
+            # Download with checksum verification (multi-line happens
+            # in real workflows; here just ensure the bare line shape
+            # without a pipe doesn't fire).
+            "      - run: wget -q -O setup.sh https://example.com/setup.sh",
+            # Comment.
+            "      # - run: curl https://example.com | bash",
+            # Pipe but not network — no curl/wget anchor.
+            "      - run: cat install.sh | bash",
+            # Powershell command unrelated to web download.
+            "      - run: iex 'Get-Process | Format-Table'",
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "Piping a remote script to a shell gives the remote server "
+            "arbitrary code execution in the runner with no opportunity "
+            "to review the bytes before execution.  DNS hijack, CDN "
+            "compromise, expired-and-resquatted domain, or a supply-"
+            "chain attack on the hosting infrastructure all let the "
+            "attacker substitute a malicious payload — at which point "
+            "every secret bound to the workflow is exfiltrable on the "
+            "next run."
+        ),
+        incidents=[
+            # No specific public-attribution incident; the threat is the
+            # same shape as the LiteLLM PyPI compromise (Mar 2026,
+            # exfil via curl-pipe-bash) and any of the
+            # `install-fetch-execute` patterns the supply-chain
+            # research community has documented.
+        ],
+    ),
+    # =========================================================================
     # SEC10-GH-003: Actions debug logging enabled — unmasks secrets in logs
     # =========================================================================
     Rule(
@@ -2002,6 +2105,120 @@ RULES: list[Rule] = [
         ),
         confidence="high",
         finding_family="credential_persistence",
+    ),
+    # =========================================================================
+    # SEC6-GH-011: ``secrets: inherit`` in reusable-workflow caller
+    # =========================================================================
+    # Phase 8 iter-4 (2026-05-04): credential-blast-radius warning
+    # for over-broad secret forwarding into reusable workflows.
+    # When a caller invokes a reusable workflow and uses
+    # ``secrets: inherit``, every secret available to the caller is
+    # forwarded to the callee — even if the callee only needs one
+    # of them.  A future callee compromise leaks the caller's full
+    # secret set, not just what the callee was designed for.
+    #
+    # Safe alternative: enumerate explicitly via ``secrets:`` map,
+    # forwarding only the secrets the callee actually consumes.
+    # Industry peer audits (e.g. zizmor's ``secrets-inherit``) cover
+    # the same threat class.
+    Rule(
+        id="SEC6-GH-011",
+        title="Reusable workflow invoked with ``secrets: inherit`` (over-broad credential forward)",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-6",
+        review_needed=True,
+        confidence="medium",
+        finding_family="credential_persistence",
+        description=(
+            "A caller workflow invokes a reusable workflow via "
+            "``uses: ./.github/workflows/<x>.yml`` (or "
+            "``uses: <org>/<repo>/.github/workflows/<x>.yml@<ref>``) "
+            "and forwards EVERY secret in scope via "
+            "``secrets: inherit``.  The callee receives the caller's "
+            "full secret set even if it only needs one — so any "
+            "future compromise of the callee (a logging change, a "
+            "new step, an upstream supply-chain incident) leaks the "
+            "caller's entire credential surface, not just the "
+            "secrets the callee was designed for."
+        ),
+        pattern=ContextPattern(
+            anchor=r"^\s+secrets\s*:\s*inherit\s*(#.*)?$",
+            # Reusable-workflow caller shapes:
+            #   uses: ./.github/workflows/<x>.yml          (local)
+            #   uses: ../shared/.github/workflows/<x>.yml  (relative-up)
+            #   uses: <org>/<repo>/.github/workflows/<x>.yml@<ref>  (cross-repo)
+            # Use ``\b`` after the extension so the match works
+            # without MULTILINE — ``\.ya?ml(@|$)`` requires end-of-
+            # string in non-MULTILINE mode and would miss the case
+            # where the secrets-inherit line follows the uses-line.
+            requires=r"uses\s*:\s*\S*\.ya?ml\b",
+            scope="file",
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Replace ``secrets: inherit`` with an explicit secrets "
+            "map listing only what the callee needs:\n"
+            "  jobs:\n"
+            "    deploy:\n"
+            "      uses: ./.github/workflows/deploy.yml\n"
+            "      secrets:\n"
+            "        DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}\n"
+            "Audit each callee's input contract and wire only those "
+            "secrets through.  Future maintainers of the callee "
+            "must explicitly request additional secrets — making "
+            "scope expansion visible in review rather than implicit."
+        ),
+        reference=(
+            "https://docs.github.com/en/actions/using-workflows/"
+            "reusing-workflows#passing-inputs-and-secrets-to-a-reusable-workflow"
+        ),
+        test_positive=[
+            (
+                "on: push\n"
+                "jobs:\n  deploy:\n"
+                "    uses: ./.github/workflows/deploy.yml\n"
+                "    secrets: inherit\n"
+            ),
+            (
+                "on: push\n"
+                "jobs:\n  build:\n"
+                "    uses: my-org/shared-workflows/.github/workflows/build.yml@v1\n"
+                "    secrets: inherit\n"
+            ),
+        ],
+        test_negative=[
+            # Explicit secrets map — caller is in control.
+            (
+                "on: push\n"
+                "jobs:\n  deploy:\n"
+                "    uses: ./.github/workflows/deploy.yml\n"
+                "    secrets:\n"
+                "      DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}\n"
+            ),
+            # No reusable-workflow uses — anchor unmet.
+            ("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    secrets: inherit\n"),
+            # Comment.
+            (
+                "on: push\n"
+                "jobs:\n  deploy:\n"
+                "    uses: ./.github/workflows/deploy.yml\n"
+                "#    secrets: inherit\n"
+            ),
+        ],
+        stride=["I", "E"],
+        threat_narrative=(
+            "An attacker compromises a reusable workflow downstream "
+            "of the caller (maintainer takeover on a third-party "
+            "shared-workflows repo, a malicious step added by a "
+            "subsequent PR to a sibling internal workflow, or an "
+            "upstream action pulled into the callee).  The callee "
+            "now has every secret the caller had — not just the "
+            "ones it was designed to use.  ``secrets: inherit`` "
+            "makes the caller's credential surface effectively "
+            "transitive, which is the wrong default for least-"
+            "privilege CI."
+        ),
     ),
     # =========================================================================
     # SEC9-GH-004: Tainted `actions/cache` key — a workflow restores an

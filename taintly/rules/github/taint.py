@@ -48,6 +48,38 @@ from taintly.workflow_aware_pattern import WorkflowAwarePattern
 # a reusable workflow (``on: workflow_call``).
 _INPUTS_REF_RE = re.compile(r"\$\{\{\s*inputs\.[A-Za-z_][\w-]*\s*\}\}")
 
+
+def _taint_gh_006_predicate(
+    value: str,
+    _value_kind: str,
+    _path: tuple[object, ...],
+    ctx,
+) -> bool:
+    """Predicate for TAINT-GH-006 (Phase 8 iter-4 form).
+
+    Fires when:
+
+    * the leaf's value contains an ``${{ inputs.X }}`` reference
+    * the file is a reusable workflow (``on: workflow_call``)
+    * AND the caller-graph analysis does not prove the input is
+      always literal-only
+
+    Caller-graph suppression: if at least one in-repo caller exists
+    AND every caller's ``with:`` map for this callee passes literal
+    or matrix-literal values to the input (no attacker-reachable
+    context — see ``_ATTACKER_REACHABLE_CONTEXT_RE``), the rule
+    suppresses.  Callees with no in-repo callers keep firing as
+    callee-side review-needed warnings (the rule's original
+    contract before iter-4).
+    """
+    if not _INPUTS_REF_RE.search(value or ""):
+        return False
+    if not ctx.is_reusable_workflow():
+        return False
+    callers = ctx.find_callers_of_self()
+    return not (callers and all(c.passes_only_literals() for c in callers))
+
+
 # ---------------------------------------------------------------------------
 # Pattern adapter
 # ---------------------------------------------------------------------------
@@ -1136,6 +1168,18 @@ RULES = [
         # The reusable-workflow gate (``on: workflow_call``) is
         # checked via ``ctx.is_reusable_workflow()`` which covers
         # the three legal shapes (bare, block, list).
+        #
+        # Phase 8 iteration 4 (2026-05-04) added caller-graph
+        # suppression: when EVERY in-repo caller of this reusable
+        # workflow passes literal / matrix-literal values to the
+        # input (no attacker-reachable context), the rule
+        # suppresses.  Sample-and-label of 21 corpus fires found
+        # 19/21 FP because of this exact shape (matrix-driven fan-
+        # out into a callee that takes inputs).  The suppression
+        # only applies when at least one caller is found in the
+        # local ``.github/workflows/`` tree — externally-callable
+        # reusable workflows (no in-repo callers) keep firing as
+        # callee-side review-needed warnings.
         pattern=WorkflowAwarePattern(
             path=[
                 "jobs.*.steps[*].run",
@@ -1144,8 +1188,7 @@ RULES = [
                 "jobs.*.steps[*].with.script",
                 "jobs.*.steps[*].with.command",
             ],
-            predicate=lambda value, _kind, _path, ctx: bool(_INPUTS_REF_RE.search(value or ""))
-            and ctx.is_reusable_workflow(),
+            predicate=_taint_gh_006_predicate,
         ),
         remediation=(
             "Do one of:\n"
