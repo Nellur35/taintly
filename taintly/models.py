@@ -96,6 +96,95 @@ def _compute_match_text(snippet: str) -> str:
     return cleaned
 
 
+def _safe_search_chunked(compiled_pattern, content: str):
+    """Run a compiled regex search across ``content`` with ReDoS
+    protection AND length-cap safety.
+
+    Phase 8 iter-4 (2026-05-04) split: ``_safe_search`` returns
+    ``None`` outright when ``content > _MAX_SAFE_TEXT_LEN``, which
+    silently breaks ``ContextPattern.requires`` /
+    ``AbsencePattern.absent`` on legitimately-large workflows
+    (Microsoft / Azure / AWS routinely have files >50KB).  This
+    chunked variant scans the content in line-windowed chunks
+    bounded by ``_MAX_SAFE_TEXT_LEN``; each chunk pays the
+    SIGALRM ReDoS timeout and the per-chunk length cap, and the
+    overall search reaches the full file.
+
+    Overlap of ``_CHUNK_OVERLAP_LINES`` lines preserves matches
+    that span the chunk boundary; in practice every requires
+    regex in the rule pack matches within a single line (or a
+    small bounded range), so the overlap is generous belt-and-
+    suspenders rather than load-bearing.
+    """
+    if len(content) <= _MAX_SAFE_TEXT_LEN:
+        return _safe_search(compiled_pattern, content)
+    # Line-windowed chunking.  splitlines(keepends=True) preserves
+    # newline boundaries so reassembly produces the original text.
+    import time as _time
+
+    lines = content.splitlines(keepends=True)
+    pos = 0
+    n = len(lines)
+    chunks_scanned = 0
+    deadline = _time.monotonic() + _CHUNKED_WALLCLOCK_BUDGET_S
+    while pos < n:
+        # Adversarial-input safety: two bounds, either of which
+        # short-circuits the scan.
+        # (a) Chunk-count cap: real workflows fit in single-digit
+        #     chunks; ~_MAX_CHUNKS × cap bytes is far above any
+        #     realistic CI config.
+        # (b) Wallclock budget: pathological inputs (deeply-indented
+        #     fuzz fixtures, regex shapes that backtrack hard on
+        #     each 50KB chunk of nested whitespace) can multiply
+        #     per-chunk SIGALRM ceilings.  An overall wall-clock
+        #     budget contains the worst case end-to-end.
+        if chunks_scanned >= _MAX_CHUNKS:
+            return None
+        if _time.monotonic() >= deadline:
+            return None
+        # Grow the window until either we hit the line budget or
+        # adding the next line would exceed the byte cap.
+        end = pos
+        size = 0
+        while (
+            end < n and end - pos < _CHUNK_LINES and (size + len(lines[end]) <= _MAX_SAFE_TEXT_LEN)
+        ):
+            size += len(lines[end])
+            end += 1
+        if end == pos:
+            # A single line exceeds the cap on its own — nothing to
+            # do but skip it (rare; would require a 50KB single line
+            # which no real workflow has).
+            pos += 1
+            continue
+        chunk = "".join(lines[pos:end])
+        m = _safe_search(compiled_pattern, chunk)
+        chunks_scanned += 1
+        if m:
+            return m
+        if end == n:
+            break
+        pos = max(pos + 1, end - _CHUNK_OVERLAP_LINES)
+    return None
+
+
+# Chunk-scan tuning constants for ``_safe_search_chunked``.
+# _CHUNK_LINES caps the per-chunk line count even when the byte
+# cap would allow more — protects against pathological files made
+# of trivially-short lines.  _CHUNK_OVERLAP_LINES is the trailing
+# context carried into the next chunk so multi-line requires
+# patterns straddling a boundary still resolve.  _MAX_CHUNKS bounds
+# the total number of chunks scanned per call so adversarial inputs
+# (e.g. deeply-indented YAML that produces ~250KB / 500 lines of
+# nested keys) don't multiply per-chunk regex cost without bound.
+# At default tuning, _MAX_CHUNKS × _MAX_SAFE_TEXT_LEN = ~1 MB —
+# every realistic CI config fits.
+_CHUNK_LINES = 2000
+_CHUNK_OVERLAP_LINES = 50
+_MAX_CHUNKS = 20
+_CHUNKED_WALLCLOCK_BUDGET_S = 3.0
+
+
 def _safe_search(compiled_pattern, text: str):
     """Run a compiled regex search with ReDoS / CPU-exhaustion protection.
 
@@ -312,7 +401,11 @@ class AbsencePattern:
     # whole file lacks ``self.absent``.  The contract test treats this
     # as a documented exception.
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        if not _safe_search(self._compiled, content):
+        # Chunked-safe: AbsencePattern is a file-scope check, so the
+        # 50KB length cap previously caused FALSE absences (the
+        # pattern was actually present but the cap returned None).
+        # That inverted FP/TP for absence-style rules on big files.
+        if not _safe_search_chunked(self._compiled, content):
             return [(1, f"(pattern not found: {self.absent})")]
         return []
 
@@ -563,9 +656,13 @@ class ContextPattern:
         return self._check_file_scoped(content, lines)
 
     def _check_file_scoped(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        if not _safe_search(self._requires_re, content):
+        # File-scope requires / requires_absent: chunked-safe so
+        # legitimate large workflows (>50KB) don't silently lose
+        # rule coverage to the ReDoS length cap.  See
+        # ``_safe_search_chunked`` for the chunking semantics.
+        if not _safe_search_chunked(self._requires_re, content):
             return []
-        if self._requires_absent_re and _safe_search(self._requires_absent_re, content):
+        if self._requires_absent_re and _safe_search_chunked(self._requires_absent_re, content):
             return []
 
         # Build per-line job-segment content map if we need per-job anchor suppression.
@@ -610,9 +707,14 @@ class ContextPattern:
         results = []
         for seg_start, seg_lines in _split_into_job_segments(lines):
             seg_content = "\n".join(seg_lines)
-            if not _safe_search(self._requires_re, seg_content):
+            # Chunked-safe: a single-job workflow over 50KB would
+            # produce a >50KB segment; ``_safe_search`` returns None
+            # outright in that case, silently disabling the rule.
+            if not _safe_search_chunked(self._requires_re, seg_content):
                 continue
-            if self._requires_absent_re and _safe_search(self._requires_absent_re, seg_content):
+            if self._requires_absent_re and _safe_search_chunked(
+                self._requires_absent_re, seg_content
+            ):
                 continue
             for j, line in enumerate(seg_lines):
                 if any(ex.search(line) for ex in self._excludes):
