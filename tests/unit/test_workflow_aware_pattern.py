@@ -477,6 +477,66 @@ def test_find_callers_matrix_literal_passes_only_literals(tmp_path):
     assert callers and callers[0].passes_only_literals() is True
 
 
+# ---------------------------------------------------------------------------
+# Phase 8 iter-3 (2026-05-04): repo_root helper for AI-GH-036
+# ---------------------------------------------------------------------------
+
+
+def test_repo_root_finds_git_dir(tmp_path):
+    """A nested workflow file inside a repo with ``.git/`` resolves
+    to the repo root via ``ctx.repo_root()``."""
+    (tmp_path / ".git").mkdir()
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    workflow = wf_dir / "ci.yml"
+    workflow.write_text("on: push\njobs:\n  build:\n    steps:\n      - run: hi\n")
+
+    src = workflow.read_text()
+    seen: list = []
+
+    def _capture(_v, _k, _p, ctx):
+        seen.append(ctx.repo_root())
+        return False
+
+    pattern = WorkflowAwarePattern(path="**.run", predicate=_capture)
+    with set_pattern_filepath_context(str(workflow)):
+        pattern.check(src, src.splitlines())
+
+    # All predicate invocations resolve to the same repo root.
+    assert seen, "predicate did not fire on any leaf"
+    expected = tmp_path.resolve()
+    assert all(p == expected for p in seen), seen
+
+
+def test_repo_root_returns_none_when_filepath_unset():
+    """Without filepath context, the helper returns None — predicates
+    that need a repo root must defend the None case."""
+    ctx = PredicateContext(leaves=())
+    assert ctx.filepath is None
+    assert ctx.repo_root() is None
+
+
+def test_repo_root_caps_walk_depth(tmp_path):
+    """A pathologically deep filepath inside a non-repo directory
+    must not loop forever; the 10-level cap returns None
+    deterministically."""
+    # Build 15 nested directories — deeper than the 10-level cap.
+    deep = tmp_path
+    for i in range(15):
+        deep = deep / f"d{i}"
+    deep.mkdir(parents=True)
+    bogus_workflow = deep / "ci.yml"
+    bogus_workflow.write_text("on: push\njobs: {}\n")
+
+    ctx = PredicateContext(leaves=(), filepath=str(bogus_workflow))
+    # No ``.git`` / ``.github`` in any ancestor up to the cap, so the
+    # helper must return None rather than walking off to filesystem
+    # root.  The check terminates by hitting the depth cap, not by
+    # running out of parents — that's the defensive behaviour we want
+    # on Windows UNC paths and weird sandbox roots.
+    assert ctx.repo_root() is None
+
+
 def test_find_callers_caches_within_predicate_context(tmp_path):
     """The caller-graph lookup walks the workflow directory; a per-
     leaf predicate that calls ``find_callers_of_self`` repeatedly

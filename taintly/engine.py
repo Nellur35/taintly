@@ -58,6 +58,12 @@ _SUPPRESS_SPECIFIC = re.compile(r"#\s*taintly:\s*ignore\[([^\]]+)\]", re.IGNOREC
 _PROJECT_SCOPE_RULES: frozenset[str] = frozenset(
     {
         "SEC10-GL-002",  # Public-pipelines visibility — a GitLab project setting
+        # AI-GH-036 fires per workflow file when the repo contains an
+        # agent-instruction file (CLAUDE.md, .cursorrules, AGENTS.md, …).
+        # The presence is a repo-root property, not a workflow property,
+        # so the per-file fan-out is noise.  Project-scope dedup keeps
+        # the first occurrence per scan.
+        "AI-GH-036",
     }
 )
 
