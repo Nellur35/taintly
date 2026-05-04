@@ -751,7 +751,21 @@ RULES: list[Rule] = [
     Rule(
         id="SEC4-GH-005",
         title="Checkout persists credentials to disk",
-        severity=Severity.MEDIUM,
+        # Severity downgraded MEDIUM -> LOW (Phase 8 tuning, 2026-05-03).
+        # Corpus baseline (35 repos, 2080 findings): SEC4-GH-005 fires
+        # in 31/31 repos with actions/checkout, including well-defended
+        # orgs (Microsoft, AWS, Google) where checkout is checkout-only
+        # with no downstream git push/config.  ~80% of fires are
+        # FP-density (the persisted credential dies with the runner;
+        # no later step uses it).  Rule remains precision-correct -
+        # it still flags persist-credentials: true as the
+        # actions/checkout default - but triage priority is
+        # informational, not MEDIUM.  A sharper tune (custom predicate
+        # scanning subsequent steps for git push/config) would let the
+        # rule fire HIGH only when downstream actually consumes the
+        # credential; that requires structural-reader hooks beyond
+        # SequencePattern's bounded lookahead and is deferred.
+        severity=Severity.LOW,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(

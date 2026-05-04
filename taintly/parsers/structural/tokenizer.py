@@ -133,14 +133,20 @@ class _Tokenizer:
                 # Block scalar ended on this line; fall through and
                 # tokenise the line as ordinary content.
 
-            # Reject directives and document separators.
+            # Reject directives.  Document separators (--- and ...) are
+            # valid YAML markers commonly used at the top of workflow
+            # files (`---\nname: ...`) and at multi-document boundaries.
+            # We scan single-document content, so the markers are no-
+            # ops; skip them rather than aborting the tokenization.
             stripped_full = raw.lstrip()
             if stripped_full.startswith("%"):
                 raise TokenizerError(line_no, f"directive not supported: {stripped_full[:20]!r}")
             if stripped_full.startswith("---") and stripped_full[3:4] in ("", " ", "\t"):
-                raise TokenizerError(line_no, "document separator '---' not supported")
-            if stripped_full.startswith("..."):
-                raise TokenizerError(line_no, "document end '...' not supported")
+                self._line_idx += 1
+                continue
+            if stripped_full.startswith("...") and stripped_full[3:4] in ("", " ", "\t"):
+                self._line_idx += 1
+                continue
 
             if not stripped_full:
                 self._line_idx += 1

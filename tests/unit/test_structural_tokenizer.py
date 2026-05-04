@@ -292,16 +292,54 @@ def test_directive_rejected():
         list(tokenize(src))
 
 
-def test_document_separator_rejected():
-    src = "---\nname: ci\n"
-    with pytest.raises(TokenizerError):
-        list(tokenize(src))
+def test_document_separator_skipped():
+    """Document-start markers are valid YAML and common in workflow
+    files (`---\\nname: ...`).  The tokenizer treats them as no-ops
+    rather than aborting tokenization, so single-document content
+    after the marker tokenizes normally.
+
+    Bug history: previously raised TokenizerError, which bubbled up
+    as ENGINE-ERR ('Structural coverage degraded: file partially
+    unparseable from line 1') across ~17 of 18 ENGINE-ERRs in the
+    Phase 8 corpus baseline scan (2026-05-03).  All affected files
+    were valid GHA workflows that started with `---`.
+    """
+    src = "---\nname: ci\non: push\n"
+    tokens = list(tokenize(src))
+    # Should produce normal tokens for `name: ci` and `on: push`
+    # (plus EOF), with no error.
+    kinds = [t.kind for t in tokens]
+    from taintly.parsers.structural.tokenizer import TokenKind
+    assert TokenKind.EOF in kinds
+    # `name` and `on` should appear as KEY tokens.
+    keys = [t.value for t in tokens if t.kind == TokenKind.KEY]
+    assert "name" in keys
+    assert "on" in keys
 
 
-def test_document_end_rejected():
-    src = "name: ci\n...\n"
-    with pytest.raises(TokenizerError):
-        list(tokenize(src))
+def test_document_end_skipped():
+    """`...` document-end marker is also a no-op for our scanner."""
+    src = "name: ci\non: push\n...\n"
+    tokens = list(tokenize(src))
+    from taintly.parsers.structural.tokenizer import TokenKind
+    assert TokenKind.EOF in [t.kind for t in tokens]
+
+
+def test_document_separator_mid_stream_skipped():
+    """A `---` mid-file (multi-document YAML) is also skipped silently.
+
+    Workflow YAML is single-document by convention; if a multi-doc
+    file is encountered, the second document's content tokenizes as
+    if it were part of the first.  The scanner doesn't try to
+    differentiate documents — it scans all tokens it sees.
+    """
+    src = "name: a\non: push\n---\nname: b\non: pull_request\n"
+    tokens = list(tokenize(src))
+    from taintly.parsers.structural.tokenizer import TokenKind
+    keys = [t.value for t in tokens if t.kind == TokenKind.KEY]
+    # Both `name` keys appear (one per document); both `on` keys too.
+    assert keys.count("name") == 2
+    assert keys.count("on") == 2
 
 
 def test_custom_tag_rejected():
