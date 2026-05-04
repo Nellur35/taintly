@@ -14,7 +14,12 @@ any individual rule.
 
 from __future__ import annotations
 
-from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
+from taintly.workflow_aware_pattern import (
+    CallerInfo,
+    PredicateContext,
+    WorkflowAwarePattern,
+    set_pattern_filepath_context,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -311,3 +316,199 @@ def test_block_scalar_predicate_runs_per_body_line():
     # Predicate observed all body lines, not just the matched one.
     assert any("first" in s for s in seen_lines)
     assert any("last" in s for s in seen_lines)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 iter-4 (2026-05-04): caller-graph helpers for TAINT-GH-007
+# ---------------------------------------------------------------------------
+
+
+def test_filepath_context_threads_through_check(tmp_path):
+    """``set_pattern_filepath_context`` should bind a value that the
+    predicate can read off ``ctx.filepath``."""
+    src = "jobs:\n  build:\n    steps:\n      - run: hi\n"
+    seen: list[str | None] = []
+
+    def _capture(_v, _k, _p, ctx):
+        seen.append(ctx.filepath)
+        return False
+
+    pattern = WorkflowAwarePattern(path="**.run", predicate=_capture)
+    with set_pattern_filepath_context("/abs/path/.github/workflows/ci.yml"):
+        pattern.check(src, src.splitlines())
+    assert seen == ["/abs/path/.github/workflows/ci.yml"]
+
+
+def test_filepath_context_defaults_none_outside_block():
+    """Outside an active context, ``ctx.filepath`` is ``None``."""
+    src = "jobs:\n  build:\n    steps:\n      - run: hi\n"
+    seen: list[str | None] = []
+
+    def _capture(_v, _k, _p, ctx):
+        seen.append(ctx.filepath)
+        return False
+
+    WorkflowAwarePattern(path="**.run", predicate=_capture).check(src, src.splitlines())
+    assert seen == [None]
+
+
+def test_find_callers_of_self_finds_local_callers(tmp_path):
+    """A reusable workflow at ``./.github/workflows/callee.yml`` is
+    invoked by a sibling ``caller.yml`` via ``uses: ./.github/
+    workflows/callee.yml`` — caller-graph helper resolves it and
+    parses the caller's ``with:`` map."""
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    callee = wf / "callee.yml"
+    callee.write_text(
+        "on: workflow_call\n"
+        "jobs:\n  echo:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: echo ${{ inputs.title }}\n"
+    )
+    caller = wf / "caller.yml"
+    caller.write_text(
+        "on: push\n"
+        "jobs:\n  build:\n"
+        "    uses: ./.github/workflows/callee.yml\n"
+        "    with:\n"
+        "      title: hardcoded-release\n"
+    )
+
+    src = callee.read_text()
+    seen: list[tuple[CallerInfo, ...]] = []
+
+    def _capture(_v, _k, _p, ctx):
+        seen.append(ctx.find_callers_of_self())
+        return False
+
+    pattern = WorkflowAwarePattern(path="**.run", predicate=_capture)
+    with set_pattern_filepath_context(str(callee)):
+        pattern.check(src, src.splitlines())
+
+    assert seen and len(seen[0]) == 1
+    caller_info = seen[0][0]
+    assert caller_info.caller_path == str(caller)
+    assert caller_info.with_map == {"title": "hardcoded-release"}
+    assert caller_info.passes_only_literals() is True
+
+
+def test_find_callers_passes_only_literals_false_on_attacker_context(tmp_path):
+    """A caller that forwards ``${{ github.event.pull_request.title }}``
+    via ``with:`` must NOT be classified as literal-only."""
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    callee = wf / "callee.yml"
+    callee.write_text(
+        "on: workflow_call\n"
+        "jobs:\n  echo:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: echo ${{ inputs.title }}\n"
+    )
+    caller = wf / "caller.yml"
+    caller.write_text(
+        "on: pull_request_target\n"
+        "jobs:\n  build:\n"
+        "    uses: ./.github/workflows/callee.yml\n"
+        "    with:\n"
+        "      title: ${{ github.event.pull_request.title }}\n"
+    )
+
+    src = callee.read_text()
+    seen: list[tuple[CallerInfo, ...]] = []
+
+    def _capture(_v, _k, _p, ctx):
+        seen.append(ctx.find_callers_of_self())
+        return False
+
+    pattern = WorkflowAwarePattern(path="**.run", predicate=_capture)
+    with set_pattern_filepath_context(str(callee)):
+        pattern.check(src, src.splitlines())
+
+    assert seen and len(seen[0]) == 1
+    assert seen[0][0].passes_only_literals() is False
+
+
+def test_find_callers_returns_empty_when_no_filepath():
+    """Without filepath context, caller-graph lookup returns empty."""
+    src = "on: workflow_call\njobs: {}\n"
+    seen: list[tuple[CallerInfo, ...]] = []
+
+    def _capture(_v, _k, _p, ctx):
+        seen.append(ctx.find_callers_of_self())
+        return False
+
+    pattern = WorkflowAwarePattern(path="**", predicate=_capture)
+    pattern.check(src, src.splitlines())
+    # At least one leaf exists; helper returns ()
+    assert seen and all(c == () for c in seen)
+
+
+def test_find_callers_matrix_literal_passes_only_literals(tmp_path):
+    """Matrix-driven fan-out (the dominant TAINT-GH-006 FP shape):
+    callee receives ``${{ matrix.X }}`` from caller. Workflow-author-
+    controlled, so passes_only_literals() is True."""
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    callee = wf / "callee.yml"
+    callee.write_text("on: workflow_call\njobs: {}\n")
+    caller = wf / "caller.yml"
+    caller.write_text(
+        "on: push\n"
+        "jobs:\n  build:\n"
+        "    strategy:\n      matrix:\n        os: [ubuntu, macos]\n"
+        "    uses: ./.github/workflows/callee.yml\n"
+        "    with:\n"
+        "      runner: ${{ matrix.os }}\n"
+    )
+
+    src = callee.read_text()
+    seen: list[tuple[CallerInfo, ...]] = []
+
+    def _capture(_v, _k, _p, ctx):
+        seen.append(ctx.find_callers_of_self())
+        return False
+
+    # Force the predicate to run on at least one leaf — query "**"
+    # picks up the on/jobs leaves.
+    pattern = WorkflowAwarePattern(path="**", predicate=_capture)
+    with set_pattern_filepath_context(str(callee)):
+        pattern.check(src, src.splitlines())
+
+    callers = seen[0] if seen else ()
+    assert callers and callers[0].passes_only_literals() is True
+
+
+def test_find_callers_caches_within_predicate_context(tmp_path):
+    """The caller-graph lookup walks the workflow directory; a per-
+    leaf predicate that calls ``find_callers_of_self`` repeatedly
+    must hit the cache after the first call."""
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    callee = wf / "callee.yml"
+    callee.write_text(
+        "on: workflow_call\n"
+        "jobs:\n  echo:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: a\n      - run: b\n      - run: c\n"
+    )
+    caller = wf / "caller.yml"
+    caller.write_text(
+        "on: push\n"
+        "jobs:\n  build:\n    uses: ./.github/workflows/callee.yml\n"
+        "    with:\n      x: lit\n"
+    )
+
+    src = callee.read_text()
+    call_results: list[tuple[CallerInfo, ...]] = []
+
+    def _capture(_v, _k, _p, ctx):
+        call_results.append(ctx.find_callers_of_self())
+        return False
+
+    pattern = WorkflowAwarePattern(path="jobs.*.steps[*].run", predicate=_capture)
+    with set_pattern_filepath_context(str(callee)):
+        pattern.check(src, src.splitlines())
+
+    # 3 run leaves → 3 predicate invocations, each returns the same
+    # cached tuple identity.
+    assert len(call_results) == 3
+    assert all(r is call_results[0] for r in call_results)

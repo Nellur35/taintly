@@ -34,11 +34,50 @@ Phase contract is the same as ``StructuralPattern``:
 
 from __future__ import annotations
 
+import contextvars
+import re
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from .parsers.structural import Event, EventKind, walk_workflow
+
+# ---------------------------------------------------------------------------
+# Per-scan filepath context — populated by the engine before invoking
+# ``rule.pattern.check()`` so WorkflowAwarePattern predicates can
+# resolve sibling workflow files (caller-graph for TAINT-GH-007),
+# repo-root walks (file-presence rules), and similar cross-file
+# context.
+#
+# Other pattern types ignore this; using a contextvar avoids
+# changing the cross-pattern ``PatternProtocol.check`` signature
+# (every pattern type and dozens of test call sites would otherwise
+# need updating).
+# ---------------------------------------------------------------------------
+
+_current_filepath: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "taintly_pattern_filepath", default=None
+)
+
+
+@contextmanager
+def set_pattern_filepath_context(filepath: Optional[str]):
+    """Bind ``filepath`` for the duration of this with-block so any
+    ``WorkflowAwarePattern`` predicate dispatched inside the block
+    can read it via :attr:`PredicateContext.filepath`.
+
+    Used by the engine to thread the current file's path down through
+    ``rule.pattern.check()`` without changing the cross-pattern
+    protocol.  Outside an active block, ``PredicateContext.filepath``
+    is ``None`` — predicates that need filepath must defend that.
+    """
+    token = _current_filepath.set(filepath)
+    try:
+        yield
+    finally:
+        _current_filepath.reset(token)
 
 
 @dataclass
@@ -52,10 +91,20 @@ class PredicateContext:
     """
 
     leaves: tuple[Event, ...]
+    filepath: Optional[str] = None
+    """Absolute or relative path of the file being scanned, populated
+    by :func:`set_pattern_filepath_context` during the engine's per-
+    file pass.  ``None`` when the pattern is invoked outside an
+    engine scan (self-test samples, unit tests).  Predicates that
+    rely on this MUST defend the ``None`` case."""
+
     _by_path_cache: dict[tuple[object, ...], Event] = field(
         default_factory=dict, init=False, repr=False
     )
     _is_reusable: Optional[bool] = field(default=None, init=False, repr=False)
+    _caller_graph_cache: Optional[tuple[CallerInfo, ...]] = field(
+        default=None, init=False, repr=False
+    )
 
     # ------------------------------------------------------------------
     # Direct lookups
@@ -156,6 +205,69 @@ class PredicateContext:
     # File-shape helpers
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Caller-graph helpers — Phase 8 iter-4 (2026-05-04).
+    #
+    # Used by TAINT-GH-007 to suppress TAINT-GH-006 fires when every
+    # in-repo caller of THIS reusable workflow passes literal /
+    # matrix-literal values to the input (no attacker reachability).
+    # Sample-and-label of TAINT-GH-006's 21 corpus fires found 19/21
+    # FP because of this exact shape (matrix-driven build/test fan-
+    # out into a callee that takes inputs).
+    # ------------------------------------------------------------------
+
+    def find_callers_of_self(self) -> tuple[CallerInfo, ...]:
+        """Return CallerInfo for every workflow file in the same
+        ``.github/workflows/`` directory that invokes the current
+        file via ``uses: ./.github/workflows/<self>.yml`` (or any
+        other ``uses:`` reference whose suffix matches the current
+        filename).
+
+        Empty tuple when:
+
+        * ``self.filepath`` is ``None`` (no engine context — unit
+          tests / self-test samples).
+        * ``self.filepath``'s parent directory has no other YAML
+          workflow files.
+        * No file in the parent directory references the current
+          file via ``uses:``.
+
+        Result is cached on the predicate context for the lifetime
+        of one ``check()`` call so a rule that calls this in its
+        per-leaf predicate doesn't re-walk the directory on every
+        leaf.
+        """
+        if self._caller_graph_cache is not None:
+            return self._caller_graph_cache
+        if not self.filepath:
+            self._caller_graph_cache = ()
+            return ()
+        callers: list[CallerInfo] = []
+        try:
+            self_path = Path(self.filepath).resolve()
+            self_name = self_path.name
+            wf_dir = self_path.parent
+        except (OSError, ValueError):
+            self._caller_graph_cache = ()
+            return ()
+        if not wf_dir.exists():
+            self._caller_graph_cache = ()
+            return ()
+        for sibling in sorted(wf_dir.iterdir()):
+            if not sibling.is_file():
+                continue
+            if sibling.suffix not in (".yml", ".yaml"):
+                continue
+            if sibling.resolve() == self_path:
+                continue
+            try:
+                content = sibling.read_text(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                continue
+            callers.extend(_parse_callers(content, self_name, str(sibling)))
+        self._caller_graph_cache = tuple(callers)
+        return self._caller_graph_cache
+
     def is_reusable_workflow(self) -> bool:
         """True if the file is a GitHub Actions reusable workflow.
 
@@ -195,6 +307,143 @@ class PredicateContext:
 
 
 PredicateFn = Callable[[str, str, tuple[object, ...], PredicateContext], bool]
+
+
+@dataclass(frozen=True)
+class CallerInfo:
+    """Parsed information about a workflow file that invokes another
+    reusable workflow.
+
+    Returned by :meth:`PredicateContext.find_callers_of_self`.  The
+    fields are minimal — only what TAINT-GH-007 needs to decide
+    whether a callee's ``inputs.X`` reference can be reached by
+    attacker bytes.
+    """
+
+    caller_path: str
+    """Absolute path to the calling workflow file."""
+
+    triggers: tuple[str, ...]
+    """Trigger event names declared on the caller (``on:``)."""
+
+    with_map: dict[str, str]
+    """Map of input-name → caller's ``with:`` value, as a literal
+    string.  Multi-line / structured values are flattened to their
+    raw text representation for predicate inspection."""
+
+    def passes_only_literals(self) -> bool:
+        """True when every value in ``with_map`` looks like a
+        trusted-literal — no attacker-reachable context references.
+
+        Heuristic: a value is *trusted* if it does NOT contain any of
+        ``github.event.*``, ``github.head_ref``, ``github.actor``,
+        or ``${{ inputs.* }}`` (forwarding-from-own-inputs case).
+        Matrix literals (``${{ matrix.X }}``) are trusted because
+        the matrix is workflow-author-controlled.
+        """
+        if not self.with_map:
+            return True
+        for value in self.with_map.values():
+            if _ATTACKER_REACHABLE_CONTEXT_RE.search(value):
+                return False
+        return True
+
+
+# Attacker-reachable expression shapes inside a caller's ``with:``
+# value.  If ANY of these appear in any forwarded value, the caller
+# can plausibly transport attacker bytes into the callee's
+# ``inputs.X`` namespace, so TAINT-GH-006 should NOT be suppressed.
+_ATTACKER_REACHABLE_CONTEXT_RE = re.compile(
+    r"\$\{\{\s*github\.(?:"
+    r"event\.(?:issue|pull_request|comment|review|head_commit|"
+    r"discussion|workflow_run|push|release)\.|"
+    r"head_ref|"
+    r"event\.inputs\."
+    r")"
+    r"|\$\{\{\s*inputs\."
+)
+
+
+def _parse_callers(content: str, callee_name: str, caller_path: str) -> list[CallerInfo]:
+    """Extract CallerInfo objects from a workflow file's text.
+
+    Walks the workflow with the structural reader, looking for
+    ``jobs.<job>.uses`` leaves whose value ends in ``/<callee_name>``
+    (or is ``./.github/workflows/<callee_name>``).  For each caller
+    job, collects the corresponding ``jobs.<job>.with.*`` map and
+    the file's ``on:`` triggers.
+
+    Errors during parsing yield no callers — the rule should fall
+    back to firing (conservative) rather than silently suppressing.
+    """
+    try:
+        leaves = [
+            ev
+            for ev in walk_workflow(caller_path, content=content, recover=True)
+            if ev.kind == EventKind.LEAF_SCALAR
+        ]
+    except Exception:
+        return []
+
+    # Triggers: any leaf whose path starts with ('on',).  Collect both
+    # the bare-string form (path == ('on',), value is the event name)
+    # and the block-form (path[1] is the event name, ignore values).
+    triggers: list[str] = []
+    for ev in leaves:
+        if not ev.path or ev.path[0] != "on":
+            continue
+        if ev.path == ("on",) and ev.value:
+            triggers.append(ev.value)
+        elif len(ev.path) >= 2 and isinstance(ev.path[1], str):
+            triggers.append(ev.path[1])
+        elif len(ev.path) == 2 and isinstance(ev.path[1], int) and ev.value:
+            triggers.append(ev.value)
+
+    # Group leaves by job for ``jobs.<job>.uses`` + ``jobs.<job>.with.*``
+    # pairing.  Reusable-workflow callers use the JOB-level form
+    # (``jobs: build: uses: ./.../x.yml`` + ``jobs: build: with: ...``);
+    # a step-level uses (``jobs.<j>.steps[*].uses``) is an action call,
+    # not a reusable-workflow call.
+    job_uses: dict[str, str] = {}
+    job_with: dict[str, dict[str, str]] = {}
+    for ev in leaves:
+        path = ev.path
+        if (
+            len(path) == 3
+            and path[0] == "jobs"
+            and isinstance(path[1], str)
+            and path[2] == "uses"
+            and ev.value
+        ):
+            job_uses[path[1]] = ev.value
+        elif (
+            len(path) >= 4
+            and path[0] == "jobs"
+            and isinstance(path[1], str)
+            and path[2] == "with"
+            and isinstance(path[3], str)
+            and ev.value is not None
+        ):
+            job_with.setdefault(path[1], {})[path[3]] = ev.value
+
+    callers: list[CallerInfo] = []
+    unique_triggers = tuple(sorted(set(triggers)))
+    for job_id, uses_value in job_uses.items():
+        # Match callee_name as the trailing path segment of the uses
+        # reference.  Both ``./.github/workflows/<name>``,
+        # ``./<name>``, and cross-repo
+        # ``<org>/<repo>/.github/workflows/<name>@<ref>`` resolve.
+        head = uses_value.split("@", 1)[0].strip()
+        if not (head.endswith("/" + callee_name) or head == callee_name):
+            continue
+        callers.append(
+            CallerInfo(
+                caller_path=caller_path,
+                triggers=unique_triggers,
+                with_map=dict(job_with.get(job_id, {})),
+            )
+        )
+    return callers
 
 
 @dataclass
@@ -244,7 +493,10 @@ class WorkflowAwarePattern:
             if ev.kind == EventKind.LEAF_SCALAR:
                 all_leaves.append(ev)
 
-        ctx = PredicateContext(leaves=tuple(all_leaves))
+        ctx = PredicateContext(
+            leaves=tuple(all_leaves),
+            filepath=_current_filepath.get(),
+        )
 
         # Pass 2: per-glob query against the same content.  Walking
         # again with a query is cheap (single-pass tokenizer) and
@@ -328,4 +580,10 @@ class WorkflowAwarePattern:
         return value
 
 
-__all__ = ["PredicateContext", "PredicateFn", "WorkflowAwarePattern"]
+__all__ = [
+    "CallerInfo",
+    "PredicateContext",
+    "PredicateFn",
+    "WorkflowAwarePattern",
+    "set_pattern_filepath_context",
+]

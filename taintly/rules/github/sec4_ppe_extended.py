@@ -1192,4 +1192,151 @@ RULES: list[Rule] = [
         ),
         incidents=[],
     ),
+    # =========================================================================
+    # SEC4-GH-021: ``github.actor`` (or bot-login) used as a trust gate
+    # =========================================================================
+    # Phase 8 iter-4 (2026-05-04): ``github.actor``-as-trust-gate.
+    # Workflows commonly gate privileged operations on
+    # ``github.actor == 'dependabot[bot]'`` or similar, under the
+    # assumption that the actor field is a safe bot identity.  In
+    # several trigger paths this assumption is wrong:
+    #
+    #   * ``workflow_run`` triggered by a forked PR's workflow runs
+    #     under the *fork author*, but ``github.actor`` reflects the
+    #     triggering workflow's actor — easy to confuse.
+    #   * ``pull_request`` from a fork can spoof a bot login by
+    #     committing as ``Dependabot <noreply@...>`` (the actor still
+    #     reads as the PR author, but downstream hash-checking is
+    #     surprising).
+    #   * Bot logins shadowed by a user with that exact display name
+    #     can route around the gate on legacy events.
+    #
+    # The rule is a sibling of SEC4-GH-010 (actor in log message);
+    # there the actor is observed but not trusted, here it IS trusted.
+    # Industry peer audits (e.g. zizmor's ``bot-conditions``) cover
+    # the same threat class.
+    Rule(
+        id="SEC4-GH-021",
+        title="``github.actor`` used as a trust gate (bot-conditions)",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        review_needed=True,
+        confidence="medium",
+        finding_family="privileged_pr_trigger",
+        description=(
+            "A workflow gates a privileged operation on a "
+            "``github.actor == '<bot>[bot]'`` (or similar bot login) "
+            "comparison.  ``github.actor`` is not a strong-trust "
+            "channel: bot identities can be spoofed in some commit-"
+            "actor combinations, ``workflow_run`` chains conflate "
+            "the triggering and originating actors, and a user "
+            "account with the bot's display name shadows the gate "
+            "on legacy event paths.  Whenever a positive actor "
+            "match unlocks secrets, an environment, or a write-"
+            "scope ``GITHUB_TOKEN``, the gate becomes a target."
+        ),
+        pattern=ContextPattern(
+            # Anchor: ``github.actor == 'dependabot[bot]'`` /
+            # ``github.actor == 'renovate[bot]'`` /
+            # ``github.event.sender.login == 'X[bot]'`` and similar.
+            # ``[bot]`` literal is the giveaway — actual user logins
+            # don't end in that suffix.  Quoting variants supported.
+            anchor=(
+                r"(?:github\.actor|github\.triggering_actor|"
+                r"github\.event\.sender\.login)"
+                r"\s*==\s*['\"][\w-]+\[bot\]['\"]"
+            ),
+            # Requires a privileged context in the same file:
+            # secrets reference, environment binding, or pull_request
+            # / workflow_run trigger that the gate would be guarding.
+            requires=(
+                r"\$\{\{\s*secrets\.[A-Z_][A-Z0-9_]*\s*\}\}"
+                r"|^\s+environment\s*:"
+                r"|^\s*on:\s*workflow_run\b"
+                r"|^\s+workflow_run\s*:"
+                r"|^\s*on:\s*pull_request_target\b"
+                r"|^\s+pull_request_target\s*:"
+            ),
+            scope="file",
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Don't trust ``github.actor`` for security decisions.  "
+            "Either:\n"
+            "  1. Split the workflow into a non-privileged "
+            "``pull_request`` half (read-only, no secrets) and a "
+            "privileged ``workflow_run`` half gated on the upstream "
+            "workflow's name AND ``conclusion == 'success'`` — and "
+            "still treat the head_sha as untrusted.\n"
+            "  2. Verify the PR commit is signed by the bot's "
+            "expected verified-commit identity, not just the "
+            "actor field.\n"
+            "  3. For Dependabot specifically, prefer "
+            "``dependabot/fetch-metadata`` to validate that the PR "
+            "is genuinely a Dependabot update rather than asserting "
+            "it via ``github.actor``."
+        ),
+        reference=(
+            "https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/"
+        ),
+        test_positive=[
+            (
+                "on: pull_request_target\n"
+                "jobs:\n  auto-merge:\n    runs-on: ubuntu-latest\n"
+                "    if: github.actor == 'dependabot[bot]'\n"
+                "    steps:\n"
+                "      - run: gh pr merge --auto\n"
+                "        env:\n          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n"
+            ),
+            (
+                "on: workflow_run\n"
+                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
+                "    if: github.event.sender.login == 'release-bot[bot]'\n"
+                "    steps:\n"
+                "      - run: deploy.sh\n"
+                "        env:\n          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n"
+            ),
+        ],
+        test_negative=[
+            # Actor compared to a non-bot login — different threat
+            # shape (covered by other rules); not bot-conditions.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n  test:\n    if: github.actor == 'asaf'\n"
+                "    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n"
+            ),
+            # Bot equality but no privileged context — anchor fires
+            # but requires fails.  No secret, no environment, no
+            # privileged trigger.
+            (
+                "on: push\n"
+                "jobs:\n  log:\n    runs-on: ubuntu-latest\n"
+                "    if: github.actor == 'dependabot[bot]'\n"
+                "    steps:\n      - run: echo $GITHUB_ACTOR\n"
+            ),
+            # Comment.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n  test:\n"
+                "#    if: github.actor == 'dependabot[bot]'\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: echo hi\n"
+            ),
+        ],
+        stride=["S", "E"],
+        threat_narrative=(
+            "An attacker submits a PR or chains a ``workflow_run`` "
+            "trigger that lands the privileged half of the workflow "
+            "with ``github.actor`` set to (or appearing to be) a "
+            "trusted bot identity.  The actor-equality gate "
+            "evaluates true; the privileged step runs with the "
+            "caller's full secret set and write-scope token.  Because "
+            "the actor field is observable BUT not cryptographically "
+            "verified at the workflow boundary, every workflow that "
+            "trusts it as the sole gate is one trigger-path "
+            "discovery away from compromise."
+        ),
+        incidents=[],
+    ),
 ]
