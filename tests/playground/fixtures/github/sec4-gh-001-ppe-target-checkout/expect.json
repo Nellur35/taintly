@@ -1,0 +1,16 @@
+{
+  "platform": "github",
+  "vulnerable": {
+    "must_fire": ["SEC4-GH-001"],
+    "must_not_fire": []
+  },
+  "fixed": {
+    "must_fire": [],
+    "must_not_fire": ["SEC4-GH-001"]
+  },
+  "fix_invariants": {
+    "still_parses": true,
+    "jobs": ["build"],
+    "steps_per_job": {"build": 2}
+  }
+}

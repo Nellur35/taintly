@@ -1,0 +1,9 @@
+# vulnerable: pulls a remote include from an unpinned, mutable URL — author can swap content
+# EXPECT: SEC3-GL-001 fires (HIGH)
+include:
+  - remote: 'https://example.com/shared/build.yml'
+
+build:
+  stage: build
+  script:
+    - make build

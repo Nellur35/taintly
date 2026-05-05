@@ -1,0 +1,16 @@
+// vulnerable: hardcoded credential in shell — pipeline lifts it into env, leaks via process list
+// EXPECT: a SEC6-JK-* secret-handling rule fires
+pipeline {
+    agent any
+    environment {
+        AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE'
+        AWS_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+    }
+    stages {
+        stage('deploy') {
+            steps {
+                sh 'aws s3 cp build.tgz s3://my-bucket/'
+            }
+        }
+    }
+}

@@ -1,0 +1,12 @@
+{
+  "platform": "github",
+  "vulnerable": {
+    "must_fire": ["AI-GH-036", "AI-GH-039"],
+    "must_not_fire": []
+  },
+  "fixed": {
+    "must_fire": ["AI-GH-036"],
+    "must_not_fire": ["AI-GH-039"]
+  },
+  "notes": "AI-GH-036 always fires when CLAUDE.md exists (inventory). AI-GH-039 fires only when the file's content has directive×mutable-remote-ref outside fenced code blocks. The fixed CLAUDE.md keeps the file (and AI-GH-036) but moves the unpinned curl|bash into a fenced code block (illustration, not directive)."
+}
