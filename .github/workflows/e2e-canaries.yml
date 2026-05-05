@@ -59,7 +59,25 @@ jobs:
           git checkout "$CANARY_SHA"
 
       - name: Scan canary
-        run: python -m taintly /tmp/canary --format json > canary.json
+        # taintly exit codes 0/1/2/11 all mean "scan completed and emitted
+        # JSON" (clean / HIGH findings / CRITICAL findings / coverage
+        # degraded).  Any of those is fine for a smoke test — the gate is
+        # "did the scanner produce parseable output," not "did it find
+        # nothing."  Anything else (3 config error, segfault, unexpected
+        # exit) is a real failure.
+        run: |
+          set +e
+          python -m taintly /tmp/canary --format json > canary.json
+          rc=$?
+          set -e
+          case "$rc" in
+            0|1|2|11) echo "taintly exit=$rc (scan completed, JSON emitted)" ;;
+            *)
+              echo "::error::taintly exit=$rc — unexpected scanner failure"
+              head -c 4000 canary.json || true
+              exit 1
+              ;;
+          esac
 
       - name: Summarize
         run: |
