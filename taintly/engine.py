@@ -64,6 +64,13 @@ _PROJECT_SCOPE_RULES: frozenset[str] = frozenset(
         # so the per-file fan-out is noise.  Project-scope dedup keeps
         # the first occurrence per scan.
         "AI-GH-036",
+        # AI-GH-039 reads the agent-instruction file's *content* at
+        # repo-root scope and fires on directive×mutable-remote-ref.
+        # Same dedup rationale as AI-GH-036 — the underlying state is
+        # repo-content, not workflow-content, so per-file fan-out is
+        # noise.  AI-GH-037 / AI-GH-038 are step-scoped and stay
+        # off this list.
+        "AI-GH-039",
     }
 )
 
