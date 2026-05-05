@@ -563,11 +563,19 @@ _DOC_DOMAIN_HOSTS: tuple[str, ...] = (
     "localhost",
 )
 
+# github.com host anchor — matches only when github.com is the actual
+# URL host, not a substring appearing in the path or query of an
+# arbitrary URL (CodeQL py/incomplete-url-substring-sanitization).
+_GITHUB_HOST_RE = re.compile(
+    r"^https?://(?:www\.)?github\.com/",
+    re.IGNORECASE,
+)
+
 # github.com paths that ARE fetchable content sources (raw files,
 # release-asset downloads, archive tarballs) — these stay flagged
 # even when other github.com paths get allowlisted as citations.
 _GITHUB_FETCHABLE_PATH_RE = re.compile(
-    r"github\.com/[^/]+/[^/]+/(?:raw|releases/download|archive)/",
+    r"^https?://(?:www\.)?github\.com/[^/]+/[^/]+/(?:raw|releases/download|archive)/",
     re.IGNORECASE,
 )
 
@@ -584,7 +592,9 @@ def _is_doc_domain_url(url: str) -> bool:
     for host in _DOC_DOMAIN_HOSTS:
         if host in lowered:
             return True
-    if "github.com/" in lowered:
+    # Match github.com only as the actual host, not as a substring
+    # appearing elsewhere in the URL (e.g. `https://evil.com/?ref=github.com/x`).
+    if _GITHUB_HOST_RE.match(lowered):
         # Fetchable github paths (raw / releases-download / archive)
         # still fire; everything else on github.com — bare repo URL,
         # issues/pull/wiki/blob/tree/discussions paths, profile pages
@@ -628,9 +638,7 @@ def _strip_fenced_code_blocks(text: str) -> str:
     consideration.  Fenced-block content is illustration, not
     directive — citing ``curl … | bash`` inside a fenced block in a
     README doesn't bind the agent to run it."""
-    return _FENCED_CODE_BLOCK_RE.sub(
-        lambda m: "\n" * m.group(0).count("\n"), text
-    )
+    return _FENCED_CODE_BLOCK_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
 
 
 def _scan_directive_intersection(text: str) -> bool:
@@ -700,9 +708,7 @@ class _AgentInstructionWritePattern:
         return self._check_text_fallback(content, lines)
 
     @staticmethod
-    def _check_text_fallback(
-        content: str, lines: list[str]
-    ) -> list[tuple[int, str]]:
+    def _check_text_fallback(content: str, lines: list[str]) -> list[tuple[int, str]]:
         # Self-test fixture marker shortcut.
         if _AI_GH_037_FIXTURE_MARKER in content:
             for i, line in enumerate(lines, 1):
@@ -747,9 +753,7 @@ class _AgentInstructionRenderPattern:
         return self._check_text_fallback(content, lines)
 
     @staticmethod
-    def _check_text_fallback(
-        content: str, lines: list[str]
-    ) -> list[tuple[int, str]]:
+    def _check_text_fallback(content: str, lines: list[str]) -> list[tuple[int, str]]:
         if not _FORK_REACHABLE_TRIGGER_RE.search(content):
             return []
         # Self-test fixture marker shortcut (still gated on fork-
@@ -5996,7 +6000,7 @@ RULES: list[Rule] = [
                 "  build:\n"
                 "    runs-on: ubuntu-latest\n"
                 "    steps:\n"
-                "      - run: echo \"${{ github.event.comment.body }}\" >> AGENTS.md\n"
+                '      - run: echo "${{ github.event.comment.body }}" >> AGENTS.md\n'
             ),
             # Env-routed taint: the run text uses $TITLE which is
             # bound from github.event.pull_request.title via env:.
@@ -6030,7 +6034,7 @@ RULES: list[Rule] = [
                 "    runs-on: ubuntu-latest\n"
                 "    steps:\n"
                 "      - run: |\n"
-                "          echo \"${{ github.event.head_commit.message }}\" >> CLAUDE.md\n"
+                '          echo "${{ github.event.head_commit.message }}" >> CLAUDE.md\n'
             ),
             # Fork-reachable trigger but no attacker context (only
             # github.repository, which is workflow-author-controlled).
@@ -6040,7 +6044,7 @@ RULES: list[Rule] = [
                 "  build:\n"
                 "    runs-on: ubuntu-latest\n"
                 "    steps:\n"
-                "      - run: echo \"repo=${{ github.repository }}\" >> CLAUDE.md\n"
+                '      - run: echo "repo=${{ github.repository }}" >> CLAUDE.md\n'
             ),
             # Writes to a non-instruction file (CHANGELOG, not CLAUDE).
             (
@@ -6049,7 +6053,7 @@ RULES: list[Rule] = [
                 "  build:\n"
                 "    runs-on: ubuntu-latest\n"
                 "    steps:\n"
-                "      - run: echo \"${{ github.event.pull_request.title }}\" >> CHANGELOG.md\n"
+                '      - run: echo "${{ github.event.pull_request.title }}" >> CHANGELOG.md\n'
             ),
         ],
         stride=["T", "S", "E"],
