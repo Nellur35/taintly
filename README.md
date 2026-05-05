@@ -299,7 +299,7 @@ do not recompute risk.
 ## Coverage
 
 <!-- AUTOGEN:summary -->
-239 file-based rules and 29 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+242 file-based rules and 29 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 <!-- AUTOGEN:coverage -->
@@ -315,7 +315,7 @@ do not recompute risk.
 | SEC-8 — Ungoverned 3rd Party Services | 4 | 3 | 4 |
 | SEC-9 — Improper Artifact Integrity | 6 | 3 | 3 |
 | SEC-10 — Insufficient Logging | 4 | 2 | 1 |
-| AI / ML | 36 | 16 | 12 |
+| AI / ML | 39 | 16 | 12 |
 | TAINT — Multi-stage taint flows | 13 | 4 | 2 |
 <!-- /AUTOGEN:coverage -->
 
