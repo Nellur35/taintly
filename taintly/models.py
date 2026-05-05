@@ -46,7 +46,7 @@ class scan_session:
         if os.name != "posix":
             return self
         try:
-            self._old_handler = signal.signal(signal.SIGALRM, _pattern_timeout_handler)  # type: ignore[attr-defined]
+            self._old_handler = signal.signal(signal.SIGALRM, _pattern_timeout_handler)  # type: ignore[attr-defined,unused-ignore]
         except (ValueError, OSError):
             return self
         self._installed = True
@@ -55,8 +55,8 @@ class scan_session:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if not self._installed:
             return
-        signal.alarm(0)  # type: ignore[attr-defined]
-        signal.signal(signal.SIGALRM, self._old_handler)  # type: ignore[attr-defined]
+        signal.alarm(0)  # type: ignore[attr-defined,unused-ignore]
+        signal.signal(signal.SIGALRM, self._old_handler)  # type: ignore[attr-defined,unused-ignore]
 
 
 _MATCH_TEXT_MAX_LEN = 200
@@ -224,7 +224,7 @@ def _safe_search(compiled_pattern, text: str):
     # because we still observe and restore their handler on the first
     # call into each entry.
     try:
-        current = signal.getsignal(signal.SIGALRM)  # type: ignore[attr-defined]
+        current = signal.getsignal(signal.SIGALRM)  # type: ignore[attr-defined,unused-ignore]
     except (ValueError, OSError):
         return compiled_pattern.search(text)
 
@@ -232,18 +232,18 @@ def _safe_search(compiled_pattern, text: str):
     old_handler = current
     if need_swap:
         try:
-            signal.signal(signal.SIGALRM, _pattern_timeout_handler)  # type: ignore[attr-defined]
+            signal.signal(signal.SIGALRM, _pattern_timeout_handler)  # type: ignore[attr-defined,unused-ignore]
         except (ValueError, OSError):
             return compiled_pattern.search(text)
-    signal.alarm(5)  # type: ignore[attr-defined]
+    signal.alarm(5)  # type: ignore[attr-defined,unused-ignore]
     try:
         return compiled_pattern.search(text)
     except _PatternTimeout:
         return None
     finally:
-        signal.alarm(0)  # type: ignore[attr-defined]
+        signal.alarm(0)  # type: ignore[attr-defined,unused-ignore]
         if need_swap:
-            signal.signal(signal.SIGALRM, old_handler)  # type: ignore[attr-defined]
+            signal.signal(signal.SIGALRM, old_handler)  # type: ignore[attr-defined,unused-ignore]
 
 
 # =============================================================================
