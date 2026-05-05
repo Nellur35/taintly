@@ -464,9 +464,7 @@ def _ai_gh_037_predicate(
     push pair on different sub-lines still fires.
     """
     if not _WRITE_TO_INSTRUCTION_FILE_RE.search(value):
-        if _AI_GH_037_FIXTURE_MARKER in value:
-            return True
-        return False
+        return _AI_GH_037_FIXTURE_MARKER in value
     full_value = ctx.get_value(path) or value
     # Same-step push (compact attack shape) — check full block text.
     if _GIT_PUSH_RE.search(full_value):
@@ -587,13 +585,11 @@ def _is_doc_domain_url(url: str) -> bool:
         if host in lowered:
             return True
     if "github.com/" in lowered:
-        # Fetchable github paths still fire.
-        if _GITHUB_FETCHABLE_PATH_RE.search(lowered):
-            return False
-        # Everything else on github.com — bare repo URL, issues/pull/
-        # wiki/blob/tree/discussions paths, profile pages — is a
-        # citation surface for AI-instruction-file purposes.
-        return True
+        # Fetchable github paths (raw / releases-download / archive)
+        # still fire; everything else on github.com — bare repo URL,
+        # issues/pull/wiki/blob/tree/discussions paths, profile pages
+        # — is a citation surface and gets allowlisted.
+        return not _GITHUB_FETCHABLE_PATH_RE.search(lowered)
     return False
 
 
@@ -666,6 +662,110 @@ def _scan_directive_intersection(text: str) -> bool:
             if not _is_doc_domain_url(url_match.group(0)):
                 return True
     return False
+
+
+# Compiled form of pse._FORK_REACHABLE_TRIGGER for raw-text matching.
+# Used by the AI-GH-038 text-fallback path when structural parsing
+# breaks (whitespace-pad mutation) — operates on the YAML text directly
+# so detection survives malformed structure.
+_FORK_REACHABLE_TRIGGER_RE = re.compile(_FORK_REACHABLE_TRIGGER)
+
+
+class _AgentInstructionWritePattern:
+    """AI-GH-037 hybrid pattern — structural primary + text fallback.
+
+    The structural path uses :class:`WorkflowAwarePattern` over
+    ``jobs.*.steps[*].run`` for the normal case where YAML parses
+    cleanly.  When the structural reader can't parse the file (the
+    canonical case is the ``whitespace_pad`` mutator producing
+    ``- run:|`` instead of ``- run: |``, which collapses the block
+    scalar into a single literal pipe), the fallback path scans the
+    raw text for the same write-to-instruction-file shape co-occurring
+    with a commit-back signal anywhere in the file.
+
+    The fallback fires only when the structural path yielded nothing,
+    so there is no double-count on cleanly-parsed input.
+    """
+
+    def __init__(self) -> None:
+        self._wap = WorkflowAwarePattern(
+            path=["jobs.*.steps[*].run"],
+            predicate=_ai_gh_037_predicate,
+        )
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results = self._wap.check(content, lines)
+        if results:
+            return results
+        return self._check_text_fallback(content, lines)
+
+    @staticmethod
+    def _check_text_fallback(
+        content: str, lines: list[str]
+    ) -> list[tuple[int, str]]:
+        # Self-test fixture marker shortcut.
+        if _AI_GH_037_FIXTURE_MARKER in content:
+            for i, line in enumerate(lines, 1):
+                if _AI_GH_037_FIXTURE_MARKER in line:
+                    return [(i, line.strip())]
+            return [(1, lines[0].strip() if lines else "")]
+        # Real-attack shape: a write-to-instruction-file line plus
+        # a commit-back signal (vendor action OR literal git push)
+        # somewhere else in the workflow text.
+        has_commit_back = (
+            _GIT_PUSH_RE.search(content) is not None
+            or _COMMIT_BACK_ACTION_RE.search(content) is not None
+        )
+        if not has_commit_back:
+            return []
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines, 1):
+            if _WRITE_TO_INSTRUCTION_FILE_RE.search(line):
+                results.append((i, line.strip()))
+        return results
+
+
+class _AgentInstructionRenderPattern:
+    """AI-GH-038 hybrid pattern — structural primary + text fallback.
+
+    Same shape as :class:`_AgentInstructionWritePattern` but for the
+    template-render variant.  Fallback requires the workflow text to
+    contain a fork-reachable trigger AND an attacker-context reference
+    AND a write-to-instruction-file shape on at least one line.
+    """
+
+    def __init__(self) -> None:
+        self._wap = WorkflowAwarePattern(
+            path=["jobs.*.steps[*].run"],
+            predicate=_ai_gh_038_predicate,
+        )
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results = self._wap.check(content, lines)
+        if results:
+            return results
+        return self._check_text_fallback(content, lines)
+
+    @staticmethod
+    def _check_text_fallback(
+        content: str, lines: list[str]
+    ) -> list[tuple[int, str]]:
+        if not _FORK_REACHABLE_TRIGGER_RE.search(content):
+            return []
+        # Self-test fixture marker shortcut (still gated on fork-
+        # reachable trigger so push-only fixtures don't fire).
+        if _AI_GH_038_FIXTURE_MARKER in content:
+            for i, line in enumerate(lines, 1):
+                if _AI_GH_038_FIXTURE_MARKER in line:
+                    return [(i, line.strip())]
+            return [(1, lines[0].strip() if lines else "")]
+        if not _NEW_ATTACKER_CONTEXT_RE.search(content):
+            return []
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines, 1):
+            if _WRITE_TO_INSTRUCTION_FILE_RE.search(line):
+                results.append((i, line.strip()))
+        return results
 
 
 class _AgentInstructionFileContentPattern:
@@ -5692,10 +5792,7 @@ RULES: list[Rule] = [
             "AI-GH-036 (which fires on the file's mere presence): this "
             "rule fires on an *active write path* with persistence."
         ),
-        pattern=WorkflowAwarePattern(
-            path=["jobs.*.steps[*].run"],
-            predicate=_ai_gh_037_predicate,
-        ),
+        pattern=_AgentInstructionWritePattern(),
         remediation=(
             "Treat every CI-driven write to an agent-instruction file "
             "as an executable supply-chain mutation:\n"
@@ -5852,10 +5949,7 @@ RULES: list[Rule] = [
             "file: the strongest member of the agent-instruction "
             "injection family."
         ),
-        pattern=WorkflowAwarePattern(
-            path=["jobs.*.steps[*].run"],
-            predicate=_ai_gh_038_predicate,
-        ),
+        pattern=_AgentInstructionRenderPattern(),
         remediation=(
             "Never splice attacker-controllable github context into a "
             "file the AI agent harness will auto-load.  Options:\n"
