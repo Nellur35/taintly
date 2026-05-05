@@ -115,7 +115,21 @@ jobs:
           git checkout "$CANARY_SHA"
 
       - name: Scan canary
-        run: python -m taintly /tmp/canary --platform gitlab --format json > canary.json
+        # See note in canary-github above — taintly exits 0/1/2/11 on
+        # successful scans; only 3 / unexpected codes are real failures.
+        run: |
+          set +e
+          python -m taintly /tmp/canary --platform gitlab --format json > canary.json
+          rc=$?
+          set -e
+          case "$rc" in
+            0|1|2|11) echo "taintly exit=$rc (scan completed, JSON emitted)" ;;
+            *)
+              echo "::error::taintly exit=$rc — unexpected scanner failure"
+              head -c 4000 canary.json || true
+              exit 1
+              ;;
+          esac
 
       - name: Summarize
         run: |
@@ -153,7 +167,21 @@ jobs:
           git checkout "$CANARY_SHA"
 
       - name: Scan canary
-        run: python -m taintly /tmp/canary --platform jenkins --format json > canary.json
+        # See note in canary-github above — taintly exits 0/1/2/11 on
+        # successful scans; only 3 / unexpected codes are real failures.
+        run: |
+          set +e
+          python -m taintly /tmp/canary --platform jenkins --format json > canary.json
+          rc=$?
+          set -e
+          case "$rc" in
+            0|1|2|11) echo "taintly exit=$rc (scan completed, JSON emitted)" ;;
+            *)
+              echo "::error::taintly exit=$rc — unexpected scanner failure"
+              head -c 4000 canary.json || true
+              exit 1
+              ;;
+          esac
 
       - name: Summarize
         run: |
