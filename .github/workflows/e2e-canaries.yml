@@ -1,0 +1,148 @@
+name: E2E canaries
+
+# Layer 3 of the "don't ship broken rules" enforcement.  The 76-repo
+# Phase 8 corpus is a fixed set; this workflow scans three OUTSIDE-
+# corpus canary repos (one per platform) on every PR so a scanner
+# regression that only surfaces on real-world repos gets caught BEFORE
+# merge, not after.
+#
+# Gates (v1, smoke test):
+#   * taintly itself exits cleanly (no scanner crash, no Python
+#     exception bubbling out).
+#   * Findings JSON parses (output is valid).
+#
+# Surfaces (notices, not blockers):
+#   * Total finding count per canary.
+#   * ENGINE-ERR count per canary (structural-coverage drift signal —
+#     LOW-severity, expected on repos with complex YAML extends/anchors;
+#     a future v2 will gate on count <= baseline).
+#
+# Future v2:
+#   * Baseline-vs-current drift gate on findings count and ENGINE-ERR
+#     count, baselines in .github/canary-baselines/, auto-updated on
+#     main merge, fail PRs that drift > 20%.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary-github:
+    name: E2E canary (GitHub Actions — astral-sh/uv)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      CANARY_REPO: https://github.com/astral-sh/uv.git
+      CANARY_SHA: e5d20c6e3a67900b499de4cee45513182d55d686
+      CANARY_NAME: astral-sh/uv
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Clone canary at pinned SHA
+        run: |
+          git clone --filter=blob:none --no-checkout "$CANARY_REPO" /tmp/canary
+          cd /tmp/canary
+          git checkout "$CANARY_SHA"
+
+      - name: Scan canary
+        run: python -m taintly /tmp/canary --format json > canary.json
+
+      - name: Summarize
+        run: |
+          python <<'PY'
+          import json, os
+          d = json.load(open('canary.json'))
+          findings = d.get('findings', [])
+          err = [f for f in findings if f.get('rule_id','').startswith('ENGINE-ERR')]
+          print(f"::notice::{os.environ['CANARY_NAME']} @ {os.environ['CANARY_SHA'][:7]}: {len(findings)} findings, {len(err)} ENGINE-ERR")
+          PY
+
+  canary-gitlab:
+    name: E2E canary (GitLab CI — gitlab-org/gitlab-runner)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      CANARY_REPO: https://gitlab.com/gitlab-org/gitlab-runner.git
+      CANARY_SHA: b22b1035770a5f13e648b3d2bc3fedb1f3a59b1c
+      CANARY_NAME: gitlab-org/gitlab-runner
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Clone canary at pinned SHA
+        run: |
+          git clone --filter=blob:none --no-checkout "$CANARY_REPO" /tmp/canary
+          cd /tmp/canary
+          git checkout "$CANARY_SHA"
+
+      - name: Scan canary
+        run: python -m taintly /tmp/canary --platform gitlab --format json > canary.json
+
+      - name: Summarize
+        run: |
+          python <<'PY'
+          import json, os
+          d = json.load(open('canary.json'))
+          findings = d.get('findings', [])
+          err = [f for f in findings if f.get('rule_id','').startswith('ENGINE-ERR')]
+          print(f"::notice::{os.environ['CANARY_NAME']} @ {os.environ['CANARY_SHA'][:7]}: {len(findings)} findings, {len(err)} ENGINE-ERR")
+          PY
+
+  canary-jenkins:
+    name: E2E canary (Jenkins — jenkinsci/plugin-installation-manager-tool)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      CANARY_REPO: https://github.com/jenkinsci/plugin-installation-manager-tool.git
+      CANARY_SHA: 28b6ac3f9b1c5fd7b0bf8095d41a7e5c408c8ccd
+      CANARY_NAME: jenkinsci/plugin-installation-manager-tool
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Clone canary at pinned SHA
+        run: |
+          git clone --filter=blob:none --no-checkout "$CANARY_REPO" /tmp/canary
+          cd /tmp/canary
+          git checkout "$CANARY_SHA"
+
+      - name: Scan canary
+        run: python -m taintly /tmp/canary --platform jenkins --format json > canary.json
+
+      - name: Summarize
+        run: |
+          python <<'PY'
+          import json, os
+          d = json.load(open('canary.json'))
+          findings = d.get('findings', [])
+          err = [f for f in findings if f.get('rule_id','').startswith('ENGINE-ERR')]
+          print(f"::notice::{os.environ['CANARY_NAME']} @ {os.environ['CANARY_SHA'][:7]}: {len(findings)} findings, {len(err)} ENGINE-ERR")
+          PY
