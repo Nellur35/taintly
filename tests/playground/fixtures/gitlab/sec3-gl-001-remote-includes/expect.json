@@ -1,0 +1,14 @@
+{
+  "platform": "gitlab",
+  "vulnerable": {
+    "must_fire": ["SEC3-GL-001"],
+    "must_not_fire": []
+  },
+  "fixed": {
+    "must_fire": [],
+    "must_not_fire": ["SEC3-GL-001"]
+  },
+  "fix_invariants": {
+    "still_parses": true
+  }
+}

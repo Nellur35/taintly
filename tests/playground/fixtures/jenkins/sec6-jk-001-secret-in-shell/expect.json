@@ -1,0 +1,10 @@
+{
+  "platform": "jenkins",
+  "vulnerable": {
+    "must_fire_any_of": ["SEC6-JK-001", "SEC6-JK-002", "SEC6-JK-003"],
+    "must_not_fire": []
+  },
+  "fixed": {
+    "must_not_fire": ["SEC6-JK-001", "SEC6-JK-002", "SEC6-JK-003"]
+  }
+}

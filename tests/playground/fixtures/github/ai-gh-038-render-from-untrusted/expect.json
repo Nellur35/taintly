@@ -1,0 +1,16 @@
+{
+  "platform": "github",
+  "vulnerable": {
+    "must_fire": ["AI-GH-038"],
+    "must_not_fire": []
+  },
+  "fixed": {
+    "must_fire": [],
+    "must_not_fire": ["AI-GH-038"]
+  },
+  "fix_invariants": {
+    "still_parses": true,
+    "jobs": ["render"],
+    "steps_per_job": {"render": 1}
+  }
+}

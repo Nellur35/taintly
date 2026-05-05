@@ -1,0 +1,10 @@
+# fixed: split — pull_request runs untrusted code without secrets;
+# workflow_run handles results separately.
+name: ci
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm test

@@ -1,0 +1,8 @@
+# fixed: write to a non-instruction-file path AND drop the fork-reachable trigger
+name: render-claude-md
+on: pull_request
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "see PR for the title — no longer rendering into agent-instruction file"

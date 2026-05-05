@@ -1,0 +1,15 @@
+// fixed: credentials() helper pulls from the Jenkins credential store (not in the YAML)
+pipeline {
+    agent any
+    environment {
+        AWS_ACCESS_KEY_ID     = credentials('aws-access-key-id')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
+    }
+    stages {
+        stage('deploy') {
+            steps {
+                sh 'aws s3 cp build.tgz s3://my-bucket/'
+            }
+        }
+    }
+}
