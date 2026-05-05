@@ -521,7 +521,8 @@ def test_context_pattern_requires_fires_on_oversize_file():
     # and requires.  Anchor sits in the first KB; requires is at the
     # tail (past the cap) so a non-chunked search would miss it.
     head = "anchor_line: hit\n"
-    middle = "filler_line: noise\n" * 3000
+    # 4000 × 19 ≈ 76 KB — past the 65_536-byte cap with room for cap bumps.
+    middle = "filler_line: noise\n" * 4000
     tail = "requires_line: needed_token\n"
     content = head + middle + tail
     assert len(content) > _MAX_SAFE_TEXT_LEN
@@ -546,7 +547,8 @@ def test_context_pattern_requires_absent_on_oversize_file():
     from taintly.models import _MAX_SAFE_TEXT_LEN
 
     head = "anchor_line: hit\n"
-    middle = "filler_line: noise\n" * 3000
+    # 4000 × 19 ≈ 76 KB — past the 65_536-byte cap with room for cap bumps.
+    middle = "filler_line: noise\n" * 4000
     tail = "absent_token_present_here\n"
     content = head + middle + tail
     assert len(content) > _MAX_SAFE_TEXT_LEN

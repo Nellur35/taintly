@@ -14,7 +14,7 @@ class _PatternTimeout(Exception):
     """Raised when a pattern match exceeds the safety timeout."""
 
 
-_MAX_SAFE_TEXT_LEN = 50_000  # chars; skip regex beyond this to prevent ReDoS in threads
+_MAX_SAFE_TEXT_LEN = 65_536  # chars; skip regex beyond this to prevent ReDoS in threads.  Bumped 50_000 → 65_536 (2026-05-05) after astral-sh/uv's build-release-binaries.yml hit 50064 bytes — clean 64 KiB power-of-2 covers realistic GitHub Actions / GitLab CI / Jenkins files with margin while keeping per-regex worst-case bounded.
 
 # YAML boolean representations per the YAML 1.1 spec (used by PyYAML / most CI parsers).
 # GitHub Actions convention is true/false, but rules should tolerate all valid forms.
@@ -46,7 +46,7 @@ class scan_session:
         if os.name != "posix":
             return self
         try:
-            self._old_handler = signal.signal(signal.SIGALRM, _pattern_timeout_handler)
+            self._old_handler = signal.signal(signal.SIGALRM, _pattern_timeout_handler)  # type: ignore[attr-defined,unused-ignore]
         except (ValueError, OSError):
             return self
         self._installed = True
@@ -55,8 +55,8 @@ class scan_session:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if not self._installed:
             return
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, self._old_handler)
+        signal.alarm(0)  # type: ignore[attr-defined,unused-ignore]
+        signal.signal(signal.SIGALRM, self._old_handler)  # type: ignore[attr-defined,unused-ignore]
 
 
 _MATCH_TEXT_MAX_LEN = 200
@@ -177,7 +177,7 @@ def _safe_search_chunked(compiled_pattern, content: str):
 # the total number of chunks scanned per call so adversarial inputs
 # (e.g. deeply-indented YAML that produces ~250KB / 500 lines of
 # nested keys) don't multiply per-chunk regex cost without bound.
-# At default tuning, _MAX_CHUNKS × _MAX_SAFE_TEXT_LEN = ~1 MB —
+# At default tuning, _MAX_CHUNKS × _MAX_SAFE_TEXT_LEN = ~1.3 MB —
 # every realistic CI config fits.
 _CHUNK_LINES = 2000
 _CHUNK_OVERLAP_LINES = 50
@@ -224,7 +224,7 @@ def _safe_search(compiled_pattern, text: str):
     # because we still observe and restore their handler on the first
     # call into each entry.
     try:
-        current = signal.getsignal(signal.SIGALRM)
+        current = signal.getsignal(signal.SIGALRM)  # type: ignore[attr-defined,unused-ignore]
     except (ValueError, OSError):
         return compiled_pattern.search(text)
 
@@ -232,18 +232,18 @@ def _safe_search(compiled_pattern, text: str):
     old_handler = current
     if need_swap:
         try:
-            signal.signal(signal.SIGALRM, _pattern_timeout_handler)
+            signal.signal(signal.SIGALRM, _pattern_timeout_handler)  # type: ignore[attr-defined,unused-ignore]
         except (ValueError, OSError):
             return compiled_pattern.search(text)
-    signal.alarm(5)
+    signal.alarm(5)  # type: ignore[attr-defined,unused-ignore]
     try:
         return compiled_pattern.search(text)
     except _PatternTimeout:
         return None
     finally:
-        signal.alarm(0)
+        signal.alarm(0)  # type: ignore[attr-defined,unused-ignore]
         if need_swap:
-            signal.signal(signal.SIGALRM, old_handler)
+            signal.signal(signal.SIGALRM, old_handler)  # type: ignore[attr-defined,unused-ignore]
 
 
 # =============================================================================
