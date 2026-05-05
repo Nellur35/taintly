@@ -6,6 +6,8 @@ A human must design, implement, test, and verify.
 
 from __future__ import annotations
 
+from .reporters._encoding import to_ascii
+
 # Maps rule_id to a detailed remediation guide.
 
 GUIDES: dict[str, str] = {
@@ -2632,7 +2634,10 @@ REFERENCES:
 
 
 def get_guide(rule_id: str) -> str | None:
-    return GUIDES.get(rule_id)
+    guide = GUIDES.get(rule_id)
+    if guide is None:
+        return None
+    return to_ascii(guide)
 
 
 def get_all_guided_rules() -> list[str]:
@@ -2653,4 +2658,4 @@ def format_guide_list() -> str:
     out.append("")
     out.append("Level 3 remediations — architectural changes requiring human implementation.")
     out.append("The guide tells you what to do. A human must do it and verify it.")
-    return "\n".join(out)
+    return to_ascii("\n".join(out))

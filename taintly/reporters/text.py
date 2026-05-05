@@ -446,7 +446,14 @@ def format_text(
         key=lambda kv: (-kv[1][0].severity.rank, -len(kv[1]), kv[0]),
     )
 
-    out.append(f"{b}{sep * 3} Findings ({len(report.findings)}) {sep * 3}{r}")
+    total = len(report.findings)
+    inventory_count = sum(1 for f in report.findings if f.rule_id in INVENTORY_RULE_IDS)
+    vuln_count = total - inventory_count
+    if inventory_count:
+        header_count = f"{total} = {vuln_count} to fix + {inventory_count} inventory"
+    else:
+        header_count = str(total)
+    out.append(f"{b}{sep * 3} Findings ({header_count}) {sep * 3}{r}")
     out.append("")
 
     for rule_id, group in rule_order:
