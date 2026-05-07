@@ -59,11 +59,16 @@ class _JobScopedSequencePattern:
         absent_within: str,
         lookahead_lines: int = 10,
         exclude: list[str] | None = None,
+        exclude_unless_within: list[tuple[str, str]] | None = None,
     ) -> None:
         self._pattern_a_re = re.compile(pattern_a)
         self._absent_re = re.compile(absent_within)
         self._lookahead = lookahead_lines
         self._excludes = [re.compile(e) for e in (exclude or [])]
+        self._conditional_excludes = [
+            (re.compile(line_re), re.compile(keep_re, re.IGNORECASE))
+            for line_re, keep_re in (exclude_unless_within or [])
+        ]
 
     def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
         # Find the ``jobs:`` line.  When absent, the pattern degrades
@@ -80,10 +85,15 @@ class _JobScopedSequencePattern:
                 # Pre-jobs: trigger block, file-level permissions,
                 # env: defaults — never the rule's intended target.
                 continue
-            if any(ex.search(line) for ex in self._excludes):
-                continue
             if self._pattern_a_re.search(line):
                 window = "\n".join(lines[i : i + self._lookahead])
+                if any(ex.search(line) for ex in self._excludes):
+                    continue
+                if any(
+                    line_re.search(line) and not keep_re.search(window)
+                    for line_re, keep_re in self._conditional_excludes
+                ):
+                    continue
                 if not self._absent_re.search(window):
                     results.append((i + 1, line.strip()))
         return results
@@ -343,7 +353,20 @@ RULES: list[Rule] = [
             pattern_a=r"^\s{2,4}(deploy|release|publish|production|prod)[_-]?\w*:\s*$",
             absent_within=r"environment:",
             lookahead_lines=20,
-            exclude=[r"^\s*#"],
+            exclude=[
+                r"^\s*#",
+            ],
+            exclude_unless_within=[
+                (
+                    # release-please normally updates release metadata/PRs; keep
+                    # it reportable if the job also performs real publish/deploy work.
+                    r"^\s{2,4}release[-_]please:\s*$",
+                    r"\b(npm|pnpm|yarn|uv|cargo)\s+publish\b"
+                    r"|\btwine\s+upload\b"
+                    r"|\bdocker\s+push\b"
+                    r"|\bgh\s+release\s+(create|upload)\b",
+                ),
+            ],
         ),
         remediation=(
             "Add an environment: key to deployment jobs:\n"

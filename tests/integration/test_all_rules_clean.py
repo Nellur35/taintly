@@ -137,7 +137,7 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
 
 
 @pytest.mark.parametrize(
-    "fixture_path, expected_rules",
+    ("fixture_path", "expected_rules"),
     [
         # ── GitHub ──────────────────────────────────────────────────────────────
         ("github/vulnerable/ppe_classic.yml",           ["SEC3-GH-001"]),
@@ -146,6 +146,7 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         ("github/vulnerable/workflow_run_no_conclusion.yml", ["SEC4-GH-003"]),
         ("github/vulnerable/secret_in_with_input.yml", ["SEC6-GH-010"]),
         ("github/vulnerable/publish_job_no_environment.yml", ["SEC1-GH-001"]),
+        ("github/vulnerable/release_please_with_publish_step.yml", ["SEC1-GH-001"]),
         ("github/vulnerable/tag_push_unquoted_ref_name.yml", ["SEC4-GH-018"]),
         ("github/vulnerable/pull_request_target_head_sha_checkout.yml", ["SEC4-GH-001"]),
         ("github/vulnerable/ai_trust_remote_code.yml",  ["AI-GH-001"]),
