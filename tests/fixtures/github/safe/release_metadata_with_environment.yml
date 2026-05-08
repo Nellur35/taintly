@@ -1,0 +1,26 @@
+# release_metadata_with_environment.yml - safe fixture for SEC1-GH-001.
+#
+# Release metadata automation remains clean when an explicit environment is
+# present. This guards the ordinary safe path while keeping the fixture free
+# of publish/deploy behavior.
+name: Release metadata with environment
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    environment: release-management
+    permissions:
+      contents: write
+      pull-requests: write
+    timeout-minutes: 10
+    steps:
+      - uses: googleapis/release-please-action@1111111111111111111111111111111111111111
+        with:
+          release-type: simple

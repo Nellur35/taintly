@@ -1,0 +1,26 @@
+# release_automation_no_environment.yml - safe fixture for SEC1-GH-001.
+#
+# A release-automation job can update release metadata and release PRs
+# without being a production deploy/publish job. This fixture keeps the
+# shape sanitized and focused on the job-name false-positive class.
+name: Release automation
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    timeout-minutes: 10
+    steps:
+      - uses: googleapis/release-please-action@1111111111111111111111111111111111111111
+        with:
+          release-type: simple

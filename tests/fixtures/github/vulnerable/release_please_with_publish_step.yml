@@ -1,0 +1,23 @@
+# release_please_with_publish_step.yml - vulnerable fixture for SEC1-GH-001.
+#
+# Release automation is not exempt when the same job performs real package
+# publication without an environment approval gate.
+name: Release and publish
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: googleapis/release-please-action@1111111111111111111111111111111111111111
+        with:
+          release-type: simple
+      - run: npm publish --provenance --access public

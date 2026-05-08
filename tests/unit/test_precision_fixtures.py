@@ -272,6 +272,46 @@ def test_sec1_gh_001_does_not_fire_on_release_trigger(gh_rules):
     )
 
 
+def test_sec1_gh_001_does_not_fire_on_release_automation_job(gh_rules):
+    findings = scan_file(str(_SAFE_GH / "release_automation_no_environment.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
+    assert not fired, (
+        "SEC1-GH-001 must not fire on release metadata automation "
+        f"that is not itself a production deploy/publish job: {fired}"
+    )
+
+
+def test_sec1_gh_001_does_not_fire_on_release_metadata_job_with_custom_name(gh_rules):
+    findings = scan_file(str(_SAFE_GH / "release_metadata_custom_name.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
+    assert not fired, (
+        "SEC1-GH-001 must not fire on a custom-named metadata-only "
+        f"release automation job: {fired}"
+    )
+
+
+def test_sec1_gh_001_does_not_fire_on_release_metadata_job_with_environment(gh_rules):
+    findings = scan_file(str(_SAFE_GH / "release_metadata_with_environment.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
+    assert not fired, (
+        "SEC1-GH-001 must not fire when release metadata automation "
+        f"declares an explicit environment: {fired}"
+    )
+
+
+def test_sec1_gh_001_still_fires_on_release_automation_that_publishes(gh_rules):
+    findings = scan_file(str(_VULN_GH / "release_please_with_publish_step.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
+    assert fired, (
+        "SEC1-GH-001 must still fire when a release automation job "
+        "performs real publish/deploy work without environment approval"
+    )
+    assert any("release-please:" in f.snippet for f in fired), (
+        "SEC1-GH-001 should anchor on the publish-capable job context, "
+        f"got snippets: {[f.snippet for f in fired]}"
+    )
+
+
 def test_sec1_gh_001_anchors_on_job_not_trigger(gh_rules):
     findings = scan_file(str(_VULN_GH / "publish_job_no_environment.yml"), gh_rules)
     fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
