@@ -62,21 +62,24 @@ def _suffix_for(rule) -> str:
     return ".yml"
 
 
-# Rules whose minimal positive samples don't fire in isolation. These
-# are documented gaps where the rule needs surrounding context (an
-# ``on:`` trigger, a ``jobs:`` parent) that the bare positive sample
-# omits. Each entry is a real rule-engineering observation, NOT a
-# test bug — fix by either:
-#   * Expanding the rule's positive sample to include needed context.
-#   * Loosening the rule pattern to match the bare line.
+# Hardcoded growth-only baselines. The earlier auto-resolved version
+# (``_MINIMAL_FIRES_BASELINE = len(_gather_*_failures(...))`` at import
+# time) was a no-op gate: ``len(failures) > BASELINE`` could never
+# fire because both sides were computed from the same load of the
+# rule pack on every run. A contributor adding 10 new broken rules
+# would see baseline auto-rise to accommodate them and the test
+# would still pass.
 #
-# Same growth-only discipline as _KNOWN_MUTATION_GAPS: shrinking is
-# good, growing is forbidden by the gate.
-_MINIMAL_FIRES_BASELINE: int  # set below after enumeration
-
-# Rules whose negative samples DO fire — pre-existing rule precision
-# gaps that this test will newly surface. Same baseline pattern.
-_NEGATIVE_FIRES_BASELINE: int
+# Same discipline as ``_KNOWN_MUTATION_GAPS`` (see
+# ``scripts/check_mutation_gap_count.py``) and
+# ``_INCIDENT_REF_BASELINE`` / ``_DUPLICATE_POSITIVE_BASELINE`` in
+# ``test_rule_pack_consistency.py``: hardcode the count, fail on
+# growth, fail on shrinkage to force the constant down on the same
+# PR that lands the fix. The numbers below are the validated
+# failure count at the time this test was wired in; lower them as
+# the underlying rules get fixed, never raise them.
+_MINIMAL_FIRES_BASELINE = 4
+_NEGATIVE_FIRES_BASELINE = 0
 
 
 @pytest.fixture(scope="module")
@@ -136,26 +139,16 @@ def _gather_negative_fire_failures(rules) -> list[tuple[str, str]]:
     return failures
 
 
-# Resolved at import time so the baselines below are honest.
-def _initial_counts():
-    rules = load_all_rules()
-    return (
-        len(_gather_minimal_fire_failures(rules)),
-        len(_gather_negative_fire_failures(rules)),
-    )
-
-
-_MINIMAL_FIRES_BASELINE, _NEGATIVE_FIRES_BASELINE = _initial_counts()
-
-
 def test_minimal_positive_samples_fire_no_growth(_all_rules):
     """Every rule's positive sample must fire that rule when scanned
     in isolation — i.e. the minimum-YAML form is detectable, not just
     the full-workflow form.
 
-    Growth-only gate: failures count cannot exceed the committed
-    baseline. The baseline auto-resolves at import time, so as
-    contributors fix rules the gate keeps tracking.
+    Growth-only gate against the hardcoded baseline above. Failures
+    growing past the baseline trips the build; failures dropping below
+    also trips the build, so the constant gets ratcheted down on the
+    same PR that lands the rule fix (otherwise the gate stops tracking
+    the new floor).
     """
     failures = _gather_minimal_fire_failures(_all_rules)
     if len(failures) > _MINIMAL_FIRES_BASELINE:
@@ -168,6 +161,13 @@ def test_minimal_positive_samples_fire_no_growth(_all_rules):
             f"context dependency. Fix the rule's pattern or expand the "
             f"sample to include the needed context.\n"
             f"First failures: {sample}"
+        )
+    if len(failures) < _MINIMAL_FIRES_BASELINE:
+        pytest.fail(
+            f"minimal-positive-sample failure count dropped to "
+            f"{len(failures)} (baseline was {_MINIMAL_FIRES_BASELINE}). "
+            f"Update _MINIMAL_FIRES_BASELINE in this file to "
+            f"{len(failures)} so the gate stays meaningful."
         )
 
 
@@ -187,4 +187,69 @@ def test_minimal_negative_samples_dont_fire_no_growth(_all_rules):
             f"of {_NEGATIVE_FIRES_BASELINE}. A negative sample that fires "
             f"is a precision regression at the rule's documented boundary."
             f"\nFirst failures: {sample}"
+        )
+    if len(failures) < _NEGATIVE_FIRES_BASELINE:
+        pytest.fail(
+            f"negative-sample false-positive count dropped to "
+            f"{len(failures)} (baseline was {_NEGATIVE_FIRES_BASELINE}). "
+            f"Update _NEGATIVE_FIRES_BASELINE in this file to "
+            f"{len(failures)} so the gate stays meaningful."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Gate self-test — ensure the baselines are static constants, not
+# auto-resolved values. The earlier ``_initial_counts()`` version of
+# this module computed both ``len(failures)`` and ``BASELINE`` from the
+# same load of the rule pack on every test run, making the gate a
+# tautology (``x > x`` is always False). This test pins the constraint
+# that future contributors don't reintroduce that pattern by accident.
+# ---------------------------------------------------------------------------
+
+
+def test_baselines_are_static_constants():
+    """The growth-only gate is meaningful only if the baseline is
+    a hardcoded number — auto-resolving the baseline from the current
+    failure count makes the comparison tautological.
+
+    This test inspects the module source and asserts the baseline
+    constants are integer literals, not expressions. If you need to
+    update a baseline, change the literal; don't replace it with a
+    function call or computed value.
+    """
+    import ast
+    import inspect
+    import sys
+
+    module = sys.modules[__name__]
+    source = inspect.getsource(module)
+    tree = ast.parse(source)
+
+    baseline_names = {"_MINIMAL_FIRES_BASELINE", "_NEGATIVE_FIRES_BASELINE"}
+    found: dict[str, ast.AST] = {}
+    for node in ast.walk(tree):
+        # Module-level assignments only — annotated or plain.
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name) and tgt.id in baseline_names:
+                    found[tgt.id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.target.id in baseline_names and node.value is not None:
+                found[node.target.id] = node.value
+
+    missing = baseline_names - set(found)
+    assert not missing, (
+        f"baseline constants not found at module scope: {sorted(missing)}"
+    )
+
+    for name, value_node in found.items():
+        assert isinstance(value_node, ast.Constant) and isinstance(
+            value_node.value, int
+        ), (
+            f"{name} must be assigned an integer literal so the gate is a "
+            f"real comparison, not a tautology. Got: "
+            f"{ast.unparse(value_node)!r}. If you're tempted to compute "
+            f"the baseline at import time, read the module docstring — "
+            f"that pattern was the original bug this test exists to "
+            f"prevent."
         )
