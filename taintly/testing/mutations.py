@@ -162,6 +162,96 @@ def mutate_expression_brace_space(sample: str) -> list[str]:
     return [compacted] if compacted != sample else []
 
 
+# ---------------------------------------------------------------------------
+# Semantic-equivalence operators — surface differs, meaning identical.
+#
+# The eight surface mutators above probe whitespace / casing / quotes
+# fragility. Real evasion vectors usually go through YAML's many
+# semantically-equivalent shapes: ``true`` / ``yes`` / ``"true"``;
+# ``on: push`` / ``on: [push]`` / ``on:\n  push:``; merge keys vs
+# inline. A rule that only fires on one surface form quietly fails to
+# detect an attacker who uses the other.
+#
+# These operators systematically search the equivalence-class space
+# the audit's evasion folder documents only ad-hoc. Same kill-rate
+# discipline applies: a survivor is a rule-engineering gap, an entry
+# in _KNOWN_MUTATION_GAPS, not a thing to silently tolerate.
+# ---------------------------------------------------------------------------
+
+
+def mutate_yaml_boolean_synonyms(sample: str) -> list[str]:
+    """Swap YAML 1.1 boolean synonyms.
+
+    YAML 1.1 accepts ``true / yes / on / y`` (and case variants) as
+    equivalent boolean tokens; some rules' regexes only match a
+    canonical spelling. Real workflows use ``true`` overwhelmingly, but
+    the parser doesn't care.
+
+    Only emit when the swap is locally a value (preceded by ``: `` or
+    ``=``) so we don't rewrite unrelated occurrences of the literal
+    text inside ``run:`` script bodies.
+    """
+    mutations: list[str] = []
+    swaps = [
+        (r"(:\s+)true\b", r"\1yes"),
+        (r"(:\s+)false\b", r"\1no"),
+        (r"(:\s+)yes\b", r"\1true"),
+        (r"(:\s+)no\b", r"\1false"),
+    ]
+    for pattern, replacement in swaps:
+        new = re.sub(pattern, replacement, sample, count=1)
+        if new != sample:
+            mutations.append(new)
+    return mutations
+
+
+def mutate_trigger_shape(sample: str) -> list[str]:
+    """Equivalent ``on:`` trigger shapes.
+
+    GitHub Actions accepts:
+      * ``on: push``                        (scalar)
+      * ``on: [push]``                      (flow sequence)
+      * ``on:\\n  push:``                   (mapping key with empty body)
+    All three mean the same thing. A trigger-shape-sensitive rule
+    silently fails when a workflow uses an alternate form.
+    """
+    mutations: list[str] = []
+    # Scalar -> flow sequence
+    m1 = re.sub(r"^(on):\s*([a-z_]+)\s*$", r"\1: [\2]", sample, count=1, flags=re.MULTILINE)
+    if m1 != sample:
+        mutations.append(m1)
+    # Scalar -> mapping form
+    m2 = re.sub(
+        r"^(on):\s*([a-z_]+)\s*$",
+        r"\1:\n  \2:",
+        sample,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if m2 != sample:
+        mutations.append(m2)
+    return mutations
+
+
+def mutate_quoted_scalar_form(sample: str) -> list[str]:
+    """Add explicit double-quotes around values that don't need them.
+
+    YAML accepts ``permissions: write-all`` and ``permissions: "write-all"``
+    interchangeably. Some regexes anchor on the unquoted form and miss
+    the quoted one — a real evasion vector for any rule keyed on a
+    string literal.
+
+    Only quotes simple scalars (no embedded ``: `` or quote chars) to
+    avoid producing invalid YAML.
+    """
+    mutations: list[str] = []
+    pattern = re.compile(r"^(\s*[A-Za-z][A-Za-z0-9_-]*:\s+)([A-Za-z][A-Za-z0-9._/\-]*)\s*$", re.MULTILINE)
+    quoted = pattern.sub(r'\1"\2"', sample, count=1)
+    if quoted != sample:
+        mutations.append(quoted)
+    return mutations
+
+
 MUTATION_OPERATORS: dict[str, Callable[[str], list[str]]] = {
     "whitespace_pad": mutate_whitespace_pad,
     "indent_shift": mutate_indent_shift,
@@ -171,4 +261,23 @@ MUTATION_OPERATORS: dict[str, Callable[[str], list[str]]] = {
     "case_change": mutate_case_change,
     "line_break": mutate_line_break,
     "expression_brace_space": mutate_expression_brace_space,
+}
+
+
+# Advisory operators — exercised by ``--mutate --semantic`` but NOT
+# gated by the 100%-kill-rate CI step. Results surface as a separate
+# section in the report so maintainers can SEE the rule-engineering
+# gaps without the build failing the moment they're introduced.
+#
+# Why advisory and not in MUTATION_OPERATORS: enabling these without
+# warning would explode the _KNOWN_MUTATION_GAPS allowlist on day one
+# (each YAML-equivalence operator finds gaps across many rules at once)
+# and the gap-growth gate at scripts/check_mutation_gap_count.py would
+# block every PR. Phasing them in keeps the gate meaningful: a rule
+# that survives a semantic mutation gets a follow-up ticket, not a
+# silent allowlist entry.
+SEMANTIC_MUTATION_OPERATORS: dict[str, Callable[[str], list[str]]] = {
+    "yaml_boolean_synonyms": mutate_yaml_boolean_synonyms,
+    "trigger_shape": mutate_trigger_shape,
+    "quoted_scalar_form": mutate_quoted_scalar_form,
 }

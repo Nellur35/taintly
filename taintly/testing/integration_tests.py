@@ -926,6 +926,217 @@ deploy:
         )
     )
 
+    # Additional realistic scenarios — pre-audit population was 6 cases
+    # for a 209-rule scanner. The audit's chunk 5.3 noted that ~6
+    # realistic cases is sparse; per-OWASP-category coverage is the
+    # right granularity. These extra cases bring realistic coverage up
+    # by exercising distinct OWASP categories end-to-end.
+
+    cases.append(
+        IntegrationTestCase(
+            name="REALISTIC: Third-party action with broad permissions chain",
+            category="realistic",
+            platform="github",
+            notes=(
+                "Realistic supply-chain shape: a third-party action (not "
+                "first-party actions/*) imported via a mutable tag, used "
+                "in a workflow with write-all permissions. Both findings "
+                "are individually documented; the realistic value is "
+                "showing them firing together so the reporter's family "
+                "clustering gets exercised end-to-end."
+            ),
+            must_fire=["SEC3-GH-001", "SEC2-GH-001"],
+            must_not_fire=[],
+            content="""\
+name: Release
+on: push
+permissions: write-all
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v4
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          args: release --clean
+""",
+        )
+    )
+
+    cases.append(
+        IntegrationTestCase(
+            name="REALISTIC: AI-agent on PR with CLI execution path (chained AI rules)",
+            category="realistic",
+            platform="github",
+            notes=(
+                "An AI-coding-agent step gated on a pull_request trigger AND "
+                "executing the agent's tool output through a shell. The two "
+                "halves are individually documented (AI-GH-006 = agent on PR, "
+                "AI-GH-007 = LLM output to shell); a real attack chains them."
+            ),
+            must_fire=["AI-GH-006"],
+            must_not_fire=[],
+            content="""\
+name: AI agent
+on:
+  pull_request:
+    types: [opened]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      - run: |
+          # The agent's output is consumed verbatim by a shell — a real
+          # injection vector when the agent is influenced by
+          # attacker-controlled comments.
+          eval "$(cat agent-output.txt)"
+""",
+        )
+    )
+
+    cases.append(
+        IntegrationTestCase(
+            name="REALISTIC: GitLab MR pipeline with docker push to registry",
+            category="realistic",
+            platform="gitlab",
+            notes=(
+                "MR pipelines that push to a registry are a known supply-"
+                "chain risk (SEC4-GL-005); when combined with debug tracing "
+                "(SEC7-GL-001) the registry credential leaks into the "
+                "pipeline output."
+            ),
+            must_fire=["SEC4-GL-005", "SEC7-GL-001"],
+            must_not_fire=[],
+            content="""\
+variables:
+  CI_DEBUG_TRACE: "true"
+
+stages:
+  - test
+  - deploy
+
+test:
+  stage: test
+  only:
+    - merge_requests
+  script:
+    - make test
+
+push:
+  stage: deploy
+  only:
+    - merge_requests
+  script:
+    - docker login -u "$REGISTRY_USER" -p "$REGISTRY_PASS" registry.example.com
+    - docker push registry.example.com/app:$CI_COMMIT_SHA
+""",
+        )
+    )
+
+    cases.append(
+        IntegrationTestCase(
+            name="REALISTIC: Jenkins parameterised job with input injection",
+            category="realistic",
+            platform="jenkins",
+            notes=(
+                "A common Jenkins anti-pattern: parameter passed straight "
+                "into a Groovy double-quoted shell command, where Groovy "
+                "interpolates the value before bash runs. SEC4-JK-001 is "
+                "the per-rule detection; SEC1-JK-002 (no top-level timeout) "
+                "and SEC10-JK-001 (no post-always block) are common "
+                "co-occurring hygiene gaps."
+            ),
+            must_fire=["SEC4-JK-001"],
+            must_not_fire=[],
+            content="""\
+pipeline {
+  agent any
+  parameters {
+    string(name: 'PR_TITLE', defaultValue: '')
+  }
+  stages {
+    stage('build') {
+      steps {
+        sh "echo Building: ${params.PR_TITLE}"
+      }
+    }
+  }
+}
+""",
+        )
+    )
+
+    # Additional KNOWN_BYPASS — the audit (chunk 5.3) noted only 4 of
+    # these existed; cross-platform analogs of the GH bypasses keep the
+    # documented detection ceiling honest across the rule pack.
+
+    cases.append(
+        IntegrationTestCase(
+            name="BYPASS: GitLab variable-indirection mirrors GH variable_indirection.yml",
+            category="known_bypass",
+            platform="gitlab",
+            notes=(
+                "GitLab analog of the documented GH bypass: storing the "
+                "tainted value in a shell variable before using it splits "
+                "the source/sink across lines and evades single-line taint "
+                "regexes. Same fundamental limitation as TAINT-GL-001 has "
+                "for cross-line flows."
+            ),
+            must_fire=[],
+            must_not_fire=["TAINT-GL-001"],
+            content="""\
+build:
+  script:
+    - LATER="$CI_COMMIT_TITLE"
+    - echo "$LATER"
+""",
+        )
+    )
+
+    cases.append(
+        IntegrationTestCase(
+            name="BYPASS: Jenkins single-quoted GString that still interpolates via inner ${...}",
+            category="known_bypass",
+            platform="jenkins",
+            notes=(
+                "Jenkins SEC4-JK-001 only fires on double-quoted Groovy "
+                "strings because single-quotes don't interpolate. But "
+                "Groovy's ``$/.../$`` slashy strings interpolate even when "
+                "wrapped in single quotes inside another expression. Real "
+                "evasion target — same shape as the GH base64_shell.yml "
+                "evasion (the literal pattern never appears)."
+            ),
+            must_fire=[],
+            must_not_fire=["SEC4-JK-001"],
+            content="""\
+pipeline {
+  agent any
+  parameters {
+    string(name: 'PR_TITLE', defaultValue: '')
+  }
+  stages {
+    stage('s') {
+      steps {
+        sh '''
+          echo "PR=''' + params.PR_TITLE + '''"
+        '''
+      }
+    }
+  }
+}
+""",
+        )
+    )
+
+    # Original "Full hardened" baseline retained below.
+
     cases.append(
         IntegrationTestCase(
             name="REALISTIC: Full hardened workflow — no rules should fire",

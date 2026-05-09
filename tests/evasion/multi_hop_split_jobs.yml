@@ -1,0 +1,33 @@
+# Evasion: TAINT-GH-002+ multi-hop taint via env-to-env indirection
+# spread across multiple steps. The taint analyzer follows env-static
+# and env-indirect hops within a single step block; chaining two
+# indirections through *different* env: declarations across
+# separate steps still fits the rule's model in principle, but in
+# practice the analyzer's segmentation only walks contiguous
+# sibling steps. A workflow that interleaves an unrelated step
+# between the source and the indirection breaks the chain.
+#
+# Discovered: 2026-05-09  (audit chunk 3.1 — multi-hop taint evasion gap)
+# Severity:   HIGH  (TAINT-GH-002 is HIGH)
+# Platform:   github
+name: PR labeler
+on: pull_request_target
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - id: src
+        env:
+          RAW: ${{ github.event.pull_request.title }}
+        run: echo "raw=$RAW" >> "$GITHUB_OUTPUT"
+      # Unrelated step that doesn't reference the tainted output —
+      # may break the analyzer's contiguous-step segmentation.
+      - run: echo "doing unrelated work"
+      - env:
+          INDIRECT: ${{ steps.src.outputs.raw }}
+        run: |
+          echo "title was: $INDIRECT"
