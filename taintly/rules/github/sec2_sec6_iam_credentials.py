@@ -86,7 +86,16 @@ RULES: list[Rule] = [
         owasp_cicd="CICD-SEC-6",
         description="Potential hardcoded secret or credential detected in workflow file.",
         pattern=RegexPattern(
-            match=r"""(?i)(password|passwd|secret|token|api_key|apikey|access_key|private_key)\s*[:=]\s*['"][^${\s][^'"]{8,}['"]""",
+            # ``\b`` before the group prevents substring-name false
+            # positives like ``keychain_password="password1"`` (the
+            # canonical macOS code-signing pattern: an EPHEMERAL
+            # keychain unlock pwd in $RUNNER_TEMP, not a real secret —
+            # the actual cert pwd is $APPLE_APPLICATION_CERT_PASSWORD
+            # already pulled from secrets:). Word boundary requires the
+            # variable name to start a new word, so ``keychain_password``
+            # (no boundary between ``_`` and ``p``) won't match while
+            # ``password:`` at column 0 / after whitespace still does.
+            match=r"""(?i)\b(password|passwd|secret|token|api_key|apikey|access_key|private_key)\s*[:=]\s*['"][^${\s][^'"]{8,}['"]""",
             exclude=[r"^\s*#", r"\$\{\{", r"secrets\."],
         ),
         remediation=(
@@ -106,6 +115,16 @@ RULES: list[Rule] = [
             "        password: ${{ secrets.DB_PASSWORD }}",
             "        # password: 'old_password'",
             '        api_key: ""',
+            # macOS ephemeral-keychain unlock password — NOT a secret.
+            # The actual signing cert password is in
+            # $APPLE_APPLICATION_CERT_PASSWORD (a real secret); this
+            # one just unlocks a temp keychain that exists for ~30s
+            # in $RUNNER_TEMP. Real-world FP from gh/cli's
+            # deployment.yml. Catching this would frighten every
+            # macOS code-signing workflow into thinking it had leaked
+            # credentials. Word-boundary anchor in the regex
+            # prevents the substring match on ``password``.
+            '        keychain_password="password1"',
         ],
         stride=["I"],
         threat_narrative=(

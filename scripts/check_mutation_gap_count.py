@@ -27,7 +27,12 @@ from pathlib import Path
 # Baseline — current (validated) entry count in _KNOWN_MUTATION_GAPS.
 # Lower this number when entries are removed (real fixes); never
 # raise it to silence a regression.
-_BASELINE = 74
+#
+# History:
+#   74 → 73 (iter-6, 2026-05-09): SEC8-GL-002 retired as duplicate of
+#                                  SEC3-GL-002, removing its
+#                                  whitespace_pad gap entry.
+_BASELINE = 73
 
 
 def _count_entries() -> int:

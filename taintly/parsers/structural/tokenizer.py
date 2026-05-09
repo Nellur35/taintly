@@ -301,6 +301,26 @@ class _Tokenizer:
                     pos += 1
                 continue
 
+            # iter-6 (2026-05-09): GitLab-specific ``!reference`` tag.
+            # Used heavily in real GitLab CI files
+            # (``before_script: [!reference [.x, before_script]]``)
+            # to splice fragments from anchored maps. We don't follow
+            # the reference (the resolver lives in the GitLab CI
+            # service, not in the YAML tokenizer) but we MUST keep
+            # tokenizing past it so structural rules can inspect the
+            # rest of the file. Skip the ``!reference`` tag literal
+            # and let the next iteration tokenize the value
+            # (typically a ``[...]`` flow sequence) normally.
+            # Without this, the audit's scan of gitlab-org/cli's
+            # .gitlab-ci.yml emitted ENGINE-ERR at line 367 and
+            # forfeited structural coverage for half the file.
+            if ch == "!" and raw[pos:pos + 10] == "!reference":
+                pos += 10
+                # Skip optional whitespace after the tag.
+                while pos < n and raw[pos] in " \t":
+                    pos += 1
+                continue
+
             # Reject custom tags: ``!`` / ``!!``.
             if ch == "!":
                 raise TokenizerError(line_no, "custom tags ('!') not supported")

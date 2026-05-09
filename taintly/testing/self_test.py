@@ -405,7 +405,8 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ("SEC8-GL-001", "whitespace_pad"): (
         "Same family as SEC8-GH-001/002/003; image-pin regex fragile to whitespace around `:`."
     ),
-    ("SEC8-GL-002", "whitespace_pad"): ("Same family as SEC8-GL-001."),
+    # SEC8-GL-002 retired iter-6 (duplicate of SEC3-GL-002); the
+    # whitespace_pad gap that lived here disappears with the rule.
     ("TAINT-GL-001", "comment_inject"): (
         "Inline `# comment` on the source line of a taint flow breaks the line-level regex anchor."
     ),

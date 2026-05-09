@@ -152,7 +152,18 @@ RULES: list[Rule] = [
                 r"uses:\s+[a-zA-Z0-9_-][a-zA-Z0-9_.-]*/[a-zA-Z0-9_.-]+"
                 r"/\.github/workflows/[^@\s]+@(?![a-f0-9]{40}\b)\S+"
             ),
-            exclude=[r"^\s*#"],
+            exclude=[
+                r"^\s*#",
+                # iter-6 (2026-05-09): when a reusable workflow is
+                # pinned to a *branch* (main/master/develop/dev),
+                # SEC3-GH-002 already fires CRITICAL on the same
+                # line. Letting SEC8-GH-003 also fire HIGH was a
+                # 1:1 dup that surfaced 19/19 perfect overlap on
+                # gh/cli's triage workflows. SEC8-GH-003 keeps the
+                # tag-pin case (e.g. ``@v2.1.0``) which SEC3-GH-002
+                # doesn't cover — that's where the rules diverge.
+                r"@(?:main|master|develop|dev)\s*(?:#.*)?$",
+            ],
         ),
         remediation=(
             "Pin reusable workflow calls to a full commit SHA:\n"
@@ -163,9 +174,11 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.github.com/en/actions/sharing-automations/reusing-workflows",
         test_positive=[
+            # Post-dedup (iter-6): branch pins are handled by SEC3-GH-002
+            # (CRITICAL); SEC8-GH-003 owns the tag-pin case (HIGH).
             "      uses: org/shared-workflows/.github/workflows/deploy.yml@v2",
-            "      uses: company/ci-templates/.github/workflows/test.yml@main",
             "      uses: my-org/pipelines/.github/workflows/release.yml@v1.2.3",
+            "      uses: org/shared-workflows/.github/workflows/lint.yml@release-2026",
         ],
         test_negative=[
             "      uses: org/shared-workflows/.github/workflows/deploy.yml"

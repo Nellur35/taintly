@@ -451,7 +451,23 @@ RULES: list[Rule] = [
     Rule(
         id="SEC10-GL-002",
         title="Public pipelines may expose job logs",
-        severity=Severity.MEDIUM,
+        # iter-6 (2026-05-09): downgraded MEDIUM -> INFO and marked
+        # review_needed. This is the ONLY ``AbsencePattern(...
+        # INTENTIONALLY_DISABLED ...)`` always-fires rule in the
+        # whole pack — it cannot be satisfied by any pipeline YAML
+        # because the visibility control lives in GitLab project
+        # settings, not the .gitlab-ci.yml. Audit found it firing on
+        # every GitLab project at MEDIUM severity, providing no per-
+        # project signal. Long-term home: a posture-audit check
+        # under ``--gitlab-project ID --platform-audit`` that queries
+        # ``/projects/:id`` for ``public_jobs:`` and ``visibility:``,
+        # then fires only when the actual setting is unsafe. Until
+        # that exists, the INFO + review_needed routing keeps the
+        # reminder visible without adding to the MEDIUM-or-above
+        # finding count.
+        severity=Severity.INFO,
+        review_needed=True,
+        confidence="low",
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-10",
         description=(

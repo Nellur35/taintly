@@ -142,6 +142,13 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
     r"ossf/scorecard-action",
     r"actions/deploy-pages",
     r"slsa-framework/slsa-github-generator",
+    # iter-6 (2026-05-09): CodSpeed benchmarking action requires
+    # ``id-token: write`` for OIDC-based result attestation. Found
+    # in astral-sh/ruff's ci.yaml with explicit comment "required
+    # for OIDC authentication with CodSpeed". Without this entry
+    # the rule fired three times on a workflow whose intent was
+    # documented in YAML comments.
+    r"CodSpeedHQ/action",
     # Shell-form.  ``--`` is two non-word characters, so a leading
     # ``\b`` would never match on the flag — the preceding space is
     # also non-word, so there is no word boundary between them.  The
@@ -258,6 +265,27 @@ _SAFE_ACTION_INPUT_PAIRS: frozenset[tuple[str, str]] = frozenset(
         # github/issue-labeler — same trust tier as the existing
         # github/codeql-action entry (both GitHub-published).
         ("github/issue-labeler", "repo-token"),
+        # ---- Iteration 6 additions (2026-05-09) -------------------
+        # Identified via the public-repo audit — actions whose
+        # documented credential slots are with: inputs by design,
+        # with no env-var alternative the action consumes. Routing
+        # through env: + ``${{ env.X }}`` would change the token
+        # value the action reads; the action's contract requires
+        # the with: form.
+        # Cloudflare Wrangler — apiToken is the documented Wrangler
+        # auth slot; the action passes it through to wrangler CLI
+        # which expects CLOUDFLARE_API_TOKEN env OR --api-token
+        # (set internally from the with: input). FP from astral-
+        # sh/ruff publish-{,ty-}playground.yml.
+        ("cloudflare/wrangler-action", "apiToken"),
+        ("cloudflare/wrangler-action", "accountId"),
+        # JFrog setup-cli — single-purpose auth surface for the
+        # JFrog REST client; same shape as the AWS / Azure entries
+        # above.
+        ("jfrog/setup-jfrog-cli", "oidc-provider-name"),
+        # actions/upload-pages-artifact — github-token is the docs-
+        # publishing auth surface (single-purpose).
+        ("actions/upload-pages-artifact", "token"),
     }
 )
 
@@ -764,6 +792,23 @@ RULES: list[Rule] = [
                 # risk because real shell-injection contexts always
                 # carry other tokens on the same line.
                 r"""^\s*-?\s*["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
+                # iter-6 (2026-05-09): exclude env-block assignments
+                # where the secret is embedded in a larger value
+                # (e.g. ``AWS_ENDPOINT_URL: https://${{ secrets.X
+                # }}.r2.cloudflarestorage.com`` from astral-sh/ruff's
+                # publish-mirror.yml). The danger this rule flags
+                # is secrets reaching the GENERATED RUN SCRIPT on
+                # disk; ``env:`` assignments don't reach the script
+                # — they're set by the runner and exposed to the
+                # process via environ. Any ``key: <value>`` line
+                # is safe except when the key is ``run`` or
+                # ``script`` (the only keys whose value becomes a
+                # shell command body). Negative-lookahead pinned
+                # to those two keys keeps the existing test_positive
+                # samples (which both start ``run:``) firing.
+                # ``\s*`` (not ``\s+``) after the colon tolerates
+                # whitespace_pad mutants that strip the separator.
+                r"^\s*(?!run\s*:|script\s*:)[\w._-]+:\s*\S",
             ],
         ),
         remediation=(
@@ -795,6 +840,12 @@ RULES: list[Rule] = [
             "        with:\n          secret-ids: |\n            ${{ secrets.AWS_KEY_1 }}\n            ${{ secrets.AWS_KEY_2 }}",
             # Same shape with a YAML list-item dash prefix.
             "        with:\n          tokens:\n            - ${{ secrets.GH_TOKEN }}\n            - ${{ secrets.NPM_TOKEN }}",
+            # iter-6 (2026-05-09): env-block assignment with a
+            # secret embedded in a URL/larger value. From astral-
+            # sh/ruff's publish-mirror.yml: the secret is set as
+            # an env var via env: AWS_ENDPOINT_URL; never reaches
+            # the run: script as a literal token.
+            "        env:\n          AWS_ENDPOINT_URL: https://${{ secrets.MIRROR_R2_ACCOUNT_ID }}.r2.cloudflarestorage.com",
         ],
         stride=["I", "R"],
         threat_narrative=(
@@ -1079,7 +1130,27 @@ RULES: list[Rule] = [
             # Other setup-* actions require explicit `cache:` input and are
             # deliberately EXCLUDED here to avoid the release.yml FP.
             anchor=r"uses:\s*(actions/cache|actions/setup-go)@",
-            requires=r"(release:|tags:)",
+            # iter-6 (2026-05-09): tightened trigger detection. The
+            # previous ``(release:|tags:)`` matched any ``release:``
+            # or ``tags:`` token anywhere in the file — including job
+            # names (``cargo-test-linux-release:``), input parameter
+            # names (``release:`` as a workflow_dispatch input), and
+            # step names. Audit found 4 FPs across ruff and gh/cli
+            # from this looseness. New pattern requires the matched
+            # token to actually appear as part of an ``on:`` block:
+            #   Form A — single-line: ``on: release`` or ``on: [release]``
+            #   Form B — block: ``on:\n  release:\n    types: ...``
+            #   Form C — push:tags: ``on:\n  push:\n    tags: ...``
+            # ``[^\n]*\n`` after ``on:`` tolerates trailing comments
+            # (``on:  # comment``) — comment_inject mutation hardening.
+            requires=(
+                r"(?m)"
+                r"^on:\s*(?:release\b|\[\s*[^\]]*\brelease\b)"
+                r"|"
+                r"^on:[^\n]*\n[\s\S]{0,500}?^\s+release:\s*(?:#[^\n]*)?\n\s+types:"
+                r"|"
+                r"^on:[^\n]*\n[\s\S]{0,500}?^\s+tags:\s*[\[\n#]"
+            ),
             exclude=[r"^\s*#"],
         ),
         remediation=(
@@ -2264,119 +2335,17 @@ RULES: list[Rule] = [
         finding_family="credential_persistence",
     ),
     # =========================================================================
-    # SEC6-GH-011: ``secrets: inherit`` in reusable-workflow caller
+    # SEC6-GH-011 was a near-perfect duplicate of SEC4-GH-012 (both
+    # fired on every ``secrets: inherit`` line). Phase 8 iter-4 split
+    # them by OWASP framing (SEC-6 credential-blast vs SEC-4 PPE-
+    # secrets-forwarding) but at the line level they always co-fired,
+    # producing 2x the finding count on every reusable-workflow caller.
+    # Removed in iter-6 (2026-05-09) after audit confirmed 10/10 line
+    # overlap on astral-sh/ruff's release.yml. The HIGH-severity SEC4-
+    # GH-012 wins as canonical. If the credential-persistence framing
+    # matters for reporting, set ``finding_family`` on SEC4-GH-012
+    # instead of maintaining a duplicate rule.
     # =========================================================================
-    # Phase 8 iter-4 (2026-05-04): credential-blast-radius warning
-    # for over-broad secret forwarding into reusable workflows.
-    # When a caller invokes a reusable workflow and uses
-    # ``secrets: inherit``, every secret available to the caller is
-    # forwarded to the callee — even if the callee only needs one
-    # of them.  A future callee compromise leaks the caller's full
-    # secret set, not just what the callee was designed for.
-    #
-    # Safe alternative: enumerate explicitly via ``secrets:`` map,
-    # forwarding only the secrets the callee actually consumes.
-    # Industry peer audits (e.g. zizmor's ``secrets-inherit``) cover
-    # the same threat class.
-    Rule(
-        id="SEC6-GH-011",
-        title="Reusable workflow invoked with ``secrets: inherit`` (over-broad credential forward)",
-        severity=Severity.MEDIUM,
-        platform=Platform.GITHUB,
-        owasp_cicd="CICD-SEC-6",
-        review_needed=True,
-        confidence="medium",
-        finding_family="credential_persistence",
-        description=(
-            "A caller workflow invokes a reusable workflow via "
-            "``uses: ./.github/workflows/<x>.yml`` (or "
-            "``uses: <org>/<repo>/.github/workflows/<x>.yml@<ref>``) "
-            "and forwards EVERY secret in scope via "
-            "``secrets: inherit``.  The callee receives the caller's "
-            "full secret set even if it only needs one — so any "
-            "future compromise of the callee (a logging change, a "
-            "new step, an upstream supply-chain incident) leaks the "
-            "caller's entire credential surface, not just the "
-            "secrets the callee was designed for."
-        ),
-        pattern=ContextPattern(
-            anchor=r"^\s+secrets\s*:\s*inherit\s*(#.*)?$",
-            # Reusable-workflow caller shapes:
-            #   uses: ./.github/workflows/<x>.yml          (local)
-            #   uses: ../shared/.github/workflows/<x>.yml  (relative-up)
-            #   uses: <org>/<repo>/.github/workflows/<x>.yml@<ref>  (cross-repo)
-            # Use ``\b`` after the extension so the match works
-            # without MULTILINE — ``\.ya?ml(@|$)`` requires end-of-
-            # string in non-MULTILINE mode and would miss the case
-            # where the secrets-inherit line follows the uses-line.
-            requires=r"uses\s*:\s*\S*\.ya?ml\b",
-            scope="file",
-            exclude=[r"^\s*#"],
-        ),
-        remediation=(
-            "Replace ``secrets: inherit`` with an explicit secrets "
-            "map listing only what the callee needs:\n"
-            "  jobs:\n"
-            "    deploy:\n"
-            "      uses: ./.github/workflows/deploy.yml\n"
-            "      secrets:\n"
-            "        DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}\n"
-            "Audit each callee's input contract and wire only those "
-            "secrets through.  Future maintainers of the callee "
-            "must explicitly request additional secrets — making "
-            "scope expansion visible in review rather than implicit."
-        ),
-        reference=(
-            "https://docs.github.com/en/actions/using-workflows/"
-            "reusing-workflows#passing-inputs-and-secrets-to-a-reusable-workflow"
-        ),
-        test_positive=[
-            (
-                "on: push\n"
-                "jobs:\n  deploy:\n"
-                "    uses: ./.github/workflows/deploy.yml\n"
-                "    secrets: inherit\n"
-            ),
-            (
-                "on: push\n"
-                "jobs:\n  build:\n"
-                "    uses: my-org/shared-workflows/.github/workflows/build.yml@v1\n"
-                "    secrets: inherit\n"
-            ),
-        ],
-        test_negative=[
-            # Explicit secrets map — caller is in control.
-            (
-                "on: push\n"
-                "jobs:\n  deploy:\n"
-                "    uses: ./.github/workflows/deploy.yml\n"
-                "    secrets:\n"
-                "      DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}\n"
-            ),
-            # No reusable-workflow uses — anchor unmet.
-            ("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    secrets: inherit\n"),
-            # Comment.
-            (
-                "on: push\n"
-                "jobs:\n  deploy:\n"
-                "    uses: ./.github/workflows/deploy.yml\n"
-                "#    secrets: inherit\n"
-            ),
-        ],
-        stride=["I", "E"],
-        threat_narrative=(
-            "An attacker compromises a reusable workflow downstream "
-            "of the caller (maintainer takeover on a third-party "
-            "shared-workflows repo, a malicious step added by a "
-            "subsequent PR to a sibling internal workflow, or an "
-            "upstream action pulled into the callee).  The callee "
-            "now has every secret the caller had — not just the "
-            "ones it was designed to use.  ``secrets: inherit`` "
-            "makes the caller's credential surface effectively "
-            "transitive, which is the wrong default for least-"
-            "privilege CI."
-        ),
-    ),
     # =========================================================================
     # SEC9-GH-004: Tainted `actions/cache` key — a workflow restores an
     # `actions/cache` entry whose `key:` or `restore-keys:` interpolates

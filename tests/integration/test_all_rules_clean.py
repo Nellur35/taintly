@@ -221,7 +221,7 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         ("gitlab/vulnerable/docker_auth_config.yml",             ["SEC2-GL-001"], ["SEC10-GL-002"]),
         ("gitlab/vulnerable/dind_no_tls.yml",                    ["SEC2-GL-002"], ["SEC10-GL-002"]),
         ("gitlab/vulnerable/unquoted_commit_message.yml",        ["SEC4-GL-001"], ["SEC10-GL-002"]),
-        ("gitlab/vulnerable/trigger_with_job_token.yml",         ["SEC4-GL-002"], ["SEC10-GL-002", "SEC3-GL-006", "SEC8-GL-002"]),
+        ("gitlab/vulnerable/trigger_with_job_token.yml",         ["SEC4-GL-002"], ["SEC10-GL-002", "SEC3-GL-006"]),
         ("gitlab/vulnerable/unquoted_ref_name.yml",              ["SEC4-GL-003"], ["SEC10-GL-002"]),
         ("gitlab/vulnerable/pipeline_source_only.yml",           ["SEC4-GL-004"], ["SEC10-GL-002"]),
         ("gitlab/vulnerable/mr_pipeline_docker_push.yml",        ["SEC4-GL-005"], ["SEC10-GL-002"]),

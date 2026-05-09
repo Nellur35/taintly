@@ -607,13 +607,25 @@ RULES: list[Rule] = [
     Rule(
         id="SEC4-GH-002",
         title="pull_request_target trigger detected",
-        severity=Severity.HIGH,
+        # iter-6 (2026-05-09): downgraded HIGH -> MEDIUM. SEC4-GH-002
+        # is the BARE-TRIGGER signal (rule already in
+        # ``_REVIEW_NEEDED_RULES`` per families.py). The actually-
+        # dangerous combination — pull_request_target + checkout-of-
+        # PR-code — is covered by SEC4-GH-001 [CRITICAL]. Audit found
+        # this rule firing HIGH on 7 gh/cli triage workflows that
+        # explicitly disclaim risk in YAML comments and never check
+        # out PR code. Bare-trigger detection at MEDIUM keeps the
+        # signal visible without crowding the HIGH bucket with
+        # known-safe trigger usage. SEC4-GH-001 still escalates the
+        # dangerous combination to CRITICAL.
+        severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
             "Workflow uses pull_request_target which runs with write access to the base repo "
             "and access to secrets. Even without PR checkout, this trigger is inherently risky. "
-            "Any future modification could introduce a PPE vulnerability."
+            "Any future modification could introduce a PPE vulnerability. "
+            "If the workflow also checks out PR code, SEC4-GH-001 escalates to CRITICAL."
         ),
         pattern=RegexPattern(
             match=r"pull_request_target",
