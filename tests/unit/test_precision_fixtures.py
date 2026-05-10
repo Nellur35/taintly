@@ -148,6 +148,7 @@ def test_placeholder_password_not_treated_as_confirmed_secret(gh_rules):
     # If any of THOSE fire, they must be confidence<high AND must match
     # the placeholder text specifically.
     from taintly.families import default_confidence
+
     for f in findings:
         if default_confidence(f.rule_id) == "high":
             continue  # High-confidence structural rules are not in scope
@@ -207,8 +208,7 @@ def test_sec4_gh_003_fires_once_per_workflow(gh_rules):
     # Anchor cites the trigger declaration line, not a property
     # reference deeper in the file.
     assert "workflow_run:" in fired[0].snippet, (
-        f"Expected anchor on the workflow_run: declaration line, "
-        f"got snippet: {fired[0].snippet!r}"
+        f"Expected anchor on the workflow_run: declaration line, got snippet: {fired[0].snippet!r}"
     )
 
 
@@ -227,6 +227,7 @@ def test_sec4_gh_003_fires_once_per_workflow(gh_rules):
     [
         "secret_in_with_but_also_env.yml",
         "with_input_no_secret.yml",
+        "known_auth_action_inputs.yml",
     ],
 )
 def test_sec6_gh_010_does_not_fire_on_safe_with_input(fixture_name, gh_rules):
@@ -285,8 +286,7 @@ def test_sec1_gh_001_does_not_fire_on_release_metadata_job_with_custom_name(gh_r
     findings = scan_file(str(_SAFE_GH / "release_metadata_custom_name.yml"), gh_rules)
     fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
     assert not fired, (
-        "SEC1-GH-001 must not fire on a custom-named metadata-only "
-        f"release automation job: {fired}"
+        f"SEC1-GH-001 must not fire on a custom-named metadata-only release automation job: {fired}"
     )
 
 
@@ -296,6 +296,22 @@ def test_sec1_gh_001_does_not_fire_on_release_metadata_job_with_environment(gh_r
     assert not fired, (
         "SEC1-GH-001 must not fire when release metadata automation "
         f"declares an explicit environment: {fired}"
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "release_notes_only.yml",
+        "release_pr_only_job.yml",
+    ],
+)
+def test_sec1_gh_001_does_not_fire_on_release_metadata_preparation_jobs(fixture_name, gh_rules):
+    findings = scan_file(str(_SAFE_GH / fixture_name), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
+    assert not fired, (
+        "SEC1-GH-001 must not fire on metadata-only release preparation "
+        f"jobs that do not publish or deploy: {fired}"
     )
 
 
@@ -312,6 +328,27 @@ def test_sec1_gh_001_still_fires_on_release_automation_that_publishes(gh_rules):
     )
 
 
+@pytest.mark.parametrize(
+    ("fixture_name", "anchor"),
+    [
+        ("release_notes_with_gh_release_create.yml", "release-notes:"),
+        ("release_pr_then_publish.yml", "release:"),
+    ],
+)
+def test_sec1_gh_001_still_fires_on_release_metadata_jobs_that_publish(
+    fixture_name, anchor, gh_rules
+):
+    findings = scan_file(str(_VULN_GH / fixture_name), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
+    assert fired, (
+        "SEC1-GH-001 must still fire when release metadata/preparation "
+        "jobs perform real release or package publication"
+    )
+    assert any(anchor in f.snippet for f in fired), (
+        f"SEC1-GH-001 should anchor on {anchor!r}, got snippets: {[f.snippet for f in fired]}"
+    )
+
+
 def test_sec1_gh_001_anchors_on_job_not_trigger(gh_rules):
     findings = scan_file(str(_VULN_GH / "publish_job_no_environment.yml"), gh_rules)
     fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
@@ -323,8 +360,7 @@ def test_sec1_gh_001_anchors_on_job_not_trigger(gh_rules):
     )
     # The anchor cites the publish: line, not the release: trigger.
     assert "publish:" in fired[0].snippet, (
-        f"Expected anchor on the publish: job line, "
-        f"got snippet: {fired[0].snippet!r}"
+        f"Expected anchor on the publish: job line, got snippet: {fired[0].snippet!r}"
     )
 
 
