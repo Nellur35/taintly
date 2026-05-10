@@ -1,0 +1,20 @@
+# workflow_call_with_other_triggers_no_permissions.yml - vulnerable fixture for SEC2-GH-002.
+#
+# workflow_call appears in the on: block, but push is also a top-level
+# trigger.  The workflow can be invoked directly (not only as a callee),
+# so the caller's permissions block does not bound every invocation.
+# The rule MUST still fire — the permissions: block is required.
+name: Build (callable AND push-triggered)
+
+on:
+  workflow_call:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111
+      - run: ./build.sh

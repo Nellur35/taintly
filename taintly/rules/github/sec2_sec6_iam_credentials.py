@@ -1,5 +1,7 @@
 """GitHub Actions security rules — Identity/Access Management and Credential Hygiene."""
 
+import re
+
 from taintly.models import (
     AbsencePattern,
     Platform,
@@ -8,6 +10,80 @@ from taintly.models import (
     Severity,
 )
 from taintly.structural_pattern import StructuralPattern
+
+
+class _NoExplicitPermissionsPattern(AbsencePattern):
+    """SEC2-GH-002 variant of AbsencePattern.
+
+    Fires when a workflow has no ``permissions:`` block AT ANY LEVEL
+    (file or job), UNLESS the workflow's only top-level trigger is
+    ``workflow_call`` — i.e. it is a pure reusable workflow.
+
+    Reusable workflows (``workflow_call``-only) inherit GITHUB_TOKEN
+    permissions from the calling workflow.  When the caller's
+    ``permissions:`` block is the policy boundary, a redundant
+    declaration in the called workflow adds no security value and
+    risks divergence from the caller's intent.  GitHub explicitly
+    documents this inheritance:
+    https://docs.github.com/en/actions/sharing-automations/reusing-workflows#access-and-permissions
+
+    Subclassing AbsencePattern keeps this rule on the documented
+    sentinel-snippet exception list in ``test_pattern_contract``
+    (``isinstance`` succeeds for subclasses).
+    """
+
+    _ON_INLINE_RE = re.compile(r"^on[ \t]*:[ \t]*(\S[^\n]*)$", re.MULTILINE)
+    # The two alternatives are mutually exclusive — content lines
+    # require ``\S`` after the indent, blank lines require only
+    # whitespace before the newline — so the engine doesn't have to
+    # backtrack between them on adversarial whitespace-heavy input.
+    _ON_BLOCK_RE = re.compile(r"(?ms)^on[ \t]*:[ \t]*\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)")
+    _KEY_RE = re.compile(r"^\s*([\w-]+)\s*:")
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if self._is_workflow_call_only(content):
+            return []
+        return super().check(content, lines)
+
+    def _is_workflow_call_only(self, content: str) -> bool:
+        """Return True iff the file's ``on:`` declaration names
+        ``workflow_call`` and no other top-level trigger."""
+        # Inline form — ``on: workflow_call`` or ``on: [workflow_call]``.
+        m = self._ON_INLINE_RE.search(content)
+        if m:
+            value = m.group(1).split("#", 1)[0].strip()
+            if value.startswith("["):
+                triggers = re.findall(r"[a-z_]+", value)
+                return triggers == ["workflow_call"]
+            return value == "workflow_call"
+        # Block form — collect top-level keys at the on: block's
+        # minimum indent.  Comment-only lines and blank lines are
+        # ignored; deeper-indented body keys (``inputs:``, ``branches:``)
+        # are not top-level triggers and don't count.
+        m = self._ON_BLOCK_RE.search(content)
+        if not m:
+            return False
+        body = m.group(1)
+        body_lines = body.splitlines()
+        meaningful = []
+        for line in body_lines:
+            stripped = line.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            meaningful.append((indent, stripped))
+        if not meaningful:
+            return False
+        min_indent = min(ind for ind, _ in meaningful)
+        block_triggers: list[str] = []
+        for indent, stripped in meaningful:
+            if indent != min_indent:
+                continue
+            km = self._KEY_RE.match(stripped)
+            if km:
+                block_triggers.append(km.group(1))
+        return block_triggers == ["workflow_call"]
+
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -55,8 +131,13 @@ RULES: list[Rule] = [
             "does not silently depend on an org/enterprise toggle that can change under "
             "you."
         ),
-        pattern=AbsencePattern(absent=r"^\s*permissions:", scope="file"),
-        remediation=("Add a top-level permissions block:\npermissions:\n  contents: read"),
+        pattern=_NoExplicitPermissionsPattern(absent=r"^\s*permissions:", scope="file"),
+        remediation=(
+            "Add a top-level permissions block:\npermissions:\n  contents: read\n\n"
+            "Reusable workflows (``on: workflow_call``-only) inherit the calling "
+            "workflow's permissions and do not need their own block — the rule already "
+            "skips that shape."
+        ),
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication#modifying-the-permissions-for-the-github_token",
         test_positive=[
             "name: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest",
