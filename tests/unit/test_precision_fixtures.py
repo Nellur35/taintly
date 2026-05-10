@@ -409,3 +409,36 @@ def test_sec4_gh_018_stays_high_on_pull_request(gh_rules, tmp_path):
     assert fired
     for f in fired:
         assert f.severity == Severity.HIGH
+
+
+# ---------------------------------------------------------------------------
+# SEC2-GH-002 — workflow_call-only reusable workflows are exempt
+#
+# Reusable workflows whose only top-level trigger is workflow_call inherit
+# the calling workflow's permissions block.  A redundant declaration in the
+# called workflow does not strengthen security and risks drift from the
+# caller's intent, so the rule must not fire.  The bound is tight: a
+# workflow that has workflow_call AND any other trigger is invocable
+# directly and still requires its own permissions block.
+# ---------------------------------------------------------------------------
+
+
+def test_sec2_gh_002_does_not_fire_on_workflow_call_only_reusable(gh_rules):
+    findings = scan_file(str(_SAFE_GH / "reusable_workflow_call_only.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC2-GH-002"]
+    assert not fired, (
+        "SEC2-GH-002 must not fire on a workflow_call-only reusable — "
+        f"the caller's permissions block inherits.  Got: {fired}"
+    )
+
+
+def test_sec2_gh_002_still_fires_when_workflow_call_paired_with_push(gh_rules):
+    findings = scan_file(
+        str(_VULN_GH / "workflow_call_with_other_triggers_no_permissions.yml"), gh_rules
+    )
+    fired = [f for f in findings if f.rule_id == "SEC2-GH-002"]
+    assert fired, (
+        "SEC2-GH-002 must fire when workflow_call is paired with another "
+        "trigger (push) and no permissions block — the workflow can be "
+        "invoked directly without a caller setting permissions"
+    )

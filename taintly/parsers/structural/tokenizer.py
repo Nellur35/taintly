@@ -301,7 +301,49 @@ class _Tokenizer:
                     pos += 1
                 continue
 
-            # Reject custom tags: ``!`` / ``!!``.
+            # GitLab CI: ``!reference [section, key]`` is a cross-section
+            # value reference.  The structural reader can't expand the
+            # reference (would require resolving the target path against
+            # the rest of the document), but emitting CUTOFF here breaks
+            # every rule on every gitlab-org/gitlab subpath file, since
+            # ``!reference`` appears in nearly all of them.  Instead,
+            # consume the entire ``!reference [...]`` as one opaque
+            # scalar value: per-line rules see the source text, the
+            # walker continues, and structural-only rules degrade to
+            # "this leaf has an unexpanded reference value" rather
+            # than "the file is unreadable past line N."
+            if ch == "!" and raw[pos : pos + 10] == "!reference":
+                # Skip past "!reference" + optional whitespace.
+                end = pos + 10
+                while end < n and raw[end] in " \t":
+                    end += 1
+                if end < n and raw[end] == "[":
+                    depth = 0
+                    scan = end
+                    while scan < n:
+                        if raw[scan] == "[":
+                            depth += 1
+                        elif raw[scan] == "]":
+                            depth -= 1
+                            if depth == 0:
+                                scan += 1
+                                break
+                        scan += 1
+                    # Closed bracket OR ran off the end — either way,
+                    # take everything from ! to here as the opaque value.
+                    yield Token(
+                        TokenKind.SCALAR_PLAIN,
+                        line_no,
+                        column=pos + 1,
+                        value=raw[pos:scan],
+                        indent=indent,
+                    )
+                    pos = scan
+                    continue
+                # ``!reference`` not followed by ``[`` — not the GitLab
+                # form; fall through to the generic-tag rejection so
+                # the caller still gets a clear signal.
+            # Reject other custom tags: ``!`` / ``!!``.
             if ch == "!":
                 raise TokenizerError(line_no, "custom tags ('!') not supported")
 

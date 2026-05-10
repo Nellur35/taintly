@@ -1,0 +1,32 @@
+# reusable_workflow_call_only.yml - safe fixture for SEC2-GH-002.
+#
+# A reusable workflow whose only top-level trigger is workflow_call
+# inherits the calling workflow's permissions block.  Declaring an
+# explicit permissions block in the called workflow is redundant and
+# can drift from the caller's intent, so the rule must not fire.
+name: Reusable build
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+    outputs:
+      digest:
+        value: ${{ jobs.build.outputs.digest }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      digest: ${{ steps.compute.outputs.digest }}
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111
+        with:
+          persist-credentials: false
+      - id: compute
+        run: |
+          digest=$(sha256sum dist.tar.gz | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
