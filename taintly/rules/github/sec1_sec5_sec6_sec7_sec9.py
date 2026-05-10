@@ -37,6 +37,14 @@ from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePatter
 # AFTER the file's top-level ``jobs:`` declaration so trigger-block
 # matches are skipped.
 
+_SEC1_PUBLISH_OR_DEPLOY_RE = (
+    r"\b(npm|pnpm|yarn|uv|cargo)\s+publish\b"
+    r"|\btwine\s+upload\b"
+    r"|\bdocker\s+push\b"
+    r"|\bgh\s+release\s+(create|upload)\b"
+    r"|\bpublish\.sh\b"
+)
+
 
 class _JobScopedSequencePattern:
     """SequencePattern variant that only matches inside the ``jobs:``
@@ -60,6 +68,7 @@ class _JobScopedSequencePattern:
         lookahead_lines: int = 10,
         exclude: list[str] | None = None,
         exclude_unless_within: list[tuple[str, str]] | None = None,
+        exclude_if_within: list[tuple[str, str, str]] | None = None,
     ) -> None:
         self._pattern_a_re = re.compile(pattern_a)
         self._absent_re = re.compile(absent_within)
@@ -69,6 +78,23 @@ class _JobScopedSequencePattern:
             (re.compile(line_re), re.compile(keep_re, re.IGNORECASE))
             for line_re, keep_re in (exclude_unless_within or [])
         ]
+        self._presence_excludes = [
+            (
+                re.compile(line_re),
+                re.compile(skip_re, re.IGNORECASE),
+                re.compile(keep_re, re.IGNORECASE),
+            )
+            for line_re, skip_re, keep_re in (exclude_if_within or [])
+        ]
+
+    @staticmethod
+    def _job_block(lines: list[str], start: int) -> str:
+        block = [lines[start]]
+        for line in lines[start + 1 :]:
+            if re.match(r"^\s{2}\S[^:]*:\s*(#.*)?$", line):
+                break
+            block.append(line)
+        return "\n".join(block)
 
     def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
         # Find the ``jobs:`` line.  When absent, the pattern degrades
@@ -87,11 +113,19 @@ class _JobScopedSequencePattern:
                 continue
             if self._pattern_a_re.search(line):
                 window = "\n".join(lines[i : i + self._lookahead])
+                job_block = self._job_block(lines, i)
                 if any(ex.search(line) for ex in self._excludes):
                     continue
                 if any(
-                    line_re.search(line) and not keep_re.search(window)
+                    line_re.search(line) and not keep_re.search(job_block)
                     for line_re, keep_re in self._conditional_excludes
+                ):
+                    continue
+                if any(
+                    line_re.search(line)
+                    and skip_re.search(job_block)
+                    and not keep_re.search(job_block)
+                    for line_re, skip_re, keep_re in self._presence_excludes
                 ):
                     continue
                 if not self._absent_re.search(window):
@@ -225,6 +259,10 @@ _SAFE_ACTION_INPUT_PAIRS: frozenset[tuple[str, str]] = frozenset(
         # only auth path; the script itself is the consumer (Octokit
         # client), so env-routing offers no masking benefit.
         ("actions/github-script", "github-token"),
+        # First-party — actions/download-artifact uses github-token as
+        # its documented GitHub API auth input for cross-run/repo
+        # downloads.
+        ("actions/download-artifact", "github-token"),
         # First-party — converts (app-id, private-key) to an
         # installation token; private-key IS the credential.
         ("actions/create-github-app-token", "private-key"),
@@ -258,6 +296,16 @@ _SAFE_ACTION_INPUT_PAIRS: frozenset[tuple[str, str]] = frozenset(
         # github/issue-labeler — same trust tier as the existing
         # github/codeql-action entry (both GitHub-published).
         ("github/issue-labeler", "repo-token"),
+        # CodSpeed upload token is the action's documented private-repo
+        # upload credential surface.
+        ("codspeedhq/action", "token"),
+        # GitLab trigger action credentials are the action's documented
+        # pipeline trigger/auth inputs.
+        ("digital-blueprint/gitlab-pipeline-trigger-action", "trigger_token"),
+        ("digital-blueprint/gitlab-pipeline-trigger-action", "access_token"),
+        # Gemini action's API key input is its documented model auth
+        # surface.
+        ("google-github-actions/run-gemini-cli", "gemini_api_key"),
     }
 )
 
@@ -277,8 +325,8 @@ def _action_name_from_uses(uses_value: str) -> str:
     head = uses_value.split("@", 1)[0].strip()
     parts = head.split("/")
     if len(parts) >= 2:
-        return f"{parts[0]}/{parts[1]}"
-    return head
+        return f"{parts[0]}/{parts[1]}".lower()
+    return head.lower()
 
 
 def _is_unmasked_secret_input(
@@ -361,10 +409,22 @@ RULES: list[Rule] = [
                     # release-please normally updates release metadata/PRs; keep
                     # it reportable if the job also performs real publish/deploy work.
                     r"^\s{2,4}release[-_]please:\s*$",
-                    r"\b(npm|pnpm|yarn|uv|cargo)\s+publish\b"
-                    r"|\btwine\s+upload\b"
-                    r"|\bdocker\s+push\b"
-                    r"|\bgh\s+release\s+(create|upload)\b",
+                    _SEC1_PUBLISH_OR_DEPLOY_RE,
+                ),
+                (
+                    # release-notes jobs prepare metadata for another job; keep
+                    # them reportable if they create/upload a release themselves.
+                    r"^\s{2,4}release[-_]?notes:\s*$",
+                    _SEC1_PUBLISH_OR_DEPLOY_RE,
+                ),
+            ],
+            exclude_if_within=[
+                (
+                    # A plain release job that only opens a release PR is
+                    # metadata preparation, not production release/publish.
+                    r"^\s{2,4}release:\s*$",
+                    r"\bgh\s+pr\s+create\b",
+                    _SEC1_PUBLISH_OR_DEPLOY_RE,
                 ),
             ],
         ),
