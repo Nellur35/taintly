@@ -6,13 +6,11 @@ These two categories cover the exact attack vectors used in documented supply ch
 import re
 
 from taintly.models import (
-    _YAML_BOOL_FALSE,
     CompromisedActionPattern,
     ContextPattern,
     Platform,
     RegexPattern,
     Rule,
-    SequencePattern,
     Severity,
 )
 from taintly.platform import github_sha_verify
@@ -39,7 +37,28 @@ _BRANCH_REF_NAMES = frozenset({"main", "master", "develop", "dev"})
 # precision gain — the same threat is more usefully reported via
 # SEC3-GH-006 (third-party inventory).  See Phase 8 iteration 2
 # tuning doc for the corpus-baseline measurement.
-_FIRST_PARTY_ACTION_ORGS = frozenset({"actions", "github"})
+# First-party action publishers — actions in these orgs are
+# operationally trusted (the platform vendor itself or a vendor-
+# equivalent foundation).  SEC3-GH-001 silences fires here so the
+# rule's HIGH severity is reserved for genuinely third-party
+# unpinned actions; SEC3-GH-006's inventory review is the right
+# channel if a strict-pinning policy needs to enumerate first-party
+# actions for SHA pinning.
+#
+# Adding to this set is a trust-posture decision — the org must be
+# the documented vendor for the platforms / ecosystems we cover, not
+# just a popular third-party.
+_FIRST_PARTY_ACTION_ORGS = frozenset(
+    {
+        "actions",  # GitHub itself
+        "github",  # GitHub secondary org
+        "aws-actions",  # AWS official
+        "azure",  # Azure / Microsoft official
+        "google-github-actions",  # Google Cloud official
+        "googleapis",  # Google official
+        "pypa",  # Python Packaging Authority
+    }
+)
 
 # Attacker-controlled GitHub-context expressions that turn an
 # unguarded ``run:`` interpolation into shell injection.  Kept in
@@ -68,6 +87,101 @@ _DANGEROUS_GITHUB_CONTEXT_RE = re.compile(
     r"head_ref"
     r")"
 )
+
+
+# ---------------------------------------------------------------------------
+# SEC4-GH-005 — actions/checkout downstream-credential-consumer detector
+# ---------------------------------------------------------------------------
+#
+# The previous rule fired on every actions/checkout that didn't
+# explicitly set ``persist-credentials: false`` — corpus baseline
+# showed ~80% of fires were FP-density (the persisted credential
+# died with the runner, no later step used it).  That tradeoff is
+# why the severity was downgraded MEDIUM → LOW in iter-3.
+#
+# The path forward documented at the time was: fire only when a
+# downstream step in the same job actually consumes the persisted
+# credential.  Implementing that requires a job-scoped scan, which
+# this custom pattern provides.
+
+_CHECKOUT_USES_RE = re.compile(r"uses:\s*actions/checkout@", re.IGNORECASE)
+# YAML boolean false accepts ``false``/``False``/``FALSE`` and
+# ``no``/``No``/``NO``; quote the value or not.  IGNORECASE matches
+# all surface forms.
+_PERSIST_FALSE_RE = re.compile(
+    r"""persist-credentials:\s*['"]?(?:false|no)['"]?\b""",
+    re.IGNORECASE,
+)
+# Shell git operations that consume the persisted credential.
+_GIT_CREDENTIAL_OP_RE = re.compile(
+    r"\bgit\s+(?:push|fetch\s+http|config\s+user\.(?:name|email)|config\s+--global\s+user)\b"
+)
+# Actions whose documented behaviour is "git push using the persisted
+# checkout token."  Each is the credential's actual consumer.
+_GIT_PUSH_ACTION_RE = re.compile(
+    r"uses:\s*(?:"
+    r"peaceiris/actions-gh-pages"
+    r"|ad-m/github-push-action"
+    r"|stefanzweifel/git-auto-commit-action"
+    r"|EndBug/add-and-commit"
+    r"|crazy-max/ghaction-github-pages"
+    r"|JamesIves/github-pages-deploy-action"
+    r"|s0/git-publish-subdir-action"
+    r"|cpina/github-action-push-to-another-repository"
+    r")",
+    re.IGNORECASE,
+)
+_LINE_COMMENT_RE = re.compile(r"^\s*#")
+
+
+class _CheckoutDownstreamCredentialConsumerPattern:
+    """Pattern for SEC4-GH-005 (Phase 8 follow-up).
+
+    Fires when ALL of:
+
+    * a step uses ``actions/checkout@<ref>`` AND
+    * that step does NOT explicitly set ``persist-credentials: false``
+      within an 8-line lookahead AND
+    * a subsequent step IN THE SAME JOB consumes the persisted
+      credential — either a ``git push`` / ``git fetch <url>`` /
+      ``git config user`` shell op, OR a documented git-pushing
+      action (peaceiris/actions-gh-pages, ad-m/github-push-action,
+      stefanzweifel/git-auto-commit-action, etc.).
+
+    "Same job" is determined via ``_split_into_job_segments`` so a
+    sibling job's git push doesn't false-trigger a finding on this
+    job's checkout.
+
+    Conforms to ``PatternProtocol``.
+    """
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        from taintly.models import _split_into_job_segments
+
+        results: list[tuple[int, str]] = []
+        for seg_start, seg_lines in _split_into_job_segments(lines):
+            seg_text = "\n".join(seg_lines)
+            has_consumer = bool(_GIT_CREDENTIAL_OP_RE.search(seg_text)) or bool(
+                _GIT_PUSH_ACTION_RE.search(seg_text)
+            )
+            if not has_consumer:
+                continue
+            for j, line in enumerate(seg_lines):
+                if _LINE_COMMENT_RE.match(line):
+                    continue
+                if not _CHECKOUT_USES_RE.search(line):
+                    continue
+                window = "\n".join(seg_lines[j : j + 8])
+                if _PERSIST_FALSE_RE.search(window):
+                    continue
+                downstream = "\n".join(seg_lines[j + 1 :])
+                if not (
+                    _GIT_CREDENTIAL_OP_RE.search(downstream)
+                    or _GIT_PUSH_ACTION_RE.search(downstream)
+                ):
+                    continue
+                results.append((seg_start + j + 1, line.strip()))
+        return results
 
 
 def _has_dangerous_github_context(value: str, _value_kind: str, _path: tuple[object, ...]) -> bool:
@@ -104,10 +218,12 @@ def _is_unpinned_uses_value(value: str, _value_kind: str, _path: tuple[object, .
     head, _, ref = v.partition("@")
     if not ref:
         return False
-    # First-party allowlist: GitHub-published action namespaces are
-    # operationally trusted; SEC3-GH-006 is the right channel for
-    # any inventory review of these.
-    org = head.split("/", 1)[0] if "/" in head else ""
+    # First-party allowlist: platform-vendor-published action
+    # namespaces are operationally trusted; SEC3-GH-006 is the right
+    # channel for any inventory review of these.  GitHub matches
+    # ``uses:`` owner/repo case-insensitively, so we lowercase to
+    # match the set's canonical form.
+    org = head.split("/", 1)[0].lower() if "/" in head else ""
     if org in _FIRST_PARTY_ACTION_ORGS:
         return False
     # Branch refs are SEC3-GH-002's CRITICAL scope; don't double-
@@ -775,22 +891,16 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC4-GH-005",
-        title="Checkout persists credentials to disk",
-        # Severity downgraded MEDIUM -> LOW (Phase 8 tuning, 2026-05-03).
-        # Corpus baseline (35 repos, 2080 findings): SEC4-GH-005 fires
-        # in 31/31 repos with actions/checkout, including well-defended
-        # orgs (Microsoft, AWS, Google) where checkout is checkout-only
-        # with no downstream git push/config.  ~80% of fires are
-        # FP-density (the persisted credential dies with the runner;
-        # no later step uses it).  Rule remains precision-correct -
-        # it still flags persist-credentials: true as the
-        # actions/checkout default - but triage priority is
-        # informational, not MEDIUM.  A sharper tune (custom predicate
-        # scanning subsequent steps for git push/config) would let the
-        # rule fire HIGH only when downstream actually consumes the
-        # credential; that requires structural-reader hooks beyond
-        # SequencePattern's bounded lookahead and is deferred.
-        severity=Severity.LOW,
+        title="Checkout persists credentials AND a downstream step consumes them",
+        # Phase 8 follow-up (2026-05-10): tightened from "fires on every
+        # actions/checkout without persist-credentials: false" to "fires
+        # only when a downstream step in the same job actually uses the
+        # persisted credential" (git push/fetch/config or a documented
+        # git-pushing action).  Severity raised back to MEDIUM because
+        # remaining fires are now real risk, not posture-density noise.
+        # See _CheckoutDownstreamCredentialConsumerPattern below for
+        # the consumer detector.
+        severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
@@ -799,25 +909,62 @@ RULES: list[Rule] = [
             "under $RUNNER_TEMP and configures `.git/config` to reference it, so any "
             "subsequent step — including third-party actions — can read the token off "
             "disk and reuse it against the GitHub API without going through the secrets "
-            "facility. Set `persist-credentials: false` unless the job needs to push "
-            "commits from this clone."
+            "facility. This rule fires only when a downstream step in the same job "
+            "actually consumes that credential — a `git push` / `git fetch <url>` / "
+            "`git config user` shell op, or a documented git-pushing action "
+            "(peaceiris/actions-gh-pages, ad-m/github-push-action, "
+            "stefanzweifel/git-auto-commit-action, EndBug/add-and-commit, etc.). "
+            "Set `persist-credentials: false` on the checkout step (or scope the "
+            "downstream push to its own minimal-permissions checkout)."
         ),
-        pattern=SequencePattern(
-            pattern_a=r"uses:\s*actions/checkout@",
-            absent_within=rf"persist-credentials:\s*{_YAML_BOOL_FALSE}",
-            lookahead_lines=8,
-            exclude=[r"^\s*#"],
-        ),
+        pattern=_CheckoutDownstreamCredentialConsumerPattern(),
         remediation="Add 'persist-credentials: false' to the checkout step.",
         reference="https://github.com/actions/checkout#usage",
         test_positive=[
-            "      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0",
-            "      - uses: actions/checkout@abc123def456abc123def456abc123def456abc1",
+            # Checkout + downstream git push in the same job.
+            (
+                "jobs:\n  publish-pages:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - run: |\n"
+                "          git config user.email bot@example.com\n"
+                "          git push origin gh-pages\n"
+            ),
+            # Checkout + a documented git-pushing action.
+            (
+                "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - uses: peaceiris/actions-gh-pages@v3\n"
+                "        with:\n          publish_dir: ./public\n"
+            ),
         ],
         test_negative=[
-            "      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false",
-            "      - uses: actions/checkout@v4\n        with:\n          persist-credentials: no",
-            "      - uses: actions/checkout@v4\n        with:\n          persist-credentials: 'false'",
+            # persist-credentials: false explicitly.
+            (
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
+                "        with:\n          persist-credentials: false\n"
+                "      - run: git push origin main\n"
+            ),
+            # Checkout-only; no downstream consumer — used to fire LOW,
+            # now silent under the consumer-required tune.
+            (
+                "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
+                "      - run: pytest\n"
+            ),
+            # Cross-job: sibling job pushes, but THIS job doesn't.
+            (
+                "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
+                "      - run: pytest\n"
+                "  publish:\n    runs-on: ubuntu-latest\n"
+                "    needs: test\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
+                "        with:\n          persist-credentials: false\n"
+                "      - run: git push\n"
+            ),
         ],
         stride=["I", "T"],
         threat_narrative=(
@@ -826,15 +973,10 @@ RULES: list[Rule] = [
             "subsequent step — including third-party actions — from the filesystem "
             "without any secrets API call. With write repository permissions, a token "
             "extracted this way can push malicious commits, modify branch protections, "
-            "or inject code into other workflows."
+            "or inject code into other workflows.  The risk is concrete only when a "
+            "downstream step actually uses the credential; this rule scopes to that "
+            "case to keep the signal-to-noise ratio actionable."
         ),
-        # Persist-credentials: false can legitimately be supplied via a
-        # YAML anchor merge (`<<: *checkout_opts`) whose body is defined
-        # at the top of the file, outside the SequencePattern lookahead
-        # window.  The anchor-aware suppression cross-checks against an
-        # expanded copy of the source so the fix-by-anchor pattern
-        # doesn't get reported as a false positive.
-        anchor_aware=True,
     ),
     # =========================================================================
     # SEC3-GH-007: Docker image reference (services.<name>.image: or
