@@ -33,7 +33,13 @@ class _NoExplicitPermissionsPattern(AbsencePattern):
     """
 
     _ON_INLINE_RE = re.compile(r"^on[ \t]*:[ \t]*(\S[^\n]*)$", re.MULTILINE)
-    _ON_BLOCK_RE = re.compile(r"(?ms)^on[ \t]*:[ \t]*\n((?:[ \t]+[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)")
+    # The two alternatives are mutually exclusive — content lines
+    # require ``\S`` after the indent, blank lines require only
+    # whitespace before the newline — so the engine doesn't have to
+    # backtrack between them on adversarial whitespace-heavy input.
+    _ON_BLOCK_RE = re.compile(
+        r"(?ms)^on[ \t]*:[ \t]*\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
+    )
     _KEY_RE = re.compile(r"^\s*([\w-]+)\s*:")
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
