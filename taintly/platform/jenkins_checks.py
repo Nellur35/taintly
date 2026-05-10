@@ -336,67 +336,95 @@ def check_csrf_protection(instance: str, client: JenkinsClient) -> list[Finding]
 # ---------------------------------------------------------------------------
 
 
-# The Jenkins security team publishes a machine-readable advisories index
-# at this URL. It maps (plugin_name, affected version constraints) to CVE
-# IDs and severity. Cross-checking installed plugin versions against this
-# feed catches the gap PLAT-JK-002 leaves open: a plugin where
-# ``hasUpdate: false`` because the patched version hasn't shipped yet, but
-# an active advisory affects the installed version.
+# The Jenkins infrastructure team publishes a machine-readable feed of
+# security warnings at this URL — confirmed against
+# github.com/jenkins-infra/update-center2 (the project that produces the
+# update center index). The feed is a flat JSON array of warning entries.
+#
+# Schema (verified 2026-05-09 against the published feed):
+#   [
+#     {
+#       "id": "SECURITY-208",
+#       "type": "plugin" | "core",
+#       "name": "<plugin-short-name>",       # for type=plugin; "core" for type=core
+#       "message": "<advisory description>",
+#       "url": "https://jenkins.io/security/advisory/<date>/",
+#       "versions": [
+#         {
+#           "firstVersion": "1.3.0",          # optional, inclusive lower bound
+#           "lastVersion":  "2.5.1",          # optional, inclusive upper bound
+#           "pattern": "(1[.][34]|2[.][012])(|[.-].*)"  # regex matching vulnerable versions
+#         },
+#         ...
+#       ]
+#     },
+#     ...
+#   ]
+#
+# The ``pattern`` regex is the most precise check — it directly matches
+# the version string. ``firstVersion`` / ``lastVersion`` are looser
+# bounds. Severity is NOT in the feed; it lives on the linked HTML
+# advisory page, so this rule defaults to HIGH and can't auto-escalate.
 _JENKINS_ADVISORY_FEED = (
-    "https://www.jenkins.io/security/advisories/jenkins-data.json"
+    "https://raw.githubusercontent.com/jenkins-infra/update-center2"
+    "/master/resources/warnings.json"
 )
 
 
-def _matches_advisory_constraint(installed: str, constraint: str) -> bool:
-    """Return True when ``installed`` falls in the advisory's affected
-    version range.
+def _version_matches_warning_entry(installed: str, entry: dict) -> bool:
+    """Return True when ``installed`` falls in the warning entry's
+    affected version range.
 
-    Jenkins advisory entries use a small set of constraint shapes:
-      ``"firstVersion": "1.0"``  (vulnerable starting at this version)
-      ``"lastVersion": "2.5"``   (vulnerable up through this version)
+    Tries ``pattern`` (regex) first — the most precise; the published
+    feed uses regex patterns to encode complex range-and-exclusion
+    rules. Falls back to ``firstVersion`` / ``lastVersion`` tuple
+    comparison when ``pattern`` is absent or unparseable.
 
-    The advisory entry is a dict with optional ``firstVersion`` and
-    ``lastVersion`` fields. Both inclusive.
-
-    We do a permissive "looks-vulnerable" check rather than full semver:
-    string-compare with version-tuple fallback handles the 95% case
-    (Jenkins plugin versions are mostly ``major.minor.patch``). False
-    positives here are minor — a finding the user can verify against the
-    published advisory page; false negatives would silently miss CVEs.
+    Conservative bias: matches when uncertain. Better to surface a
+    finding the user can verify against the linked advisory than to
+    silently miss a CVE.
     """
+    import re
+
+    pattern = entry.get("pattern")
+    if pattern:
+        try:
+            # The feed's patterns anchor implicitly at start (they're
+            # used with Java's Pattern.matches semantics). Match from
+            # start, allow trailing.
+            if re.match(pattern + r"$", installed):
+                return True
+            if re.match(pattern + r"(?:\s|$)", installed):
+                return True
+        except re.error:
+            # Bad regex in the feed — fall through to bound check.
+            pass
+
     def _to_tuple(v: str) -> tuple:
-        # Strip non-numeric suffix (``2.5-beta-1`` -> 2.5), split on dots.
         head = v.split("-", 1)[0]
         parts = []
         for p in head.split("."):
             try:
                 parts.append(int(p))
             except ValueError:
-                # Non-numeric segment — treat as 0 to keep ordering total.
                 parts.append(0)
         return tuple(parts)
 
+    first = entry.get("firstVersion")
+    last = entry.get("lastVersion")
+    if not first and not last:
+        # No bounds AND pattern didn't match — no signal we can act on.
+        return False
+
     try:
         inst_t = _to_tuple(installed)
+        if first and inst_t < _to_tuple(first):
+            return False
+        if last and inst_t > _to_tuple(last):
+            return False
+        return True
     except Exception:
         return False
-    if not isinstance(constraint, dict):
-        return False
-    first = constraint.get("firstVersion")
-    last = constraint.get("lastVersion")
-    if first:
-        try:
-            if inst_t < _to_tuple(first):
-                return False
-        except Exception:
-            return False
-    if last:
-        try:
-            if inst_t > _to_tuple(last):
-                return False
-        except Exception:
-            return False
-    return True
 
 
 def check_plugin_advisories(instance: str, client: JenkinsClient) -> list[Finding]:
@@ -405,11 +433,18 @@ def check_plugin_advisories(instance: str, client: JenkinsClient) -> list[Findin
     Pairs with PLAT-JK-002 to close the disclosed-but-not-yet-patched
     window. PLAT-JK-002 catches "behind on updates" via the runtime
     ``hasUpdate`` flag; this rule catches "running a known-bad version"
-    even when no patched version is yet available.
+    directly against the published advisory feed.
 
-    Network: fetches the Jenkins security advisories JSON feed. Failure
-    to fetch produces a single PLAT-JK-006-INFO finding (feed unavailable);
-    the rule does not silently skip.
+    Network: fetches the Jenkins update-center2 warnings feed. Failure
+    to fetch produces a single LOW operational finding (feed
+    unavailable); the rule does not silently skip.
+
+    Severity: defaults to HIGH for every match. The feed does NOT carry
+    severity — it lives on the linked advisory HTML page. We don't
+    parse HTML to escalate; reviewers should read the linked page.
+    Core (Jenkins itself) CVEs are out of scope for this rule and
+    intentionally skipped — a separate rule could check
+    ``instance_info().version`` against ``type:"core"`` entries.
     """
     feed = client.fetch_external(_JENKINS_ADVISORY_FEED, timeout=15)
     if feed is None:
@@ -417,21 +452,23 @@ def check_plugin_advisories(instance: str, client: JenkinsClient) -> list[Findin
             _finding(
                 rule_id="PLAT-JK-006",
                 severity=Severity.LOW,
-                title="Jenkins security advisory feed unavailable",
+                title="Jenkins security warnings feed unavailable",
                 description=(
                     f"Could not fetch {_JENKINS_ADVISORY_FEED}. The plugin "
                     "advisory cross-check (PLAT-JK-006) cannot run. This is "
                     "operational signal, not a security finding — verify "
-                    "the controller can reach jenkins.io, or run the audit "
-                    "from a host that can. PLAT-JK-002 (outdated-plugins) "
-                    "still ran and provides partial coverage."
+                    "the audit host can reach raw.githubusercontent.com, "
+                    "or run the audit from a host that can. PLAT-JK-002 "
+                    "(outdated-plugins) still ran and provides partial "
+                    "coverage."
                 ),
                 instance=instance,
                 remediation=(
                     "Manually verify installed plugin versions against the "
-                    f"published advisories at {_JENKINS_ADVISORY_FEED}, or "
+                    "published advisories at "
+                    "https://www.jenkins.io/security/advisories/, or "
                     "re-run the posture audit from a host with outbound "
-                    "HTTPS to jenkins.io."
+                    "HTTPS to githubusercontent.com."
                 ),
                 reference=_JENKINS_ADVISORY_FEED,
                 owasp_cicd="CICD-SEC-3",
@@ -459,87 +496,94 @@ def check_plugin_advisories(instance: str, client: JenkinsClient) -> list[Findin
         if short and version:
             installed_index[short] = version
 
-    findings: list[Finding] = []
-    # The published feed is a list of advisories; each entry has a
-    # ``plugins`` array listing affected (name, version-constraint)
-    # tuples. The schema is documented at jenkins.io/security/advisories.
-    advisories = feed if isinstance(feed, list) else feed.get("advisories", [])
-    if not isinstance(advisories, list):
-        return []
+    # The feed is a flat list of warning entries. Defensive: also accept
+    # an envelope shape ``{"warnings": [...]}`` in case the feed structure
+    # ever changes.
+    if isinstance(feed, list):
+        warnings = feed
+    elif isinstance(feed, dict):
+        warnings = feed.get("warnings") or feed.get("advisories") or []
+    else:
+        warnings = []
 
+    findings: list[Finding] = []
     seen_pairs: set[tuple[str, str]] = set()
-    for adv in advisories:
-        if not isinstance(adv, dict):
+    for warn in warnings:
+        if not isinstance(warn, dict):
             continue
-        adv_id = (
-            adv.get("id")
-            or adv.get("name")
-            or adv.get("url", "").rsplit("/", 1)[-1]
-            or "unknown"
+        warn_type = warn.get("type", "")
+        if warn_type != "plugin":
+            # Skip core and unknown types — out of scope for this rule.
+            continue
+        plugin_name = warn.get("name") or ""
+        if not plugin_name or plugin_name not in installed_index:
+            continue
+        installed_version = installed_index[plugin_name]
+        warn_id = warn.get("id") or "unknown"
+        affected_versions = warn.get("versions") or []
+        if not isinstance(affected_versions, list):
+            continue
+
+        # The plugin is in some affected range if ANY of the version
+        # entries match the installed version.
+        matched = False
+        for entry in affected_versions:
+            if isinstance(entry, dict) and _version_matches_warning_entry(
+                installed_version, entry
+            ):
+                matched = True
+                break
+        if not matched:
+            continue
+
+        key = (plugin_name, warn_id)
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+
+        warn_url = warn.get("url") or (
+            f"https://www.jenkins.io/security/advisory/"
         )
-        adv_severity = (adv.get("severity") or "").lower()
-        affected_plugins = adv.get("plugins") or []
-        if not isinstance(affected_plugins, list):
-            continue
-        for affected in affected_plugins:
-            if not isinstance(affected, dict):
-                continue
-            short = affected.get("name") or affected.get("plugin")
-            if not short or short not in installed_index:
-                continue
-            installed_version = installed_index[short]
-            if not _matches_advisory_constraint(installed_version, affected):
-                continue
-            key = (short, adv_id)
-            if key in seen_pairs:
-                continue
-            seen_pairs.add(key)
-            sev = (
-                Severity.CRITICAL
-                if adv_severity in ("critical", "high")
-                else Severity.HIGH
+        warn_message = warn.get("message") or ""
+
+        findings.append(
+            _finding(
+                rule_id="PLAT-JK-006",
+                severity=Severity.HIGH,
+                title=(
+                    f"Plugin '{plugin_name}' v{installed_version} matches "
+                    f"security advisory {warn_id}"
+                ),
+                description=(
+                    f"Plugin '{plugin_name}' is installed at version "
+                    f"'{installed_version}'. The Jenkins security team "
+                    f"has published advisory {warn_id} affecting this "
+                    f"version: {warn_message}. Plugin RCE is the most-"
+                    "exploited initial-access vector for Jenkins "
+                    "controllers. Patch immediately or disable the "
+                    "plugin. Severity is not carried in the feed JSON; "
+                    "read the linked advisory for the upstream rating."
+                ),
+                instance=instance,
+                remediation=(
+                    f"Read the advisory at {warn_url}. If a patched "
+                    "version exists, update via Manage Jenkins > "
+                    "Plugins > Updates. If no patch exists, disable "
+                    "the plugin until one ships."
+                ),
+                reference=warn_url,
+                owasp_cicd="CICD-SEC-3",
+                threat_narrative=(
+                    "An installed plugin matches a published Jenkins "
+                    "security advisory. Plugin CVEs are actively "
+                    "exploited — this is the surface DDoS-botnet "
+                    "recruitment scanners probe after fingerprinting "
+                    "an exposed controller. Closing this gap is the "
+                    "highest-priority action."
+                ),
+                stride=["E", "T"],
             )
-            findings.append(
-                _finding(
-                    rule_id="PLAT-JK-006",
-                    severity=sev,
-                    title=(
-                        f"Plugin '{short}' v{installed_version} matches "
-                        f"security advisory {adv_id}"
-                    ),
-                    description=(
-                        f"Plugin '{short}' is installed at version "
-                        f"'{installed_version}'. The Jenkins security "
-                        f"team has published advisory {adv_id} affecting "
-                        f"this version. Severity (per advisory): "
-                        f"{adv_severity or 'unspecified'}. Plugin RCE is "
-                        "the most-exploited initial-access vector for "
-                        "Jenkins controllers. Patch immediately or "
-                        "disable the plugin."
-                    ),
-                    instance=instance,
-                    remediation=(
-                        f"Read the advisory at https://www.jenkins.io/"
-                        f"security/advisories/{adv_id}/. If a patched "
-                        "version exists, update via Manage Jenkins > "
-                        "Plugins > Updates. If no patch exists, disable "
-                        "the plugin until one ships."
-                    ),
-                    reference=(
-                        f"https://www.jenkins.io/security/advisories/{adv_id}/"
-                    ),
-                    owasp_cicd="CICD-SEC-3",
-                    threat_narrative=(
-                        "An installed plugin matches a published Jenkins "
-                        "security advisory. Plugin CVEs are actively "
-                        "exploited — this is the surface DDoS-botnet "
-                        "recruitment scanners probe after fingerprinting "
-                        "an exposed controller. Closing this gap is the "
-                        "highest-priority action."
-                    ),
-                    stride=["E", "T"],
-                )
-            )
+        )
 
     return findings
 

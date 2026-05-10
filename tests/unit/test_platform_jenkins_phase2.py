@@ -73,12 +73,43 @@ INSTANCE = "https://jenkins.example.com"
 # ---------------------------------------------------------------------------
 
 
-_FEED_URL = "https://www.jenkins.io/security/advisories/jenkins-data.json"
+# Real feed URL — verified against jenkins-infra/update-center2 (2026-05-09).
+_FEED_URL = (
+    "https://raw.githubusercontent.com/jenkins-infra/update-center2"
+    "/master/resources/warnings.json"
+)
 
 
-def test_plat006_fires_when_installed_version_in_advisory_range():
-    """An installed plugin matching an advisory's affected version range
-    must produce a HIGH (or CRITICAL) finding."""
+# Sample warning entry shape — mirrors the verified upstream schema.
+# See taintly/platform/jenkins_checks.py for the full schema doc.
+def _sample_plugin_warning(
+    *,
+    warn_id: str,
+    plugin_name: str,
+    first: str | None = None,
+    last: str | None = None,
+    pattern: str | None = None,
+) -> dict:
+    version_entry: dict = {}
+    if first is not None:
+        version_entry["firstVersion"] = first
+    if last is not None:
+        version_entry["lastVersion"] = last
+    if pattern is not None:
+        version_entry["pattern"] = pattern
+    return {
+        "id": warn_id,
+        "type": "plugin",
+        "name": plugin_name,
+        "message": f"Vulnerability in {plugin_name}",
+        "url": f"https://jenkins.io/security/advisory/{warn_id}/",
+        "versions": [version_entry],
+    }
+
+
+def test_plat006_fires_when_installed_version_in_warning_range():
+    """An installed plugin matching a warning's affected version range
+    must produce a HIGH finding."""
     client = StubClient(
         plugins=[
             {"shortName": "script-security", "version": "1.78", "active": True},
@@ -86,18 +117,12 @@ def test_plat006_fires_when_installed_version_in_advisory_range():
         ],
         external={
             _FEED_URL: [
-                {
-                    "id": "2024-04-01-script-security-rce",
-                    "name": "2024-04-01-script-security-rce",
-                    "severity": "high",
-                    "plugins": [
-                        {
-                            "name": "script-security",
-                            "firstVersion": "1.0",
-                            "lastVersion": "1.80",
-                        }
-                    ],
-                }
+                _sample_plugin_warning(
+                    warn_id="SECURITY-208",
+                    plugin_name="script-security",
+                    first="1.0",
+                    last="1.80",
+                ),
             ]
         },
     )
@@ -107,27 +132,22 @@ def test_plat006_fires_when_installed_version_in_advisory_range():
     assert f.rule_id == "PLAT-JK-006"
     assert "script-security" in f.title
     assert "1.78" in f.title
-    assert f.severity.value in ("HIGH", "CRITICAL")
+    assert f.severity.value == "HIGH"
 
 
-def test_plat006_silent_when_installed_version_below_advisory_range():
-    """An installed plugin below the advisory's firstVersion is not
+def test_plat006_silent_when_installed_version_below_range():
+    """An installed plugin below the warning's firstVersion is not
     affected — must stay silent."""
     client = StubClient(
         plugins=[{"shortName": "script-security", "version": "0.5", "active": True}],
         external={
             _FEED_URL: [
-                {
-                    "id": "2024-04-01-script-security-rce",
-                    "severity": "high",
-                    "plugins": [
-                        {
-                            "name": "script-security",
-                            "firstVersion": "1.0",
-                            "lastVersion": "1.80",
-                        }
-                    ],
-                }
+                _sample_plugin_warning(
+                    warn_id="SECURITY-208",
+                    plugin_name="script-security",
+                    first="1.0",
+                    last="1.80",
+                )
             ]
         },
     )
@@ -135,23 +155,18 @@ def test_plat006_silent_when_installed_version_below_advisory_range():
     assert findings == []
 
 
-def test_plat006_silent_when_installed_version_above_advisory_range():
+def test_plat006_silent_when_installed_version_above_range():
     """Patched: installed > lastVersion. Rule must stay silent."""
     client = StubClient(
         plugins=[{"shortName": "script-security", "version": "2.0", "active": True}],
         external={
             _FEED_URL: [
-                {
-                    "id": "2024-04-01-script-security-rce",
-                    "severity": "high",
-                    "plugins": [
-                        {
-                            "name": "script-security",
-                            "firstVersion": "1.0",
-                            "lastVersion": "1.80",
-                        }
-                    ],
-                }
+                _sample_plugin_warning(
+                    warn_id="SECURITY-208",
+                    plugin_name="script-security",
+                    first="1.0",
+                    last="1.80",
+                )
             ]
         },
     )
@@ -165,17 +180,12 @@ def test_plat006_silent_for_inactive_plugin():
         plugins=[{"shortName": "script-security", "version": "1.78", "active": False}],
         external={
             _FEED_URL: [
-                {
-                    "id": "2024-04-01-script-security-rce",
-                    "severity": "high",
-                    "plugins": [
-                        {
-                            "name": "script-security",
-                            "firstVersion": "1.0",
-                            "lastVersion": "1.80",
-                        }
-                    ],
-                }
+                _sample_plugin_warning(
+                    warn_id="SECURITY-208",
+                    plugin_name="script-security",
+                    first="1.0",
+                    last="1.80",
+                )
             ]
         },
     )
@@ -194,49 +204,84 @@ def test_plat006_emits_low_finding_when_feed_unavailable():
     assert len(findings) == 1
     assert findings[0].rule_id == "PLAT-JK-006"
     assert findings[0].severity.value == "LOW"
-    assert "advisory feed unavailable" in findings[0].title.lower()
+    assert "warnings feed unavailable" in findings[0].title.lower()
 
 
-def test_plat006_critical_severity_for_critical_advisory():
-    """Advisory severity 'critical' should escalate the finding to
-    CRITICAL even though the rule's nominal severity is HIGH."""
+def test_plat006_pattern_regex_matches_when_present():
+    """The feed's ``pattern`` regex is the most precise version-range
+    encoding. When present, it overrides first/last comparison.
+    Mirrors the real entry shape (e.g. SECURITY-309 cucumber-reports
+    pattern: ``(1[.][34]|2[.][012345])(|[.-].*)``)."""
     client = StubClient(
-        plugins=[{"shortName": "remoting", "version": "4.6", "active": True}],
+        plugins=[{"shortName": "cucumber-reports", "version": "2.5.1", "active": True}],
         external={
             _FEED_URL: [
-                {
-                    "id": "2024-04-01-remoting-rce",
-                    "severity": "critical",
-                    "plugins": [
-                        {
-                            "name": "remoting",
-                            "firstVersion": "4.0",
-                            "lastVersion": "4.10",
-                        }
-                    ],
-                }
+                _sample_plugin_warning(
+                    warn_id="SECURITY-309",
+                    plugin_name="cucumber-reports",
+                    pattern=r"(1[.][34]|2[.][012345])(|[.-].*)",
+                )
             ]
         },
     )
     findings = check_plugin_advisories(INSTANCE, client)
     assert len(findings) == 1
-    assert findings[0].severity.value == "CRITICAL"
+    assert "cucumber-reports" in findings[0].title
 
 
-def test_plat006_dedupes_per_plugin_per_advisory():
-    """The same (plugin, advisory) pair must fire exactly once even if
-    the feed lists it multiple times (defensive against feed shape
+def test_plat006_skips_core_warnings():
+    """``type: core`` entries are out of scope — covered by a separate
+    follow-up rule (instance version vs core advisory)."""
+    client = StubClient(
+        plugins=[{"shortName": "core", "version": "2.50", "active": True}],
+        external={
+            _FEED_URL: [
+                {
+                    "id": "core-2_57",
+                    "type": "core",
+                    "name": "core",
+                    "message": "Core vulnerability",
+                    "url": "https://jenkins.io/security/advisory/2017-04-26/",
+                    "versions": [{"lastVersion": "2.56"}],
+                }
+            ]
+        },
+    )
+    findings = check_plugin_advisories(INSTANCE, client)
+    assert findings == []
+
+
+def test_plat006_dedupes_per_plugin_per_warning():
+    """The same (plugin, warning_id) pair must fire exactly once even
+    if the feed lists it multiple times (defensive against feed shape
     changes)."""
-    adv = {
-        "id": "dup-id",
-        "severity": "high",
-        "plugins": [
-            {"name": "script-security", "firstVersion": "1.0", "lastVersion": "2.0"}
-        ],
-    }
+    warn = _sample_plugin_warning(
+        warn_id="SECURITY-DUP",
+        plugin_name="script-security",
+        first="1.0",
+        last="2.0",
+    )
     client = StubClient(
         plugins=[{"shortName": "script-security", "version": "1.5", "active": True}],
-        external={_FEED_URL: [adv, adv]},
+        external={_FEED_URL: [warn, warn]},
+    )
+    findings = check_plugin_advisories(INSTANCE, client)
+    assert len(findings) == 1
+
+
+def test_plat006_envelope_shape_tolerated():
+    """Defensive: if the feed ever changes to an envelope shape
+    ``{"warnings": [...]}`` instead of a bare list, the parser must
+    still extract the warnings array. Verifies the fallback path."""
+    warn = _sample_plugin_warning(
+        warn_id="SECURITY-ENV",
+        plugin_name="script-security",
+        first="1.0",
+        last="2.0",
+    )
+    client = StubClient(
+        plugins=[{"shortName": "script-security", "version": "1.5", "active": True}],
+        external={_FEED_URL: {"warnings": [warn]}},
     )
     findings = check_plugin_advisories(INSTANCE, client)
     assert len(findings) == 1
