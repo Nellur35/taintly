@@ -11,6 +11,8 @@ platform's settings.
 
 from __future__ import annotations
 
+from typing import Any
+
 from taintly.families import classify_rule, default_confidence, default_review_needed
 from taintly.models import Finding, Severity
 
@@ -366,12 +368,11 @@ def check_csrf_protection(instance: str, client: JenkinsClient) -> list[Finding]
 # bounds. Severity is NOT in the feed; it lives on the linked HTML
 # advisory page, so this rule defaults to HIGH and can't auto-escalate.
 _JENKINS_ADVISORY_FEED = (
-    "https://raw.githubusercontent.com/jenkins-infra/update-center2"
-    "/master/resources/warnings.json"
+    "https://raw.githubusercontent.com/jenkins-infra/update-center2/master/resources/warnings.json"
 )
 
 
-def _version_matches_warning_entry(installed: str, entry: dict) -> bool:
+def _version_matches_warning_entry(installed: str, entry: dict[str, Any]) -> bool:
     """Return True when ``installed`` falls in the warning entry's
     affected version range.
 
@@ -400,7 +401,7 @@ def _version_matches_warning_entry(installed: str, entry: dict) -> bool:
             # Bad regex in the feed — fall through to bound check.
             pass
 
-    def _to_tuple(v: str) -> tuple:
+    def _to_tuple(v: str) -> tuple[int, ...]:
         head = v.split("-", 1)[0]
         parts = []
         for p in head.split("."):
@@ -420,9 +421,7 @@ def _version_matches_warning_entry(installed: str, entry: dict) -> bool:
         inst_t = _to_tuple(installed)
         if first and inst_t < _to_tuple(first):
             return False
-        if last and inst_t > _to_tuple(last):
-            return False
-        return True
+        return not (last and inst_t > _to_tuple(last))
     except Exception:
         return False
 
@@ -528,9 +527,7 @@ def check_plugin_advisories(instance: str, client: JenkinsClient) -> list[Findin
         # entries match the installed version.
         matched = False
         for entry in affected_versions:
-            if isinstance(entry, dict) and _version_matches_warning_entry(
-                installed_version, entry
-            ):
+            if isinstance(entry, dict) and _version_matches_warning_entry(installed_version, entry):
                 matched = True
                 break
         if not matched:
@@ -541,9 +538,7 @@ def check_plugin_advisories(instance: str, client: JenkinsClient) -> list[Findin
             continue
         seen_pairs.add(key)
 
-        warn_url = warn.get("url") or (
-            f"https://www.jenkins.io/security/advisory/"
-        )
+        warn_url = warn.get("url") or "https://www.jenkins.io/security/advisory/"
         warn_message = warn.get("message") or ""
 
         findings.append(
@@ -637,9 +632,7 @@ def check_setup_wizard_completed(instance: str, client: JenkinsClient) -> list[F
                     "or build artefacts on it as compromised — assume an "
                     "attacker has had unauthenticated admin access."
                 ),
-                reference=(
-                    "https://www.jenkins.io/doc/book/security/securing-jenkins/"
-                ),
+                reference=("https://www.jenkins.io/doc/book/security/securing-jenkins/"),
                 owasp_cicd="CICD-SEC-1",
                 threat_narrative=(
                     "An attacker can run arbitrary Groovy via Script "
@@ -683,14 +676,10 @@ def _is_canonical_update_center(url: str) -> bool:
         return False
     if url.startswith("https://updates.jenkins.io/"):
         return True
-    if url in _CANONICAL_UPDATE_CENTERS:
-        return True
-    return False
+    return url in _CANONICAL_UPDATE_CENTERS
 
 
-def check_update_center_integrity(
-    instance: str, client: JenkinsClient
-) -> list[Finding]:
+def check_update_center_integrity(instance: str, client: JenkinsClient) -> list[Finding]:
     """PLAT-JK-010: Configured Update Center URL is non-canonical.
 
     Every plugin install pulls its descriptor (and signing key chain)
@@ -740,9 +729,7 @@ def check_update_center_integrity(
                     "mirror's signing-key chain is independently "
                     "verified."
                 ),
-                reference=(
-                    "https://www.jenkins.io/doc/book/managing/plugins/"
-                ),
+                reference=("https://www.jenkins.io/doc/book/managing/plugins/"),
                 owasp_cicd="CICD-SEC-3",
                 threat_narrative=(
                     "An attacker who can replace the update center URL "
