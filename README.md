@@ -84,6 +84,40 @@ GITLAB_TOKEN=glpat-... taintly --gitlab-group my-group
 taintly /path/to/repo --platform jenkins
 ```
 
+## Platform posture audit
+
+Pipeline configuration is one half of CI/CD security. The other half is the
+**controller / forge configuration** — branch protection, default token
+permissions, plugin patch level, agent transport. Misconfigurations here are
+how attackers get initial access in the first place (DDoS botnets recruiting
+exposed Jenkins controllers, fork-PR pwn-requests bypassing review, etc.).
+
+Taintly ships a posture audit per platform that queries the live API and
+flags configuration smells. **You have to run it explicitly** — the default
+scan reads pipeline files only.
+
+```bash
+# GitHub repository posture
+GITHUB_TOKEN=ghp_... taintly --github-repo OWNER/REPO --platform-audit
+
+# GitLab project posture
+GITLAB_TOKEN=glpat-... taintly --gitlab-project OWNER/PROJECT --platform-audit
+
+# Jenkins controller posture
+JENKINS_USER=admin JENKINS_TOKEN=... taintly --jenkins-url https://jenkins.example.com
+```
+
+Coverage at a glance (full reference in [`docs/PLATFORM_POSTURE.md`](docs/PLATFORM_POSTURE.md)):
+
+| Platform | Rules | Surface covered |
+|---|---|---|
+| **GitHub** (`PLAT-GH-*`, 12 rules) | Branch protection, fork-PR approval gate, default `GITHUB_TOKEN` perms, CODEOWNERS coverage of workflows, Dependabot alerts/updates, deploy keys, webhook TLS, outside collaborators with admin, secret scanning |
+| **GitLab** (`PLAT-GL-*`, 8 rules) | Branch protection, MR approval count, CI/CD variable Protected/Masked flags, public-pipelines visibility, deploy keys, webhook TLS, member-access surface, group variables |
+| **Jenkins** (`PLAT-JK-*`, 5 rules) | Anonymous access, Script Console exposure, outdated plugins, agent transport (JNLP without TLS, builds on controller), CSRF protection |
+
+Each posture run hits well-known REST endpoints (`/api/v3/repos/...`,
+`/api/v4/projects/...`, `/api/json`); no scraping, no privileged scanning.
+
 ## CI integration
 
 **GitHub Actions**
