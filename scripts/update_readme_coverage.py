@@ -161,7 +161,7 @@ def main() -> int:
     summary = render_summary(total_file, total_plat)
     coverage = render_coverage_table(table)
 
-    current = README.read_text()
+    current = README.read_text(encoding="utf-8")
     updated = _replace_block(current, "summary", summary)
     updated = _replace_block(updated, "coverage", coverage)
     updated = _replace_postscript(updated, total_plat)
@@ -177,7 +177,7 @@ def main() -> int:
         return 0
 
     if updated != current:
-        README.write_text(updated)
+        README.write_text(updated, encoding="utf-8")
         print("Updated README.md AUTOGEN blocks")
     else:
         print("README already in sync; no changes")
