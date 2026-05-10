@@ -667,8 +667,7 @@ def format_test_results_json(
         known_gap_count = sum(
             1
             for r in mutation_results
-            if not r.passed
-            and (r.rule_id, r.mutation_op) in _KNOWN_MUTATION_GAPS
+            if not r.passed and (r.rule_id, r.mutation_op) in _KNOWN_MUTATION_GAPS
         )
         by_rule_op: dict[str, dict[str, int]] = {}
         for r in mutation_results:
@@ -683,9 +682,7 @@ def format_test_results_json(
             "kill_rate": (killed / total) if total else 0.0,
             "known_gaps": known_gap_count,
             "by_rule_op": by_rule_op,
-            "survivors": [
-                _result_to_dict(r) for r in mutation_results if not r.passed
-            ],
+            "survivors": [_result_to_dict(r) for r in mutation_results if not r.passed],
         }
 
     return json.dumps(

@@ -314,7 +314,7 @@ class _Tokenizer:
             # Without this, the audit's scan of gitlab-org/cli's
             # .gitlab-ci.yml emitted ENGINE-ERR at line 367 and
             # forfeited structural coverage for half the file.
-            if ch == "!" and raw[pos:pos + 10] == "!reference":
+            if ch == "!" and raw[pos : pos + 10] == "!reference":
                 pos += 10
                 # Skip optional whitespace after the tag.
                 while pos < n and raw[pos] in " \t":

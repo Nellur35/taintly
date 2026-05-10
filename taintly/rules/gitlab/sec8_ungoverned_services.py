@@ -10,7 +10,7 @@ artefacts, and the GitLab token. This makes image pinning more critical
 in GitLab than in GitHub Actions (where job containers are optional).
 """
 
-from taintly.models import Platform, RegexPattern, Rule, SequencePattern, Severity
+from taintly.models import Platform, RegexPattern, Rule, Severity
 
 RULES: list[Rule] = [
     # =========================================================================

@@ -245,7 +245,9 @@ def mutate_quoted_scalar_form(sample: str) -> list[str]:
     avoid producing invalid YAML.
     """
     mutations: list[str] = []
-    pattern = re.compile(r"^(\s*[A-Za-z][A-Za-z0-9_-]*:\s+)([A-Za-z][A-Za-z0-9._/\-]*)\s*$", re.MULTILINE)
+    pattern = re.compile(
+        r"^(\s*[A-Za-z][A-Za-z0-9_-]*:\s+)([A-Za-z][A-Za-z0-9._/\-]*)\s*$", re.MULTILINE
+    )
     quoted = pattern.sub(r'\1"\2"', sample, count=1)
     if quoted != sample:
         mutations.append(quoted)

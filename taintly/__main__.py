@@ -554,12 +554,11 @@ def main():
 
         mutation_results = None
         if args.mutate:
-            mutation_results = run_mutation_tests(
-                testable, include_semantic=args.mutate_semantic
-            )
+            mutation_results = run_mutation_tests(testable, include_semantic=args.mutate_semantic)
 
         if args.self_test_json:
             from .testing.self_test import format_test_results_json
+
             print(format_test_results_json(self_results, mutation_results))
         else:
             print(format_test_results(self_results, mutation_results))
