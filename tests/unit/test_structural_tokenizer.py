@@ -162,6 +162,24 @@ def test_double_quoted_value_with_escape():
     assert quoted[0].value == "line1\\nline2"
 
 
+def test_multiline_double_quoted_value_continues_until_closing_quote():
+    """Real GitHub workflows use YAML's multi-line quoted scalar
+    form for long input descriptions. The tokenizer should treat
+    the whole quoted run as one scalar instead of cutting off at the
+    first physical line.
+    """
+    src = (
+        'description: "Pass `--prerelease=allow` to wheel-install steps so\n'
+        "  transitive prerelease deps resolve. Use only when the release itself\n"
+        '  is a prerelease."\n'
+        "type: string\n"
+    )
+    quoted = [t for t in _tokens(src) if t.kind == TokenKind.SCALAR_QUOTED]
+    assert len(quoted) == 1
+    assert "transitive prerelease deps resolve" in quoted[0].value
+    assert quoted[0].line == 1
+
+
 # ---------------------------------------------------------------------------
 # Block scalars — chomping and indentation indicators
 # ---------------------------------------------------------------------------

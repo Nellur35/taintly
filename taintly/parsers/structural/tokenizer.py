@@ -329,7 +329,7 @@ class _Tokenizer:
 
             # Quoted scalar.
             if ch in ("'", '"'):
-                end, value = self._read_quoted_scalar(raw, pos, line_no)
+                end, value = self._read_quoted_scalar_across_lines(raw, pos, line_no)
                 # Look ahead: if followed by ``:``, this was a quoted
                 # key.  Otherwise it's a quoted scalar value.
                 trailing = end
@@ -365,6 +365,35 @@ class _Tokenizer:
     # ------------------------------------------------------------------
     # Quoted scalar
     # ------------------------------------------------------------------
+
+    def _read_quoted_scalar_across_lines(
+        self, raw: str, start: int, line_no: int
+    ) -> tuple[int, str]:
+        try:
+            return self._read_quoted_scalar(raw, start, line_no)
+        except TokenizerError:
+            pass
+
+        quote = raw[start]
+        line_idx = self._line_idx
+        value_parts = [raw[start + 1 :]]
+        while True:
+            line_idx += 1
+            if line_idx >= len(self._lines):
+                raise TokenizerError(
+                    line_no,
+                    f"unterminated {quote!r}-quoted scalar",
+                )
+
+            continuation = self._lines[line_idx]
+            try:
+                _end, value = self._read_quoted_scalar(quote + continuation, 0, line_idx + 1)
+            except TokenizerError:
+                value_parts.append(continuation)
+                continue
+            value_parts.append(value)
+            self._line_idx = line_idx
+            return len(raw), "\n".join(value_parts)
 
     def _read_quoted_scalar(self, raw: str, start: int, line_no: int) -> tuple[int, str]:
         quote = raw[start]
