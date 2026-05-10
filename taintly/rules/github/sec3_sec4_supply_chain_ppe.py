@@ -104,8 +104,14 @@ _DANGEROUS_GITHUB_CONTEXT_RE = re.compile(
 # credential.  Implementing that requires a job-scoped scan, which
 # this custom pattern provides.
 
-_CHECKOUT_USES_RE = re.compile(r"uses:\s*actions/checkout@")
-_PERSIST_FALSE_RE = re.compile(r"""persist-credentials:\s*['"]?(?:false|no)['"]?\b""")
+_CHECKOUT_USES_RE = re.compile(r"uses:\s*actions/checkout@", re.IGNORECASE)
+# YAML boolean false accepts ``false``/``False``/``FALSE`` and
+# ``no``/``No``/``NO``; quote the value or not.  IGNORECASE matches
+# all surface forms.
+_PERSIST_FALSE_RE = re.compile(
+    r"""persist-credentials:\s*['"]?(?:false|no)['"]?\b""",
+    re.IGNORECASE,
+)
 # Shell git operations that consume the persisted credential.
 _GIT_CREDENTIAL_OP_RE = re.compile(
     r"\bgit\s+(?:push|fetch\s+http|config\s+user\.(?:name|email)|config\s+--global\s+user)\b"
