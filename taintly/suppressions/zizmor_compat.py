@@ -14,9 +14,11 @@ broader level even if the specific tooling differs.
 
 The bracketed forms suppress a specific zizmor rule.  We map a small
 set of zizmor rule IDs onto the taintly rule IDs whose threat shape
-genuinely overlaps; mappings outside this allowlist degrade to the
-broad-suppression behaviour (treat as "ignore on this line") because
-silently dropping the unfamiliar id would surprise the user.
+genuinely overlaps; mappings outside this allowlist do **not**
+suppress.  The maintainer who wants a broad-line suppression can
+write the unbracketed ``# zizmor: ignore`` (or use taintly's own
+``# taintly: ignore``) — the bracketed form is reserved for the
+explicit mapping it advertises.
 
 The mapping is deliberately conservative.  The goal is to avoid the
 "flood of new findings on a repo that already passed zizmor review"
@@ -84,10 +86,12 @@ def is_zizmor_suppressed(line: str, taintly_rule_id: str) -> bool:
     * ``# zizmor: ignore[<ids>]`` where any id maps to a taintly rule
       set containing ``taintly_rule_id`` → suppress.
     * ``# zizmor: ignore[<ids>]`` where no listed id has a known
-      mapping → broad-suppress on the line (treat the maintainer's
-      intent as "this line was reviewed").  Conservative-but-safe:
-      we don't fire findings on lines the maintainer marked under a
-      foreign tool, but we don't expand the mapping silently either.
+      mapping → do not suppress.  The bracketed form advertises an
+      explicit mapping; honouring it for unmapped ids would scope the
+      effect to whatever zizmor adds in the future, which the
+      maintainer can't have known when writing the marker.  A
+      maintainer who wants a broad-line suppression can write the
+      unbracketed ``# zizmor: ignore`` instead.
     """
     if _ZIZMOR_GENERIC_RE.search(line):
         return True
@@ -97,14 +101,10 @@ def is_zizmor_suppressed(line: str, taintly_rule_id: str) -> bool:
     listed = [s.strip() for s in m.group(1).split(",") if s.strip()]
     if not listed:
         return False
-    any_unmapped = False
     for zid in listed:
         mapped = ZIZMOR_TO_TAINTLY.get(zid)
         if mapped is None:
-            any_unmapped = True
             continue
         if taintly_rule_id in mapped:
             return True
-    # If no listed id is mapped to this rule but at least one is
-    # unmapped, treat as broad ignore (per docstring rationale).
-    return any_unmapped
+    return False

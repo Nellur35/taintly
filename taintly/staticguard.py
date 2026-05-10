@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import subprocess
 from enum import Enum
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 
 class Verdict(Enum):
@@ -72,7 +72,13 @@ def evaluate_if(expr: str | None, ctx: WorkflowContext | None = None) -> Verdict
     if left is None or right is None:
         return Verdict.RUNTIME
 
-    equal = left.lower() == right.lower()
+    # GitHub Actions' ``==`` operator is case-sensitive on string
+    # comparisons.  Coercing both sides with ``.lower()`` would
+    # cause false negatives on suppression when ctx and literal
+    # differ only in case (conservative — never over-suppresses,
+    # but misses dead-job suppression on case-mismatched literals
+    # that GHA would have evaluated false at runtime).
+    equal = left == right
     if comparison.group(2) == "!=":
         equal = not equal
     return Verdict.STATIC_TRUE if equal else Verdict.STATIC_FALSE
@@ -81,34 +87,111 @@ def evaluate_if(expr: str | None, ctx: WorkflowContext | None = None) -> Verdict
 def find_dead_line_ranges(
     content: str, ctx: WorkflowContext | None = None
 ) -> list[tuple[int, int]]:
-    """Return 1-based inclusive line ranges for statically dead jobs/steps."""
-    lines = content.splitlines()
-    jobs_range = _find_mapping_item(lines, 0, len(lines), 0, "jobs")
-    if jobs_range is None:
-        return []
+    """Return 1-based inclusive line ranges for statically dead jobs/steps.
+
+    Walks the workflow with the structural reader, which resolves YAML
+    anchors and merge keys: a job inheriting ``if: false`` via
+    ``<<: *anchor`` is recognised as dead even though the literal
+    ``if:`` line lives in the anchor body.  Job-key declaration lines
+    are recovered from the source via :func:`_job_key_line_map` so the
+    returned range covers the full job block, including the key line.
+    """
+    from .parsers.structural import EventKind, walk_workflow
+
+    job_key_lines = _job_key_line_map(content)
+
+    # Heterogeneous nested dict: top-level keys are str (job IDs);
+    # inner dicts mix str ("if"), int ("start"/"end"), and dict
+    # ("steps") values.  TypedDict would require restructuring; Any
+    # for the inner type is the minimal annotation that satisfies
+    # mypy's `Missing type parameters for generic type "dict"` check
+    # without changing runtime behaviour.
+    job_data: dict[str, dict[str, Any]] = {}
+    for event in walk_workflow(filepath="anonymous.yml", content=content, recover=True):
+        if event.kind is not EventKind.LEAF_SCALAR:
+            continue
+        path = event.path
+        if not path or path[0] != "jobs" or len(path) < 2:
+            continue
+        job_id = path[1]
+        if not isinstance(job_id, str):
+            continue
+
+        slot = job_data.setdefault(
+            job_id,
+            {"if": None, "start": event.line, "end": event.line, "steps": {}},
+        )
+        slot["start"] = min(slot["start"], event.line)
+        slot["end"] = max(slot["end"], event.line)
+
+        if len(path) == 3 and path[2] == "if":
+            slot["if"] = event.value
+
+        if len(path) >= 5 and path[2] == "steps" and isinstance(path[3], int):
+            step_idx = path[3]
+            step_slot = slot["steps"].setdefault(
+                step_idx,
+                {"if": None, "start": event.line, "end": event.line},
+            )
+            step_slot["start"] = min(step_slot["start"], event.line)
+            step_slot["end"] = max(step_slot["end"], event.line)
+            if len(path) == 5 and path[4] == "if":
+                step_slot["if"] = event.value
 
     ranges: list[tuple[int, int]] = []
-    jobs_start, jobs_end, jobs_indent = jobs_range
-    for job_start, job_end, job_indent in _child_mapping_ranges(
-        lines, jobs_start + 1, jobs_end, jobs_indent
-    ):
-        job_if = _find_direct_if(lines, job_start + 1, job_end, job_indent)
-        if evaluate_if(job_if, ctx) is Verdict.STATIC_FALSE:
-            ranges.append((job_start + 1, job_end))
+    for job_id, slot in job_data.items():
+        start = job_key_lines.get(job_id, slot["start"])
+        if evaluate_if(slot["if"], ctx) is Verdict.STATIC_FALSE:
+            ranges.append((start, slot["end"]))
             continue
-
-        steps_range = _find_mapping_item(lines, job_start + 1, job_end, job_indent + 1, "steps")
-        if steps_range is None:
-            continue
-        steps_start, steps_end, steps_indent = steps_range
-        for step_start, step_end, step_indent in _list_item_ranges(
-            lines, steps_start + 1, steps_end, steps_indent
-        ):
-            step_if = _find_step_if(lines, step_start, step_end, step_indent)
-            if evaluate_if(step_if, ctx) is Verdict.STATIC_FALSE:
-                ranges.append((step_start + 1, step_end))
+        for step_slot in slot["steps"].values():
+            if evaluate_if(step_slot["if"], ctx) is Verdict.STATIC_FALSE:
+                ranges.append((step_slot["start"], step_slot["end"]))
 
     return ranges
+
+
+def is_workflow_whole_dead(content: str, ctx: WorkflowContext | None = None) -> bool:
+    """Return ``True`` if every job in the workflow is statically dead.
+
+    Walks the workflow via the structural reader, collects each job's
+    ``if:`` guard (or ``None`` when the job is unconditional), evaluates
+    each guard with :func:`evaluate_if`, and returns ``True`` iff:
+
+    1. The workflow has at least one job (an empty ``jobs:`` map is
+       not "whole-dead", it's "no jobs to suppress").
+    2. Every job's guard evaluates to STATIC_FALSE.
+
+    A workflow with no ``jobs:`` block (e.g., ``workflow_call``-only
+    definitions, or syntactically incomplete files) returns ``False``
+    — there is nothing to call dead.
+
+    Conservatism: any RUNTIME or STATIC_TRUE job means ``False`` is
+    returned and the existing per-job suppression path handles the
+    file normally.  The static evaluator's literal-only / repo-match
+    semantics carry through.
+    """
+    from .parsers.structural import EventKind, walk_workflow
+
+    job_ifs: dict[str, str | None] = {}
+    for event in walk_workflow(filepath="anonymous.yml", content=content, recover=True):
+        if event.kind is not EventKind.LEAF_SCALAR:
+            continue
+        path = event.path
+        if not path or path[0] != "jobs" or len(path) < 2:
+            continue
+        job_id = path[1]
+        if not isinstance(job_id, str):
+            continue
+        if job_id not in job_ifs:
+            job_ifs[job_id] = None
+        if len(path) == 3 and path[2] == "if":
+            job_ifs[job_id] = event.value
+
+    if not job_ifs:
+        return False
+
+    return all(evaluate_if(if_expr, ctx) is Verdict.STATIC_FALSE for if_expr in job_ifs.values())
 
 
 def detect_github_workflow_context(repo_path: str) -> WorkflowContext:
@@ -133,9 +216,19 @@ def detect_github_workflow_context(repo_path: str) -> WorkflowContext:
 
 
 def _strip_expression_wrapper(expr: str) -> str:
-    if expr.startswith("${{") and expr.endswith("}}"):
-        return expr[3:-2].strip()
-    return expr
+    s = expr.strip()
+    # Unwrap a YAML-quoted ``${{ … }}`` expression (some style guides
+    # recommend the outer quotes to disambiguate from ``${{`` syntax
+    # for YAML linters).  Bare YAML-quoted strings are left untouched
+    # so the conservative evaluator falls through to RUNTIME instead
+    # of pretending to know GHA's truthy-string semantics.
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        inner = s[1:-1].strip()
+        if inner.startswith("${{") and inner.endswith("}}"):
+            s = inner
+    if s.startswith("${{") and s.endswith("}}"):
+        return s[3:-2].strip()
+    return s
 
 
 def _comparison_value(raw: str, ctx: WorkflowContext | None) -> str | None:
@@ -154,120 +247,39 @@ def _comparison_value(raw: str, ctx: WorkflowContext | None) -> str | None:
     return None
 
 
-def _indent(line: str) -> int:
-    return len(line) - len(line.lstrip(" "))
+def _job_key_line_map(content: str) -> dict[str, int]:
+    """Map ``job_id`` -> 1-based line of its ``<id>:`` declaration.
 
-
-def _is_ignorable(line: str) -> bool:
-    stripped = line.strip()
-    return not stripped or stripped.startswith("#")
-
-
-def _range_end(lines: list[str], start: int, limit: int, indent: int) -> int:
-    end = start + 1
-    while end < limit:
-        if not _is_ignorable(lines[end]) and _indent(lines[end]) <= indent:
-            break
-        end += 1
-    return end
-
-
-def _find_mapping_item(
-    lines: list[str], start: int, end: int, min_indent: int, key: str
-) -> tuple[int, int, int] | None:
-    pattern = re.compile(rf"^\s*{re.escape(key)}\s*:\s*(?:#.*)?$")
-    for idx in range(start, end):
-        if _is_ignorable(lines[idx]) or _indent(lines[idx]) < min_indent:
-            continue
-        if pattern.match(lines[idx]):
-            indent = _indent(lines[idx])
-            return idx, _range_end(lines, idx, end, indent), indent
-    return None
-
-
-def _child_mapping_ranges(
-    lines: list[str], start: int, end: int, parent_indent: int
-) -> list[tuple[int, int, int]]:
-    ranges: list[tuple[int, int, int]] = []
-    pattern = re.compile(r"^\s*[\w.-]+\s*:\s*(?:#.*)?$")
-    idx = start
-    while idx < end:
-        if _is_ignorable(lines[idx]) or _indent(lines[idx]) <= parent_indent:
-            idx += 1
-            continue
-        indent = _indent(lines[idx])
-        if pattern.match(lines[idx]):
-            child_end = _range_end(lines, idx, end, indent)
-            ranges.append((idx, child_end, indent))
-            idx = child_end
-            continue
-        idx += 1
-    return ranges
-
-
-def _list_item_ranges(
-    lines: list[str], start: int, end: int, parent_indent: int
-) -> list[tuple[int, int, int]]:
-    ranges: list[tuple[int, int, int]] = []
-    idx = start
-    while idx < end:
-        line = lines[idx]
-        if _is_ignorable(line) or _indent(line) <= parent_indent:
-            idx += 1
-            continue
-        if re.match(r"^\s*-\s+", line):
-            indent = _indent(line)
-            item_end = idx + 1
-            while item_end < end:
-                if not _is_ignorable(lines[item_end]):
-                    item_indent = _indent(lines[item_end])
-                    if item_indent < indent:
-                        break
-                    if item_indent == indent and re.match(r"^\s*-\s+", lines[item_end]):
-                        break
-                    if item_indent <= parent_indent:
-                        break
-                item_end += 1
-            ranges.append((idx, item_end, indent))
-            idx = item_end
-            continue
-        idx += 1
-    return ranges
-
-
-def _find_direct_if(lines: list[str], start: int, end: int, parent_indent: int) -> str | None:
+    Used as the upper bound of a dead-job range so suppression ranges
+    cover the job key line (matching the engine's existing contract),
+    not just the job's leaf-scalar lines.  The structural reader emits
+    leaves at child paths but not at the parent key, so this small
+    line scan is the supplement; everything else (``if:`` resolution,
+    merge-key inheritance, step bookkeeping) goes through the
+    structural reader.
+    """
+    lines = content.splitlines()
+    in_jobs = False
+    jobs_indent = -1
     child_indent: int | None = None
-    for idx in range(start, end):
-        if not _is_ignorable(lines[idx]) and _indent(lines[idx]) > parent_indent:
-            child_indent = _indent(lines[idx])
-            break
-    if child_indent is None:
-        return None
-    for idx in range(start, end):
-        if _is_ignorable(lines[idx]):
+    out: dict[str, int] = {}
+    job_pattern = re.compile(r"^\s*([\w.-]+)\s*:\s*(?:#.*)?$")
+    for idx, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        indent = _indent(lines[idx])
-        if indent <= parent_indent:
-            break
-        if indent != child_indent:
+        indent = len(raw) - len(raw.lstrip(" "))
+        if not in_jobs:
+            if re.match(r"^jobs\s*:\s*(?:#.*)?$", raw):
+                in_jobs = True
+                jobs_indent = indent
             continue
-        match = re.match(r"^\s*if\s*:\s*(.+?)\s*$", lines[idx])
-        if match is not None:
-            return match.group(1).strip()
-    return None
-
-
-def _find_step_if(lines: list[str], start: int, end: int, item_indent: int) -> str | None:
-    inline = re.match(r"^\s*-\s*if\s*:\s*(.+?)\s*$", lines[start])
-    if inline is not None:
-        return inline.group(1).strip()
-    for idx in range(start + 1, end):
-        if _is_ignorable(lines[idx]):
-            continue
-        indent = _indent(lines[idx])
-        if indent <= item_indent:
+        if indent <= jobs_indent:
             break
-        match = re.match(r"^\s*if\s*:\s*(.+?)\s*$", lines[idx])
-        if match is not None:
-            return match.group(1).strip()
-    return None
+        if child_indent is None:
+            child_indent = indent
+        if indent == child_indent:
+            m = job_pattern.match(raw)
+            if m and m.group(1) not in out:
+                out[m.group(1)] = idx + 1
+    return out

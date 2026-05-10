@@ -1,0 +1,16 @@
+# Every job has if: false -> whole-workflow suppression applies,
+# and the pull_request_target trigger-level findings (SEC4-GH-001 +
+# SEC4-GH-002) that would normally fire here are suppressed because
+# the workflow can never run.
+on:
+  pull_request_target:
+    types: [labeled]
+jobs:
+  build:
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: echo "${{ github.event.pull_request.title }}"

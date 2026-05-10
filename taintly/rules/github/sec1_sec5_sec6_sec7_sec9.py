@@ -18,6 +18,7 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
 
 # ---------------------------------------------------------------------------
 # SEC1-GH-001 — job-scoped variant of SequencePattern
@@ -58,11 +59,16 @@ class _JobScopedSequencePattern:
         absent_within: str,
         lookahead_lines: int = 10,
         exclude: list[str] | None = None,
+        exclude_unless_within: list[tuple[str, str]] | None = None,
     ) -> None:
         self._pattern_a_re = re.compile(pattern_a)
         self._absent_re = re.compile(absent_within)
         self._lookahead = lookahead_lines
         self._excludes = [re.compile(e) for e in (exclude or [])]
+        self._conditional_excludes = [
+            (re.compile(line_re), re.compile(keep_re, re.IGNORECASE))
+            for line_re, keep_re in (exclude_unless_within or [])
+        ]
 
     def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
         # Find the ``jobs:`` line.  When absent, the pattern degrades
@@ -79,10 +85,15 @@ class _JobScopedSequencePattern:
                 # Pre-jobs: trigger block, file-level permissions,
                 # env: defaults — never the rule's intended target.
                 continue
-            if any(ex.search(line) for ex in self._excludes):
-                continue
             if self._pattern_a_re.search(line):
                 window = "\n".join(lines[i : i + self._lookahead])
+                if any(ex.search(line) for ex in self._excludes):
+                    continue
+                if any(
+                    line_re.search(line) and not keep_re.search(window)
+                    for line_re, keep_re in self._conditional_excludes
+                ):
+                    continue
                 if not self._absent_re.search(window):
                     results.append((i + 1, line.strip()))
         return results
@@ -123,6 +134,14 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
     r"pypa/gh-action-pypi-publish",
     r"sigstore/gh-action-sigstore",
     r"actions/attest-build-provenance",
+    # iter-5 (2026-05-04): three OIDC-consuming actions found
+    # legitimately requesting ``id-token: write`` in the corpus
+    # baseline that the previous list missed.  All three are
+    # documented OIDC-only flows where the token is the actual
+    # auth surface, not a misconfigured permission.
+    r"ossf/scorecard-action",
+    r"actions/deploy-pages",
+    r"slsa-framework/slsa-github-generator",
     # Shell-form.  ``--`` is two non-word characters, so a leading
     # ``\b`` would never match on the flag — the preceding space is
     # also non-word, so there is no word boundary between them.  The
@@ -135,6 +154,183 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
 )
 
 _OIDC_CONSUMER_REGEX: str = "|".join(_OIDC_CONSUMER_ALTERNATES)
+
+
+# ---------------------------------------------------------------------------
+# SEC6-GH-010 helpers — see the rule's docstring for the threat model.
+# ---------------------------------------------------------------------------
+
+# Action input slot names whose shape implies a credential.  Matched
+# case-insensitively, anchored start-and-end so ``api-key`` matches
+# but ``api-key-name`` does not (the latter is a label, not the
+# secret itself).
+_CREDENTIAL_INPUT_RE = re.compile(
+    r"^[\w-]*(?:token|key|secret|password|pass)$",
+    re.IGNORECASE,
+)
+
+# A scalar value that is exactly a single ``${{ secrets.X }}``
+# reference, possibly with surrounding whitespace.  We deliberately
+# do not match values that interpolate the secret into a larger
+# string — those are covered by SEC4-GH-004's script-injection rule
+# when the destination is a shell sink.
+_SECRETS_REF_VALUE_RE = re.compile(r"^\s*\$\{\{\s*secrets\.[A-Za-z_][\w-]*\s*\}\}\s*$")
+
+# Known-safe (action_name, input_slot) pairs.  An action listed here
+# documents the slot as its primary credential surface — passing the
+# secret directly as ``with: <slot>: ${{ secrets.X }}`` matches the
+# action's intended interface, and routing through ``env:`` first
+# offers no additional masking benefit (the action either logs its
+# inputs or it doesn't, regardless of how the value got into the
+# slot).
+#
+# Curated from the corpus baseline 2026-05-04 (35 repos, top SEC6-
+# GH-010 fires).  Each entry is the ``owner/repo`` form of the
+# action — sub-action paths (e.g. ``github/codeql-action/init``)
+# match by the leading two segments only; see
+# ``_action_name_from_uses``.
+_SAFE_ACTION_INPUT_PAIRS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # ---- Iteration 2 baseline (10 pairs) -----------------------
+        # GitHub-published stale-issue bot — repo-token IS its auth.
+        ("actions/stale", "repo-token"),
+        # PyPI publish action — password is the API token.
+        ("pypa/gh-action-pypi-publish", "password"),
+        # Container registry login — these slots ARE the credentials.
+        ("docker/login-action", "password"),
+        ("docker/login-action", "username"),
+        # AWS credentials login — keypair IS its auth.
+        ("aws-actions/configure-aws-credentials", "aws-secret-access-key"),
+        ("aws-actions/configure-aws-credentials", "aws-access-key-id"),
+        # Azure Active Directory login — client-secret IS its auth.
+        ("azure/login", "client-secret"),
+        # Google Cloud auth — credentials_json IS its auth.
+        ("google-github-actions/auth", "credentials_json"),
+        # GitHub-published CodeQL — token is the GITHUB_TOKEN passthrough.
+        ("github/codeql-action", "token"),
+        # Peter Evans — popular actions whose token slot is the
+        # action's documented auth.
+        ("peter-evans/create-pull-request", "token"),
+        ("peter-evans/create-or-update-comment", "token"),
+        # Snyk action — github-token is its auth.
+        ("snyk/actions", "github-token"),
+        # ---- Iteration 3 additions (12 pairs) ----------------------
+        # Identified via corpus sample-and-label of 26 SEC6-GH-010
+        # post-iteration-2 fires (2026-05-04, 17/26 = 65% FP rate).
+        # Each pair: action's documented single-purpose auth surface.
+        # First-party — actions/checkout's token slot IS the GitHub
+        # auth surface for git fetch/clone (GITHUB_TOKEN or PAT).
+        ("actions/checkout", "token"),
+        # First-party — actions/github-script's github-token is the
+        # only auth path; the script itself is the consumer (Octokit
+        # client), so env-routing offers no masking benefit.
+        ("actions/github-script", "github-token"),
+        # First-party — converts (app-id, private-key) to an
+        # installation token; private-key IS the credential.
+        ("actions/create-github-app-token", "private-key"),
+        # peaceiris/actions-gh-pages — single-purpose: push to
+        # gh-pages branch using the supplied token.
+        ("peaceiris/actions-gh-pages", "github_token"),
+        # ad-m/github-push-action — single-purpose: git push using
+        # the supplied token.
+        ("ad-m/github-push-action", "github_token"),
+        # codecov/codecov-action — token IS the Codecov upload
+        # credential; upstream zizmor's `secrets-outside-env` ignore
+        # confirms this is canonically expected.
+        ("codecov/codecov-action", "token"),
+        # ossf/scorecard-action — repo_token is the documented PAT
+        # slot for branch-protection / settings reads.
+        ("ossf/scorecard-action", "repo_token"),
+        # googleapis/release-please-action — release-please's
+        # documented auth surface.
+        ("googleapis/release-please-action", "token"),
+        # peter-evans/slash-command-dispatch — same trust tier as
+        # the existing peter-evans/* allowlist entries.
+        ("peter-evans/slash-command-dispatch", "token"),
+        # rustsec/audit-check — GITHUB_TOKEN passthrough for filing
+        # vulnerability issues; documented auth surface.
+        ("rustsec/audit-check", "token"),
+        # crazy-max/ghaction-import-gpg + crowdstrike's fork —
+        # single-purpose: import a GPG private key. The slot IS the
+        # input the action exists to consume.
+        ("crazy-max/ghaction-import-gpg", "gpg_private_key"),
+        ("crowdstrike/ghaction-import-gpg", "gpg_private_key"),
+        # github/issue-labeler — same trust tier as the existing
+        # github/codeql-action entry (both GitHub-published).
+        ("github/issue-labeler", "repo-token"),
+    }
+)
+
+
+def _action_name_from_uses(uses_value: str) -> str:
+    """Extract the canonical ``owner/repo`` action name from a
+    ``uses:`` value.
+
+    Drops the ``@<ref>`` suffix and any sub-action path segments
+    beyond the second ``/``.  Used to normalise the lookup key for
+    ``_SAFE_ACTION_INPUT_PAIRS`` so ``github/codeql-action/init@v3``
+    and ``github/codeql-action/analyze@v3`` both resolve to
+    ``github/codeql-action``.
+    """
+    if not uses_value:
+        return ""
+    head = uses_value.split("@", 1)[0].strip()
+    parts = head.split("/")
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return head
+
+
+def _is_unmasked_secret_input(
+    value: str,
+    _value_kind: str,
+    path: tuple[object, ...],
+    ctx: PredicateContext,
+) -> bool:
+    """Predicate for SEC6-GH-010 (Phase 8 iteration 2 form).
+
+    Fires when:
+
+    * the leaf is at ``jobs.<j>.steps[<i>].with.<input_slot>`` with
+      a credential-shape ``<input_slot>``
+    * the value is exactly ``${{ secrets.X }}``
+    * AND the step has no ``env:`` block routing any secret (the
+      runner registers env-block secret values with the log
+      redactor on process start; without an env entry, the with-
+      input value is unredacted in the action's stdout)
+    * AND the ``(action, input_slot)`` pair is not in the safe-
+      consumer allowlist
+    """
+    # Path shape: jobs.<job>.steps[<i>].with.<input_slot>
+    if (
+        len(path) != 6
+        or path[0] != "jobs"
+        or path[2] != "steps"
+        or not isinstance(path[3], int)
+        or path[4] != "with"
+        or not isinstance(path[5], str)
+    ):
+        return False
+    input_slot = path[5]
+    if not _CREDENTIAL_INPUT_RE.match(input_slot):
+        return False
+    if not _SECRETS_REF_VALUE_RE.match(value or ""):
+        return False
+    job_id = path[1]
+    step_i = path[3]
+    step_prefix: tuple[object, ...] = ("jobs", job_id, "steps", step_i)
+    # Step-scope env-block exception.  Any leaf under this step's
+    # ``env:`` block whose value is a secret reference indicates the
+    # safe pattern is in use at this step — the runner has
+    # registered at least one secret with the redactor on the
+    # step's process start.
+    for env_leaf in ctx.descendants(step_prefix + ("env",)):
+        if env_leaf.value and _SECRETS_REF_VALUE_RE.match(env_leaf.value):
+            return False
+    # Safe-consumer allowlist.
+    uses_value = ctx.get_value(step_prefix + ("uses",)) or ""
+    action_name = _action_name_from_uses(uses_value)
+    return (action_name, input_slot) not in _SAFE_ACTION_INPUT_PAIRS
 
 
 RULES: list[Rule] = [
@@ -157,7 +353,20 @@ RULES: list[Rule] = [
             pattern_a=r"^\s{2,4}(deploy|release|publish|production|prod)[_-]?\w*:\s*$",
             absent_within=r"environment:",
             lookahead_lines=20,
-            exclude=[r"^\s*#"],
+            exclude=[
+                r"^\s*#",
+            ],
+            exclude_unless_within=[
+                (
+                    # release-please normally updates release metadata/PRs; keep
+                    # it reportable if the job also performs real publish/deploy work.
+                    r"^\s{2,4}release[-_]please:\s*$",
+                    r"\b(npm|pnpm|yarn|uv|cargo)\s+publish\b"
+                    r"|\btwine\s+upload\b"
+                    r"|\bdocker\s+push\b"
+                    r"|\bgh\s+release\s+(create|upload)\b",
+                ),
+            ],
         ),
         remediation=(
             "Add an environment: key to deployment jobs:\n"
@@ -225,6 +434,104 @@ RULES: list[Rule] = [
         ),
     ),
     # =========================================================================
+    # SEC2-GH-003: Hardcoded container credentials in services / job container
+    # =========================================================================
+    # A workflow's ``services.<name>.credentials.password`` (or
+    # ``container.credentials.password`` at the job level) holds a
+    # literal string instead of a ``${{ secrets.X }}`` reference.
+    # The literal travels in the workflow YAML, in commit history,
+    # and through every fork — broader exposure than any actual
+    # secrets-storage channel.
+    #
+    # Industry peer audits (e.g. zizmor's
+    # ``hardcoded-container-credentials``) cover the same threat
+    # class.  Implementation here is independent.
+    Rule(
+        id="SEC2-GH-003",
+        title="Container credentials hardcoded in workflow YAML",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-2",
+        finding_family="credential_persistence",
+        description=(
+            "A ``services.<name>.credentials.password`` or "
+            "``container.credentials.password`` field contains a "
+            "literal string value rather than a ``${{ secrets.X }}`` "
+            "reference.  The credential is stored in the workflow "
+            "YAML, in every commit's history, and is visible to "
+            "every fork — far broader exposure than any GitHub "
+            "secrets channel.  Even ``actions/checkout`` is enough "
+            "to surface the value to an attacker who runs an arbitrary "
+            "step in the workflow.\n"
+            "\n"
+            "The same threat applies to ``username`` when paired with "
+            "a literal ``password``: the registry account is fully "
+            "characterised in the YAML.  Token-style credentials are "
+            "the canonical risk; literal ``username`` alone (without "
+            "a literal password) is hygiene-only."
+        ),
+        pattern=PathPattern(
+            # Match `password:` keys nested under either
+            # `jobs.<j>.services.<svc>.credentials` or
+            # `jobs.<j>.container.credentials` whose VALUE is NOT a
+            # GitHub Actions expression.  ``${{ ... }}`` is the safe
+            # form (env-var or secret reference); anything else is a
+            # hardcoded literal.
+            path=r"^jobs\.[^.]+\.(services\.[^.]+|container)\.credentials\.password$",
+            value=r"^(?!\s*\$\{\{).+",
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Move the password to a repository or organisation secret "
+            "and reference it via ``${{ secrets.NAME }}``:\n"
+            "  services:\n"
+            "    postgres:\n"
+            "      image: postgres:14\n"
+            "      credentials:\n"
+            "        username: postgres\n"
+            "        password: ${{ secrets.POSTGRES_PASSWORD }}\n"
+            "Rotate the leaked password.  Audit fork PRs and forks "
+            "of the repository: anyone who saw the workflow YAML "
+            "during the leak window has the credential."
+        ),
+        reference=(
+            "https://docs.github.com/en/actions/using-workflows/"
+            "workflow-syntax-for-github-actions#jobsjob_idservicescredentials"
+        ),
+        test_positive=[
+            "jobs:\n  test:\n    services:\n      db:\n        image: postgres:14\n"
+            "        credentials:\n          username: postgres\n          password: hunter2\n",
+            "jobs:\n  build:\n    container:\n      image: ghcr.io/example/runner\n"
+            "      credentials:\n        username: ci-bot\n          password: gh_pat_AAA111BBB222CCC\n".replace(
+                "          password", "        password"
+            ),
+        ],
+        test_negative=[
+            # Secret-referenced password — safe.
+            "jobs:\n  test:\n    services:\n      db:\n        image: postgres:14\n"
+            "        credentials:\n          username: postgres\n"
+            "          password: ${{ secrets.POSTGRES_PASSWORD }}\n",
+            # Container with secret-referenced password.
+            "jobs:\n  build:\n    container:\n      image: ghcr.io/example/runner\n"
+            "      credentials:\n        username: ci-bot\n"
+            "        password: ${{ secrets.GHCR_TOKEN }}\n",
+            # No credentials block at all.
+            "jobs:\n  test:\n    services:\n      db:\n        image: postgres:14\n",
+        ],
+        stride=["I", "S"],
+        threat_narrative=(
+            "An attacker browsing the workflow file (which is "
+            "publicly readable on every public repo, in every fork, "
+            "in every commit's history) recovers the literal "
+            "credential and uses it to push a backdoored image to the "
+            "private registry — or to authenticate as the registry "
+            "user account in any other system the user has access "
+            "to.  Unlike a leaked secret in CI logs (which has a "
+            "redaction layer), workflow-text leaks are immediate and "
+            "permanent."
+        ),
+    ),
+    # =========================================================================
     # CICD-SEC-5: Insufficient PBAC
     # =========================================================================
     Rule(
@@ -275,6 +582,12 @@ RULES: list[Rule] = [
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: twine upload --use-oidc dist/*",
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: cargo publish",
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: npm publish --provenance --access public",
+            # iter-5 (2026-05-04): three OIDC consumers added to the
+            # allowlist after sample-and-label found 12/17 FPs in
+            # the corpus baseline used these actions legitimately.
+            "permissions:\n  id-token: write\njobs:\n  scorecard:\n    steps:\n      - uses: ossf/scorecard-action@v2.4.0\n        with:\n          publish_results: true",
+            "permissions:\n  id-token: write\njobs:\n  pages:\n    steps:\n      - uses: actions/deploy-pages@v4",
+            "permissions:\n  id-token: write\njobs:\n  release:\n    steps:\n      - uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0",
         ],
         stride=["E"],
         threat_narrative=(
@@ -437,6 +750,20 @@ RULES: list[Rule] = [
                 # environment variable (env:). The dangerous pattern is embedding ${{ }} inside a
                 # larger shell string (e.g. inside a `run:` command).
                 r"""^\s*[\w.-]+:\s*["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
+                # iter-5 (2026-05-04): exclude lines whose entire
+                # content is a bare ``${{ secrets.X }}`` reference
+                # (possibly quoted, possibly with a hyphen prefix
+                # for YAML list items).  This is the block-scalar
+                # action-input shape (e.g. ``secret-ids: |`` body
+                # lines in aws-actions/configure-aws-credentials):
+                # the value passes through to the action as a
+                # plain string, the same path covered by the
+                # ``key: ${{ secrets.X }}`` form above.  Sample-
+                # and-label found 4 fires of this exact shape in
+                # the corpus baseline; no neighboring TPs are at
+                # risk because real shell-injection contexts always
+                # carry other tokens on the same line.
+                r"""^\s*-?\s*["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
             ],
         ),
         remediation=(
@@ -460,6 +787,14 @@ RULES: list[Rule] = [
             "        with:\n          token: ${{ secrets.GITHUB_TOKEN }}",
             '        with:\n          repoToken: "${{ secrets.GITHUB_TOKEN }}"',
             "        # run: curl ${{ secrets.TOKEN }}",
+            # iter-5 (2026-05-04): block-scalar list-item shape.
+            # ``secret-ids: |`` body lines pass each secret to the
+            # action as a literal string, same trust path as the
+            # ``key: ${{ secrets.X }}`` form.  Sample-and-label
+            # found 4 fires of this shape in the corpus baseline.
+            "        with:\n          secret-ids: |\n            ${{ secrets.AWS_KEY_1 }}\n            ${{ secrets.AWS_KEY_2 }}",
+            # Same shape with a YAML list-item dash prefix.
+            "        with:\n          tokens:\n            - ${{ secrets.GH_TOKEN }}\n            - ${{ secrets.NPM_TOKEN }}",
         ],
         stride=["I", "R"],
         threat_narrative=(
@@ -1235,6 +1570,109 @@ RULES: list[Rule] = [
         incidents=["PyTorch dependency confusion (Dec 2022)"],
     ),
     # =========================================================================
+    # SEC9-GH-006: pipe-bash / iex(Invoke-WebRequest) — runtime supply chain
+    # =========================================================================
+    # Phase 8 iter-4 (2026-05-04): port of taintly's existing
+    # SEC6-GL-006 (GitLab) and SEC9-JK-001 (Jenkins) rules to
+    # GitHub Actions, closing the platform-coverage gap.  Even
+    # when the workflow itself is hardened (SHA-pinned actions,
+    # pinned images), a ``run: ... | bash`` step downloads and
+    # executes content the workflow author never reviewed.  DNS
+    # hijack, CDN compromise, or supply-chain attack on the
+    # hosting domain replaces the payload silently.  Industry
+    # peer audits (e.g. zizmor's ``unpinned-tools``) cover the
+    # same threat class.
+    Rule(
+        id="SEC9-GH-006",
+        title="Workflow downloads and executes a remote script with no integrity check",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-9",
+        finding_family="supply_chain_immutability",
+        description=(
+            "A ``run:`` step downloads a script from the network and "
+            "pipes it directly into a shell or interpreter — "
+            "``curl ... | bash``, ``wget ... | sh``, "
+            "``bash <(curl ...)``, or PowerShell "
+            "``iex(Invoke-WebRequest ...)``.  The downloaded bytes "
+            "are executed before any review or checksum verification, "
+            "so whoever controls the URL controls the workflow.\n"
+            "\n"
+            "Distinct from SEC3-GH-001 (action pinning) and SEC3-GH-"
+            "005 (Docker image pinning) — those guard the workflow "
+            "definition; this rule guards the runtime tool chain "
+            "the workflow invokes."
+        ),
+        pattern=RegexPattern(
+            # Five idiomatic shapes: curl|sh, wget|sh, bash <(curl…),
+            # iex(Invoke-WebRequest…) or iex(iwr…), and the bare
+            # ``... | python -c '…'`` shape that downloads then evals.
+            match=(
+                r"(?:curl|wget)\s+[^|\n#]*\|\s*(?:bash|sh|zsh|fish|python|perl|ruby|node)"
+                r"|bash\s*<\s*\(\s*(?:curl|wget)"
+                r"|(?i:iex)\s*\(\s*(?:Invoke-WebRequest|iwr)\b"
+                r"|(?:curl|wget)\s+[^|\n#]*\|\s*python\s+-c\s+['\"]"
+            ),
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Download the script separately, verify its checksum, "
+            "and only then execute it:\n"
+            "  - run: |\n"
+            "      curl -fsSL https://example.com/install.sh -o install.sh\n"
+            "      echo '<sha256>  install.sh' | sha256sum -c -\n"
+            "      bash install.sh\n"
+            "Or vendor the install script into the repo and pin it "
+            "to a SHA.  For tool installation specifically, prefer "
+            "first-party setup actions (actions/setup-node, actions/"
+            "setup-python, etc.) over network installers."
+        ),
+        reference=(
+            "https://owasp.org/www-project-top-10-ci-cd-security-risks/"
+            "CICD-SEC-09-Improper-Artifact-Integrity-Validation"
+        ),
+        test_positive=[
+            "      - run: curl -fsSL https://get.example.com/install.sh | bash",
+            "      - run: wget -qO- https://install.example.com | sh",
+            "      - run: bash <(curl -s https://example.com/bootstrap.sh)",
+            "      - run: curl https://example.com/setup.sh | bash -s -- --auto",
+            "      - run: iex(Invoke-WebRequest -Uri https://chocolatey.org/install.ps1)",
+            "      - run: iex(iwr -Uri https://example.com/install.ps1)",
+        ],
+        test_negative=[
+            # Download to disk, no pipe.
+            "      - run: curl -fsSL https://example.com/install.sh -o install.sh",
+            # Download with checksum verification (multi-line happens
+            # in real workflows; here just ensure the bare line shape
+            # without a pipe doesn't fire).
+            "      - run: wget -q -O setup.sh https://example.com/setup.sh",
+            # Comment.
+            "      # - run: curl https://example.com | bash",
+            # Pipe but not network — no curl/wget anchor.
+            "      - run: cat install.sh | bash",
+            # Powershell command unrelated to web download.
+            "      - run: iex 'Get-Process | Format-Table'",
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "Piping a remote script to a shell gives the remote server "
+            "arbitrary code execution in the runner with no opportunity "
+            "to review the bytes before execution.  DNS hijack, CDN "
+            "compromise, expired-and-resquatted domain, or a supply-"
+            "chain attack on the hosting infrastructure all let the "
+            "attacker substitute a malicious payload — at which point "
+            "every secret bound to the workflow is exfiltrable on the "
+            "next run."
+        ),
+        incidents=[
+            # No specific public-attribution incident; the threat is the
+            # same shape as the LiteLLM PyPI compromise (Mar 2026,
+            # exfil via curl-pipe-bash) and any of the
+            # `install-fetch-execute` patterns the supply-chain
+            # research community has documented.
+        ],
+    ),
+    # =========================================================================
     # SEC10-GH-003: Actions debug logging enabled — unmasks secrets in logs
     # =========================================================================
     Rule(
@@ -1654,6 +2092,18 @@ RULES: list[Rule] = [
         confidence="medium",
     ),
     # =========================================================================
+    # SEC6-GH-010 helpers (defined module-local so the rule's pattern
+    # block reads as ``predicate=_is_unmasked_secret_input`` rather
+    # than carrying the allowlist lookup inline).
+    #
+    # Phase 8 iteration 2 (2026-05-04): converted from ContextPattern
+    # regex to WorkflowAwarePattern.  Adds a safe-consumer allowlist:
+    # action+input pairs whose documented purpose IS to consume the
+    # secret (the action's primary auth surface).  Routing those
+    # specific pairs through env: is over-defensive — the secret is
+    # already at its destination — and produces noise without
+    # precision gain.
+    # =========================================================================
     # SEC6-GH-010: Secret passed as action input without env-block masking
     # =========================================================================
     # GitHub auto-masks secrets that flow through a step's ``env:`` block:
@@ -1689,41 +2139,22 @@ RULES: list[Rule] = [
             "``${{ env.NAME }}`` — the env-block path is masked, the "
             "with-input is then a non-secret reference."
         ),
-        pattern=ContextPattern(
-            # Per-line anchor: a YAML key ending in a credential-shape
-            # token, mapped to a ``${{ secrets.X }}`` value.  The
-            # ``(?i)`` flag accepts both ``token:`` and ``Token:``
-            # spellings; the leading whitespace requirement excludes
-            # workflow-level keys.  The prefix portion is zero-or-more
-            # word/hyphen characters so bare ``token:`` / ``password:``
-            # match alongside hyphenated forms like ``api-key:``.
-            anchor=(
-                r"(?i)^\s+[\w-]*"
-                r"(?:token|key|secret|password|pass)"
-                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
-            ),
-            # The full file must contain at least one such pattern for
-            # the rule to fire — the anchor regex itself is the
-            # presence check.
-            requires=(
-                r"(?i)\s+[\w-]*"
-                r"(?:token|key|secret|password|pass)"
-                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
-            ),
-            # Job-scope suppression: when the same job has an ``env:``
-            # block routing any secret, the safe pattern is in use
-            # somewhere — suppress.  This trades a small amount of
-            # precision (a job that with-inputs ``secrets.A`` while
-            # env-exporting ``secrets.B`` in a sibling step would
-            # suppress) for the avoidance of the dominant false
-            # positive: workflows that DO route secrets through
-            # ``env:`` but reference them in ``with:`` via ``env.X``
-            # would otherwise still trip the anchor regex on lines
-            # the rule shouldn't flag.  Step-scope suppression would
-            # require an engine-level model change; revisit if the
-            # broad-suppression FP rate is observed in the wild.
-            anchor_job_exclude=(r"env:\s*\n[\s\S]*?\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"),
-            exclude=[r"^\s*#"],
+        # Phase 8 iteration 2 (2026-05-04): converted from
+        # ContextPattern regex to WorkflowAwarePattern.  The
+        # workflow-aware predicate gives us:
+        #   1. exact path-shape filtering (only with: keys under a
+        #      step's ``with`` map) — the regex anchor was line-shape-
+        #      only and could match nested non-step contexts.
+        #   2. step-scope env-block detection via descendant lookup
+        #      — replaces a multi-line regex with deterministic
+        #      structural traversal.
+        #   3. safe-consumer allowlist keyed on ``(action, slot)`` —
+        #      drops noise on actions whose documented auth surface
+        #      IS the credential slot (docker/login-action.password,
+        #      pypa/gh-action-pypi-publish.password, etc.).
+        pattern=WorkflowAwarePattern(
+            path="jobs.*.steps[*].with.*",
+            predicate=_is_unmasked_secret_input,
         ),
         remediation=(
             "Route the secret through the step's ``env:`` block and\n"
@@ -1745,8 +2176,9 @@ RULES: list[Rule] = [
             "security-guides/using-secrets-in-github-actions#accessing-your-secrets"
         ),
         test_positive=[
-            # Bare with: token: ${{ secrets.X }} with no env: anywhere
-            # in the job — the dominant unsafe shape.
+            # Bare with: token: ${{ secrets.X }} on a non-allowlisted
+            # action with no env: in the step — the dominant unsafe
+            # shape.
             (
                 "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: some-org/some-action@v1\n"
@@ -1760,16 +2192,22 @@ RULES: list[Rule] = [
                 "        with:\n"
                 "          api-key: ${{ secrets.API_KEY }}"
             ),
-            # password input.
+            # Step-scope sample: the matched step has no env: block
+            # of its own; an unrelated sibling step's env: routing
+            # does not co-locate the safe-pattern signal.
             (
-                "jobs:\n  push:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n      - uses: docker/login-action@v3\n"
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/some-action@v1\n"
                 "        with:\n"
-                "          password: ${{ secrets.REGISTRY_PASSWORD }}"
+                "          token: ${{ secrets.GH_TOKEN }}\n"
+                "      - uses: some-org/log@v1\n"
+                "        env:\n"
+                "          DUMMY: ${{ secrets.GITHUB_TOKEN }}"
             ),
         ],
         test_negative=[
-            # Same secret routed via env: — env-block exception fires.
+            # Same secret routed via env: — step-scope env-block
+            # exception fires.
             (
                 "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: some-org/some-action@v1\n"
@@ -1778,23 +2216,36 @@ RULES: list[Rule] = [
                 "        env:\n"
                 "          GH_TOKEN: ${{ secrets.GH_TOKEN }}"
             ),
-            # with: input value is a hardcoded string, not a secret —
-            # anchor regex doesn't match.
+            # with: input value is a hardcoded string, not a secret.
             (
                 "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: some-org/some-action@v1\n"
                 "        with:\n"
                 "          registry-url: https://registry.npmjs.org"
             ),
-            # with: input name is not credential-shape — anchor doesn't
-            # match.
+            # with: input name is not credential-shape.
             (
                 "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: some-org/some-action@v1\n"
                 "        with:\n"
                 "          repository: ${{ secrets.PRIVATE_REPO }}"
             ),
-            # Comment.
+            # Safe-consumer allowlist — docker/login-action's
+            # ``password`` slot IS its documented auth surface.
+            (
+                "jobs:\n  push:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: docker/login-action@v3\n"
+                "        with:\n"
+                "          password: ${{ secrets.REGISTRY_PASSWORD }}"
+            ),
+            # Safe-consumer allowlist — pypa/gh-action-pypi-publish.
+            (
+                "jobs:\n  release:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: pypa/gh-action-pypi-publish@v1\n"
+                "        with:\n"
+                "          password: ${{ secrets.PYPI_API_TOKEN }}"
+            ),
+            # Comment-only (path matching never reaches this leaf).
             "          # token: ${{ secrets.GH_TOKEN }}",
         ],
         stride=["I"],
@@ -1811,6 +2262,120 @@ RULES: list[Rule] = [
         ),
         confidence="high",
         finding_family="credential_persistence",
+    ),
+    # =========================================================================
+    # SEC6-GH-011: ``secrets: inherit`` in reusable-workflow caller
+    # =========================================================================
+    # Phase 8 iter-4 (2026-05-04): credential-blast-radius warning
+    # for over-broad secret forwarding into reusable workflows.
+    # When a caller invokes a reusable workflow and uses
+    # ``secrets: inherit``, every secret available to the caller is
+    # forwarded to the callee — even if the callee only needs one
+    # of them.  A future callee compromise leaks the caller's full
+    # secret set, not just what the callee was designed for.
+    #
+    # Safe alternative: enumerate explicitly via ``secrets:`` map,
+    # forwarding only the secrets the callee actually consumes.
+    # Industry peer audits (e.g. zizmor's ``secrets-inherit``) cover
+    # the same threat class.
+    Rule(
+        id="SEC6-GH-011",
+        title="Reusable workflow invoked with ``secrets: inherit`` (over-broad credential forward)",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-6",
+        review_needed=True,
+        confidence="medium",
+        finding_family="credential_persistence",
+        description=(
+            "A caller workflow invokes a reusable workflow via "
+            "``uses: ./.github/workflows/<x>.yml`` (or "
+            "``uses: <org>/<repo>/.github/workflows/<x>.yml@<ref>``) "
+            "and forwards EVERY secret in scope via "
+            "``secrets: inherit``.  The callee receives the caller's "
+            "full secret set even if it only needs one — so any "
+            "future compromise of the callee (a logging change, a "
+            "new step, an upstream supply-chain incident) leaks the "
+            "caller's entire credential surface, not just the "
+            "secrets the callee was designed for."
+        ),
+        pattern=ContextPattern(
+            anchor=r"^\s+secrets\s*:\s*inherit\s*(#.*)?$",
+            # Reusable-workflow caller shapes:
+            #   uses: ./.github/workflows/<x>.yml          (local)
+            #   uses: ../shared/.github/workflows/<x>.yml  (relative-up)
+            #   uses: <org>/<repo>/.github/workflows/<x>.yml@<ref>  (cross-repo)
+            # Use ``\b`` after the extension so the match works
+            # without MULTILINE — ``\.ya?ml(@|$)`` requires end-of-
+            # string in non-MULTILINE mode and would miss the case
+            # where the secrets-inherit line follows the uses-line.
+            requires=r"uses\s*:\s*\S*\.ya?ml\b",
+            scope="file",
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Replace ``secrets: inherit`` with an explicit secrets "
+            "map listing only what the callee needs:\n"
+            "  jobs:\n"
+            "    deploy:\n"
+            "      uses: ./.github/workflows/deploy.yml\n"
+            "      secrets:\n"
+            "        DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}\n"
+            "Audit each callee's input contract and wire only those "
+            "secrets through.  Future maintainers of the callee "
+            "must explicitly request additional secrets — making "
+            "scope expansion visible in review rather than implicit."
+        ),
+        reference=(
+            "https://docs.github.com/en/actions/using-workflows/"
+            "reusing-workflows#passing-inputs-and-secrets-to-a-reusable-workflow"
+        ),
+        test_positive=[
+            (
+                "on: push\n"
+                "jobs:\n  deploy:\n"
+                "    uses: ./.github/workflows/deploy.yml\n"
+                "    secrets: inherit\n"
+            ),
+            (
+                "on: push\n"
+                "jobs:\n  build:\n"
+                "    uses: my-org/shared-workflows/.github/workflows/build.yml@v1\n"
+                "    secrets: inherit\n"
+            ),
+        ],
+        test_negative=[
+            # Explicit secrets map — caller is in control.
+            (
+                "on: push\n"
+                "jobs:\n  deploy:\n"
+                "    uses: ./.github/workflows/deploy.yml\n"
+                "    secrets:\n"
+                "      DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}\n"
+            ),
+            # No reusable-workflow uses — anchor unmet.
+            ("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    secrets: inherit\n"),
+            # Comment.
+            (
+                "on: push\n"
+                "jobs:\n  deploy:\n"
+                "    uses: ./.github/workflows/deploy.yml\n"
+                "#    secrets: inherit\n"
+            ),
+        ],
+        stride=["I", "E"],
+        threat_narrative=(
+            "An attacker compromises a reusable workflow downstream "
+            "of the caller (maintainer takeover on a third-party "
+            "shared-workflows repo, a malicious step added by a "
+            "subsequent PR to a sibling internal workflow, or an "
+            "upstream action pulled into the callee).  The callee "
+            "now has every secret the caller had — not just the "
+            "ones it was designed to use.  ``secrets: inherit`` "
+            "makes the caller's credential surface effectively "
+            "transitive, which is the wrong default for least-"
+            "privilege CI."
+        ),
     ),
     # =========================================================================
     # SEC9-GH-004: Tainted `actions/cache` key — a workflow restores an

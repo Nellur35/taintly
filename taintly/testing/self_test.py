@@ -182,6 +182,43 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "Same family as SEC8-GH-001; image-pin regex fragile to whitespace."
     ),
     ("SEC8-GH-003", "whitespace_pad"): ("Same family; fragile to whitespace around `:` separator."),
+    ("SEC6-GH-010", "whitespace_pad"): (
+        "Phase 8 iteration 2 (2026-05-04) refactored the rule onto "
+        "WorkflowAwarePattern with a path glob "
+        "``jobs.*.steps[*].with.*``.  The structural reader requires "
+        "whitespace after `:` to recognise a YAML mapping; the zero-"
+        "space mutant produces no step paths, so the pattern's path "
+        "match never reaches the credential leaf and the rule no "
+        "longer fires.  Real workflows always have a space after `:`. "
+        "Broadening the structural reader to accept ``key:value`` "
+        "would change parsing semantics across every rule that "
+        "queries step-scoped paths (SEC4-GH-004, SEC3-GH-001, "
+        "SEC6-GH-010, TAINT-GH-006, etc.), which is not worth the "
+        "fragility trade.  Documented as a known gap in the same "
+        "spirit as SEC10-GH-004 / AI-GH-019 / TAINT-GH-010."
+    ),
+    ("TAINT-GH-006", "whitespace_pad"): (
+        "Phase 8 iteration 2 (2026-05-04) refactored the rule onto "
+        "WorkflowAwarePattern with path globs "
+        "``jobs.*.steps[*].run`` / ``with.{args,entrypoint,script,"
+        "command}``.  Same structural-reader fragility as SEC6-GH-"
+        "010: the zero-space mutant produces no step paths so neither "
+        "the path glob nor ``ctx.is_reusable_workflow`` resolves.  "
+        "Real workflows always have a space after `:`; broadening "
+        "the structural reader is the wrong knob — it would weaken "
+        "every other rule that queries step-scoped paths."
+    ),
+    ("SEC4-GH-008", "whitespace_pad"): (
+        "Phase 8 iteration 3 (2026-05-04) refactored the rule onto "
+        "WorkflowAwarePattern with path globs "
+        "``jobs.*.steps[*].run`` / ``jobs.*.steps[*].with.*``.  "
+        "Same structural-reader fragility as SEC6-GH-010 / TAINT-"
+        "GH-006: the zero-space mutant produces no step paths so "
+        "the path-glob predicate never sees the leaf.  Real "
+        "workflows always have a space after `:`; broadening the "
+        "structural reader to accept ``key:value`` would weaken "
+        "every rule that queries step-scoped paths."
+    ),
     ("SEC8-GH-004", "comment_inject"): (
         "Inline `# comment` trailing a `services:` line prevents match; "
         "rule doesn't strip trailing comments before anchoring."

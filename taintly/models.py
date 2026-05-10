@@ -14,7 +14,7 @@ class _PatternTimeout(Exception):
     """Raised when a pattern match exceeds the safety timeout."""
 
 
-_MAX_SAFE_TEXT_LEN = 50_000  # chars; skip regex beyond this to prevent ReDoS in threads
+_MAX_SAFE_TEXT_LEN = 65_536  # chars; skip regex beyond this to prevent ReDoS in threads.  Bumped 50_000 → 65_536 (2026-05-05) after astral-sh/uv's build-release-binaries.yml hit 50064 bytes — clean 64 KiB power-of-2 covers realistic GitHub Actions / GitLab CI / Jenkins files with margin while keeping per-regex worst-case bounded.
 
 # YAML boolean representations per the YAML 1.1 spec (used by PyYAML / most CI parsers).
 # GitHub Actions convention is true/false, but rules should tolerate all valid forms.
@@ -46,7 +46,7 @@ class scan_session:
         if os.name != "posix":
             return self
         try:
-            self._old_handler = signal.signal(signal.SIGALRM, _pattern_timeout_handler)
+            self._old_handler = signal.signal(signal.SIGALRM, _pattern_timeout_handler)  # type: ignore[attr-defined,unused-ignore]
         except (ValueError, OSError):
             return self
         self._installed = True
@@ -55,8 +55,134 @@ class scan_session:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if not self._installed:
             return
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, self._old_handler)
+        signal.alarm(0)  # type: ignore[attr-defined,unused-ignore]
+        signal.signal(signal.SIGALRM, self._old_handler)  # type: ignore[attr-defined,unused-ignore]
+
+
+_MATCH_TEXT_MAX_LEN = 200
+
+
+def _compute_match_text(snippet: str) -> str:
+    """Strip inline YAML comments from ``snippet`` and bound the length.
+
+    The result is intended for downstream tooling that passes finding
+    data into LLM contexts (the AI-triage workflow): YAML comments
+    are author-controlled bytes that an LLM has no way to distinguish
+    from user instructions, so removing them at the serialization
+    boundary keeps untrusted text out of the LLM's prompt context.
+
+    The helper handles single- and double-quoted strings and GitHub
+    Actions ``${{ ... }}`` expressions correctly via the existing
+    :func:`taintly.yaml_path._strip_inline_comment` parser.  Multi-
+    line snippets are handled line by line; the result is bounded
+    to ``_MATCH_TEXT_MAX_LEN`` characters.
+    """
+    if not snippet:
+        return ""
+    # Late import: ``yaml_path`` and ``models`` are sibling modules
+    # and the strip helper is cheap, but keeping the import lazy
+    # avoids a circular-import risk if ``yaml_path`` ever needs to
+    # consult ``models``.
+    from taintly.yaml_path import _strip_inline_comment
+
+    cleaned_lines: list[str] = []
+    for line in snippet.splitlines() or [snippet]:
+        cleaned = _strip_inline_comment(line).rstrip()
+        if cleaned:
+            cleaned_lines.append(cleaned)
+    cleaned = " ".join(cleaned_lines).strip()
+    if len(cleaned) > _MATCH_TEXT_MAX_LEN:
+        cleaned = cleaned[: _MATCH_TEXT_MAX_LEN - 1] + "…"
+    return cleaned
+
+
+def _safe_search_chunked(compiled_pattern, content: str):
+    """Run a compiled regex search across ``content`` with ReDoS
+    protection AND length-cap safety.
+
+    Phase 8 iter-4 (2026-05-04) split: ``_safe_search`` returns
+    ``None`` outright when ``content > _MAX_SAFE_TEXT_LEN``, which
+    silently breaks ``ContextPattern.requires`` /
+    ``AbsencePattern.absent`` on legitimately-large workflows
+    (Microsoft / Azure / AWS routinely have files >50KB).  This
+    chunked variant scans the content in line-windowed chunks
+    bounded by ``_MAX_SAFE_TEXT_LEN``; each chunk pays the
+    SIGALRM ReDoS timeout and the per-chunk length cap, and the
+    overall search reaches the full file.
+
+    Overlap of ``_CHUNK_OVERLAP_LINES`` lines preserves matches
+    that span the chunk boundary; in practice every requires
+    regex in the rule pack matches within a single line (or a
+    small bounded range), so the overlap is generous belt-and-
+    suspenders rather than load-bearing.
+    """
+    if len(content) <= _MAX_SAFE_TEXT_LEN:
+        return _safe_search(compiled_pattern, content)
+    # Line-windowed chunking.  splitlines(keepends=True) preserves
+    # newline boundaries so reassembly produces the original text.
+    import time as _time
+
+    lines = content.splitlines(keepends=True)
+    pos = 0
+    n = len(lines)
+    chunks_scanned = 0
+    deadline = _time.monotonic() + _CHUNKED_WALLCLOCK_BUDGET_S
+    while pos < n:
+        # Adversarial-input safety: two bounds, either of which
+        # short-circuits the scan.
+        # (a) Chunk-count cap: real workflows fit in single-digit
+        #     chunks; ~_MAX_CHUNKS × cap bytes is far above any
+        #     realistic CI config.
+        # (b) Wallclock budget: pathological inputs (deeply-indented
+        #     fuzz fixtures, regex shapes that backtrack hard on
+        #     each 50KB chunk of nested whitespace) can multiply
+        #     per-chunk SIGALRM ceilings.  An overall wall-clock
+        #     budget contains the worst case end-to-end.
+        if chunks_scanned >= _MAX_CHUNKS:
+            return None
+        if _time.monotonic() >= deadline:
+            return None
+        # Grow the window until either we hit the line budget or
+        # adding the next line would exceed the byte cap.
+        end = pos
+        size = 0
+        while (
+            end < n and end - pos < _CHUNK_LINES and (size + len(lines[end]) <= _MAX_SAFE_TEXT_LEN)
+        ):
+            size += len(lines[end])
+            end += 1
+        if end == pos:
+            # A single line exceeds the cap on its own — nothing to
+            # do but skip it (rare; would require a 50KB single line
+            # which no real workflow has).
+            pos += 1
+            continue
+        chunk = "".join(lines[pos:end])
+        m = _safe_search(compiled_pattern, chunk)
+        chunks_scanned += 1
+        if m:
+            return m
+        if end == n:
+            break
+        pos = max(pos + 1, end - _CHUNK_OVERLAP_LINES)
+    return None
+
+
+# Chunk-scan tuning constants for ``_safe_search_chunked``.
+# _CHUNK_LINES caps the per-chunk line count even when the byte
+# cap would allow more — protects against pathological files made
+# of trivially-short lines.  _CHUNK_OVERLAP_LINES is the trailing
+# context carried into the next chunk so multi-line requires
+# patterns straddling a boundary still resolve.  _MAX_CHUNKS bounds
+# the total number of chunks scanned per call so adversarial inputs
+# (e.g. deeply-indented YAML that produces ~250KB / 500 lines of
+# nested keys) don't multiply per-chunk regex cost without bound.
+# At default tuning, _MAX_CHUNKS × _MAX_SAFE_TEXT_LEN = ~1.3 MB —
+# every realistic CI config fits.
+_CHUNK_LINES = 2000
+_CHUNK_OVERLAP_LINES = 50
+_MAX_CHUNKS = 20
+_CHUNKED_WALLCLOCK_BUDGET_S = 3.0
 
 
 def _safe_search(compiled_pattern, text: str):
@@ -98,7 +224,7 @@ def _safe_search(compiled_pattern, text: str):
     # because we still observe and restore their handler on the first
     # call into each entry.
     try:
-        current = signal.getsignal(signal.SIGALRM)
+        current = signal.getsignal(signal.SIGALRM)  # type: ignore[attr-defined,unused-ignore]
     except (ValueError, OSError):
         return compiled_pattern.search(text)
 
@@ -106,18 +232,18 @@ def _safe_search(compiled_pattern, text: str):
     old_handler = current
     if need_swap:
         try:
-            signal.signal(signal.SIGALRM, _pattern_timeout_handler)
+            signal.signal(signal.SIGALRM, _pattern_timeout_handler)  # type: ignore[attr-defined,unused-ignore]
         except (ValueError, OSError):
             return compiled_pattern.search(text)
-    signal.alarm(5)
+    signal.alarm(5)  # type: ignore[attr-defined,unused-ignore]
     try:
         return compiled_pattern.search(text)
     except _PatternTimeout:
         return None
     finally:
-        signal.alarm(0)
+        signal.alarm(0)  # type: ignore[attr-defined,unused-ignore]
         if need_swap:
-            signal.signal(signal.SIGALRM, old_handler)
+            signal.signal(signal.SIGALRM, old_handler)  # type: ignore[attr-defined,unused-ignore]
 
 
 # =============================================================================
@@ -275,7 +401,11 @@ class AbsencePattern:
     # whole file lacks ``self.absent``.  The contract test treats this
     # as a documented exception.
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        if not _safe_search(self._compiled, content):
+        # Chunked-safe: AbsencePattern is a file-scope check, so the
+        # 50KB length cap previously caused FALSE absences (the
+        # pattern was actually present but the cap returned None).
+        # That inverted FP/TP for absence-style rules on big files.
+        if not _safe_search_chunked(self._compiled, content):
             return [(1, f"(pattern not found: {self.absent})")]
         return []
 
@@ -414,6 +544,62 @@ def _split_into_job_segments(lines: list[str]) -> list[tuple[int, list[str]]]:
     return segments if len(segments) > 1 else [(0, lines)]
 
 
+def _split_into_step_segments(content: str) -> list[tuple[int, list[str]]]:
+    """Split a workflow file into per-step segments.
+
+    Returns a list of (start_line_index, segment_lines) pairs, one
+    per step across all jobs in the file.  ``start_line_index`` is
+    the 0-based index of the first content line of the step in the
+    original file; ``segment_lines`` is the slice of original lines
+    bounded by the step's first and last leaf events as observed by
+    the structural reader.
+
+    Used by ``ContextPattern.anchor_step_exclude`` to scope
+    safe-pattern co-location checks to the step containing the
+    anchor match (rather than the whole job).  Mirrors the shape
+    of ``_split_into_job_segments`` but at step granularity.
+
+    Step enumeration goes through the structural reader so YAML
+    anchors and merge keys are resolved correctly: a step inheriting
+    its body via ``<<: *anchor`` is recognised as one step, not
+    skipped.  Files with no ``jobs:`` block (or no ``steps:`` under
+    any job) return an empty list.
+    """
+    from .parsers.structural import EventKind, walk_workflow
+
+    lines = content.splitlines()
+    # Map (job_id, step_idx) -> [min_line, max_line], 1-based as the
+    # structural reader emits them.  Convert to 0-based indices on
+    # output to match _split_into_job_segments's contract.
+    step_bounds: dict[tuple[str, int], list[int]] = {}
+    for event in walk_workflow(filepath="anonymous.yml", content=content, recover=True):
+        if event.kind is not EventKind.LEAF_SCALAR:
+            continue
+        path = event.path
+        if (
+            len(path) >= 5
+            and path[0] == "jobs"
+            and isinstance(path[1], str)
+            and path[2] == "steps"
+            and isinstance(path[3], int)
+        ):
+            key = (path[1], path[3])
+            slot = step_bounds.get(key)
+            if slot is None:
+                step_bounds[key] = [event.line, event.line]
+            else:
+                slot[0] = min(slot[0], event.line)
+                slot[1] = max(slot[1], event.line)
+
+    # Stable order: by job-id then step-index, mirroring file order.
+    segments: list[tuple[int, list[str]]] = []
+    for (_job_id, _step_idx), (start_1b, end_1b) in sorted(step_bounds.items()):
+        start_0b = max(0, start_1b - 1)
+        end_0b_inclusive = max(start_0b, end_1b - 1)
+        segments.append((start_0b, lines[start_0b : end_0b_inclusive + 1]))
+    return segments
+
+
 @dataclass
 class ContextPattern:
     """Trigger when BOTH anchor AND requires patterns exist in the same file.
@@ -438,6 +624,12 @@ class ContextPattern:
     anchor_job_exclude: str = (
         ""  # If set, suppress anchor matches found in a job segment that contains this pattern
     )
+    # If set, suppress anchor matches found within a step whose body
+    # matches this pattern.  Use when the safe-pattern signal must be
+    # co-located with the matched line at step granularity rather
+    # than spread across the job: a sibling step's content cannot
+    # influence whether the matched step is suppressed.
+    anchor_step_exclude: str = ""
 
     def __post_init__(self):
         self._anchor_re = re.compile(self.anchor)
@@ -448,6 +640,9 @@ class ContextPattern:
         self._excludes = [re.compile(e) for e in self.exclude]
         self._anchor_job_exclude_re = (
             re.compile(self.anchor_job_exclude) if self.anchor_job_exclude else None
+        )
+        self._anchor_step_exclude_re = (
+            re.compile(self.anchor_step_exclude) if self.anchor_step_exclude else None
         )
 
     # CONTRACT: returns (line_num, snippet) where snippet is the
@@ -461,9 +656,13 @@ class ContextPattern:
         return self._check_file_scoped(content, lines)
 
     def _check_file_scoped(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        if not _safe_search(self._requires_re, content):
+        # File-scope requires / requires_absent: chunked-safe so
+        # legitimate large workflows (>50KB) don't silently lose
+        # rule coverage to the ReDoS length cap.  See
+        # ``_safe_search_chunked`` for the chunking semantics.
+        if not _safe_search_chunked(self._requires_re, content):
             return []
-        if self._requires_absent_re and _safe_search(self._requires_absent_re, content):
+        if self._requires_absent_re and _safe_search_chunked(self._requires_absent_re, content):
             return []
 
         # Build per-line job-segment content map if we need per-job anchor suppression.
@@ -474,6 +673,16 @@ class ContextPattern:
                 for j in range(len(seg_lines)):
                     job_content_by_line[seg_start + j] = seg_content
 
+        # Build per-line step-segment content map for step-scope
+        # suppression.  Built lazily; rules without
+        # ``anchor_step_exclude`` pay zero cost.
+        step_content_by_line: dict[int, str] = {}
+        if self._anchor_step_exclude_re:
+            for seg_start, seg_lines in _split_into_step_segments(content):
+                seg_content = "\n".join(seg_lines)
+                for j in range(len(seg_lines)):
+                    step_content_by_line[seg_start + j] = seg_content
+
         results = []
         for i, line in enumerate(lines):
             if any(ex.search(line) for ex in self._excludes):
@@ -483,6 +692,13 @@ class ContextPattern:
                     seg_content = job_content_by_line.get(i, "")
                     if seg_content and _safe_search(self._anchor_job_exclude_re, seg_content):
                         continue
+                # Step-scope suppression check.  When both job- and
+                # step-scope are set on the same rule, both must
+                # permit the match (i.e. neither suppresses it).
+                if self._anchor_step_exclude_re:
+                    seg_content = step_content_by_line.get(i, "")
+                    if seg_content and _safe_search(self._anchor_step_exclude_re, seg_content):
+                        continue
                 results.append((i + 1, line.strip()))
         return results
 
@@ -491,9 +707,14 @@ class ContextPattern:
         results = []
         for seg_start, seg_lines in _split_into_job_segments(lines):
             seg_content = "\n".join(seg_lines)
-            if not _safe_search(self._requires_re, seg_content):
+            # Chunked-safe: a single-job workflow over 50KB would
+            # produce a >50KB segment; ``_safe_search`` returns None
+            # outright in that case, silently disabling the rule.
+            if not _safe_search_chunked(self._requires_re, seg_content):
                 continue
-            if self._requires_absent_re and _safe_search(self._requires_absent_re, seg_content):
+            if self._requires_absent_re and _safe_search_chunked(
+                self._requires_absent_re, seg_content
+            ):
                 continue
             for j, line in enumerate(seg_lines):
                 if any(ex.search(line) for ex in self._excludes):
@@ -872,6 +1093,17 @@ class Finding:
             "file": self.file,
             "line": self.line,
             "snippet": self.snippet,
+            # ``match_text`` is the comment-stripped, length-bounded
+            # form of ``snippet`` intended for downstream tooling that
+            # passes finding data into LLM contexts (the AI-triage
+            # workflow at ``docs/AI_TRIAGE.md``).  Stripping inline
+            # YAML comments before serialization keeps workflow
+            # comments from carrying through into untrusted LLM
+            # context — comments are author-controlled bytes and an
+            # LLM has no way to distinguish prose from instructions
+            # otherwise.  ``snippet`` keeps its existing contract for
+            # consumers that want the verbatim source line.
+            "match_text": _compute_match_text(self.snippet),
             "remediation": self.remediation,
             "reference": self.reference,
             "owasp_cicd": self.owasp_cicd,
@@ -915,6 +1147,29 @@ class AuditReport:
     # anchor match maps to "Not applicable"; a family with no
     # ContextPattern coverage keeps the existing "Strong" default.
     families_with_ctx_coverage: set[str] = field(default_factory=set)
+    # Rule IDs excluded from the scan via ``.taintly.yml``'s
+    # ``exclude-rules:`` list.  Surfaced in the summary so reviewers
+    # can see which rules the local config disabled.  CLI-only
+    # exclusions (``--exclude-rule``) are not included here — those
+    # are operator choices, not artifacts of the repository's
+    # checked-in config.
+    excluded_rules_from_config: list[str] = field(default_factory=list)
+    # Source of the static-guard ``WorkflowContext`` for this scan,
+    # surfaced in the summary so reviewers can see whether
+    # repo-mismatch suppression evaluated against an auto-detected
+    # remote, an explicit ``--github-repo`` flag, or stayed
+    # unconfigured.  Possible values: ``"explicit"`` (CLI flag),
+    # ``"auto"`` (git remote detection succeeded), ``"unset"`` (no
+    # source — repo-mismatch suppression disabled).  GitHub-only.
+    repo_identity_source: str = "unset"
+    # Repository identity actually resolved (``OWNER/REPO``) when
+    # ``repo_identity_source`` is ``explicit`` or ``auto``.
+    repo_identity_value: str = ""
+    # GitLab CI predefined-variables that were auto-detected from
+    # the environment (when taintly itself runs inside a GitLab CI
+    # job).  Surfaced so reviewers can see which context drove
+    # ``is_pipeline_whole_dead`` and the rule-chain evaluator.
+    gitlab_ctx_detected: dict[str, str] = field(default_factory=dict)
 
     def add(self, finding: Finding):
         self.findings.append(finding)

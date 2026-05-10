@@ -4,9 +4,11 @@ from taintly.gitlabguard import (
     ExprVerdict,
     GitLabContext,
     GuardVerdict,
+    detect_gitlab_context,
     evaluate_gitlab_if,
     evaluate_gitlab_rules,
     find_dead_gitlab_job_ranges,
+    is_pipeline_whole_dead,
 )
 
 
@@ -117,3 +119,131 @@ def test_find_dead_gitlab_job_ranges_for_literal_when_never():
     ).lstrip()
 
     assert find_dead_gitlab_job_ranges(content) == [(4, 9)]
+
+
+def test_pipeline_whole_dead_all_when_never():
+    """Every job has bare ``when: never`` -> whole pipeline is dead."""
+    content = dedent(
+        """
+        stages:
+          - test
+
+        job_a:
+          stage: test
+          rules:
+            - when: never
+          script: [echo a]
+
+        job_b:
+          stage: test
+          rules:
+            - when: never
+          script: [echo b]
+        """
+    ).lstrip()
+    assert is_pipeline_whole_dead(content) is True
+
+
+def test_pipeline_whole_dead_mixed_blocks():
+    """One unconditional job -> not whole-dead."""
+    content = dedent(
+        """
+        stages:
+          - test
+
+        dead:
+          stage: test
+          rules:
+            - when: never
+          script: [echo dead]
+
+        live:
+          stage: test
+          script: [echo live]
+        """
+    ).lstrip()
+    assert is_pipeline_whole_dead(content) is False
+
+
+def test_pipeline_whole_dead_empty_yields_false():
+    """A file with no jobs is not 'whole-dead'."""
+    assert is_pipeline_whole_dead("stages: [test]\n") is False
+
+
+def test_pipeline_whole_dead_runtime_blocks():
+    """A job with a RUNTIME guard prevents whole-dead classification."""
+    content = dedent(
+        """
+        conditional:
+          rules:
+            - if: '$CI_PIPELINE_SOURCE == "schedule"'
+              when: never
+          script: [echo a]
+
+        always_dead:
+          rules:
+            - when: never
+          script: [echo b]
+        """
+    ).lstrip()
+    assert is_pipeline_whole_dead(content) is False
+
+
+def test_detect_gitlab_context_outside_ci_returns_empty(monkeypatch):
+    """Outside a GitLab CI environment, every field stays None."""
+    for var in ("CI_PIPELINE_SOURCE", "CI_COMMIT_BRANCH", "CI_DEFAULT_BRANCH"):
+        monkeypatch.delenv(var, raising=False)
+    ctx = detect_gitlab_context()
+    assert ctx == GitLabContext()
+    assert ctx.pipeline_source is None
+    assert ctx.commit_branch is None
+    assert ctx.default_branch is None
+
+
+def test_detect_gitlab_context_inside_ci_populates_fields(monkeypatch):
+    """Inside a GitLab CI environment, predefined vars populate ctx."""
+    monkeypatch.setenv("CI_PIPELINE_SOURCE", "schedule")
+    monkeypatch.setenv("CI_COMMIT_BRANCH", "feature-x")
+    monkeypatch.setenv("CI_DEFAULT_BRANCH", "main")
+    ctx = detect_gitlab_context()
+    assert ctx.pipeline_source == "schedule"
+    assert ctx.commit_branch == "feature-x"
+    assert ctx.default_branch == "main"
+
+
+def test_detect_gitlab_context_treats_empty_string_as_none(monkeypatch):
+    """An empty CI var (``CI_COMMIT_BRANCH=``) is interchangeable with unset.
+
+    GitLab leaves predefined variables empty in some pipeline shapes
+    (e.g. ``CI_COMMIT_BRANCH`` on a tag pipeline); the evaluator
+    treats empty == unset == None to keep the conservative path.
+    """
+    monkeypatch.setenv("CI_PIPELINE_SOURCE", "")
+    monkeypatch.setenv("CI_COMMIT_BRANCH", "")
+    monkeypatch.delenv("CI_DEFAULT_BRANCH", raising=False)
+    ctx = detect_gitlab_context()
+    assert ctx.pipeline_source is None
+    assert ctx.commit_branch is None
+    assert ctx.default_branch is None
+
+
+def test_detect_gitlab_context_drives_whole_pipeline_dead(monkeypatch):
+    """End-to-end: when CI_PIPELINE_SOURCE is set, ctx-dependent
+    `when: never` chains gate the pipeline correctly."""
+    monkeypatch.setenv("CI_PIPELINE_SOURCE", "schedule")
+    ctx = detect_gitlab_context()
+    content = dedent(
+        """
+        job_a:
+          rules:
+            - if: '$CI_PIPELINE_SOURCE == "schedule"'
+              when: never
+          script: [echo a]
+        job_b:
+          rules:
+            - if: '$CI_PIPELINE_SOURCE == "schedule"'
+              when: never
+          script: [echo b]
+        """
+    ).lstrip()
+    assert is_pipeline_whole_dead(content, ctx) is True

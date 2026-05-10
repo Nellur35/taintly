@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 from taintly.engine import scan_file
 from taintly.models import Rule
+from taintly.reporters._encoding import to_ascii
 
 # ---------------------------------------------------------------------------
 # Test case model
@@ -160,7 +161,7 @@ def format_integration_results(results: list[IntegrationTestResult]) -> str:
     if not non_bypass_passed:
         out.append("  (known_bypass failures are expected — they document tool limitations)")
 
-    return "\n".join(out)
+    return to_ascii("\n".join(out))
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +176,8 @@ def _build_cases() -> list[IntegrationTestCase]:
     # FALSE POSITIVE — safe code that must NOT trigger specific rules
     # =========================================================================
 
-    # NOTE: The YAML anchor case for SEC4-GH-005 is a known false positive — see known_bypass section.
+    # NOTE: SEC4-GH-005's YAML-anchor merge-key case (formerly a known false positive)
+    # is now correctly handled — see the false-positive regression case below.
 
     cases.append(
         IntegrationTestCase(
@@ -458,19 +460,19 @@ jobs:
 
     cases.append(
         IntegrationTestCase(
-            name="BYPASS: SEC4-GH-005 false positive — persist-credentials set via YAML anchor",
-            category="known_bypass",
+            name="SEC4-GH-005: persist-credentials set via YAML anchor must not trigger FP",
+            category="false_positive",
             platform="github",
             notes=(
-                "SEC4-GH-005 uses an 8-line lookahead after the checkout line to find "
-                "'persist-credentials: false'. When the value is injected via a YAML anchor "
-                "merge key (<<: *opts), the raw text shows '<<: *opts', not the expanded value. "
-                "The anchor definition is typically at the TOP of the file (before the jobs "
-                "section), so it falls outside the lookahead window. Result: rule fires even "
-                "though persist-credentials IS properly set to false — a false positive."
+                "When persist-credentials is supplied through a YAML anchor merge key "
+                "(<<: *checkout_opts) whose definition lives above the jobs: section, "
+                "SEC4-GH-005 must still recognise that persist-credentials is set to "
+                "false and stay silent. This was historically a known false positive; "
+                "the rule now resolves anchor merges, and this case guards against "
+                "regression."
             ),
-            must_fire=["SEC4-GH-005"],  # Rule incorrectly fires here — that's the FP
-            must_not_fire=[],
+            must_fire=[],
+            must_not_fire=["SEC4-GH-005"],
             content="""\
 name: CI
 on: push
@@ -580,7 +582,7 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
-            - uses: actions/setup-node@v3
+            - uses: tj-actions/changed-files@v44
             - run: npm test
 """,
         )
@@ -674,7 +676,7 @@ jobs:
     env:
       <<: *common_env
     steps:
-      - uses: actions/checkout@v4
+      - uses: tj-actions/changed-files@v44
       - run: npm ci
 """,
         )

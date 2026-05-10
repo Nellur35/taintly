@@ -194,7 +194,14 @@ def main():
     parser.add_argument(
         "--github-repo",
         metavar="OWNER/REPO",
-        help="Repository to target with --platform-audit (e.g. octocat/hello-world).",
+        help=(
+            "Repository identity in OWNER/REPO form. Used in two contexts: "
+            "(1) targets the repository for --platform-audit; "
+            "(2) provides explicit identity to the static-guard evaluator "
+            "on the scan path (overrides ``git remote`` auto-detection). "
+            "Useful when scanning a directory that isn't a git checkout "
+            "or whose remote is not named ``origin``."
+        ),
     )
     parser.add_argument(
         "--gitlab-project",
@@ -221,6 +228,18 @@ def main():
         dest="exclude_rule",
         metavar="RULE_ID",
         help="Exclude a rule ID from the scan (repeatable, e.g. --exclude-rule SEC2-GH-002)",
+    )
+    parser.add_argument(
+        "--strict-config",
+        action="store_true",
+        help=(
+            "Exit non-zero if the local ``.taintly.yml`` excludes any rule "
+            "from the scan.  Recommended for invocations on protected "
+            "branches where checked-in exclusions should be visible to "
+            "reviewers (the summary block lists excluded rules in any "
+            "case; ``--strict-config`` makes the presence of any "
+            "exclusion fail the scan)."
+        ),
     )
     parser.add_argument(
         "--score",
@@ -463,7 +482,9 @@ def main():
             all_rules = load_all_rules()
 
     # Apply rule exclusions (CLI + config, merged)
-    excluded = set(args.exclude_rule or []) | set(audit_config.exclude_rules)
+    cli_excluded = set(args.exclude_rule or [])
+    config_excluded = set(audit_config.exclude_rules)
+    excluded = cli_excluded | config_excluded
     if args.no_taint:
         # --no-taint is a targeted off-switch for the shallow taint analysis
         # rule only.  Taint defaults to on per the v2 plan; users who find it
@@ -472,6 +493,18 @@ def main():
         excluded.add("TAINT-GH-001")
     if excluded:
         all_rules = [r for r in all_rules if r.id not in excluded]
+    # ``--strict-config`` makes the presence of any config-driven
+    # exclusion fail the scan.  The intent is for protected-branch CI
+    # invocations: the summary always lists excluded rules, but
+    # strict mode escalates that disclosure to a non-zero exit.
+    if args.strict_config and config_excluded:
+        rules_list = ", ".join(sorted(config_excluded))
+        print(
+            f"taintly: --strict-config set; .taintly.yml excludes "
+            f"{len(config_excluded)} rule(s) ({rules_list}). Exit.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
 
     # Integration test mode
     if args.integration_test:
@@ -924,7 +957,28 @@ def main():
                     file=sys.stderr,
                 )
 
-    reports = scan_repo(args.path, all_rules, platform)
+    explicit_repoctx = None
+    if getattr(args, "github_repo", None) and "/" in args.github_repo:
+        from .staticguard import WorkflowContext
+
+        owner = args.github_repo.split("/", 1)[0]
+        explicit_repoctx = WorkflowContext(repository=args.github_repo, repository_owner=owner)
+
+    reports = scan_repo(
+        args.path,
+        all_rules,
+        platform,
+        explicit_github_repoctx=explicit_repoctx,
+    )
+
+    # Surface config-driven exclusions on every report so the summary
+    # reporter can disclose them.  CLI-only exclusions are operator
+    # choices and not surfaced; config exclusions are
+    # repository-checked-in trust events that reviewers should see.
+    if config_excluded:
+        sorted_config_exc = sorted(config_excluded)
+        for report in reports:
+            report.excluded_rules_from_config = sorted_config_exc
 
     all_findings = []
     deployment_contexts: dict[str, DeploymentContext] = {}

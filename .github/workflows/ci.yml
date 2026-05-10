@@ -104,14 +104,18 @@ jobs:
         # (tests/unit/test_pattern_properties.py — PSE Domain 3.4).
         run: pip install pytest pytest-timeout pytest-cov hypothesis==6.152.1
 
-      - name: Unit + integration + evasion tests
+      - name: Unit + integration + evasion + playground tests
         # Branch coverage enabled here too (not just via pyproject) so
         # the floor reflects both line AND branch coverage. Current
         # floor is 78; target is 85 — see pyproject.toml
         # [tool.coverage.report] for the ratchet plan and per-module
         # drag list. MUST stay in lockstep with pyproject's fail_under.
+        # tests/playground/ is the light-e2e harness — fixture-driven
+        # find/fix assertions plus posture-rule API replay; cheap and
+        # gates against the kind of CI miss that surfaced in the
+        # 2026-05-05 e2e session.
         run: |
-          pytest tests/unit/ tests/integration/ tests/evasion/ \
+          pytest tests/unit/ tests/integration/ tests/evasion/ tests/playground/ \
             --tb=short -q \
             --cov=taintly \
             --cov-branch \
@@ -272,5 +276,5 @@ jobs:
         # the 78% floor; the Windows job's purpose is OS-portability,
         # not coverage.  If a test fails ONLY on Windows, that's a
         # path / line-ending / case-sensitivity bug worth fixing.
-        run: pytest tests/unit/ tests/integration/ tests/evasion/ --tb=short -q
+        run: pytest tests/unit/ tests/integration/ tests/evasion/ tests/playground/ --tb=short -q
 

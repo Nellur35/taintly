@@ -299,23 +299,23 @@ do not recompute risk.
 ## Coverage
 
 <!-- AUTOGEN:summary -->
-231 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+242 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 <!-- AUTOGEN:coverage -->
 | Category | GitHub | GitLab | Jenkins |
 |----------|--------|--------|---------|
 | SEC-1 — Insufficient Flow Control | 1 | 2 | 2 |
-| SEC-2 — Inadequate IAM | 3 | 3 | 3 |
+| SEC-2 — Inadequate IAM | 4 | 3 | 3 |
 | SEC-3 — Dependency Chain Abuse | 9 | 5 | 5 |
-| SEC-4 — Poisoned Pipeline Execution | 20 | 7 | 6 |
+| SEC-4 — Poisoned Pipeline Execution | 22 | 8 | 7 |
 | SEC-5 — Insufficient PBAC | 2 | 1 | 1 |
-| SEC-6 — Insufficient Credential Hygiene | 9 | 9 | 8 |
+| SEC-6 — Insufficient Credential Hygiene | 10 | 9 | 8 |
 | SEC-7 — Insecure System Configuration | 4 | 1 | 3 |
 | SEC-8 — Ungoverned 3rd Party Services | 4 | 3 | 4 |
-| SEC-9 — Improper Artifact Integrity | 5 | 3 | 3 |
+| SEC-9 — Improper Artifact Integrity | 6 | 3 | 3 |
 | SEC-10 — Insufficient Logging | 4 | 2 | 1 |
-| AI / ML | 35 | 16 | 12 |
+| AI / ML | 39 | 16 | 12 |
 | TAINT — Multi-stage taint flows | 13 | 4 | 2 |
 <!-- /AUTOGEN:coverage -->
 

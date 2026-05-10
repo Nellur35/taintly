@@ -4,6 +4,7 @@ from taintly.jenkinsguard import (
     GuardVerdict,
     evaluate_jenkins_when,
     find_dead_jenkins_stage_ranges,
+    is_jenkinsfile_whole_dead,
     is_literal_false_when,
 )
 
@@ -57,3 +58,52 @@ def test_find_dead_jenkins_stage_ranges_for_literal_false_stage():
     ).lstrip()
 
     assert find_dead_jenkins_stage_ranges(content) == [(4, 11)]
+
+
+def test_jenkinsfile_whole_dead_all_when_false():
+    """Every stage has ``when { expression { false } }`` -> whole-dead."""
+    content = dedent(
+        """
+        pipeline {
+            agent any
+            stages {
+                stage('a') {
+                    when { expression { false } }
+                    steps { sh 'echo a' }
+                }
+                stage('b') {
+                    when { expression { false } }
+                    steps { sh 'echo b' }
+                }
+            }
+        }
+        """
+    ).lstrip()
+    assert is_jenkinsfile_whole_dead(content) is True
+
+
+def test_jenkinsfile_whole_dead_mixed():
+    """One unconditional stage -> not whole-dead."""
+    content = dedent(
+        """
+        pipeline {
+            agent any
+            stages {
+                stage('dead') {
+                    when { expression { false } }
+                    steps { sh 'echo dead' }
+                }
+                stage('live') {
+                    steps { sh 'echo live' }
+                }
+            }
+        }
+        """
+    ).lstrip()
+    assert is_jenkinsfile_whole_dead(content) is False
+
+
+def test_jenkinsfile_whole_dead_no_stages():
+    """A pipeline without an explicit stages block -> not whole-dead."""
+    content = "pipeline { agent any }\n"
+    assert is_jenkinsfile_whole_dead(content) is False

@@ -1,0 +1,12 @@
+# vulnerable: heredoc renders attacker-controlled PR title into CLAUDE.md on a fork-reachable trigger
+# EXPECT: AI-GH-038 fires (HIGH)
+name: render-claude-md
+on: pull_request_target
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          cat <<EOF >> CLAUDE.md
+          PR title: ${{ github.event.pull_request.title }}
+          EOF

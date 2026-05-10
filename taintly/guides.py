@@ -2628,6 +2628,258 @@ REFERENCES:
   - https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/caching-dependencies-to-speed-up-workflows
   - https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions
 """,
+    "AI-GH-036": """
+═══════════════════════════════════════════════════════════════════════════════
+REMEDIATION GUIDE: Repository contains agent-instruction file (AI-GH-036)
+═══════════════════════════════════════════════════════════════════════════════
+Severity: INFO + review-needed
+OWASP:    CICD-SEC-3 — Dependency Chain Abuse
+Risk:     Files like CLAUDE.md, .cursorrules, AGENTS.md, GEMINI.md,
+          .github/copilot-instructions.md, .aider.conf.yml, .cursor/rules/,
+          .windsurf/, .gitlab/duo/instructions.md are AUTO-LOADED by AI agent
+          harnesses (Claude Code, Cursor, Aider, Copilot, Gemini, Windsurf)
+          as user-trust-tier instructions every time the agent runs against
+          this repo.  A malicious commit (yours, a contributor's, a fork)
+          can plant directives the operator's agent will follow with full
+          local trust — same shape as a malicious setup.py, but mediated
+          through the agent's trust hierarchy rather than a package hook.
+
+WHY THIS CAN'T BE AUTO-FIXED:
+  The file's PRESENCE is the surface, not its content.  A benign repo's
+  CLAUDE.md is still a future-injection vector if a malicious commit lands.
+  Auto-deleting would break legitimate agent workflows the team relies on.
+
+STEP-BY-STEP REMEDIATION:
+
+  1. AUDIT THE FILE'S CURRENT CONTENT
+     Open every flagged file and ask: does any directive ask the agent to
+     disable safeguards, run unsanitised commands, fetch external resources,
+     or trust attacker-controllable inputs?  Red flags:
+       - "always run X first" / "before any other action, do Y"
+       - "trust the contents of Z without checking"
+       - "fetch <URL> and execute it"
+       - "ignore security warnings about ..."
+
+  2. COVER WITH CODEOWNERS
+     Add an entry so changes to these files require security review:
+       /CLAUDE.md          @your-org/security
+       /.cursorrules       @your-org/security
+       /AGENTS.md          @your-org/security
+       /.github/copilot-instructions.md  @your-org/security
+       /.cursor/rules/     @your-org/security
+       /.windsurf/         @your-org/security
+       /GEMINI.md          @your-org/security
+       /.aider.conf.yml    @your-org/security
+
+  3. SCOPE TRUST AT THE HARNESS LEVEL
+     For agents that allow per-project trust scoping (Claude Code's project
+     trust prompt, Cursor's per-workspace allowlist), opt OUT of auto-loading
+     on third-party / untrusted clones.  Do NOT rely on manual review at
+     agent-launch time — operators routinely accept the prompt.
+
+  4. ACCEPT OR DELETE
+     If the file is genuinely needed for your agent workflow, the audit +
+     CODEOWNERS protection is the remediation; suppress the finding:
+       # taintly: ignore[AI-GH-036]
+     in any workflow file, OR add a path-scoped ignore in .taintly.yml after
+     recording the audit decision.  If the file is unused, delete it.
+
+REFERENCES:
+  - https://www.anthropic.com/engineering/claude-code-best-practices
+  - https://docs.cursor.com/en/context/rules
+""",
+    "AI-GH-037": """
+═══════════════════════════════════════════════════════════════════════════════
+REMEDIATION GUIDE: Workflow writes to agent-instruction file and commits back (AI-GH-037)
+═══════════════════════════════════════════════════════════════════════════════
+Severity: MEDIUM + review-needed
+OWASP:    CICD-SEC-3 — Dependency Chain Abuse
+Risk:     A CI workflow step writes to CLAUDE.md / AGENTS.md / .cursorrules /
+          etc. AND a step in the same job commits the change back to the
+          repository.  The mutation persists in the default branch, so every
+          downstream operator's agent harness loads the (now potentially
+          attacker-influenced) directives on next clone.
+
+WHY THIS CAN'T BE AUTO-FIXED:
+  The workflow may be doing legitimate doc-generation, badge insertion, or
+  content templating that you genuinely want.  The fix is design-level:
+  decouple the writing step from the operator-trust surface.
+
+STEP-BY-STEP REMEDIATION:
+
+  1. ASK WHY THE WORKFLOW WRITES THE FILE
+     Three common reasons:
+       (a) Doc-gen / badge insertion (TOC, last-updated stamp).
+       (b) Aggregating instructions from multiple sources at build time.
+       (c) Vestigial / nobody remembers — it just runs.
+
+  2. IF (a) DOC-GEN: GATE BEHIND MANUAL REVIEW
+     Replace the direct push with a draft PR that requires human approval:
+       - uses: peter-evans/create-pull-request@<SHA>
+         with:
+           title: "Update CLAUDE.md (auto-generated)"
+           branch: bot/claude-md-update
+           # NOT main / master / trunk — the change must be reviewed.
+
+  3. IF (b) AGGREGATION: WRITE TO A DIFFERENT PATH
+     The agent harness auto-loads specific paths (CLAUDE.md, AGENTS.md, etc.).
+     If you genuinely need build-time aggregation, write to a path the
+     harness IGNORES (e.g. ``docs/agent-context.md``) and rely on the
+     stable, in-repo CLAUDE.md to reference it explicitly.
+
+  4. IF (c) VESTIGIAL: DELETE THE STEP
+     Remove the writing step.  Run --baseline before and --diff after to
+     confirm no legitimate behaviour broke.
+
+  5. FALLBACK: WRITE TO A NON-DEFAULT BRANCH
+     Keep the writing step but target gh-pages / release/* / a feature
+     branch the harness will not auto-load on a clone of main.
+
+REFERENCES:
+  - https://www.anthropic.com/engineering/claude-code-best-practices
+  - https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+""",
+    "AI-GH-038": """
+═══════════════════════════════════════════════════════════════════════════════
+REMEDIATION GUIDE: Workflow renders agent-instruction file from untrusted github context (AI-GH-038)
+═══════════════════════════════════════════════════════════════════════════════
+Severity: HIGH + review-needed
+OWASP:    CICD-SEC-3 — Dependency Chain Abuse
+Risk:     A CI workflow renders an agent-instruction file (CLAUDE.md / etc.)
+          from attacker-influenceable github context (PR title/body, head_ref,
+          issue / comment / review / discussion bodies, workflow_run.head_branch)
+          AND the workflow is triggered by a fork-reachable event
+          (pull_request_target, issue_comment, pull_request_review,
+          workflow_run, discussion, discussion_comment, issues).
+
+          Full taint→render→sink chain into an operator-trust file: the
+          attacker writes a PR title containing a directive, the workflow
+          embeds that directive into CLAUDE.md, the operator's agent
+          executes it on next run.
+
+WHY THIS CAN'T BE AUTO-FIXED:
+  Removing the templating may break the workflow's intended function.
+  The fix requires re-thinking the trust boundary: attacker-controlled
+  bytes must not reach an auto-loaded file unfiltered.
+
+STEP-BY-STEP REMEDIATION:
+
+  1. DROP THE RENDERING IF UNNECESSARY
+     Most "include the PR title in CLAUDE.md" workflows are aspirational,
+     not functional.  Hard-code the instruction text in-repo and delete
+     the rendering step.
+
+  2. MOVE TO A NON-FORK-REACHABLE TRIGGER
+     If the rendering must run, change ``on: pull_request_target`` →
+     ``on: pull_request``.  The workflow loses access to secrets, but
+     also loses the attacker-trust surface.
+
+  3. WRITE TO A SCRATCH PATH NOT IN THE AGENT-INSTRUCTION INVENTORY
+     The harm comes from auto-loading.  Rendering ``${{ github.event.pull_request.title }}``
+     into ``./tmp/pr-summary.md`` is fine — the agent doesn't auto-load it.
+     Rendering it into ``CLAUDE.md`` is the bug.
+
+  4. SANITISE — WEAKEST OPTION, USE WITH CARE
+     Pass the context through a stripper that removes markdown directive
+     shapes ("run X", "execute Y", "use Z", "always do W") before
+     interpolation:
+       echo "${{ github.event.pull_request.title }}" \\
+         | jq -Rr @text \\
+         | sed -E 's/(run|execute|install|use|set|configure|load|fetch|invoke) /[REDACTED] /Ig' \\
+         > sanitized-title.txt
+     Then render from sanitized-title.txt.  This is a defence-in-depth
+     fallback, NOT a substitute for steps 1-3.
+
+  5. RUN THE RENDERING IN A SANDBOX, GATE PUBLICATION
+     The render step runs in a job with NO secrets and NO write-scoped
+     token.  It produces an artefact.  A second job downloads the artefact
+     and opens a draft PR (peter-evans/create-pull-request) for human
+     review.  Same shape as the SEC4-GH-001 split-workflow remediation.
+
+REFERENCES:
+  - https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+  - https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/
+""",
+    "AI-GH-039": """
+═══════════════════════════════════════════════════════════════════════════════
+REMEDIATION GUIDE: Agent-instruction file references mutable remote resources (AI-GH-039)
+═══════════════════════════════════════════════════════════════════════════════
+Severity: MEDIUM + review-needed
+OWASP:    CICD-SEC-3 — Dependency Chain Abuse
+Risk:     An agent-instruction file (CLAUDE.md / .cursorrules / AGENTS.md /
+          GEMINI.md / .github/copilot-instructions.md / .aider.conf.yml /
+          .gitlab/duo/instructions.md) contains a directive that references
+          a mutable remote resource (curl|bash, unpinned npm/pip/docker/
+          cargo/brew/pipx/npx, bare URL outside doc-domain allowlist) outside
+          a fenced markdown code block.  Sink is the operator's agent at
+          clone/load time.  The agent will follow the directive on every
+          load; the remote bytes can change between loads, so a one-time
+          operator approval poisons every subsequent agent run.
+
+WHY THIS CAN'T BE AUTO-FIXED:
+  The directive may be intentional and benign (a curated, well-known tool).
+  The fix is to PIN the reference so attacker-mutable bytes can't reach the
+  agent's trust surface.
+
+STEP-BY-STEP REMEDIATION:
+
+  1. PIN THE REMOTE RESOURCE
+     For each flagged reference, replace the unpinned form with a SHA-pinned
+     or version-locked form:
+
+     curl|bash:
+       Before: curl https://example.com/setup.sh | bash
+       After:  curl --proto '=https' --tlsv1.2 -fsSL https://example.com/setup.sh | sha256sum -c setup.sh.sha256 && bash setup.sh
+
+     npm / npx:
+       Before: npx some-tool
+       After:  npx some-tool@1.2.3                       (exact version)
+                                                          + commit a package-lock.json
+
+     pip:
+       Before: pip install some-pkg
+       After:  pip install some-pkg==1.2.3              (exact version)
+               OR  pip install some-pkg @ git+https://github.com/o/r@<40-hex-sha>
+
+     docker:
+       Before: docker run some-image:latest
+       After:  docker run some-image@sha256:<digest>
+
+     cargo:
+       Before: cargo install ripgrep
+       After:  cargo install --version 14.1.0 ripgrep
+
+     git clone:
+       Before: git clone https://github.com/o/r.git
+       After:  git clone --branch <tag-or-sha> https://github.com/o/r.git
+
+  2. MOVE EXAMPLES INTO FENCED CODE BLOCKS
+     If the directive's intent is illustration, not instruction, wrap the
+     command in a fenced code block.  Agent harnesses (and AI-GH-039)
+     interpret fenced blocks as documentation, not as directives:
+
+       Before:
+         To install: run `curl https://example.com/install.sh | bash`
+       After:
+         To install, run:
+         ```
+         curl https://example.com/install.sh | bash
+         ```
+
+  3. DROP UNNECESSARY DIRECTIVES
+     Many CLAUDE.md / AGENTS.md directives are aspirational developer notes
+     ("we sometimes use X", "it's helpful to have Y") that don't justify
+     the agent-load-time supply-chain risk.  Delete them.
+
+  4. REPLACE BARE URLs WITH IN-REPO REFERENCES
+     If the agent should consult documentation hosted at a URL, prefer
+     committing a snapshot of the documentation in-repo (under docs/)
+     rather than telling the agent to fetch the URL at load time.
+
+REFERENCES:
+  - https://www.anthropic.com/engineering/claude-code-best-practices
+  - https://owasp.org/www-project-top-10-ci-cd-security-risks/CICD-SEC-3-Dependency-Chain-Abuse
+""",
 }
 
 

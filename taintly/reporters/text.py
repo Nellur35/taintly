@@ -14,6 +14,21 @@ if TYPE_CHECKING:
     from taintly.scorer import ScoreReport
 
 
+# Rule IDs whose findings are inventory items, not security findings to
+# investigate.  These rules surface third-party dependencies in CI
+# surface area at INFO severity with ``review_needed=True``.  They are
+# designed to be snapshotted with ``--baseline`` and reviewed
+# periodically by the user at their own cadence — the tool does not
+# recommend a frequency.
+INVENTORY_RULE_IDS: frozenset[str] = frozenset(
+    {
+        "SEC3-GH-006",
+        "SEC3-GL-006",
+        "SEC3-JK-005",
+    }
+)
+
+
 COLORS = {
     Severity.CRITICAL: "\033[91m",
     Severity.HIGH: "\033[93m",
@@ -229,6 +244,42 @@ def _format_top_distinct_risks(
     return out
 
 
+def _format_disclosure_block(report: AuditReport) -> list[str]:
+    """Surface trust events that affected the scan: config-driven
+    rule exclusions, repository-identity source, and auto-detected
+    GitLab CI context.  Each line is omitted when the underlying
+    state is its conservative default, so default-configuration
+    scans see the same compact summary as before.
+    """
+    out: list[str] = []
+    if report.excluded_rules_from_config:
+        rules_list = ", ".join(report.excluded_rules_from_config)
+        out.append(
+            f"  Config exclusions: {len(report.excluded_rules_from_config)} "
+            f"rule(s) from .taintly.yml ({rules_list})"
+        )
+    if report.repo_identity_source == "explicit":
+        out.append(
+            f"  Repository identity: explicit ({report.repo_identity_value}) via --github-repo"
+        )
+    elif report.repo_identity_source == "auto":
+        out.append(
+            f"  Repository identity: auto-detected from git remote "
+            f"({report.repo_identity_value}) — pass --github-repo to override"
+        )
+    elif report.platform == "github" and report.repo_identity_source == "unset":
+        out.append(
+            "  Repository identity: unknown (no git remote, no --github-repo) "
+            "— repo-mismatch suppression disabled"
+        )
+    if report.gitlab_ctx_detected:
+        ctx_pairs = ", ".join(
+            f"{k.upper()}={v}" for k, v in sorted(report.gitlab_ctx_detected.items())
+        )
+        out.append(f"  GitLab CI context: auto-detected ({ctx_pairs})")
+    return out
+
+
 def _format_executive_summary(
     report: AuditReport,
     c: dict[Severity, str],
@@ -243,11 +294,22 @@ def _format_executive_summary(
 
     out.append(f"{b}Summary{r}")
     out.append(f"  Files scanned:  {report.files_scanned}")
-    out.append(f"  Total findings: {len(report.findings)}")
-    # Distinct-risk count: the report should lead with "how many root-cause
-    # clusters matter", not "how many rules fired".  This is the single most
-    # important signal once a user gets past the summary line.
-    clusters = cluster_findings(report.findings) if report.findings else []
+    # Split: vulnerability findings vs third-party inventory items.
+    # Inventory items surface CI surface-area to review periodically at
+    # the user's chosen cadence; they are not findings to fix.
+    vuln_findings = [f for f in report.findings if f.rule_id not in INVENTORY_RULE_IDS]
+    inventory_findings = [f for f in report.findings if f.rule_id in INVENTORY_RULE_IDS]
+    out.append(f"  Findings:       {len(vuln_findings)}")
+    if inventory_findings:
+        out.append(
+            f"  Third-party in CI: {len(inventory_findings)}  "
+            f"(review periodically; snapshot with --baseline)"
+        )
+    # Distinct-risk count: clusters from vulnerability findings only,
+    # excluding inventory items so the "X confirmed" lead-line means
+    # "X security clusters", not "X clusters including supply-chain
+    # inventory the user has already chosen to live with".
+    clusters = cluster_findings(vuln_findings) if vuln_findings else []
     if clusters:
         distinct = len([cl for cl in clusters if not cl.review_needed])
         review = len([cl for cl in clusters if cl.review_needed])
@@ -259,11 +321,14 @@ def _format_executive_summary(
         out.append(f"  Score:          {score_report.total_score}/100 ({score_report.grade})")
     sev_bits = []
     for sev in Severity:
-        count = report.summary.get(sev.value, 0)
+        # Severity breakdown over vulnerability findings only — INFO
+        # inventory items don't pad the INFO column.
+        count = sum(1 for f in vuln_findings if f.severity is sev)
         if count:
             sev_bits.append(f"{c[sev]}{sev.value}:{count}{r}")
     if sev_bits:
         out.append(f"  By severity:    {'  '.join(sev_bits)}")
+    out.extend(_format_disclosure_block(report))
     out.append("")
 
     # Top distinct risks (root-cause clustered) — the primary value-add of
@@ -356,6 +421,11 @@ def format_text(
 
     if not report.findings or all(f.rule_id == "ENGINE-ERR" for f in report.findings):
         out.append(f"  {check_char()} No findings.")
+        # Even on a clean scan, surface trust events that affected the
+        # scope of what was checked: a "no findings" report on a config
+        # that excludes rules is meaningfully different from "no
+        # findings" on a config that excludes nothing.
+        out.extend(_format_disclosure_block(report))
         return to_ascii("\n".join(out))
 
     # Executive summary (score, counts, top issues, top risk, quick win)
@@ -376,7 +446,14 @@ def format_text(
         key=lambda kv: (-kv[1][0].severity.rank, -len(kv[1]), kv[0]),
     )
 
-    out.append(f"{b}{sep * 3} Findings ({len(report.findings)}) {sep * 3}{r}")
+    total = len(report.findings)
+    inventory_count = sum(1 for f in report.findings if f.rule_id in INVENTORY_RULE_IDS)
+    vuln_count = total - inventory_count
+    if inventory_count:
+        header_count = f"{total} = {vuln_count} to fix + {inventory_count} inventory"
+    else:
+        header_count = str(total)
+    out.append(f"{b}{sep * 3} Findings ({header_count}) {sep * 3}{r}")
     out.append("")
 
     for rule_id, group in rule_order:

@@ -83,10 +83,12 @@ def test_engine_err_survives_filter_severity(tmp_path):
 
 def test_oversize_file_emits_engine_err_and_appears_in_text_banner(tmp_path):
     """Field-test regression (gitlabhq's 129KB rules.gitlab-ci.yml,
-    wireshark's 68KB .gitlab-ci.yml): files larger than the scanner cap
-    silently lost file-scope rule coverage. The cap still applies (it's
-    a ReDoS guard) but the loss is now visible: ENGINE-ERR is emitted
-    AND the text reporter shows a ``! Coverage degraded`` banner."""
+    wireshark's 68KB .gitlab-ci.yml): files larger than the per-regex
+    cap previously lost file-scope rule coverage silently.  Adding
+    chunked search restored coverage; ENGINE-ERR still emits as an
+    informational banner ("content scanned in chunks") AND the text
+    reporter shows a ``! Coverage degraded`` banner so the signal
+    stays visible."""
     from taintly.models import AuditReport
     from taintly.reporters.text import format_text
 
@@ -95,7 +97,7 @@ def test_oversize_file_emits_engine_err_and_appears_in_text_banner(tmp_path):
     big_file.write_text("on: push\njobs:\n" + ("  comment: " + "x" * 50 + "\n") * 1500)
 
     findings = scan_file(str(big_file), rules=[])
-    assert any(f.rule_id == "ENGINE-ERR" and "exceeds scanner cap" in f.title for f in findings)
+    assert any(f.rule_id == "ENGINE-ERR" and "per-chunk cap" in f.title for f in findings)
 
     report = AuditReport(repo_path="/test", platform="github")
     for f in findings:
@@ -330,12 +332,11 @@ def test_scope_normalize_workflows_dir(tmp_path):
     )
 
     from taintly.rules.registry import load_rules_for_platform
+
     rules = load_rules_for_platform(Platform.GITHUB)
     reports = scan_repo(str(wf_dir), rules)
     assert reports, "scan_repo returned no reports"
-    assert reports[0].files_scanned == 1, (
-        f"expected 1 file scanned, got {reports[0].files_scanned}"
-    )
+    assert reports[0].files_scanned == 1, f"expected 1 file scanned, got {reports[0].files_scanned}"
 
 
 def test_scope_normalize_dotgithub_dir(tmp_path):
@@ -347,6 +348,7 @@ def test_scope_normalize_dotgithub_dir(tmp_path):
     )
 
     from taintly.rules.registry import load_rules_for_platform
+
     rules = load_rules_for_platform(Platform.GITHUB)
     reports = scan_repo(str(tmp_path / ".github"), rules)
     assert reports[0].files_scanned == 1
@@ -364,13 +366,12 @@ def test_scope_normalize_single_file(tmp_path, capsys):
     )
 
     from taintly.rules.registry import load_rules_for_platform
+
     rules = load_rules_for_platform(Platform.GITHUB)
     reports = scan_repo(str(wf_dir / "ci.yml"), rules)
     assert reports[0].files_scanned == 1
     err = capsys.readouterr().err
-    assert "scoped" in err.lower(), (
-        f"expected scoped-mode warning on stderr, got: {err}"
-    )
+    assert "scoped" in err.lower(), f"expected scoped-mode warning on stderr, got: {err}"
 
 
 def test_scope_normalize_repo_root_unchanged(tmp_path):
@@ -385,6 +386,7 @@ def test_scope_normalize_repo_root_unchanged(tmp_path):
     )
 
     from taintly.rules.registry import load_rules_for_platform
+
     rules = load_rules_for_platform(Platform.GITHUB)
     reports = scan_repo(str(tmp_path), rules)
     assert reports[0].files_scanned == 2
@@ -393,6 +395,7 @@ def test_scope_normalize_repo_root_unchanged(tmp_path):
 def test_scope_normalize_nonexistent_path_does_not_crash(tmp_path):
     """Bogus paths should produce an empty/error report, never a crash."""
     from taintly.rules.registry import load_rules_for_platform
+
     rules = load_rules_for_platform(Platform.GITHUB)
     # Should not raise.
     reports = scan_repo(str(tmp_path / "does-not-exist"), rules)
@@ -403,6 +406,7 @@ def test_scope_normalize_jenkinsfile_single(tmp_path):
     """Passing a single Jenkinsfile path scans Jenkins-platform rules only."""
     (tmp_path / "Jenkinsfile").write_text("pipeline { agent any }\n")
     from taintly.rules.registry import load_rules_for_platform
+
     rules = load_rules_for_platform(Platform.JENKINS)
     reports = scan_repo(str(tmp_path / "Jenkinsfile"), rules)
     assert reports[0].files_scanned == 1
@@ -435,6 +439,7 @@ def test_lazy_loading_skips_other_platforms():
     import subprocess
     import sys
     import textwrap
+
     code = textwrap.dedent("""
         import sys
         from taintly.models import Platform
@@ -448,3 +453,90 @@ def test_lazy_loading_skips_other_platforms():
     """)
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert "OK" in r.stdout, f"stdout={r.stdout!r}, stderr={r.stderr!r}"
+
+
+# =============================================================================
+# Structural CUTOFF disclosure
+# =============================================================================
+
+
+def test_structural_cutoff_emits_file_level_engine_err(tmp_path, github_rules):
+    """When the structural reader hits CUTOFF mid-file, scan_file
+    surfaces a single file-level ENGINE-ERR documenting the
+    coverage degradation.
+
+    Per-rule structural-pattern markers continue to fire for the
+    rules that ran; the file-level finding ensures the disclosure
+    is visible regardless of which rule types the file exercised.
+    """
+    from taintly.engine import scan_file
+
+    wf = tmp_path / "wf.yml"
+    # ``%YAML`` directive is the simplest CUTOFF trigger -- the
+    # tokenizer treats it as an unsupported construct in recover
+    # mode (verified at tests/unit/test_structural_walker.py:183).
+    wf.write_text(
+        "name: ci\n"
+        "%YAML 1.2\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+    )
+    findings = scan_file(str(wf), github_rules)
+    cutoff_findings = [
+        f
+        for f in findings
+        if f.rule_id == "ENGINE-ERR" and "Structural coverage degraded" in f.title
+    ]
+    assert len(cutoff_findings) == 1, (
+        f"expected exactly one CUTOFF disclosure; got "
+        f"{[(f.rule_id, f.title) for f in findings if f.rule_id == 'ENGINE-ERR']}"
+    )
+    assert cutoff_findings[0].line == 2  # the directive line
+
+
+def test_clean_yaml_does_not_emit_cutoff_disclosure(tmp_path, github_rules):
+    """A well-formed workflow doesn't produce a CUTOFF ENGINE-ERR."""
+    from taintly.engine import scan_file
+
+    wf = tmp_path / "wf.yml"
+    wf.write_text(
+        "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n"
+    )
+    findings = scan_file(str(wf), github_rules)
+    cutoff = [
+        f
+        for f in findings
+        if f.rule_id == "ENGINE-ERR" and "Structural coverage degraded" in f.title
+    ]
+    assert cutoff == []
+
+
+def test_jenkinsfile_does_not_run_cutoff_check(tmp_path, jenkins_rules):
+    """Jenkinsfiles don't go through the structural reader; the
+    CUTOFF check is gated on YAML extensions and must not fire on
+    Jenkinsfile inputs (which would always produce a spurious
+    cutoff because the structural reader doesn't handle Groovy).
+    """
+    from taintly.engine import scan_file
+
+    jf = tmp_path / "Jenkinsfile"
+    jf.write_text(
+        "pipeline {\n"
+        "  agent any\n"
+        "  stages {\n"
+        "    stage('build') {\n"
+        "      steps { sh 'echo hi' }\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+    findings = scan_file(str(jf), jenkins_rules)
+    cutoff = [
+        f
+        for f in findings
+        if f.rule_id == "ENGINE-ERR" and "Structural coverage degraded" in f.title
+    ]
+    assert cutoff == []

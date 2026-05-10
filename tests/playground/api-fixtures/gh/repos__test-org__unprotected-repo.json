@@ -1,0 +1,6 @@
+{
+  "name": "unprotected-repo",
+  "full_name": "test-org/unprotected-repo",
+  "default_branch": "main",
+  "private": false
+}

@@ -15,6 +15,19 @@ class GuardVerdict(Enum):
 
 @dataclass(frozen=True)
 class JenkinsContext:
+    """Pipeline context for context-aware Jenkins ``when`` evaluation.
+
+    The ``parameter_values`` field exists for extensibility: when
+    populated with the actual build-parameter values, an evaluator
+    could resolve ``when { expression { return params.FOO == 'bar' } }``
+    against the live values.  The engine does not currently populate
+    this field on the scan path; conservatism therefore applies and
+    only literal ``when { expression { return false } }`` (and the
+    ``not { expression { return true } }`` variant) suppress.  Populate
+    when corpus evidence demands context-aware suppression and a
+    concrete source for the parameter values is settled.
+    """
+
     parameter_values: dict[str, str] | None = None
 
 
@@ -60,6 +73,31 @@ def find_dead_jenkins_stage_ranges(
                 )
             )
     return ranges
+
+
+def is_jenkinsfile_whole_dead(content: str, ctx: JenkinsContext | None = None) -> bool:
+    """Return ``True`` if every stage in the Jenkinsfile is statically dead.
+
+    Walks the pipeline's stages, evaluates each stage's ``when`` block
+    with :func:`evaluate_jenkins_when`, and returns ``True`` iff:
+
+    1. The Jenkinsfile has at least one stage.
+    2. Every stage evaluates to ``GuardVerdict.DEAD``.
+
+    Pipelines without an explicit ``stages { ... }`` block (e.g.,
+    scripted Groovy) return ``False`` — there is no structural
+    enumeration target.
+    """
+    stages = list(_stage_blocks(content))
+    if not stages:
+        return False
+    for stage_start, stage_end in stages:
+        stage_body = content[stage_start:stage_end]
+        when_block = _extract_when_block(stage_body)
+        stage: dict[str, object] = {"when": when_block} if when_block is not None else {}
+        if evaluate_jenkins_when(stage, ctx) is not GuardVerdict.DEAD:
+            return False
+    return True
 
 
 def _normalize_when_body(when_block: str) -> str:

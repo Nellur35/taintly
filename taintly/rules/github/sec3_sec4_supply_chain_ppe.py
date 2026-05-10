@@ -28,19 +28,42 @@ from taintly.structural_pattern import StructuralPattern
 _FULL_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
 _BRANCH_REF_NAMES = frozenset({"main", "master", "develop", "dev"})
 
+# First-party GitHub-published action namespaces.  The supply-chain
+# threat model that motivates SEC3-GH-001 (force-push over a tag,
+# maintainer compromise) applies in principle to any action; in
+# practice GitHub-controlled namespaces are administered by the
+# platform operator and tag-pinning here is industry-standard
+# practice (every Microsoft / AWS / Google / dotnet repository in
+# the corpus tag-pins these).  Firing HIGH on every
+# ``actions/checkout@v4`` produces severe FP-density without
+# precision gain — the same threat is more usefully reported via
+# SEC3-GH-006 (third-party inventory).  See Phase 8 iteration 2
+# tuning doc for the corpus-baseline measurement.
+_FIRST_PARTY_ACTION_ORGS = frozenset({"actions", "github"})
+
 # Attacker-controlled GitHub-context expressions that turn an
-# unguarded ``run:`` interpolation into shell injection.  Equivalent
-# to the SEC4-GH-004 regex's allowlist plus ``github.head_ref``.
+# unguarded ``run:`` interpolation into shell injection.  Kept in
+# sync with ``_TAINTED_CONTEXTS`` in ``taintly/taint.py``: any
+# attacker-controlled context shape catchable by the cross-step
+# taint analyzer must also be catchable directly here, otherwise
+# the same byte appearing inline (without an intermediate ``env:``
+# hop) goes unflagged.
 _DANGEROUS_GITHUB_CONTEXT_RE = re.compile(
     r"\$\{\{\s*github\.("
     r"event\.("
     r"issue\.(title|body)|"
-    r"pull_request\.(title|body)|"
+    r"pull_request\.(title|body|head\.(ref|label)|user\.login)|"
     r"comment\.body|"
     r"review\.body|"
     r"head_commit\.(message|author\.(email|name))|"
     r"commits|"
-    r"pages"
+    r"pages|"
+    # ``workflow_run.head_branch`` is the branch name of the
+    # upstream workflow's checkout.  For workflow_run triggered
+    # by a fork PR's workflow, it carries the fork's branch
+    # name -- attacker-controlled at the same layer as
+    # ``head_ref``.
+    r"workflow_run\.head_branch"
     r")|"
     r"head_ref"
     r")"
@@ -80,6 +103,12 @@ def _is_unpinned_uses_value(value: str, _value_kind: str, _path: tuple[object, .
         return False
     head, _, ref = v.partition("@")
     if not ref:
+        return False
+    # First-party allowlist: GitHub-published action namespaces are
+    # operationally trusted; SEC3-GH-006 is the right channel for
+    # any inventory review of these.
+    org = head.split("/", 1)[0] if "/" in head else ""
+    if org in _FIRST_PARTY_ACTION_ORGS:
         return False
     # Branch refs are SEC3-GH-002's CRITICAL scope; don't double-
     # report at HIGH here.
@@ -184,15 +213,21 @@ RULES: list[Rule] = [
         remediation="Pin to full 40-char commit SHA: uses: org/action@<sha> # vtag",
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions",
         test_positive=[
-            "      - uses: actions/checkout@v4",
             "      - uses: aquasecurity/trivy-action@v0.33.0",
-            "      uses: actions/setup-node@v3.1.2",
+            "      - uses: tj-actions/changed-files@v44",
+            "      - uses: peter-evans/find-comment@v3",
         ],
         test_negative=[
-            "      - uses: actions/checkout@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v4",
+            # First-party namespaces (actions/*, github/*) are
+            # allowlisted — SEC3-GH-006 inventories these instead.
+            "      - uses: actions/checkout@v4",
+            "      - uses: actions/setup-node@v3.1.2",
+            "      - uses: github/codeql-action/init@v3",
+            # Third-party pinned to a 40-char SHA — safe.
+            "      - uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v4",
             "      - uses: ./local-action",
             "      - uses: ../shared-action",
-            "      # uses: actions/checkout@v4",
+            "      # uses: tj-actions/changed-files@v44",
             "      - uses: docker://alpine:3.18",
         ],
         stride=["T"],
@@ -717,6 +752,9 @@ RULES: list[Rule] = [
             '        run: echo "${{ github.event.pull_request.title }}"',
             '        run: echo "${{ github.event.issue.body }}"',
             "        run: git checkout ${{ github.head_ref }}",
+            "        run: git checkout ${{ github.event.pull_request.head.ref }}",
+            '        run: echo "${{ github.event.pull_request.head.label }}"',
+            '        run: echo "${{ github.event.pull_request.user.login }}"',
         ],
         test_negative=[
             '        if: github.event.pull_request.title != ""',
@@ -738,7 +776,21 @@ RULES: list[Rule] = [
     Rule(
         id="SEC4-GH-005",
         title="Checkout persists credentials to disk",
-        severity=Severity.MEDIUM,
+        # Severity downgraded MEDIUM -> LOW (Phase 8 tuning, 2026-05-03).
+        # Corpus baseline (35 repos, 2080 findings): SEC4-GH-005 fires
+        # in 31/31 repos with actions/checkout, including well-defended
+        # orgs (Microsoft, AWS, Google) where checkout is checkout-only
+        # with no downstream git push/config.  ~80% of fires are
+        # FP-density (the persisted credential dies with the runner;
+        # no later step uses it).  Rule remains precision-correct -
+        # it still flags persist-credentials: true as the
+        # actions/checkout default - but triage priority is
+        # informational, not MEDIUM.  A sharper tune (custom predicate
+        # scanning subsequent steps for git push/config) would let the
+        # rule fire HIGH only when downstream actually consumes the
+        # credential; that requires structural-reader hooks beyond
+        # SequencePattern's bounded lookahead and is deferred.
+        severity=Severity.LOW,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(

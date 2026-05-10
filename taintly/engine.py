@@ -9,8 +9,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .families import classify_rule, default_confidence, default_review_needed
-from .gitlabguard import GitLabContext, find_dead_gitlab_job_ranges
-from .jenkinsguard import JenkinsContext, find_dead_jenkins_stage_ranges
+from .gitlabguard import (
+    GitLabContext,
+    detect_gitlab_context,
+    find_dead_gitlab_job_ranges,
+    is_pipeline_whole_dead,
+)
+from .jenkinsguard import (
+    JenkinsContext,
+    find_dead_jenkins_stage_ranges,
+    is_jenkinsfile_whole_dead,
+)
 from .models import (
     _MAX_SAFE_TEXT_LEN,
     AuditReport,
@@ -23,7 +32,11 @@ from .models import (
 from .parsers.anchor_expander import expand_anchors
 from .pse_enrichment import enrich_pse_findings
 from .staticguard import WorkflowContext as StaticGuardContext
-from .staticguard import detect_github_workflow_context, find_dead_line_ranges
+from .staticguard import (
+    detect_github_workflow_context,
+    find_dead_line_ranges,
+    is_workflow_whole_dead,
+)
 from .workflow_context import analyze as analyze_workflow
 from .workflow_context import compute_exploitability
 from .workflow_corpus import CorpusPattern, build_corpus
@@ -45,6 +58,19 @@ _SUPPRESS_SPECIFIC = re.compile(r"#\s*taintly:\s*ignore\[([^\]]+)\]", re.IGNOREC
 _PROJECT_SCOPE_RULES: frozenset[str] = frozenset(
     {
         "SEC10-GL-002",  # Public-pipelines visibility — a GitLab project setting
+        # AI-GH-036 fires per workflow file when the repo contains an
+        # agent-instruction file (CLAUDE.md, .cursorrules, AGENTS.md, …).
+        # The presence is a repo-root property, not a workflow property,
+        # so the per-file fan-out is noise.  Project-scope dedup keeps
+        # the first occurrence per scan.
+        "AI-GH-036",
+        # AI-GH-039 reads the agent-instruction file's *content* at
+        # repo-root scope and fires on directive×mutable-remote-ref.
+        # Same dedup rationale as AI-GH-036 — the underlying state is
+        # repo-content, not workflow-content, so per-file fan-out is
+        # noise.  AI-GH-037 / AI-GH-038 are step-scoped and stay
+        # off this list.
+        "AI-GH-039",
     }
 )
 
@@ -148,21 +174,78 @@ def scan_file(
                 rule_id="ENGINE-ERR",
                 severity=Severity.LOW,
                 title=(
-                    f"File size {len(content)} bytes exceeds scanner cap "
-                    f"({_MAX_SAFE_TEXT_LEN}); file-scope rule coverage degraded"
+                    f"File size {len(content)} bytes exceeds scanner per-chunk "
+                    f"cap ({_MAX_SAFE_TEXT_LEN}); content scanned in chunks"
                 ),
                 description=(
                     "To prevent regex denial-of-service on adversarial input, "
-                    "taintly skips full-content regex on files larger than "
-                    f"{_MAX_SAFE_TEXT_LEN} bytes. Per-line rules still run, but "
-                    "file-scope patterns (ContextPattern requires / "
-                    "AbsencePattern) will not report matches on this file. "
-                    "If this is a legitimate large CI config, split it via "
+                    "taintly's per-regex evaluation is bounded by a "
+                    f"{_MAX_SAFE_TEXT_LEN}-byte length cap. Phase 8 iter-4 "
+                    "(2026-05-04) added a chunked-search path so file-scope "
+                    "rules (ContextPattern requires / AbsencePattern) still "
+                    "scan large workflows in line-windowed chunks with "
+                    "overlap. Coverage is preserved; this notice surfaces "
+                    "only because the file is unusually large for a CI "
+                    "config. If you suspect a regex match that spans a "
+                    "chunk boundary was missed, split the workflow via "
                     "includes / reusable workflows."
                 ),
                 file=filepath,
             )
         )
+
+    # File-level CUTOFF disclosure.  StructuralPattern rules emit
+    # their own per-rule cutoff markers, but other rule types
+    # (RegexPattern, ContextPattern, AbsencePattern) silently no-op
+    # on the post-cutoff portion of the file.  Surfacing a single
+    # file-level warning ensures the disclosure is visible regardless
+    # of which rule types ran, so reviewers know the scan's coverage
+    # was bounded by the unparseable construct.  Only YAML files go
+    # through the structural reader; Jenkinsfiles use a different
+    # path and don't produce CUTOFF events.
+    fname = os.path.basename(filepath).lower()
+    if fname.endswith((".yml", ".yaml")):
+        try:
+            from .parsers.structural import EventKind as _EventKind
+            from .parsers.structural import walk_workflow as _walk
+
+            for _ev in _walk(filepath, content=content, recover=True):
+                if _ev.kind is _EventKind.CUTOFF:
+                    # ENGINE-ERR is the documented rule_id for "scanner
+                    # processed the file but coverage degraded" -- the
+                    # file-size cap above uses the same id for the same
+                    # class of non-fatal coverage loss.  The severity-
+                    # filter exemption and the ``engine_errors`` accessor
+                    # already surface ENGINE-ERR consistently across
+                    # JSON / SARIF / text reporters.
+                    findings.append(
+                        Finding(
+                            rule_id="ENGINE-ERR",
+                            severity=Severity.LOW,
+                            title=(
+                                "Structural coverage degraded: file partially "
+                                f"unparseable from line {_ev.line}"
+                            ),
+                            description=(
+                                "The structural reader stopped at "
+                                f"line {_ev.line} due to an unsupported YAML "
+                                "construct.  Per-line rules continue to run "
+                                "across the whole file, but rules that depend "
+                                "on the structural reader (path-based "
+                                "queries, anchor / merge-key resolution, "
+                                "step enumeration) cannot evaluate the "
+                                "post-cutoff portion of the file.  If the "
+                                "construct is intentional, no action needed; "
+                                "if it's accidental, fixing the YAML restores "
+                                "full coverage."
+                            ),
+                            file=filepath,
+                            line=_ev.line,
+                        )
+                    )
+                    break
+        except Exception:  # nosec B110 — defensive; never block the scan path on disclosure failure.
+            pass
 
     wf_ctx = analyze_workflow(content, file=filepath)
 
@@ -177,7 +260,13 @@ def scan_file(
             _expanded_cache["v"] = (ec, ec.splitlines())
         return _expanded_cache["v"]
 
-    with scan_session():
+    # Bind ``filepath`` for any WorkflowAwarePattern rule dispatched
+    # below.  Other pattern types ignore the contextvar; only
+    # WorkflowAwarePattern's PredicateContext consumes it (for
+    # caller-graph / repo-root resolution — see TAINT-GH-007).
+    from taintly.workflow_aware_pattern import set_pattern_filepath_context
+
+    with scan_session(), set_pattern_filepath_context(filepath):
         for rule in rules:
             try:
                 matches = rule.pattern.check(content, lines)
@@ -270,17 +359,38 @@ _PostProcessor = Callable[[list[Finding], _PostProcessContext], None]
 
 
 def _github_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
+    if not any(rule.platform == Platform.GITHUB for rule in ctx.rules):
+        return
+    # Whole-workflow short-circuit: if every job in the file is
+    # statically dead, the entire file is moot.  Suppress all findings
+    # (including trigger-level ones that the per-job pass deliberately
+    # leaves alone).  Per-job suppression handles the remaining cases:
+    # live-jobs-with-dead-steps, mixed-dead-and-live-jobs.
+    if is_workflow_whole_dead(ctx.content, ctx.repoctx):
+        findings.clear()
+        return
     _suppress_dead_findings(findings, ctx.content, ctx.repoctx)
 
 
 def _gitlab_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
-    if any(rule.platform == Platform.GITLAB for rule in ctx.rules):
-        _suppress_gitlab_dead_findings(findings, ctx.content, ctx.gitlabctx)
+    if not any(rule.platform == Platform.GITLAB for rule in ctx.rules):
+        return
+    # Whole-pipeline short-circuit: if every job is statically dead,
+    # the entire file is moot.  Suppress all findings (including
+    # pipeline-level ones the per-job pass deliberately leaves alone).
+    if is_pipeline_whole_dead(ctx.content, ctx.gitlabctx):
+        findings.clear()
+        return
+    _suppress_gitlab_dead_findings(findings, ctx.content, ctx.gitlabctx)
 
 
 def _jenkins_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
-    if any(rule.platform == Platform.JENKINS for rule in ctx.rules):
-        _suppress_jenkins_dead_findings(findings, ctx.content, ctx.jenkinsctx)
+    if not any(rule.platform == Platform.JENKINS for rule in ctx.rules):
+        return
+    if is_jenkinsfile_whole_dead(ctx.content, ctx.jenkinsctx):
+        findings.clear()
+        return
+    _suppress_jenkins_dead_findings(findings, ctx.content, ctx.jenkinsctx)
 
 
 def _maintainer_downgrade_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
@@ -636,9 +746,20 @@ def discover_files(repo_path: str, platform: Platform) -> list[str]:
 
 
 def scan_repo(
-    repo_path: str, rules: list[Rule], platform: Platform | None = None
+    repo_path: str,
+    rules: list[Rule],
+    platform: Platform | None = None,
+    *,
+    explicit_github_repoctx: StaticGuardContext | None = None,
 ) -> list[AuditReport]:
-    """Scan an entire repository. Returns one report per platform detected."""
+    """Scan an entire repository. Returns one report per platform detected.
+
+    ``explicit_github_repoctx`` lets callers (the CLI's ``--github-repo``
+    flag, in particular) override ``git remote`` auto-detection for the
+    static-guard ``WorkflowContext`` on the GitHub scan path.  Useful
+    when the directory is not a git checkout or its remote is not named
+    ``origin``.  When omitted, auto-detection is used as before.
+    """
     import sys as _sys
 
     repo_path, explicit_files = _normalize_input_path(repo_path)
@@ -687,7 +808,20 @@ def scan_repo(
         report.rules_loaded = len(platform_rules)
 
         all_findings: list[Finding] = []
-        repoctx = detect_github_workflow_context(repo_path) if plat == Platform.GITHUB else None
+        if plat == Platform.GITHUB:
+            if explicit_github_repoctx is not None:
+                repoctx = explicit_github_repoctx
+                report.repo_identity_source = "explicit"
+            else:
+                repoctx = detect_github_workflow_context(repo_path)
+                if repoctx.repository:
+                    report.repo_identity_source = "auto"
+                else:
+                    report.repo_identity_source = "unset"
+            if repoctx.repository:
+                report.repo_identity_value = repoctx.repository
+        else:
+            repoctx = None
         # ContextPattern rules whose finding_family is set are the
         # subset we can answer "did this family have a candidate
         # location?" for.  We compute anchor-match counts per file
@@ -702,7 +836,24 @@ def scan_repo(
                 ctx_rules_by_family.setdefault(r.finding_family, []).append(r)
         report.families_with_ctx_coverage = set(ctx_rules_by_family)
 
-        gitlabctx = GitLabContext() if plat == Platform.GITLAB else None
+        # Auto-detect GitLab context from CI predefined variables when
+        # taintly itself runs inside a GitLab CI job.  Outside that
+        # environment every field is None and the result is
+        # indistinguishable from ``GitLabContext()``, preserving the
+        # conservative-by-default suppression path.
+        if plat == Platform.GITLAB:
+            gitlabctx = detect_gitlab_context()
+            for field_name in ("pipeline_source", "commit_branch", "default_branch"):
+                value = getattr(gitlabctx, field_name)
+                if value:
+                    report.gitlab_ctx_detected[field_name] = value
+        else:
+            gitlabctx = None
+        # Jenkins parameter_values has no consumer in the evaluator
+        # today (``evaluate_jenkins_when`` discards ctx).  Populating
+        # from the environment would be speculative without effect;
+        # leave the field empty until a context-aware evaluator
+        # lands.
         jenkinsctx = JenkinsContext() if plat == Platform.JENKINS else None
         for fpath in files:
             all_findings.extend(

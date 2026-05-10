@@ -1,0 +1,8 @@
+# fixed: include from a local file in the repo (auditable, version-controlled)
+include:
+  - local: '.gitlab/ci/build.yml'
+
+build:
+  stage: build
+  script:
+    - make build

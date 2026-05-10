@@ -14,6 +14,7 @@ useDefault = true
 description = "Fixtures and rule definitions contain intentional fake secrets"
 paths = [
     '''tests/fixtures/.*''',
+    '''tests/playground/.*''',
     '''tests/_rule_pack_hashes\.json''',
     '''tests/.*test_.*\.py''',
     '''taintly/rules/.*\.py''',
@@ -29,4 +30,13 @@ regexes = [
     '''attacker\.com''',
     '''your-secret-here''',
     '''REPLACE-ME''',
+    # Canonical fake credentials used in tests/playground/fake-secrets/.
+    # These are documented-fake values from upstream provider docs OR
+    # contain literal FAKE/EXAMPLE/DO-NOT-USE markers; not real secrets.
+    '''AKIAIOSFODNN7EXAMPLE''',
+    '''wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY''',
+    '''(?i)FAKE-FAKE-FAKE''',
+    '''(?i)NOT-A-REAL-KEY''',
+    '''(?i)DO-NOT-USE''',
+    '''ghp_FAKE[A-Z]+''',
 ]

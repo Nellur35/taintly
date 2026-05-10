@@ -279,6 +279,30 @@ _FAMILIES: tuple[FindingFamily, ...] = (
         ),
     ),
     FindingFamily(
+        id="agent_instruction_file_inventory",
+        title="AI agent instruction-file inventory",
+        why=(
+            "Files like ``CLAUDE.md``, ``.cursorrules``, ``AGENTS.md``, "
+            "and ``.github/copilot-instructions.md`` are auto-loaded by "
+            "AI agent harnesses (Claude Code, Cursor, Aider, GitHub "
+            "Copilot, Gemini Code, Windsurf) as user-trust-tier "
+            "instructions whenever an agent runs against the repo.  A "
+            "malicious public repository — a fork, a transitive "
+            "dependency cloned into a workspace, an issue-driven "
+            "checkout — can plant attacker-controlled directives in "
+            "those files and have a downstream agent execute them with "
+            "the operator's full trust level.  This is the indirect-"
+            "prompt-injection / supply-chain variant of the AI-agent "
+            "rules: the file is not malicious in isolation, but its "
+            "presence is the attack surface a reviewer needs to inventory."
+        ),
+        members=frozenset(
+            {
+                "AI-GH-036",
+            }
+        ),
+    ),
+    FindingFamily(
         id="ai_ml_model_risk",
         title="AI / ML model and agent risk",
         why=(

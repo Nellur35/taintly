@@ -18,4 +18,5 @@ jobs:
             - uses: actions/setup-python@v5
               with:
                   python-version: ${{ matrix.python }}
+            - uses: tj-actions/changed-files@v44   # third-party tag-pin — the SEC3-GH-001 trigger
             - run: python -m pytest

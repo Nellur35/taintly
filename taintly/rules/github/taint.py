@@ -40,6 +40,45 @@ from dataclasses import dataclass, field
 from taintly.models import BlockPattern, ContextPattern, Platform, Rule, Severity
 from taintly.taint import TaintPath, _shell_quote_context_at
 from taintly.taint import analyze as taint_analyze
+from taintly.workflow_aware_pattern import WorkflowAwarePattern
+
+# TAINT-GH-006 — match ``${{ inputs.<name> }}`` references inside a
+# scalar value.  Used by the WorkflowAwarePattern predicate to fire
+# only when an inputs reference reaches a shell sink and the file is
+# a reusable workflow (``on: workflow_call``).
+_INPUTS_REF_RE = re.compile(r"\$\{\{\s*inputs\.[A-Za-z_][\w-]*\s*\}\}")
+
+
+def _taint_gh_006_predicate(
+    value: str,
+    _value_kind: str,
+    _path: tuple[object, ...],
+    ctx,
+) -> bool:
+    """Predicate for TAINT-GH-006 (Phase 8 iter-4 form).
+
+    Fires when:
+
+    * the leaf's value contains an ``${{ inputs.X }}`` reference
+    * the file is a reusable workflow (``on: workflow_call``)
+    * AND the caller-graph analysis does not prove the input is
+      always literal-only
+
+    Caller-graph suppression: if at least one in-repo caller exists
+    AND every caller's ``with:`` map for this callee passes literal
+    or matrix-literal values to the input (no attacker-reachable
+    context — see ``_ATTACKER_REACHABLE_CONTEXT_RE``), the rule
+    suppresses.  Callees with no in-repo callers keep firing as
+    callee-side review-needed warnings (the rule's original
+    contract before iter-4).
+    """
+    if not _INPUTS_REF_RE.search(value or ""):
+        return False
+    if not ctx.is_reusable_workflow():
+        return False
+    callers = ctx.find_callers_of_self()
+    return not (callers and all(c.passes_only_literals() for c in callers))
+
 
 # ---------------------------------------------------------------------------
 # Pattern adapter
@@ -1115,38 +1154,41 @@ RULES = [
             "confirm the input is either a trusted context (SHA, ref, "
             "actor login on a push-only trigger) or properly sanitised."
         ),
-        pattern=ContextPattern(
-            anchor=r"\$\{\{\s*inputs\.[A-Za-z_][\w-]*\s*\}\}",
-            # File must be a reusable workflow. Three legal shapes of
-            # ``on: workflow_call``: bare string, flow-style list, or
-            # block-style nested key.  The ``\b`` on workflow_call
-            # protects against a user-defined event name that
-            # contained the substring (none exists today, forward-proof).
-            requires=(
-                r"(?m)^on:\s*workflow_call\s*(?:#.*)?$"
-                r"|^on:\s*\[[^\]]*\bworkflow_call\b"
-                r"|^\s+\bworkflow_call\s*:"
-            ),
-            exclude=[
-                # Schema-definition lines — inputs referenced in the
-                # declaration block itself aren't shell sinks.
-                r"^\s*(?:description|default|type|required)\s*:",
-                # Conditionals are evaluated by the Actions engine, not
-                # by bash.  Follow the same carve-out the existing
-                # TAINT rules apply for ``if:`` lines.
-                r"^\s*if\s*:",
-                # Structural / inert YAML scalar fields — the engine
-                # validates these before any shell sees them:
-                #   timeout-minutes  — numeric only, engine rejects non-numeric
-                #   concurrency      — grouping key, never reaches a shell
-                # Keep ``runs-on:`` / ``container:`` / ``image:`` IN — those
-                # do have real threats (self-hosted runner hijack, attacker-
-                # controlled container image pull) that belong in the audit.
-                r"^\s*(?:timeout-minutes|concurrency)\s*:",
-                # Comment-only lines.
-                r"^\s*#",
+        # Phase 8 iteration 2 (2026-05-04): converted from
+        # ContextPattern regex (any-line ``${{ inputs.X }}``
+        # reference) to WorkflowAwarePattern that fires only on
+        # SHELL SINKS — ``run:``, ``with: args/entrypoint/script/
+        # command``.  Identifier sinks (``name:``, ``id:``,
+        # ``outputs.x:``, ``environment:``, ``tag_name:``,
+        # ``timeout-minutes:``) cannot execute the substituted
+        # bytes; their FP density was the dominant noise source on
+        # the corpus baseline (2026-05-04: 125 firings / 7 repos,
+        # ~50-60% identifier-sink).
+        #
+        # The reusable-workflow gate (``on: workflow_call``) is
+        # checked via ``ctx.is_reusable_workflow()`` which covers
+        # the three legal shapes (bare, block, list).
+        #
+        # Phase 8 iteration 4 (2026-05-04) added caller-graph
+        # suppression: when EVERY in-repo caller of this reusable
+        # workflow passes literal / matrix-literal values to the
+        # input (no attacker-reachable context), the rule
+        # suppresses.  Sample-and-label of 21 corpus fires found
+        # 19/21 FP because of this exact shape (matrix-driven fan-
+        # out into a callee that takes inputs).  The suppression
+        # only applies when at least one caller is found in the
+        # local ``.github/workflows/`` tree — externally-callable
+        # reusable workflows (no in-repo callers) keep firing as
+        # callee-side review-needed warnings.
+        pattern=WorkflowAwarePattern(
+            path=[
+                "jobs.*.steps[*].run",
+                "jobs.*.steps[*].with.args",
+                "jobs.*.steps[*].with.entrypoint",
+                "jobs.*.steps[*].with.script",
+                "jobs.*.steps[*].with.command",
             ],
-            scope="file",
+            predicate=_taint_gh_006_predicate,
         ),
         remediation=(
             "Do one of:\n"
