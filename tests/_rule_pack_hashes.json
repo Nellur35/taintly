@@ -125,7 +125,7 @@
   "jenkins/vulnerable/node_no_label.Jenkinsfile": "0befd72c496946d618227cf6685e248db6f00e9b993cdb49905316958565224c",
   "jenkins/vulnerable/params_injection.Jenkinsfile": "6e57eb5e18ab9378cd56faad82d601a7c2136a469318626abdbc7a9c0e89336d",
   "jenkins/vulnerable/password_param.Jenkinsfile": "f8fb1794f73265a4157d9e459965e839c6b4af5f1457d2d23725a9d92c23c038",
-  "jenkins/vulnerable/pr_author_injection.Jenkinsfile": "ccc8f05ead229a44a7ab10ccb2d3dada4a93bbf223a68f9082ba8db7e9acf953",
+  "jenkins/vulnerable/pr_author_injection.Jenkinsfile": "d89a105d4e67478fdec600e9db0b5435394fd600e9e7471da70bd93c86acae5e",
   "jenkins/vulnerable/println_credential.Jenkinsfile": "7ca34e50da8c02668e3263fb75a36422c3ae70f1667834db4ac937eafd01a225",
   "jenkins/vulnerable/prod_deploy_no_input.Jenkinsfile": "ac35cbd14f281946aee7cb6c301d085a881b836c0b5b3dfbdafa8a31f77c2361",
   "jenkins/vulnerable/remote_groovy_script.Jenkinsfile": "9101fae0493cd54e4602b36ab4281fb4e6f98e65df17c1d6567c4a7b3f98ab75",
