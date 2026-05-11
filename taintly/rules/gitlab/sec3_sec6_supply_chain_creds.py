@@ -1,5 +1,7 @@
 """GitLab CI security rules — Dependency Chain, Credential Hygiene, System Config."""
 
+import re
+
 from taintly.models import (
     AbsencePattern,
     Platform,
@@ -8,6 +10,51 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+from taintly.platform import gitlab_archived_check
+
+# ---------------------------------------------------------------------------
+# SEC3-GL-008 — archived include:project detection (opt-in)
+# ---------------------------------------------------------------------------
+#
+# Mirrors SEC3-GH-010: an ``include:`` referencing an archived GitLab
+# project is supply-chain risk (read-only, no maintainer response).
+# Opt-in via ``--check-archived-gitlab-projects``.
+
+_INCLUDE_PROJECT_RE = re.compile(
+    r"\bproject:\s*['\"]?([A-Za-z0-9][\w.-]*(?:/[A-Za-z0-9][\w.-]*)+)['\"]?"
+)
+
+
+class ArchivedIncludeProjectPattern:
+    """Pattern for SEC3-GL-008.  Gated by
+    :func:`gitlab_archived_check.is_enabled`."""
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if not gitlab_archived_check.is_enabled():
+            return []
+        seen: set[tuple[str, int]] = set()
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            m = _INCLUDE_PROJECT_RE.search(line)
+            if not m:
+                continue
+            project = m.group(1)
+            key = (project.lower(), i + 1)
+            if key in seen:
+                continue
+            seen.add(key)
+            verdict = gitlab_archived_check.is_archived(project)
+            if verdict is True:
+                snippet = (
+                    f"{project} is archived on GitLab — no new releases, "
+                    f"no maintainer response to compromise."
+                )
+                results.append((i + 1, snippet))
+        return results
+
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -493,5 +540,50 @@ RULES: list[Rule] = [
             "environment dumps can all expose internal paths, package versions, and "
             "configuration values useful for targeted attacks."
         ),
+    ),
+    # =========================================================================
+    # SEC3-GL-008: Archived include:project (opt-in, network-dependent)
+    # =========================================================================
+    Rule(
+        id="SEC3-GL-008",
+        title="``include:`` references an archived GitLab project",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-3",
+        review_needed=True,
+        confidence="high",
+        description=(
+            "A ``include:project:`` reference points to a GitLab "
+            "project that is archived (read-only).  Archived projects "
+            "receive no new releases, no security patches, and the "
+            "maintainer is not actively monitoring compromise reports.  "
+            "Continuing to depend on an archived include is a deferred "
+            "supply-chain risk.\n"
+            "\n"
+            "Opt-in via ``--check-archived-gitlab-projects`` (requires "
+            "GITLAB_TOKEN).  Mirrors SEC3-GH-010's shape for GitHub."
+        ),
+        pattern=ArchivedIncludeProjectPattern(),
+        remediation=(
+            "Migrate to a maintained alternative include — check the "
+            "archived project's README for a recommended successor, or "
+            "fork it into your own namespace so security patches can be "
+            "applied in-house.  Pin the include to a specific ref once "
+            "you've moved off the archived path."
+        ),
+        reference="https://docs.gitlab.com/ee/api/projects.html#get-single-project",
+        test_positive=[],
+        test_negative=[],
+        stride=["T", "I"],
+        threat_narrative=(
+            "Archived GitLab projects are abandoned supply-chain "
+            "surface.  When a CVE is published against an archived "
+            "include, the disclosure-to-patch interval is unbounded.  "
+            "Even though archived projects can't accept external MRs, "
+            "the project owner themselves can still push fresh "
+            "content — so a maintainer-account compromise on a "
+            "dormant archived project leaks straight through."
+        ),
+        finding_family="action_pin_drift",
     ),
 ]

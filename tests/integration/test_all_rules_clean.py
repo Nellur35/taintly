@@ -54,6 +54,9 @@ def _is_stub_rule(rule) -> bool:
         ArchivedActionPattern,
         ImposterCommitPattern,
     )
+    from taintly.rules.gitlab.sec3_sec6_supply_chain_creds import (
+        ArchivedIncludeProjectPattern,
+    )
     from taintly.workflow_corpus import CorpusPattern
     if isinstance(rule.pattern, CorpusPattern):
         return True
@@ -63,10 +66,9 @@ def _is_stub_rule(rule) -> bool:
     # the per-file test-sample contract isn't applicable.
     if isinstance(rule.pattern, ImposterCommitPattern):
         return True
-    # SEC3-GH-010 (archived-uses) is opt-in via --check-archived-actions
-    # and depends on a network call.  Same opt-in contract as
-    # SEC3-GH-009 — per-file test samples aren't applicable.
-    if isinstance(rule.pattern, ArchivedActionPattern):
+    # SEC3-GH-010 (archived-uses) + SEC3-GL-008 (archived-includes) —
+    # opt-in network-dependent rules with the same exemption rationale.
+    if isinstance(rule.pattern, (ArchivedActionPattern, ArchivedIncludeProjectPattern)):
         return True
     if (
         getattr(rule, "review_needed", False)

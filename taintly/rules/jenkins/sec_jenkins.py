@@ -2488,4 +2488,85 @@ RULES: list[Rule] = [
         ),
         incidents=["Ultralytics (Dec 2024, GH analog)", "Trivy supply chain (Mar 2026, GH analog)"],
     ),
+    # =========================================================================
+    # SEC4-JK-008: ``env.<USER_VAR>`` interpolated into sh — taint
+    # transit between stages.  Jenkins analog of SEC4-GH-023.
+    # =========================================================================
+    Rule(
+        id="SEC4-JK-008",
+        title="Stage env.<USER_VAR> interpolated into sh — review upstream provenance",
+        severity=Severity.MEDIUM,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-4",
+        review_needed=True,
+        confidence="low",
+        description=(
+            'A ``sh "...${env.<VAR>}..."`` interpolation references a '
+            "user-defined env variable in a GString (double-quoted "
+            "Groovy string).  Pipeline env variables flow between "
+            "stages — a stage that assigns ``env.X = ...`` from "
+            "``params.X``, upstream-build variables, file contents, "
+            "or any attacker-controllable source produces an env "
+            "value that, when spliced into a later stage's shell, is "
+            "the same threat shape as SEC4-JK-001's direct splice "
+            "but with the taint transiting through the env map.  "
+            "Review the assigning stage's provenance and sanitise "
+            "before writing to ``env.X``, or move the consuming "
+            "``sh`` to a single-quoted GString."
+        ),
+        pattern=RegexPattern(
+            match=(
+                r'sh\s+"{1,3}.*\$\{?\s*env\s*\.\s*'
+                r"(?!(?:JOB_NAME|JOB_BASE_NAME|JOB_URL|"
+                r"BUILD_NUMBER|BUILD_ID|BUILD_TAG|BUILD_URL|"
+                r"WORKSPACE|JENKINS_HOME|JENKINS_URL|"
+                r"NODE_NAME|NODE_LABELS|EXECUTOR_NUMBER|"
+                r"PATH|HOME|USER|HOSTNAME|"
+                r"BRANCH_NAME|CHANGE_ID|CHANGE_TARGET|GIT_COMMIT|GIT_BRANCH|GIT_URL"
+                r")\b)[A-Za-z_]"
+            ),
+            exclude=[r"^\s*//"],
+        ),
+        remediation=(
+            "Either move the value through to the consumer's shell "
+            "via a single-quoted (non-interpolating) Groovy string so "
+            "the shell sees the literal expression and you can quote "
+            "it as a shell variable:\n"
+            "\n"
+            "  sh 'echo \"$MY_VAR\"'\n"
+            "\n"
+            "or sanitise at the assigning stage before writing to "
+            "``env.X``:\n"
+            "\n"
+            "  stage('Prep') {\n"
+            "    steps { script {\n"
+            "      env.SAFE_BRANCH = params.BRANCH.replaceAll(/[^A-Za-z0-9_.-]/, '')\n"
+            "    } }\n"
+            "  }\n"
+            "\n"
+            "This rule is review-needed because the taint source is "
+            "not visible from the consuming line alone — it depends "
+            "on the upstream assignment."
+        ),
+        reference="https://www.jenkins.io/doc/book/pipeline/jenkinsfile/#string-interpolation",
+        test_positive=[
+            '        sh "echo ${env.RELEASE_TAG}"',
+            '        sh "deploy.sh --env=${env.DEPLOY_TARGET}"',
+        ],
+        test_negative=[
+            '        sh "echo ${env.JOB_NAME}-${env.BUILD_NUMBER}"',
+            '        sh "checkout ${env.GIT_COMMIT}"',
+            "        sh 'echo \"$MY_VAR\"'",
+            '        // sh "echo ${env.RELEASE_TAG}"',
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "Jenkins pipeline env variables are a cross-stage transit "
+            "channel for attacker-controllable bytes.  SEC4-JK-001 "
+            "catches direct ``params.X`` splices; this rule surfaces "
+            "the transit form where an earlier stage assigns "
+            "``env.X = params.X`` and a later stage interpolates "
+            "``env.X`` into a GString."
+        ),
+    ),
 ]
