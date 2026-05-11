@@ -13,7 +13,7 @@ from taintly.models import (
     Rule,
     Severity,
 )
-from taintly.platform import github_sha_verify
+from taintly.platform import github_archived_check, github_sha_verify
 from taintly.structural_pattern import StructuralPattern
 
 # ---------------------------------------------------------------------------
@@ -259,6 +259,55 @@ _USES_SHA_RE = re.compile(
     # or branch (SEC3-GH-001 covers those).
     r"\buses:\s+([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)@([0-9a-fA-F]{40})\b"
 )
+
+
+# ---------------------------------------------------------------------------
+# SEC3-GH-010 — archived-repo detection (opt-in, network-dependent)
+# ---------------------------------------------------------------------------
+#
+# A ``uses: owner/repo@<ref>`` reference whose target repository has
+# been archived on GitHub.  Archived repos are read-only — no new
+# releases, no security patches, no maintainer response to compromise
+# reports.  The check is opt-in via ``--check-archived-actions`` (per-
+# action GitHub API calls).
+
+_USES_OWNER_REPO_RE = re.compile(
+    r"\buses:\s+([A-Za-z0-9][\w-]*)/([A-Za-z0-9][\w.-]*)(?:/[\w./-]+)?@\S+"
+)
+
+
+class ArchivedActionPattern:
+    """Pattern for SEC3-GH-010.  Gated by
+    :func:`github_archived_check.is_enabled`.  Skips first-party orgs.
+    Conforms to ``PatternProtocol``."""
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if not github_archived_check.is_enabled():
+            return []
+        seen: set[tuple[str, str, int]] = set()
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            m = _USES_OWNER_REPO_RE.search(line)
+            if not m:
+                continue
+            owner, repo = m.group(1), m.group(2)
+            if owner.lower() in _FIRST_PARTY_ACTION_ORGS:
+                continue
+            key = (owner.lower(), repo.lower(), i + 1)
+            if key in seen:
+                continue
+            seen.add(key)
+            verdict = github_archived_check.is_archived(owner, repo)
+            if verdict is True:
+                snippet = (
+                    f"{owner}/{repo} is archived on GitHub — no new releases, "
+                    f"no security patches, no maintainer response to compromise."
+                )
+                results.append((i + 1, snippet))
+        return results
 
 
 class ImposterCommitPattern:
@@ -1121,6 +1170,61 @@ RULES: list[Rule] = [
         ),
         confidence="high",
         review_needed=True,
+        finding_family="action_pin_drift",
+    ),
+    # =========================================================================
+    # SEC3-GH-010: Archived action repository (opt-in, network-dependent)
+    # =========================================================================
+    Rule(
+        id="SEC3-GH-010",
+        title="Action references an archived GitHub repository",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-3",
+        review_needed=True,
+        confidence="high",
+        description=(
+            "A ``uses: owner/repo@<ref>`` reference points to a GitHub "
+            "repository that is archived (read-only).  Archived repos "
+            "receive no new releases, no security patches, and the "
+            "maintainer is not actively monitoring compromise reports.  "
+            "A vulnerability disclosed against an archived action is "
+            "unlikely to be fixed; a maintainer-account compromise "
+            "against an archived repo may go unnoticed indefinitely.\n"
+            "\n"
+            "This rule is opt-in via ``--check-archived-actions`` "
+            "because verification requires a per-action GitHub API "
+            "call (``GET /repos/{owner}/{repo}`` reading the "
+            "``archived`` flag).  Recommended on a weekly cron rather "
+            "than per-PR.  First-party orgs are skipped — the platform "
+            "vendors don't archive their own action repos."
+        ),
+        pattern=ArchivedActionPattern(),
+        remediation=(
+            "Migrate to a maintained fork or an alternative action that "
+            "covers the same functionality.  Check the archived repo's "
+            "README for a recommended successor; if none, search the "
+            "GitHub Marketplace for actions with similar inputs.  If no "
+            "alternative exists and the action is critical, fork it "
+            "into your own org so security patches can be applied "
+            "in-house — pinning to your fork's SHA makes the supply-"
+            "chain explicit."
+        ),
+        reference="https://docs.github.com/en/repositories/archiving-a-github-repository/archiving-repositories",
+        test_positive=[],
+        test_negative=[],
+        stride=["T", "I"],
+        threat_narrative=(
+            "Archived action repositories are abandoned supply-chain "
+            "surface.  When a CVE is published against an archived "
+            "action, the disclosure-to-patch interval is unbounded.  "
+            "An attacker with the dormant maintainer account can "
+            "publish a new tag that downstream consumers will silently "
+            "pick up if they aren't SHA-pinned; the archived flag "
+            "prevents external PRs but doesn't prevent the owner "
+            "themselves from pushing fresh content.  Migrating off "
+            "archived dependencies is the cheapest mitigation."
+        ),
         finding_family="action_pin_drift",
     ),
 ]
