@@ -152,6 +152,15 @@ RULES: list[Rule] = [
                 r"usernamePassword\s*\(",
                 r"withCredentials",
                 r"\$\{",  # variable interpolation — not a hardcoded literal
+                # AWS SDK sentinel literals — these signal a credential
+                # *provider* (IMDS, AssumeRole), not the credential
+                # value itself.  Real Jenkinsfiles assign these
+                # literals to AWS_ACCESS_KEY/AWS_SECRET_KEY to tell
+                # the SDK where to source credentials at runtime.
+                # Only literals >=8 chars need explicit allowlisting —
+                # shorter sentinels ("env", "default") fall under the
+                # rule's body-length floor of 8 characters.
+                r"['\"](?:instance-profile|assume-role)['\"]",
             ],
         ),
         remediation=(
@@ -176,6 +185,9 @@ RULES: list[Rule] = [
             "    API_TOKEN = credentials('my-api-token')",
             "    // GITHUB_TOKEN = 'ghp_placeholder'",
             '    TOKEN = "${env.INJECTED_TOKEN}"',
+            # AWS SDK sentinels — provider hints, not credential values.
+            '    AWS_ACCESS_KEY = "instance-profile"',
+            '    AWS_SECRET_KEY = "assume-role"',
         ],
         stride=["I"],
         threat_narrative=(
