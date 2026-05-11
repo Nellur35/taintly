@@ -10,7 +10,38 @@ A compromised container image has read access to all secrets, source code,
 and build artefacts within the job.
 """
 
-from taintly.models import ContextPattern, Platform, RegexPattern, Rule, Severity
+import re
+
+from taintly.models import Platform, RegexPattern, Rule, Severity
+
+
+class DependabotMissingCooldownPattern:
+    _VERSION_2_RE = re.compile(r"^version:\s*[\"']?2[\"']?\s*(?:#.*)?$", re.MULTILINE)
+    _PACKAGE_RE = re.compile(r"^(\s*)-\s+package-ecosystem:")
+    _COOLDOWN_RE = re.compile(r"^\s+cooldown:")
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if not self._VERSION_2_RE.search(content):
+            return []
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith("#"):
+                continue
+            m = self._PACKAGE_RE.match(line)
+            if not m:
+                continue
+            item_indent = len(m.group(1))
+            block: list[str] = []
+            for following in lines[i + 1 :]:
+                stripped = following.strip()
+                indent = len(following) - len(following.lstrip(" \t"))
+                if stripped and indent <= item_indent:
+                    break
+                block.append(following)
+            if not any(self._COOLDOWN_RE.match(block_line) for block_line in block):
+                results.append((i + 1, line.strip()))
+        return results
+
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -203,12 +234,7 @@ RULES: list[Rule] = [
             "a freshly-published malicious version can reach your "
             "main branch through automated bump PRs."
         ),
-        pattern=ContextPattern(
-            anchor=r"^\s+(?:-\s+)?package-ecosystem:",
-            requires=r"(?m)^version:\s*[\"']?2[\"']?",
-            requires_absent=r"(?m)^\s+cooldown:",
-            exclude=[r"^\s*#"],
-        ),
+        pattern=DependabotMissingCooldownPattern(),
         remediation=(
             "Add a ``cooldown:`` block to each update spec.  3-7 days "
             "covers the common-case where a malicious release is "

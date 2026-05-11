@@ -21,6 +21,41 @@ from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePatter
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 
+
+class StepOutputShellInterpolationPattern:
+    _OUTPUT_RE = re.compile(
+        r"\$\{\{\s*steps\.[\w-]+\.outputs(?:\.[\w-]+|\[['\"][^'\"]+['\"]\])\s*\}\}"
+    )
+    _RUN_LINE_RE = re.compile(r"^\s*(?:-\s+)?run\s*:\s*(.*)$")
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        in_run_block = False
+        run_indent = 0
+        for i, line in enumerate(lines):
+            stripped = line.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            if in_run_block and indent <= run_indent:
+                in_run_block = False
+
+            m = self._RUN_LINE_RE.match(line)
+            if m:
+                value = m.group(1).strip()
+                if value in {"|", "|-", "|+", ">", ">-", ">+"}:
+                    in_run_block = True
+                    run_indent = indent
+                    continue
+                if self._OUTPUT_RE.search(value):
+                    results.append((i + 1, line.strip()))
+                continue
+
+            if in_run_block and self._OUTPUT_RE.search(line):
+                results.append((i + 1, line.strip()))
+        return results
+
+
 # ---------------------------------------------------------------------------
 # SEC4-GH-008 helpers — Phase 8 iteration 3 (2026-05-04).
 #
@@ -1464,17 +1499,7 @@ RULES: list[Rule] = [
             "value can come from a fork PR / issue / comment / "
             "branch name, route through ``env:`` and validate."
         ),
-        pattern=RegexPattern(
-            match=r"\$\{\{\s*steps\.[\w-]+\.outputs\.[\w-]+\s*\}\}",
-            exclude=[
-                r"^\s*#",
-                r"^\s*if:",
-                r"""^\s*[\w.-]+:\s*["']?\$\{\{[^}]*\}\}["']?\s*(#.*)?$""",
-                r"""^\s*(?:-\s+)?(?:name|group|title|body|tag_name|commit-message"""
-                r"""|repository|ref|branch|head|base)\s*:\s*['"]?"""
-                r"""(?:[\w./_\- ()\[\]]*\$\{\{[^}]+\}\})+[\w./_\- ()\[\]]*['"]?\s*(#.*)?$""",
-            ],
-        ),
+        pattern=StepOutputShellInterpolationPattern(),
         remediation=(
             "Route the step output through an ``env:`` mapping at the "
             "consuming step, then reference as a double-quoted shell "

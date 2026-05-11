@@ -32,13 +32,16 @@ class _NoExplicitPermissionsPattern(AbsencePattern):
     (``isinstance`` succeeds for subclasses).
     """
 
-    _ON_INLINE_RE = re.compile(r"^on[ \t]*:[ \t]*(\S[^\n]*)$", re.MULTILINE)
+    _ON_INLINE_RE = re.compile(r"^[\"']?on[\"']?[ \t]*:[ \t]*(\S?[^\n]*)$", re.MULTILINE)
     # The two alternatives are mutually exclusive — content lines
     # require ``\S`` after the indent, blank lines require only
     # whitespace before the newline — so the engine doesn't have to
     # backtrack between them on adversarial whitespace-heavy input.
-    _ON_BLOCK_RE = re.compile(r"(?ms)^on[ \t]*:[ \t]*\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)")
-    _KEY_RE = re.compile(r"^\s*([\w-]+)\s*:")
+    _ON_BLOCK_RE = re.compile(
+        r"(?ms)^[\"']?on[\"']?[ \t]*:[ \t]*(?:#[^\n]*)?\n"
+        r"((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
+    )
+    _KEY_RE = re.compile(r"^\s*[\"']?([\w-]+)[\"']?\s*:")
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         if self._is_workflow_call_only(content):
@@ -52,10 +55,11 @@ class _NoExplicitPermissionsPattern(AbsencePattern):
         m = self._ON_INLINE_RE.search(content)
         if m:
             value = m.group(1).split("#", 1)[0].strip()
-            if value.startswith("["):
-                triggers = re.findall(r"[a-z_]+", value)
-                return triggers == ["workflow_call"]
-            return value == "workflow_call"
+            if value:
+                if value.startswith("["):
+                    triggers = re.findall(r"[a-z_]+", value)
+                    return triggers == ["workflow_call"]
+                return value == "workflow_call"
         # Block form — collect top-level keys at the on: block's
         # minimum indent.  Comment-only lines and blank lines are
         # ignored; deeper-indented body keys (``inputs:``, ``branches:``)
@@ -120,8 +124,11 @@ class _OverbroadWorkflowPermissionsPattern:
     _JOBS_BLOCK_RE = re.compile(
         r"(?ms)^jobs:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
     )
-    _ON_INLINE_RE = re.compile(r"^on[ \t]*:[ \t]*(\S[^\n]*)$", re.MULTILINE)
-    _ON_BLOCK_RE = re.compile(r"(?ms)^on[ \t]*:[ \t]*\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)")
+    _ON_INLINE_RE = re.compile(r"^[\"']?on[\"']?[ \t]*:[ \t]*(\S?[^\n]*)$", re.MULTILINE)
+    _ON_BLOCK_RE = re.compile(
+        r"(?ms)^[\"']?on[\"']?[ \t]*:[ \t]*(?:#[^\n]*)?\n"
+        r"((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
+    )
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         if not content.endswith("\n"):
@@ -151,10 +158,11 @@ class _OverbroadWorkflowPermissionsPattern:
         m = self._ON_INLINE_RE.search(content)
         if m:
             value = m.group(1).split("#", 1)[0].strip()
-            if value.startswith("["):
-                triggers = re.findall(r"[a-z_]+", value)
-                return triggers == ["workflow_call"]
-            return value == "workflow_call"
+            if value:
+                if value.startswith("["):
+                    triggers = re.findall(r"[a-z_]+", value)
+                    return triggers == ["workflow_call"]
+                return value == "workflow_call"
         m = self._ON_BLOCK_RE.search(content)
         if not m:
             return False
@@ -173,7 +181,7 @@ class _OverbroadWorkflowPermissionsPattern:
         for indent, stripped in meaningful:
             if indent != min_indent:
                 continue
-            km = re.match(r"([\w-]+)\s*:", stripped)
+            km = re.match(r"[\"']?([\w-]+)[\"']?\s*:", stripped)
             if km:
                 triggers.append(km.group(1))
         return triggers == ["workflow_call"]
@@ -199,7 +207,7 @@ class _OverbroadWorkflowPermissionsPattern:
                 continue
             if (len(line) - len(stripped)) != min_indent:
                 continue
-            if re.match(r"[\w.-]+\s*:\s*(#.*)?$", stripped):
+            if re.match(r"[\"']?[\w.-]+[\"']?\s*:\s*(#.*)?$", stripped):
                 count += 1
         return count
 
