@@ -86,8 +86,9 @@ def is_archived(project_path: str) -> Optional[bool]:
             return archived
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            _CACHE[project_path] = True
-            return True
+            # Deleted, private, moved, self-hosted, or token-scoped-out
+            # projects are not proof of GitLab's archived flag.
+            return None
         if e.code in (401, 403):
             sys.stderr.write(
                 f"error: GitLab API returned {e.code} for {project_path}; "

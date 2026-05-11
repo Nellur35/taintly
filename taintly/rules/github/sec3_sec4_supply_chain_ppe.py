@@ -113,9 +113,7 @@ _PERSIST_FALSE_RE = re.compile(
     re.IGNORECASE,
 )
 # Shell git operations that consume the persisted credential.
-_GIT_CREDENTIAL_OP_RE = re.compile(
-    r"\bgit\s+(?:push|fetch\s+http|config\s+user\.(?:name|email)|config\s+--global\s+user)\b"
-)
+_GIT_CREDENTIAL_OP_RE = re.compile(r"\bgit\s+(?:push|fetch\s+(?:https?://|ssh://|git@))\b")
 # Actions whose documented behaviour is "git push using the persisted
 # checkout token."  Each is the credential's actual consumer.
 _GIT_PUSH_ACTION_RE = re.compile(
@@ -132,6 +130,33 @@ _GIT_PUSH_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 _LINE_COMMENT_RE = re.compile(r"^\s*#")
+_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?([A-Za-z_][\w-]*)['\"]?")
+
+
+def _credential_consumer_surface(lines: list[str]) -> str:
+    """Return executable-ish lines for the credential-consumer check.
+
+    This deliberately avoids treating comments and heredoc payload
+    text as downstream credential use.  It is still regex-based, but it
+    keeps SEC4-GH-005 from firing on prose or scripts merely written to
+    disk.
+    """
+    surface: list[str] = []
+    heredoc_end: str | None = None
+    for line in lines:
+        stripped = line.strip()
+        if heredoc_end:
+            if stripped == heredoc_end:
+                heredoc_end = None
+            continue
+        if _LINE_COMMENT_RE.match(line):
+            continue
+        code = line.split("#", 1)[0]
+        surface.append(code)
+        m = _HEREDOC_RE.search(code)
+        if m:
+            heredoc_end = m.group(1)
+    return "\n".join(surface)
 
 
 class _CheckoutDownstreamCredentialConsumerPattern:
@@ -160,7 +185,7 @@ class _CheckoutDownstreamCredentialConsumerPattern:
 
         results: list[tuple[int, str]] = []
         for seg_start, seg_lines in _split_into_job_segments(lines):
-            seg_text = "\n".join(seg_lines)
+            seg_text = _credential_consumer_surface(seg_lines)
             has_consumer = bool(_GIT_CREDENTIAL_OP_RE.search(seg_text)) or bool(
                 _GIT_PUSH_ACTION_RE.search(seg_text)
             )
@@ -174,7 +199,7 @@ class _CheckoutDownstreamCredentialConsumerPattern:
                 window = "\n".join(seg_lines[j : j + 8])
                 if _PERSIST_FALSE_RE.search(window):
                     continue
-                downstream = "\n".join(seg_lines[j + 1 :])
+                downstream = _credential_consumer_surface(seg_lines[j + 1 :])
                 if not (
                     _GIT_CREDENTIAL_OP_RE.search(downstream)
                     or _GIT_PUSH_ACTION_RE.search(downstream)

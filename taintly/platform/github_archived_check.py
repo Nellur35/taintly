@@ -95,9 +95,10 @@ def is_archived(owner: str, repo: str) -> Optional[bool]:
         client = GitHubClient(token)
         body = client._request(f"/repos/{owner}/{repo}")
         if body is None:
-            # 404 — repo deleted; treat as archived-equivalent.
-            _CACHE[key] = True
-            return True
+            # 404 can mean deleted, private, renamed, or token-scoped
+            # out. SEC3-GH-010 is specifically "archived", so stay
+            # indeterminate unless the API returns archived=true.
+            return None
         archived = bool(body.get("archived", False))
         _CACHE[key] = archived
         return archived

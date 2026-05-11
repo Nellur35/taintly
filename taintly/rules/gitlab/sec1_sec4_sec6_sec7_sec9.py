@@ -13,6 +13,41 @@ from taintly.models import (
     Severity,
 )
 
+
+class DotenvReportPattern:
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            stripped = line.lstrip(" \t")
+            if not stripped or stripped.startswith("#") or not stripped.startswith("dotenv:"):
+                continue
+            indent = len(line) - len(stripped)
+            reports_idx = self._find_parent_key(lines, i, indent, "reports:")
+            if reports_idx is None:
+                continue
+            reports_line = lines[reports_idx]
+            reports_indent = len(reports_line) - len(reports_line.lstrip(" \t"))
+            if self._find_parent_key(lines, reports_idx, reports_indent, "artifacts:") is None:
+                continue
+            results.append((i + 1, line.strip()))
+        return results
+
+    @staticmethod
+    def _find_parent_key(
+        lines: list[str], before_index: int, child_indent: int, key: str
+    ) -> int | None:
+        for j in range(before_index - 1, -1, -1):
+            candidate = lines[j]
+            stripped = candidate.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(candidate) - len(candidate.lstrip(" \t"))
+            if indent >= child_indent:
+                continue
+            return j if stripped == key else None
+        return None
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # CICD-SEC-1: Insufficient Flow Control Mechanisms
@@ -1140,11 +1175,7 @@ RULES: list[Rule] = [
             "producer before writing to the dotenv file.  GitLab "
             "analog of SEC4-GH-023 (step-output injection)."
         ),
-        pattern=ContextPattern(
-            anchor=r"^\s*reports:\s*$",
-            requires=r"(?m)^\s*dotenv:",
-            exclude=[r"^\s*#"],
-        ),
+        pattern=DotenvReportPattern(),
         remediation=(
             "Audit the producer job that writes to the dotenv "
             "artifact:\n"

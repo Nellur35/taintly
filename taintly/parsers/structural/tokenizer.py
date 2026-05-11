@@ -329,8 +329,10 @@ class _Tokenizer:
                                 scan += 1
                                 break
                         scan += 1
-                    # Closed bracket OR ran off the end — either way,
-                    # take everything from ! to here as the opaque value.
+                    if depth > 0:
+                        raise TokenizerError(line_no, "unterminated !reference tag")
+                    # Closed bracket: take everything from ! to here as
+                    # the opaque value.
                     yield Token(
                         TokenKind.SCALAR_PLAIN,
                         line_no,

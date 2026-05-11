@@ -616,6 +616,8 @@ def _normalize_input_path(path: str) -> tuple[str, list[str]]:
         while cur and cur != os.path.dirname(cur):
             if (
                 os.path.isdir(os.path.join(cur, ".github", "workflows"))
+                or os.path.isfile(os.path.join(cur, ".github", "dependabot.yml"))
+                or os.path.isfile(os.path.join(cur, ".github", "dependabot.yaml"))
                 or os.path.isfile(os.path.join(cur, ".gitlab-ci.yml"))
                 or os.path.isfile(os.path.join(cur, "Jenkinsfile"))
             ):
@@ -655,7 +657,9 @@ def _file_matches_platform(filepath: str, platform: Platform) -> bool:
         if not (name.endswith(".yml") or name.endswith(".yaml")):
             return False
         norm = os.path.normpath(filepath).replace(os.sep, "/")
-        return "/.github/workflows/" in norm
+        return "/.github/workflows/" in norm or norm.endswith(
+            ("/.github/dependabot.yml", "/.github/dependabot.yaml")
+        )
     if platform == Platform.GITLAB:
         if name == ".gitlab-ci.yml":
             return True
@@ -677,7 +681,10 @@ def detect_platform(repo_path: str) -> Platform | None:
     gl_file = os.path.join(repo_path, ".gitlab-ci.yml")
     jk_file = os.path.join(repo_path, "Jenkinsfile")
 
-    has_github = os.path.isdir(gh_dir)
+    has_github = os.path.isdir(gh_dir) or any(
+        os.path.isfile(os.path.join(repo_path, ".github", f"dependabot.{ext}"))
+        for ext in ("yml", "yaml")
+    )
     has_gitlab = os.path.isfile(gl_file)
     has_jenkins = os.path.isfile(jk_file) or bool(
         glob.glob(os.path.join(repo_path, "Jenkinsfile.*"))
@@ -751,6 +758,17 @@ def discover_files(repo_path: str, platform: Platform) -> list[str]:
     # and a Jenkinsfile would be scanned twice, doubling findings.
     # ``os.path.normpath`` collapses to the platform's native form.
     return sorted({os.path.normpath(p) for p in files})
+
+
+def _is_dependabot_config(filepath: str) -> bool:
+    norm = os.path.normpath(filepath).replace(os.sep, "/")
+    return norm.endswith(("/.github/dependabot.yml", "/.github/dependabot.yaml"))
+
+
+def _rules_for_file(filepath: str, rules: list[Rule]) -> list[Rule]:
+    if _is_dependabot_config(filepath):
+        return [r for r in rules if r.id == "SEC8-GH-005"]
+    return rules
 
 
 def scan_repo(
@@ -864,10 +882,11 @@ def scan_repo(
         # lands.
         jenkinsctx = JenkinsContext() if plat == Platform.JENKINS else None
         for fpath in files:
+            file_rules = _rules_for_file(fpath, platform_rules)
             all_findings.extend(
                 scan_file(
                     fpath,
-                    platform_rules,
+                    file_rules,
                     repoctx=repoctx,
                     gitlabctx=gitlabctx,
                     jenkinsctx=jenkinsctx,

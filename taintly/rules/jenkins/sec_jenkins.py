@@ -2494,14 +2494,14 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC4-JK-008",
-        title="Stage env.<USER_VAR> interpolated into sh — review upstream provenance",
+        title="Stage env.<USER_VAR> interpolated into shell step — review upstream provenance",
         severity=Severity.MEDIUM,
         platform=Platform.JENKINS,
         owasp_cicd="CICD-SEC-4",
         review_needed=True,
         confidence="low",
         description=(
-            'A ``sh "...${env.<VAR>}..."`` interpolation references a '
+            'A shell step ``"...${env.<VAR>}..."`` interpolation references a '
             "user-defined env variable in a GString (double-quoted "
             "Groovy string).  Pipeline env variables flow between "
             "stages — a stage that assigns ``env.X = ...`` from "
@@ -2512,13 +2512,15 @@ RULES: list[Rule] = [
             "but with the taint transiting through the env map.  "
             "Review the assigning stage's provenance and sanitise "
             "before writing to ``env.X``, or move the consuming "
-            "``sh`` to a single-quoted GString."
+            "the consuming shell step to a single-quoted GString."
         ),
         pattern=RegexPattern(
             match=(
-                r'sh\s+"{1,3}.*\$\{?\s*env\s*\.\s*'
+                r'(?:sh|bat|powershell)\s+"{1,3}.*\$\{?\s*env\s*\.\s*'
                 r"(?!(?:JOB_NAME|JOB_BASE_NAME|JOB_URL|"
                 r"BUILD_NUMBER|BUILD_ID|BUILD_TAG|BUILD_URL|"
+                r"BUILD_DISPLAY_NAME|STAGE_NAME|RUN_DISPLAY_URL|"
+                r"RUN_ARTIFACTS_DISPLAY_URL|RUN_CHANGES_DISPLAY_URL|"
                 r"WORKSPACE|JENKINS_HOME|JENKINS_URL|"
                 r"NODE_NAME|NODE_LABELS|EXECUTOR_NUMBER|"
                 r"PATH|HOME|USER|HOSTNAME|"
