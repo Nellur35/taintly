@@ -85,6 +85,119 @@ class _NoExplicitPermissionsPattern(AbsencePattern):
         return block_triggers == ["workflow_call"]
 
 
+class _OverbroadWorkflowPermissionsPattern:
+    """SEC2-GH-005 — workflow-level ``permissions:`` block declares
+    write scope when the workflow has more than one job.
+
+    Per-job ``permissions:`` is the OWASP-recommended hardening: each
+    job gets exactly the GITHUB_TOKEN scopes it needs.  Declaring write
+    at the file level grants that write to EVERY job in the workflow,
+    including jobs that only read.  Maps to zizmor's
+    ``excessive-permissions`` audit.
+
+    Fires once per write-scope found at workflow level when:
+      * the workflow has >=2 jobs, AND
+      * at least one workflow-level scope is ``write``.
+
+    Suppressed on:
+      * reusable workflows (``on: workflow_call`` only) — those
+        inherit caller permissions.
+      * workflow-level ``write-all`` — SEC2-GH-001's HIGH finding,
+        don't double-report.
+    """
+
+    _PERMS_BLOCK_RE = re.compile(
+        r"(?ms)^permissions:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
+    )
+    _PERMS_WRITE_LINE_RE = re.compile(r"^[ \t]+([\w-]+):\s*['\"]?write['\"]?\s*(#.*)?$")
+    _WRITE_ALL_RE = re.compile(r"^permissions:\s*write-all\b", re.MULTILINE)
+    _JOBS_BLOCK_RE = re.compile(
+        r"(?ms)^jobs:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
+    )
+    _ON_INLINE_RE = re.compile(r"^on[ \t]*:[ \t]*(\S[^\n]*)$", re.MULTILINE)
+    _ON_BLOCK_RE = re.compile(r"(?ms)^on[ \t]*:[ \t]*\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)")
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if not content.endswith("\n"):
+            content = content + "\n"
+        if self._WRITE_ALL_RE.search(content):
+            return []
+        if self._is_workflow_call_only(content):
+            return []
+        if self._count_jobs(content) < 2:
+            return []
+        m = self._PERMS_BLOCK_RE.search(content)
+        if not m:
+            return []
+        body_start_line = content[: m.start()].count("\n") + 2
+        body = m.group(1)
+        results: list[tuple[int, str]] = []
+        for j, body_line in enumerate(body.splitlines()):
+            wm = self._PERMS_WRITE_LINE_RE.match(body_line)
+            if not wm:
+                continue
+            line_no = body_start_line + j
+            if 1 <= line_no <= len(lines):
+                results.append((line_no, lines[line_no - 1].strip()))
+        return results
+
+    def _is_workflow_call_only(self, content: str) -> bool:
+        m = self._ON_INLINE_RE.search(content)
+        if m:
+            value = m.group(1).split("#", 1)[0].strip()
+            if value.startswith("["):
+                triggers = re.findall(r"[a-z_]+", value)
+                return triggers == ["workflow_call"]
+            return value == "workflow_call"
+        m = self._ON_BLOCK_RE.search(content)
+        if not m:
+            return False
+        body = m.group(1)
+        meaningful = []
+        for line in body.splitlines():
+            stripped = line.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            meaningful.append((indent, stripped))
+        if not meaningful:
+            return False
+        min_indent = min(ind for ind, _ in meaningful)
+        triggers = []
+        for indent, stripped in meaningful:
+            if indent != min_indent:
+                continue
+            km = re.match(r"([\w-]+)\s*:", stripped)
+            if km:
+                triggers.append(km.group(1))
+        return triggers == ["workflow_call"]
+
+    def _count_jobs(self, content: str) -> int:
+        m = self._JOBS_BLOCK_RE.search(content)
+        if not m:
+            return 0
+        body = m.group(1)
+        indents = []
+        for line in body.splitlines():
+            stripped = line.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                continue
+            indents.append(len(line) - len(stripped))
+        if not indents:
+            return 0
+        min_indent = min(indents)
+        count = 0
+        for line in body.splitlines():
+            stripped = line.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                continue
+            if (len(line) - len(stripped)) != min_indent:
+                continue
+            if re.match(r"[\w.-]+\s*:\s*(#.*)?$", stripped):
+                count += 1
+        return count
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # CICD-SEC-2: Inadequate Identity and Access Management
@@ -154,6 +267,84 @@ RULES: list[Rule] = [
             "Omitting `permissions:` is a silent over-provisioning that gives every "
             "action in the workflow more access than it requires, and it breaks the "
             "moment an admin flips the org-level setting."
+        ),
+    ),
+    Rule(
+        id="SEC2-GH-005",
+        title="Workflow-level write permission grants more than one job needs",
+        severity=Severity.LOW,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-2",
+        review_needed=True,
+        confidence="low",
+        description=(
+            "The workflow declares a ``write`` scope at the file level "
+            "while running more than one job.  Workflow-level "
+            "permissions apply to EVERY job — including jobs that only "
+            "read.  The OWASP-recommended hardening is per-job "
+            "``permissions:``, scoped so each job gets exactly what it "
+            "needs.  Use file-level ``permissions:`` only for read "
+            "scopes that genuinely apply to every job; declare any "
+            "write scope on the specific job that needs it.\n"
+            "\n"
+            "Maps to zizmor's ``excessive-permissions`` audit — the "
+            "single biggest coverage gap surfaced by the round-3 "
+            "taintly-vs-zizmor cross-tool diff."
+        ),
+        pattern=_OverbroadWorkflowPermissionsPattern(),
+        remediation=(
+            "Move write scopes to the job that actually needs them.\n"
+            "Replace:\n"
+            "  permissions:\n    contents: write\n  jobs:\n    test: ...\n    publish: ...\n"
+            "With:\n"
+            "  permissions:\n    contents: read\n  jobs:\n    test:\n      permissions:\n        contents: read\n    publish:\n      permissions:\n        contents: write\n\n"
+            "Reusable workflows (``on: workflow_call``-only) inherit the caller's "
+            "permissions and are exempt from this rule."
+        ),
+        reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication#modifying-the-permissions-for-the-github_token",
+        test_positive=[
+            (
+                "permissions:\n  contents: write\non: push\n"
+                "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pytest\n"
+                "  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: ./publish.sh\n"
+            ),
+            (
+                "permissions:\n  pull-requests: write\n  contents: read\non: push\n"
+                "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: x\n"
+                "  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: y\n"
+            ),
+        ],
+        test_negative=[
+            (
+                "permissions:\n  contents: write\non: push\n"
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: build.sh\n"
+            ),
+            (
+                "permissions:\n  contents: read\non: push\n"
+                "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: x\n"
+                "  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: y\n"
+            ),
+            (
+                "permissions: write-all\non: push\n"
+                "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: x\n"
+                "  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: y\n"
+            ),
+            (
+                "permissions:\n  contents: write\non:\n  workflow_call:\n"
+                "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: x\n"
+                "  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: y\n"
+            ),
+        ],
+        stride=["E"],
+        threat_narrative=(
+            "GITHUB_TOKEN scopes granted at workflow level apply to every "
+            "job's process environment.  A compromise of any step in any "
+            "job — third-party action, malicious dependency, prompt-"
+            "injected AI agent — inherits the full workflow scope, "
+            "including write scopes that step never needed.  Per-job "
+            "permissions scope the credential to the failure domain it "
+            "applies to and stop a one-step compromise from becoming a "
+            "whole-workflow takeover."
         ),
     ),
     # =========================================================================

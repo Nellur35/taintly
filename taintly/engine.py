@@ -703,6 +703,14 @@ def discover_files(repo_path: str, platform: Platform) -> list[str]:
         if os.path.isdir(workflow_dir):
             files.extend(glob.glob(os.path.join(workflow_dir, "*.yml")))
             files.extend(glob.glob(os.path.join(workflow_dir, "*.yaml")))
+        # Dependabot config — sibling file under .github/ — picked up
+        # so the SEC8 dependabot rule family can audit it.  Other
+        # GitHub rules' patterns won't match (no jobs:/steps:/uses:),
+        # so the extra file in scope is a no-op for them.
+        for ext in ("yml", "yaml"):
+            dep = os.path.join(repo_path, ".github", f"dependabot.{ext}")
+            if os.path.isfile(dep):
+                files.append(dep)
 
     elif platform == Platform.GITLAB:
         gl_file = os.path.join(repo_path, ".gitlab-ci.yml")

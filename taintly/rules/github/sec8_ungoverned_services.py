@@ -10,7 +10,7 @@ A compromised container image has read access to all secrets, source code,
 and build artefacts within the job.
 """
 
-from taintly.models import Platform, RegexPattern, Rule, Severity
+from taintly.models import ContextPattern, Platform, RegexPattern, Rule, Severity
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -181,5 +181,90 @@ RULES: list[Rule] = [
             "The risk exceeds unpinned actions because called workflows can themselves call "
             "further nested workflows, multiplying the scope."
         ),
+    ),
+    # =========================================================================
+    # SEC8-GH-005: dependabot.yml update spec missing ``cooldown:``
+    # =========================================================================
+    Rule(
+        id="SEC8-GH-005",
+        title="Dependabot update spec missing ``cooldown:`` — no post-release window",
+        severity=Severity.LOW,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-8",
+        review_needed=True,
+        confidence="low",
+        description=(
+            "A ``.github/dependabot.yml`` update spec does not declare "
+            "a ``cooldown:`` block.  Without cooldown, Dependabot "
+            "opens a PR within minutes of a new release — including "
+            "releases that turn out to be compromised hours later "
+            "(tj-actions, xz-utils, several Node ecosystem incidents).  "
+            "Set a short cooldown (3-7 days) to bound the window where "
+            "a freshly-published malicious version can reach your "
+            "main branch through automated bump PRs."
+        ),
+        pattern=ContextPattern(
+            anchor=r"^\s+(?:-\s+)?package-ecosystem:",
+            requires=r"(?m)^version:\s*[\"']?2[\"']?",
+            requires_absent=r"(?m)^\s+cooldown:",
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Add a ``cooldown:`` block to each update spec.  3-7 days "
+            "covers the common-case where a malicious release is "
+            "spotted within a week:\n"
+            "\n"
+            "  version: 2\n"
+            "  updates:\n"
+            "    - package-ecosystem: npm\n"
+            "      directory: /\n"
+            "      schedule:\n"
+            "        interval: daily\n"
+            "      cooldown:\n"
+            "        default-days: 5\n"
+            "        semver-major-days: 7\n"
+        ),
+        reference="https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown",
+        test_positive=[
+            (
+                "version: 2\nupdates:\n  - package-ecosystem: npm\n"
+                "    directory: /\n    schedule:\n      interval: daily\n"
+            ),
+            (
+                "version: 2\nupdates:\n  - package-ecosystem: pip\n"
+                "    directory: /backend\n    schedule:\n      interval: weekly\n"
+            ),
+        ],
+        test_negative=[
+            (
+                "version: 2\nupdates:\n  - package-ecosystem: npm\n"
+                "    directory: /\n    schedule:\n      interval: daily\n"
+                "    cooldown:\n      default-days: 5\n"
+            ),
+            (
+                "name: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: pytest\n"
+            ),
+        ],
+        stride=["T"],
+        threat_narrative=(
+            "Several documented supply-chain compromises (tj-actions, "
+            "xz-utils, lottie-player, ua-parser-js, event-stream) "
+            "published malicious versions that were detected within "
+            "hours-to-days of release.  Repositories without "
+            "Dependabot cooldown auto-opened bump PRs on the "
+            "compromised version inside that detection window — and "
+            "any repo with auto-merge enabled merged before the alarm "
+            "was raised.  A short cooldown converts an "
+            "intra-minute exposure window into an intra-week one, "
+            "during which community detection routinely flags the "
+            "bad release."
+        ),
+        incidents=[
+            "tj-actions/changed-files (Mar 2025)",
+            "xz-utils (Mar 2024)",
+            "lottie-player (Oct 2024)",
+            "event-stream (Nov 2018)",
+        ],
     ),
 ]
