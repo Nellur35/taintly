@@ -676,7 +676,21 @@ def _file_matches_platform(filepath: str, platform: Platform) -> bool:
 
 
 def detect_platform(repo_path: str) -> Platform | None:
-    """Auto-detect CI/CD platform from directory structure."""
+    """Auto-detect CI/CD platform from directory structure.
+
+    Returns a single Platform when exactly one platform's signal is
+    present.  Returns None when zero or two-or-more signals are
+    present — the caller (``scan_repo``) handles None by probing all
+    three platforms via ``discover_files``.
+
+    Prior to this change, the function short-circuited on the first
+    detected platform in ``has_github → has_gitlab → has_jenkins``
+    order, so any repo with both ``.github/workflows/`` and a
+    ``Jenkinsfile`` (a common shape during migrations and in repos
+    that publish via multiple CI systems) silently dropped the
+    Jenkinsfile from scan coverage.  The existing
+    ``has_github and has_gitlab`` special case is generalised here.
+    """
     gh_dir = os.path.join(repo_path, ".github", "workflows")
     gl_file = os.path.join(repo_path, ".gitlab-ci.yml")
     jk_file = os.path.join(repo_path, "Jenkinsfile")
@@ -690,14 +704,17 @@ def detect_platform(repo_path: str) -> Platform | None:
         glob.glob(os.path.join(repo_path, "Jenkinsfile.*"))
     )
 
-    if has_github and has_gitlab:
-        return None  # Both — caller should scan both
+    detected: list[Platform] = []
     if has_github:
-        return Platform.GITHUB
+        detected.append(Platform.GITHUB)
     if has_gitlab:
-        return Platform.GITLAB
+        detected.append(Platform.GITLAB)
     if has_jenkins:
-        return Platform.JENKINS
+        detected.append(Platform.JENKINS)
+
+    if len(detected) == 1:
+        return detected[0]
+    # Zero or multiple — caller probes all three via discover_files
     return None
 
 
