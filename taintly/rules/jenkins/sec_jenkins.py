@@ -68,6 +68,7 @@ class _NodeBlockWithoutLabelPattern:
             i += 1
         return results
 
+
 RULES: list[Rule] = [
     # =========================================================================
     # SEC3-JK-001: Shared library loaded without SHA pinning
