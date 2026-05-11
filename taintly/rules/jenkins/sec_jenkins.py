@@ -11,6 +11,8 @@ Jenkins pipelines have unique risk characteristics:
 - `params.*` values come directly from build triggers and may be attacker-controlled
 """
 
+import re
+
 from taintly.models import (
     ContextPattern,
     Platform,
@@ -19,6 +21,53 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+
+
+class _NodeBlockWithoutLabelPattern:
+    """SEC7-JK-002 — fire on ``node {`` blocks that lack a ``label`` directive.
+
+    Replaces the prior single-line regex that misclassified the
+    declarative ``agent { node { label 'x' } }`` shape (label on a
+    later line, not inline as ``node('x') { ... }``).  Real
+    Jenkinsfiles using the declarative form must not fire.
+
+    Walker contract: scan brace-depth from the matching ``node {``
+    line until depth returns to baseline; if a ``label '<value>'``
+    directive appears inside that span, suppress the finding.
+    """
+
+    _NODE_RE = re.compile(r"^\s*node\s*(?:\(\s*\))?\s*\{")
+    _LABEL_RE = re.compile(r"^\s*label\s+['\"]")
+    _COMMENT_RE = re.compile(r"^\s*//")
+    _INLINE_LABEL_RE = re.compile(r"node\s*\(\s*['\"]")  # node('x') { } — not our shape
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            if self._COMMENT_RE.search(line) or self._INLINE_LABEL_RE.search(line):
+                i += 1
+                continue
+            if not self._NODE_RE.search(line):
+                i += 1
+                continue
+            depth = line.count("{") - line.count("}")
+            has_label = False
+            j = i + 1
+            while j < n and depth > 0:
+                inner = lines[j]
+                if self._LABEL_RE.search(inner):
+                    has_label = True
+                    break
+                depth += inner.count("{") - inner.count("}")
+                j += 1
+            if not has_label:
+                results.append((i + 1, line.strip()))
+            i += 1
+        return results
+
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -1598,10 +1647,7 @@ RULES: list[Rule] = [
             "shared with other teams. In mixed-trust environments, sensitive pipelines "
             "must be constrained to known, trusted nodes."
         ),
-        pattern=RegexPattern(
-            match=r"^\s*node\s*(?:\(\s*\))?\s*\{",
-            exclude=[r"^\s*//", r"node\s*\(\s*['\"]"],
-        ),
+        pattern=_NodeBlockWithoutLabelPattern(),
         remediation=(
             "Specify an agent label:\n\n"
             "// BAD\n"
@@ -1618,6 +1664,10 @@ RULES: list[Rule] = [
             "node('linux') {\n    sh 'make'\n}",
             "node('docker') {\n    docker.image('ubuntu:22.04').inside { sh 'make' }\n}",
             "// node {\n//   sh 'make'\n// }",
+            # Declarative agent's nested node block — label on a later line.
+            # This is the common shape in real Jenkinsfiles (Kong, Hibernate, etc.).
+            "agent {\n    node {\n        label 'bionic'\n    }\n}",
+            "agent {\n    node {\n        label 'linux-benchmark-node'\n        customWorkspace '/foo'\n    }\n}",
         ],
         stride=["E", "T"],
         threat_narrative=(
