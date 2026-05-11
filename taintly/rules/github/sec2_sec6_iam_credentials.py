@@ -106,13 +106,19 @@ class _OverbroadWorkflowPermissionsPattern:
         don't double-report.
     """
 
+    # Block-extractor regexes.  The two alternatives in the body are
+    # mutually exclusive — content lines require ``\S`` after the
+    # indent, blank lines require only whitespace before the newline
+    # — so the regex engine has no backtracking ambiguity on adversarial
+    # whitespace-heavy input.  Same ReDoS-avoidance shape as SEC2-GH-002's
+    # _NoExplicitPermissionsPattern after the PR #46 CodeQL review.
     _PERMS_BLOCK_RE = re.compile(
-        r"(?ms)^permissions:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
+        r"(?ms)^permissions:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
     )
     _PERMS_WRITE_LINE_RE = re.compile(r"^[ \t]+([\w-]+):\s*['\"]?write['\"]?\s*(#.*)?$")
     _WRITE_ALL_RE = re.compile(r"^permissions:\s*write-all\b", re.MULTILINE)
     _JOBS_BLOCK_RE = re.compile(
-        r"(?ms)^jobs:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
+        r"(?ms)^jobs:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
     )
     _ON_INLINE_RE = re.compile(r"^on[ \t]*:[ \t]*(\S[^\n]*)$", re.MULTILINE)
     _ON_BLOCK_RE = re.compile(r"(?ms)^on[ \t]*:[ \t]*\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)")
