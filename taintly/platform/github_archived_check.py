@@ -65,6 +65,10 @@ def is_archived(owner: str, repo: str) -> Optional[bool]:
 
     Cached process-wide on ``(owner, repo)`` for definitive yes/no
     verdicts; indeterminate verdicts bypass the cache.
+
+    Uses the shared :class:`GitHubClient` so transport, auth, retry,
+    and rate-limit handling match SEC3-GH-009's implementation —
+    keeping the two opt-in network rules consistent.
     """
     if _OVERRIDE is not None:
         return _OVERRIDE(owner, repo)
@@ -73,8 +77,8 @@ def is_archived(owner: str, repo: str) -> Optional[bool]:
     if key in _CACHE:
         return _CACHE[key]
 
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token:
+    token_value = os.environ.get("GITHUB_TOKEN")
+    if not token_value:
         sys.stderr.write(
             "warning: --check-archived-actions requires GITHUB_TOKEN in the "
             "environment for authenticated GitHub API requests; "
@@ -82,37 +86,32 @@ def is_archived(owner: str, repo: str) -> Optional[bool]:
         )
         return None
 
+    # Late imports keep this module light when the rule is disabled.
+    from .github_client import APIError, GitHubClient
+    from .token import TokenManager
+
+    token = TokenManager(token_value, source="env")
     try:
-        import urllib.error
-        import urllib.request
-
-        req = urllib.request.Request(
-            f"https://api.github.com/repos/{owner}/{repo}",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "taintly-archived-check",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            import json
-
-            body = json.loads(resp.read().decode("utf-8"))
-            archived = bool(body.get("archived", False))
-            _CACHE[key] = archived
-            return archived
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            # Repo doesn't exist (or was deleted entirely) — treat
-            # as a stronger archived-equivalent signal.
+        client = GitHubClient(token)
+        body = client._request(f"/repos/{owner}/{repo}")
+        if body is None:
+            # 404 — repo deleted; treat as archived-equivalent.
             _CACHE[key] = True
             return True
-        if e.code in (401, 403):
+        archived = bool(body.get("archived", False))
+        _CACHE[key] = archived
+        return archived
+    except APIError as e:
+        if e.status in (401, 403):
             sys.stderr.write(
-                f"error: GitHub API returned {e.code} for {owner}/{repo}; "
+                f"error: GitHub API returned {e.status} for {owner}/{repo}; "
                 "check token scope or rate limit.\n"
             )
             return None
         return None
     except Exception:
+        # Transport failure (network down, DNS, TLS) — degrade to
+        # indeterminate rather than crashing the scan.
         return None
+    finally:
+        token.clear()
