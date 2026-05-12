@@ -821,27 +821,27 @@ RULES: list[Rule] = [
         ),
     ),
     # =========================================================================
-    # CICD-SEC-1: Security gate silenced by allow_failure — GAP-4
+    # CICD-SEC-1: Security gate silenced by allow_failure / manual gating — GAP-4
     # =========================================================================
     Rule(
         id="SEC1-GL-002",
-        title="Security scanning job configured to allow failure — verify gating policy",
+        title="Security scanning job configured to allow failure or manual run — verify gating policy",
         severity=Severity.MEDIUM,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-1",
         description=(
             "A job that runs security scanning tools (SAST, secret detection, dependency "
-            "scanning, etc.) has 'allow_failure: true'. Note: GitLab's own bundled "
+            "scanning, etc.) has 'allow_failure: true' or 'when: manual'. Note: GitLab's own bundled "
             "security-scanning templates (Security/SAST.gitlab-ci.yml, "
             "Security/Secret-Detection.gitlab-ci.yml, etc.) SHIP with allow_failure: true "
             "by default — the intended blocking mechanism is a Merge Request Approval "
             "Policy or Scan Result Policy, not the job's exit status. This rule flags "
-            "allow_failure on scanning jobs so the reviewer can confirm that an approval/"
+            "non-gating scanning jobs so the reviewer can confirm that an approval/"
             "scan-result policy is in place; if you rely on the job exit code to gate "
-            "merges, remove allow_failure: true instead."
+            "merges, remove allow_failure: true and avoid making the job manual."
         ),
         pattern=ContextPattern(
-            anchor=r"allow_failure:\s*true",
+            anchor=r"(allow_failure:\s*true|when:\s*manual)",
             requires=(
                 r"(sast|secret[_-]detect|dependency[_-]scan|container[_-]scan"
                 r"|license[_-]scan|dast|fuzz|security[_-]scan"
@@ -854,12 +854,14 @@ RULES: list[Rule] = [
             "Confirm that an MR Approval Policy or Scan Result Policy is enforcing the "
             "finding gate; GitLab's default scanning templates rely on those policies "
             "rather than on the job exit code (which is why allow_failure: true ships as "
-            "the default).\n"
+            "the default). Manual security jobs require the same policy review because "
+            "they do not block by default unless a separate approval or scan-result policy "
+            "requires them.\n"
             "\n"
             "If you have NOT configured a scan-result policy and you want the pipeline "
-            "itself to fail on findings, remove 'allow_failure: true' — and tune the "
-            "scanner's configuration (e.g. severity thresholds, suppressions) to manage "
-            "false-positive noise rather than silencing the job.\n"
+            "itself to fail on findings, remove 'allow_failure: true', avoid 'when: manual', "
+            "and tune the scanner's configuration (e.g. severity thresholds, suppressions) "
+            "to manage false-positive noise rather than silencing the job.\n"
             "\n"
             "Scan Result Policies: Security & Compliance > Policies in the project."
         ),
@@ -868,10 +870,14 @@ RULES: list[Rule] = [
             "sast:\n  stage: test\n  script:\n    - semgrep --config=auto .\n  allow_failure: true",
             "secret-detection:\n  stage: security\n  image: registry.gitlab.com/security-products/secret-detection:4\n  script:\n    - /analyzer run\n  allow_failure: true",
             "trivy-scan:\n  stage: security\n  script:\n    - trivy image $CI_REGISTRY_IMAGE\n  allow_failure: true",
+            "sast:\n  stage: security\n  script:\n    - semgrep --config=auto .\n  when: manual",
+            "dependency_scanning:\n  stage: security\n  script:\n    - /analyzer run\n  when: manual",
         ],
         test_negative=[
             # allow_failure on a non-security job is fine
             "flaky-test:\n  stage: test\n  script:\n    - pytest tests/flaky/\n  allow_failure: true",
+            # Manual deploy/release approval is not a security scanner being weakened.
+            "deploy-prod:\n  stage: deploy\n  script:\n    - ./deploy.sh\n  when: manual",
             # Security scan without allow_failure is fine (gate is enforced)
             "sast:\n  stage: test\n  script:\n    - semgrep --config=auto .",
             # Commented-out allow_failure
