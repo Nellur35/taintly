@@ -164,6 +164,27 @@ def main():
     )
     parser.add_argument("--rule", help="Test specific rule ID (use with --self-test)")
     parser.add_argument(
+        "--self-test-json",
+        action="store_true",
+        help=(
+            "Emit self-test / mutation results as JSON instead of human-"
+            "readable text. Pairs with --self-test [--mutate] for CI "
+            "dashboards: per-rule kill-rate over time is invisible in the "
+            "pass/fail text format."
+        ),
+    )
+    parser.add_argument(
+        "--mutate-semantic",
+        action="store_true",
+        help=(
+            "Also run advisory semantic-equivalence mutation operators "
+            "(YAML boolean synonyms, trigger shape, quoted scalars). "
+            "These exercise rule resilience to format-equivalent inputs; "
+            "survivors are rule-engineering gaps, not gated by the "
+            "100%% kill-rate CI step. Pairs with --mutate."
+        ),
+    )
+    parser.add_argument(
         "--github-org", help="Scan all repos in a GitHub org (requires GITHUB_TOKEN env var)"
     )
     parser.add_argument(
@@ -567,9 +588,14 @@ def main():
 
         mutation_results = None
         if args.mutate:
-            mutation_results = run_mutation_tests(testable)
+            mutation_results = run_mutation_tests(testable, include_semantic=args.mutate_semantic)
 
-        print(format_test_results(self_results, mutation_results))
+        if args.self_test_json:
+            from .testing.self_test import format_test_results_json
+
+            print(format_test_results_json(self_results, mutation_results))
+        else:
+            print(format_test_results(self_results, mutation_results))
 
         # Exit codes
         if not all(r.passed for r in self_results):

@@ -227,10 +227,17 @@ def fix_persist_credentials(filepath: str, dry_run: bool = False) -> list[FixRes
                 )
                 modified = True
             else:
-                # Add 'with:' block with persist-credentials
+                # Add 'with:' block with persist-credentials. ``indent``
+                # captures the whitespace BEFORE the ``-`` (e.g. 10 spaces
+                # for steps:/  - uses:). The step's mapping content
+                # (``uses:``, ``with:``) is rooted at ``indent + "  "``
+                # so ``with:`` MUST emit at exactly that column to be a
+                # sibling of ``uses:``. Adding extra padding produces
+                # YAML that no longer parses (the original bug — caught
+                # by tests/unit/test_fix_invariants.py).
                 new_lines.append(line)
                 step_indent = indent + "  " if line.strip().startswith("-") else indent
-                with_block = f"{step_indent}  with:\n{step_indent}    persist-credentials: false\n"
+                with_block = f"{step_indent}with:\n{step_indent}  persist-credentials: false\n"
                 new_lines.append(with_block)
                 results.append(
                     FixResult(

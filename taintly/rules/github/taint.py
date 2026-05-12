@@ -2350,11 +2350,35 @@ RULES = [
             # line; matched lines extend through the step body until
             # indent drops back to the step level.
             block_anchor=r"^\s*-?\s*uses:\s*actions/github-script@",
-            # Match any ``${{ <expression> }}`` reference inside the
-            # step.  We exclude the standard ``with:`` keys whose
-            # values are interpolated as configuration (not as JS body
-            # source) so the rule fires only on the script-body sink.
-            match=r"\${{[^}]+}}",
+            # iter-6 (2026-05-09): narrowed match. Previously matched
+            # any ``${{ ... }}`` interpolation, which fired on safe
+            # system-controlled contexts like ``${{ github.repository
+            # }}`` and ``${{ github.run_id }}`` (audit found 1 FP on
+            # astral-sh/ruff's daily_fuzz.yaml issue-creation body
+            # that interpolated only system contexts). Now requires
+            # the expression body to reference at least one
+            # attacker-controllable token: github.event.*, inputs.*,
+            # github.head_ref, github.actor, needs.*.outputs.*, or
+            # steps.*.outputs.* (fork-reachable upstream output).
+            # System-controlled refs (github.repository, run_id,
+            # sha-on-push, etc.) and secrets.*/vars.* (caller-set)
+            # cannot be poisoned via this surface.
+            match=(
+                r"\${{[^}]*"
+                r"(?:"
+                r"github\.event\."
+                r"|inputs\."
+                r"|github\.head_ref\b"
+                r"|github\.actor\b"
+                r"|needs\.[a-zA-Z0-9_-]+\.outputs"
+                r"|steps\.[a-zA-Z0-9_-]+\.outputs"
+                # ``matrix.*`` can be derived from ``fromJSON(inputs.*)``;
+                # without semantic analysis we conservatively treat it as
+                # potentially attacker-influenceable.
+                r"|matrix\."
+                r")"
+                r"[^}]*}}"
+            ),
             exclude=[
                 r"^\s*#",
                 # Standard actions/github-script with: keys whose
@@ -2434,6 +2458,25 @@ RULES = [
                 "    runs-on: ubuntu-latest\n"
                 "    steps:\n"
                 "      - run: echo '${{ github.event.pull_request.title }}'\n"
+            ),
+            # iter-6 (2026-05-09): system-controlled contexts are
+            # NOT attacker-influenceable. ``${{ github.repository }}``
+            # is the repo's own slug; ``${{ github.run_id }}`` is the
+            # runner-assigned ID. Real-world FP from astral-sh/ruff's
+            # daily_fuzz.yaml, which builds an issue body containing
+            # only these system contexts. Narrowed match excludes
+            # them; this fixture pins the regression.
+            (
+                "jobs:\n"
+                "  notify:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/github-script@v7\n"
+                "        with:\n"
+                "          script: |\n"
+                "            await github.rest.issues.create({\n"
+                "              body: 'Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}',\n"
+                "            })\n"
             ),
         ],
         stride=["E", "I"],

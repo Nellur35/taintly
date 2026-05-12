@@ -176,6 +176,9 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
     r"ossf/scorecard-action",
     r"actions/deploy-pages",
     r"slsa-framework/slsa-github-generator",
+    # iter-6 (2026-05-09): CodSpeed benchmarking action requires
+    # ``id-token: write`` for OIDC-based result attestation.
+    r"CodSpeedHQ/action",
     # Shell-form.  ``--`` is two non-word characters, so a leading
     # ``\b`` would never match on the flag — the preceding space is
     # also non-word, so there is no word boundary between them.  The
@@ -266,6 +269,10 @@ _SAFE_ACTION_INPUT_PAIRS: frozenset[tuple[str, str]] = frozenset(
         # First-party — converts (app-id, private-key) to an
         # installation token; private-key IS the credential.
         ("actions/create-github-app-token", "private-key"),
+        ("actions/create-github-app-token", "private_key"),
+        # First-party — upload-pages-artifact uses token as its documented
+        # GitHub auth surface for Pages artifact upload.
+        ("actions/upload-pages-artifact", "token"),
         # peaceiris/actions-gh-pages — single-purpose: push to
         # gh-pages branch using the supplied token.
         ("peaceiris/actions-gh-pages", "github_token"),
@@ -824,6 +831,11 @@ RULES: list[Rule] = [
                 # risk because real shell-injection contexts always
                 # carry other tokens on the same line.
                 r"""^\s*-?\s*["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
+                # iter-6 (2026-05-09): exclude env-block assignments
+                # where the secret is embedded in a larger value. The
+                # risk this rule owns is literal secret interpolation into
+                # generated shell script bodies, not runner-managed env.
+                r"^\s*(?!run\s*:|script\s*:)[\w._-]+:\s*\S",
             ],
         ),
         remediation=(
@@ -855,6 +867,7 @@ RULES: list[Rule] = [
             "        with:\n          secret-ids: |\n            ${{ secrets.AWS_KEY_1 }}\n            ${{ secrets.AWS_KEY_2 }}",
             # Same shape with a YAML list-item dash prefix.
             "        with:\n          tokens:\n            - ${{ secrets.GH_TOKEN }}\n            - ${{ secrets.NPM_TOKEN }}",
+            "        env:\n          AWS_ENDPOINT_URL: https://${{ secrets.MIRROR_R2_ACCOUNT_ID }}.r2.example.com",
         ],
         stride=["I", "R"],
         threat_narrative=(
@@ -1139,7 +1152,14 @@ RULES: list[Rule] = [
             # Other setup-* actions require explicit `cache:` input and are
             # deliberately EXCLUDED here to avoid the release.yml FP.
             anchor=r"uses:\s*(actions/cache|actions/setup-go)@",
-            requires=r"(release:|tags:)",
+            requires=(
+                r"(?m)"
+                r"^on:\s*(?:release\b|\[\s*[^\]]*\brelease\b)"
+                r"|"
+                r"^on:[^\n]*\n[\s\S]{0,500}?^\s+release:\s*(?:#[^\n]*)?\n\s+types:"
+                r"|"
+                r"^on:[^\n]*\n[\s\S]{0,500}?^\s+tags:\s*[\[\n#]"
+            ),
             exclude=[r"^\s*#"],
         ),
         remediation=(

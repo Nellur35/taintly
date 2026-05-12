@@ -1,0 +1,11 @@
+# Evasion: GitLab variable-indirection — TAINT-GL-001 single-line regex
+# loses the source/sink connection when the tainted CI variable is
+# stored in a shell variable first.
+#
+# Discovered: 2026-05-09  (audit chunk 3.1 — GitLab evasion gap)
+# Severity:   HIGH  (TAINT-GL-001 is HIGH)
+# Platform:   gitlab
+build:
+  script:
+    - LATER="$CI_COMMIT_TITLE"
+    - eval "$LATER"

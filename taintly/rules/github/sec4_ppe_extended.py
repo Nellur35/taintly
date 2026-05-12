@@ -970,6 +970,15 @@ RULES: list[Rule] = [
             "rule — they're hygiene at most and are covered by "
             "SEC4-GH-020."
         ),
+        # Note (iter-6 revert, 2026-05-09): an earlier iter-6 attempt
+        # converted this to ContextPattern with a fork-reachable
+        # trigger requires. That broke the existing severity
+        # downgrade contract: when the only trigger is push:tags /
+        # workflow_dispatch / schedule, the engine's
+        # ``_downgrade_maintainer_gated_findings`` postprocessor
+        # already drops HIGH -> MEDIUM (covers the audit's flask FP
+        # on publish.yaml). Reverted to RegexPattern; the engine
+        # postprocessor handles the maintainer-gated case correctly.
         pattern=RegexPattern(
             match=(r"\$\{?(GITHUB_REF_NAME|GITHUB_HEAD_REF|GITHUB_ACTOR)\}?"),
             exclude=[
