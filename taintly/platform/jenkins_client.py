@@ -129,3 +129,45 @@ class JenkinsClient:
     def whoami(self) -> dict[str, Any] | None:
         """Current authenticated user info."""
         return self._request("/me")
+
+    def update_sites(self) -> list[dict[str, Any]]:
+        """List configured Update Center sites.
+
+        The `/updateCenter` endpoint returns a description that includes
+        every configured update site. Most controllers have exactly one
+        site pointing at ``https://updates.jenkins.io/update-center.json``.
+        Custom or replaced URLs are a tampering vector — every plugin
+        descriptor is fetched from the configured URL.
+        """
+        data = self._request("/updateCenter")
+        if data is None:
+            return []
+        return data.get("sites") or []
+
+    def fetch_external(self, url: str, *, timeout: int | None = None) -> Any | None:
+        """Fetch an external (non-Jenkins-controller) URL and parse JSON.
+
+        Used by the advisory-feed cross-check (PLAT-JK-006) which pulls
+        the published Jenkins security advisories index from
+        ``https://www.jenkins.io/security/advisories/jenkins-data.json``.
+        Separate from ``_request`` because the call doesn't go through
+        the Jenkins API auth path and shouldn't append ``/api/json``.
+
+        Returns ``None`` on any failure (network error, non-JSON body,
+        404). Callers should treat ``None`` as "feed unavailable" and
+        either skip the check or emit an explanatory finding.
+        """
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "taintly",
+            },
+        )
+        try:
+            with urllib.request.urlopen(  # nosec B310
+                req, timeout=timeout or self._timeout
+            ) as resp:
+                return json.loads(resp.read())
+        except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, TimeoutError):
+            return None
