@@ -113,9 +113,35 @@ _PERSIST_FALSE_RE = re.compile(
     re.IGNORECASE,
 )
 # Shell git operations that consume the persisted credential.
+# - ``git push`` / ``git push origin foo``
+# - ``git fetch <url>`` for cross-repo where the persisted helper is reused
+# - ``git config user.email`` / ``git config user.name`` — these only
+#   matter when a subsequent ``git push`` is run, but their presence
+#   is a strong signal the workflow is preparing to push.
+# - ``gh release create`` — uses ``GITHUB_TOKEN`` from the env, but
+#   not from .git/config; intentionally NOT a consumer.
 _GIT_CREDENTIAL_OP_RE = re.compile(r"\bgit\s+(?:push|fetch\s+(?:https?://|ssh://|git@))\b")
-# Actions whose documented behaviour is "git push using the persisted
-# checkout token."  Each is the credential's actual consumer.
+# Actions whose documented behaviour is to either reuse the persisted
+# checkout token directly (a ``git push`` under the hood) OR to package
+# the working tree — including the ``.git/`` directory whose ``config``
+# now references the token helper — into a publish/release/PR artifact
+# that leaves the runner.  Both shapes are credential consumers under
+# the artipacked threat model:
+#
+# - ``peaceiris/actions-gh-pages``, ``crazy-max/ghaction-github-pages``,
+#   ``JamesIves/github-pages-deploy-action``, ``s0/git-publish-subdir-action``,
+#   ``cpina/github-action-push-to-another-repository``,
+#   ``ad-m/github-push-action``, ``stefanzweifel/git-auto-commit-action``,
+#   ``EndBug/add-and-commit`` — direct git-push consumers.
+# - ``peter-evans/create-pull-request`` — pushes a new branch via the
+#   persisted helper to open the PR.
+# - ``pypa/gh-action-pypi-publish`` — uploads the built wheel/sdist to
+#   PyPI; if the working tree's ``.git/`` (with the token-helper config
+#   reference) is included in the bundle, the token leaks via the
+#   published artifact.  Same shape covers the ``cibuildwheel`` →
+#   ``pypa-publish`` two-step (publish step is the consumer).
+# - ``softprops/action-gh-release`` — uploads release assets to a tag;
+#   same artifact-credential-leak shape as pypa-publish.
 _GIT_PUSH_ACTION_RE = re.compile(
     r"uses:\s*(?:"
     r"peaceiris/actions-gh-pages"
@@ -126,6 +152,9 @@ _GIT_PUSH_ACTION_RE = re.compile(
     r"|JamesIves/github-pages-deploy-action"
     r"|s0/git-publish-subdir-action"
     r"|cpina/github-action-push-to-another-repository"
+    r"|peter-evans/create-pull-request"
+    r"|pypa/gh-action-pypi-publish"
+    r"|softprops/action-gh-release"
     r")",
     re.IGNORECASE,
 )
@@ -997,11 +1026,16 @@ RULES: list[Rule] = [
             "disk and reuse it against the GitHub API without going through the secrets "
             "facility. This rule fires only when a downstream step in the same job "
             "actually consumes that credential — a `git push` / `git fetch <url>` / "
-            "`git config user` shell op, or a documented git-pushing action "
+            "`git config user` shell op, a documented git-pushing action "
             "(peaceiris/actions-gh-pages, ad-m/github-push-action, "
-            "stefanzweifel/git-auto-commit-action, EndBug/add-and-commit, etc.). "
+            "stefanzweifel/git-auto-commit-action, EndBug/add-and-commit, etc.), "
+            "a PR-creation action that pushes via the persisted helper "
+            "(peter-evans/create-pull-request), or a publish/release action that "
+            "packages the working tree (including .git/) into an artifact that "
+            "leaves the runner (pypa/gh-action-pypi-publish, "
+            "softprops/action-gh-release). "
             "Set `persist-credentials: false` on the checkout step (or scope the "
-            "downstream push to its own minimal-permissions checkout)."
+            "downstream push/publish to its own minimal-permissions checkout)."
         ),
         pattern=_CheckoutDownstreamCredentialConsumerPattern(),
         remediation="Add 'persist-credentials: false' to the checkout step.",
@@ -1023,6 +1057,31 @@ RULES: list[Rule] = [
                 "      - uses: actions/checkout@v4\n"
                 "      - uses: peaceiris/actions-gh-pages@v3\n"
                 "        with:\n          publish_dir: ./public\n"
+            ),
+            # Checkout + PyPI publish artifact.
+            (
+                "jobs:\n  release:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - run: python -m build\n"
+                "      - uses: pypa/gh-action-pypi-publish@release/v1\n"
+            ),
+            # Checkout + create-pull-request (pushes via persisted helper).
+            (
+                "jobs:\n  bump:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - run: ./scripts/bump.sh\n"
+                "      - uses: peter-evans/create-pull-request@v6\n"
+            ),
+            # Checkout + softprops/action-gh-release.
+            (
+                "jobs:\n  release:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - run: make dist\n"
+                "      - uses: softprops/action-gh-release@v1\n"
+                "        with:\n          files: dist/*\n"
             ),
         ],
         test_negative=[
@@ -1051,6 +1110,20 @@ RULES: list[Rule] = [
                 "        with:\n          persist-credentials: false\n"
                 "      - run: git push\n"
             ),
+            # Docker build without push — common CI lint pattern.
+            (
+                "jobs:\n  docker:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
+                "      - uses: docker/build-push-action@v5\n"
+                "        with:\n          push: false\n"
+            ),
+            # CodeQL / Semgrep scan-only job — no consumer.
+            (
+                "jobs:\n  codeql:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
+                "      - uses: github/codeql-action/init@v3\n"
+                "      - uses: github/codeql-action/analyze@v3\n"
+            ),
         ],
         stride=["I", "T"],
         threat_narrative=(
@@ -1059,9 +1132,16 @@ RULES: list[Rule] = [
             "subsequent step — including third-party actions — from the filesystem "
             "without any secrets API call. With write repository permissions, a token "
             "extracted this way can push malicious commits, modify branch protections, "
-            "or inject code into other workflows.  The risk is concrete only when a "
-            "downstream step actually uses the credential; this rule scopes to that "
-            "case to keep the signal-to-noise ratio actionable."
+            "or inject code into other workflows.  The risk is concrete in two shapes: "
+            "(a) the downstream step pushes or fetches via the persisted helper "
+            "(git push / git fetch / a documented git-pushing action / "
+            "peter-evans/create-pull-request), or (b) the downstream step publishes "
+            "the working tree as an artifact that includes the .git/ directory whose "
+            "config now points at the token helper (pypa/gh-action-pypi-publish, "
+            "softprops/action-gh-release).  This rule scopes to those two shapes "
+            "(the 'artipacked' threat model) to keep the signal-to-noise ratio "
+            "actionable; lint / typecheck / unit-test / CodeQL / docker-build-only "
+            "jobs do not fire."
         ),
     ),
     # =========================================================================
