@@ -6,6 +6,7 @@ These were entirely missing or undercovered in the initial implementation.
 
 from taintly.models import (
     ContextPattern,
+    PathPattern,
     Platform,
     RegexPattern,
     Rule,
@@ -890,6 +891,58 @@ RULES: list[Rule] = [
             "without the enforcement. An attacker who knows the gate is bypassed can "
             "introduce malicious code that would normally be caught, confident it will not "
             "block the pipeline."
+        ),
+    ),
+    # =========================================================================
+    # CICD-SEC-1: Security scanner disabled by protected CI variable.
+    # =========================================================================
+    Rule(
+        id="SEC1-GL-003",
+        title="GitLab security scanner disabled through CI variable",
+        severity=Severity.HIGH,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-1",
+        description=(
+            "A GitLab CI variables block sets a built-in security scanner disable "
+            "switch, such as SAST_DISABLED or SECRET_DETECTION_DISABLED, to a truthy "
+            "value. GitLab documents these variables as disabling the corresponding "
+            "security jobs when set to true, so a pipeline can appear to include the "
+            "scanner template while silently skipping the scan."
+        ),
+        pattern=PathPattern(
+            path=(
+                r"(^|\.)variables\."
+                r"(SAST_DISABLED|SECRET_DETECTION_DISABLED|DEPENDENCY_SCANNING_DISABLED"
+                r"|CONTAINER_SCANNING_DISABLED|DAST_DISABLED)$"
+            ),
+            value=r"(?i)^(true|1|yes)$",
+        ),
+        remediation=(
+            "Remove the disabling CI variable and tune the scanner with documented "
+            "configuration, scan execution policies, or rule suppressions instead. If a "
+            "scanner must be disabled temporarily, require an explicit approval path and "
+            "track the exception outside the pipeline YAML."
+        ),
+        reference="https://docs.gitlab.com/topics/autodevops/cicd_variables/",
+        test_positive=[
+            'variables:\n  SAST_DISABLED: "true"',
+            "secret_scan:\n  variables:\n    SECRET_DETECTION_DISABLED: true\n  script:\n    - echo scan",
+            'variables:\n  DEPENDENCY_SCANNING_DISABLED: "1"',
+            "variables:\n  DAST_DISABLED: yes",
+        ],
+        test_negative=[
+            'variables:\n  SAST_DISABLED: "false"',
+            'variables:\n  SECRET_DETECTION_DISABLED: "0"',
+            'variables:\n  FEATURE_FLAG_DISABLED: "true"',
+            "debug:\n  script:\n    - echo 'SAST_DISABLED: true'",
+        ],
+        stride=["E", "S"],
+        threat_narrative=(
+            "Disabling GitLab's built-in security scanners through CI variables turns "
+            "a required security gate into a no-op while leaving the pipeline structure "
+            "looking compliant. An attacker or careless change can suppress SAST, secret "
+            "detection, dependency scanning, container scanning, or DAST without removing "
+            "the template include that reviewers expect to enforce the gate."
         ),
     ),
     # =========================================================================
