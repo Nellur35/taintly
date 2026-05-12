@@ -13,6 +13,41 @@ from taintly.models import (
     Severity,
 )
 
+
+class DotenvReportPattern:
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            stripped = line.lstrip(" \t")
+            if not stripped or stripped.startswith("#") or not stripped.startswith("dotenv:"):
+                continue
+            indent = len(line) - len(stripped)
+            reports_idx = self._find_parent_key(lines, i, indent, "reports:")
+            if reports_idx is None:
+                continue
+            reports_line = lines[reports_idx]
+            reports_indent = len(reports_line) - len(reports_line.lstrip(" \t"))
+            if self._find_parent_key(lines, reports_idx, reports_indent, "artifacts:") is None:
+                continue
+            results.append((i + 1, line.strip()))
+        return results
+
+    @staticmethod
+    def _find_parent_key(
+        lines: list[str], before_index: int, child_indent: int, key: str
+    ) -> int | None:
+        for j in range(before_index - 1, -1, -1):
+            candidate = lines[j]
+            stripped = candidate.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(candidate) - len(candidate.lstrip(" \t"))
+            if indent >= child_indent:
+                continue
+            return j if stripped == key else None
+        return None
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # CICD-SEC-1: Insufficient Flow Control Mechanisms
@@ -1113,5 +1148,79 @@ RULES: list[Rule] = [
             "secrets."
         ),
         incidents=["Ultralytics (Dec 2024, GH analog)", "Trivy supply chain (Mar 2026, GH analog)"],
+    ),
+    # =========================================================================
+    # SEC4-GL-009: dotenv artifact transit — review variables flowing
+    # between jobs via ``artifacts:reports:dotenv``
+    # =========================================================================
+    Rule(
+        id="SEC4-GL-009",
+        title="dotenv artifact transit — variables passed between jobs need source review",
+        severity=Severity.LOW,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-4",
+        review_needed=True,
+        confidence="low",
+        description=(
+            "The pipeline uses ``artifacts:reports:dotenv`` to pass "
+            "variables from a producer job to a consumer job via "
+            "``needs:``.  Dotenv artifacts are an opaque taint transit "
+            "channel: the consumer job's ``script:`` references "
+            "``$KEY`` and has no static way to know whether the "
+            "producer derived KEY from attacker-controllable context "
+            "(``$CI_COMMIT_TITLE``, ``$CI_MERGE_REQUEST_TITLE``, file "
+            "contents, branch name).  Review every producer job's "
+            "logic that writes into the dotenv artifact — if any "
+            "upstream value is attacker-controllable, sanitise at the "
+            "producer before writing to the dotenv file.  GitLab "
+            "analog of SEC4-GH-023 (step-output injection)."
+        ),
+        pattern=DotenvReportPattern(),
+        remediation=(
+            "Audit the producer job that writes to the dotenv "
+            "artifact:\n"
+            "\n"
+            "  build:\n"
+            "    script:\n"
+            "      # If CI_COMMIT_TITLE can carry attacker bytes,\n"
+            "      # sanitise before writing.\n"
+            '      - SAFE_TITLE=$(echo "$CI_COMMIT_TITLE" | tr -cd "[:alnum:] -")\n'
+            '      - echo "TITLE=$SAFE_TITLE" >> build.env\n'
+            "    artifacts:\n"
+            "      reports:\n"
+            "        dotenv: build.env\n"
+            "\n"
+            'The consumer\'s ``script: - echo \\"$TITLE\\"`` is then '
+            "safe because the producer enforces the alphabet."
+        ),
+        reference="https://docs.gitlab.com/ee/ci/yaml/artifacts_reports.html#artifactsreportsdotenv",
+        test_positive=[
+            (
+                'build:\n  stage: build\n  script:\n    - echo "VERSION=$CI_COMMIT_TAG" > vars.env\n'
+                "  artifacts:\n    reports:\n      dotenv: vars.env\n"
+            ),
+            (
+                'produce:\n  script:\n    - echo "X=value" > out.env\n'
+                "  artifacts:\n    reports:\n      dotenv: out.env\n"
+            ),
+        ],
+        test_negative=[
+            (
+                "test:\n  script:\n    - pytest\n"
+                "  artifacts:\n    reports:\n      junit: junit.xml\n"
+            ),
+            "build:\n  script:\n    - make\n  artifacts:\n    paths:\n      - dist/\n",
+        ],
+        stride=["T"],
+        threat_narrative=(
+            "Dotenv artifacts are an opaque transit channel for "
+            "attacker-controllable bytes.  A pipeline author who "
+            "carefully quotes ``$CI_COMMIT_TITLE`` in a build job's "
+            "script can still be compromised when that job writes the "
+            "title to a dotenv artifact and a downstream job splices "
+            "it into a shell command unquoted.  SEC4-GL-001 catches "
+            "the direct form; this rule surfaces the transit form for "
+            "producer-side review."
+        ),
     ),
 ]

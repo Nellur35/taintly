@@ -301,7 +301,51 @@ class _Tokenizer:
                     pos += 1
                 continue
 
-            # Reject custom tags: ``!`` / ``!!``.
+            # GitLab CI: ``!reference [section, key]`` is a cross-section
+            # value reference.  The structural reader can't expand the
+            # reference (would require resolving the target path against
+            # the rest of the document), but emitting CUTOFF here breaks
+            # every rule on every gitlab-org/gitlab subpath file, since
+            # ``!reference`` appears in nearly all of them.  Instead,
+            # consume the entire ``!reference [...]`` as one opaque
+            # scalar value: per-line rules see the source text, the
+            # walker continues, and structural-only rules degrade to
+            # "this leaf has an unexpanded reference value" rather
+            # than "the file is unreadable past line N."
+            if ch == "!" and raw[pos : pos + 10] == "!reference":
+                # Skip past "!reference" + optional whitespace.
+                end = pos + 10
+                while end < n and raw[end] in " \t":
+                    end += 1
+                if end < n and raw[end] == "[":
+                    depth = 0
+                    scan = end
+                    while scan < n:
+                        if raw[scan] == "[":
+                            depth += 1
+                        elif raw[scan] == "]":
+                            depth -= 1
+                            if depth == 0:
+                                scan += 1
+                                break
+                        scan += 1
+                    if depth > 0:
+                        raise TokenizerError(line_no, "unterminated !reference tag")
+                    # Closed bracket: take everything from ! to here as
+                    # the opaque value.
+                    yield Token(
+                        TokenKind.SCALAR_PLAIN,
+                        line_no,
+                        column=pos + 1,
+                        value=raw[pos:scan],
+                        indent=indent,
+                    )
+                    pos = scan
+                    continue
+                # ``!reference`` not followed by ``[`` — not the GitLab
+                # form; fall through to the generic-tag rejection so
+                # the caller still gets a clear signal.
+            # Reject other custom tags: ``!`` / ``!!``.
             if ch == "!":
                 raise TokenizerError(line_no, "custom tags ('!') not supported")
 
@@ -329,7 +373,7 @@ class _Tokenizer:
 
             # Quoted scalar.
             if ch in ("'", '"'):
-                end, value = self._read_quoted_scalar(raw, pos, line_no)
+                end, value = self._read_quoted_scalar_across_lines(raw, pos, line_no)
                 # Look ahead: if followed by ``:``, this was a quoted
                 # key.  Otherwise it's a quoted scalar value.
                 trailing = end
@@ -365,6 +409,35 @@ class _Tokenizer:
     # ------------------------------------------------------------------
     # Quoted scalar
     # ------------------------------------------------------------------
+
+    def _read_quoted_scalar_across_lines(
+        self, raw: str, start: int, line_no: int
+    ) -> tuple[int, str]:
+        try:
+            return self._read_quoted_scalar(raw, start, line_no)
+        except TokenizerError:
+            pass
+
+        quote = raw[start]
+        line_idx = self._line_idx
+        value_parts = [raw[start + 1 :]]
+        while True:
+            line_idx += 1
+            if line_idx >= len(self._lines):
+                raise TokenizerError(
+                    line_no,
+                    f"unterminated {quote!r}-quoted scalar",
+                )
+
+            continuation = self._lines[line_idx]
+            try:
+                _end, value = self._read_quoted_scalar(quote + continuation, 0, line_idx + 1)
+            except TokenizerError:
+                value_parts.append(continuation)
+                continue
+            value_parts.append(value)
+            self._line_idx = line_idx
+            return len(raw), "\n".join(value_parts)
 
     def _read_quoted_scalar(self, raw: str, start: int, line_no: int) -> tuple[int, str]:
         quote = raw[start]

@@ -11,6 +11,8 @@ Jenkins pipelines have unique risk characteristics:
 - `params.*` values come directly from build triggers and may be attacker-controlled
 """
 
+import re
+
 from taintly.models import (
     ContextPattern,
     Platform,
@@ -19,6 +21,53 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+
+
+class _NodeBlockWithoutLabelPattern:
+    """SEC7-JK-002 — fire on ``node {`` blocks that lack a ``label`` directive.
+
+    Replaces the prior single-line regex that misclassified the
+    declarative ``agent { node { label 'x' } }`` shape (label on a
+    later line, not inline as ``node('x') { ... }``).  Real
+    Jenkinsfiles using the declarative form must not fire.
+
+    Walker contract: scan brace-depth from the matching ``node {``
+    line until depth returns to baseline; if a ``label '<value>'``
+    directive appears inside that span, suppress the finding.
+    """
+
+    _NODE_RE = re.compile(r"^\s*node\s*(?:\(\s*\))?\s*\{")
+    _LABEL_RE = re.compile(r"^\s*label\s+['\"]")
+    _COMMENT_RE = re.compile(r"^\s*//")
+    _INLINE_LABEL_RE = re.compile(r"node\s*\(\s*['\"]")  # node('x') { } — not our shape
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            if self._COMMENT_RE.search(line) or self._INLINE_LABEL_RE.search(line):
+                i += 1
+                continue
+            if not self._NODE_RE.search(line):
+                i += 1
+                continue
+            depth = line.count("{") - line.count("}")
+            has_label = False
+            j = i + 1
+            while j < n and depth > 0:
+                inner = lines[j]
+                if self._LABEL_RE.search(inner):
+                    has_label = True
+                    break
+                depth += inner.count("{") - inner.count("}")
+                j += 1
+            if not has_label:
+                results.append((i + 1, line.strip()))
+            i += 1
+        return results
+
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -103,6 +152,15 @@ RULES: list[Rule] = [
                 r"usernamePassword\s*\(",
                 r"withCredentials",
                 r"\$\{",  # variable interpolation — not a hardcoded literal
+                # AWS SDK sentinel literals — these signal a credential
+                # *provider* (IMDS, AssumeRole), not the credential
+                # value itself.  Real Jenkinsfiles assign these
+                # literals to AWS_ACCESS_KEY/AWS_SECRET_KEY to tell
+                # the SDK where to source credentials at runtime.
+                # Only literals >=8 chars need explicit allowlisting —
+                # shorter sentinels ("env", "default") fall under the
+                # rule's body-length floor of 8 characters.
+                r"['\"](?:instance-profile|assume-role)['\"]",
             ],
         ),
         remediation=(
@@ -127,6 +185,9 @@ RULES: list[Rule] = [
             "    API_TOKEN = credentials('my-api-token')",
             "    // GITHUB_TOKEN = 'ghp_placeholder'",
             '    TOKEN = "${env.INJECTED_TOKEN}"',
+            # AWS SDK sentinels — provider hints, not credential values.
+            '    AWS_ACCESS_KEY = "instance-profile"',
+            '    AWS_SECRET_KEY = "assume-role"',
         ],
         stride=["I"],
         threat_narrative=(
@@ -1598,10 +1659,7 @@ RULES: list[Rule] = [
             "shared with other teams. In mixed-trust environments, sensitive pipelines "
             "must be constrained to known, trusted nodes."
         ),
-        pattern=RegexPattern(
-            match=r"^\s*node\s*(?:\(\s*\))?\s*\{",
-            exclude=[r"^\s*//", r"node\s*\(\s*['\"]"],
-        ),
+        pattern=_NodeBlockWithoutLabelPattern(),
         remediation=(
             "Specify an agent label:\n\n"
             "// BAD\n"
@@ -1618,6 +1676,10 @@ RULES: list[Rule] = [
             "node('linux') {\n    sh 'make'\n}",
             "node('docker') {\n    docker.image('ubuntu:22.04').inside { sh 'make' }\n}",
             "// node {\n//   sh 'make'\n// }",
+            # Declarative agent's nested node block — label on a later line.
+            # This is the common shape in real Jenkinsfiles (Kong, Hibernate, etc.).
+            "agent {\n    node {\n        label 'bionic'\n    }\n}",
+            "agent {\n    node {\n        label 'linux-benchmark-node'\n        customWorkspace '/foo'\n    }\n}",
         ],
         stride=["E", "T"],
         threat_narrative=(
@@ -2487,5 +2549,88 @@ RULES: list[Rule] = [
             "access to bound credentials and shared-library state."
         ),
         incidents=["Ultralytics (Dec 2024, GH analog)", "Trivy supply chain (Mar 2026, GH analog)"],
+    ),
+    # =========================================================================
+    # SEC4-JK-008: ``env.<USER_VAR>`` interpolated into sh — taint
+    # transit between stages.  Jenkins analog of SEC4-GH-023.
+    # =========================================================================
+    Rule(
+        id="SEC4-JK-008",
+        title="Stage env.<USER_VAR> interpolated into shell step — review upstream provenance",
+        severity=Severity.MEDIUM,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-4",
+        review_needed=True,
+        confidence="low",
+        description=(
+            'A shell step ``"...${env.<VAR>}..."`` interpolation references a '
+            "user-defined env variable in a GString (double-quoted "
+            "Groovy string).  Pipeline env variables flow between "
+            "stages — a stage that assigns ``env.X = ...`` from "
+            "``params.X``, upstream-build variables, file contents, "
+            "or any attacker-controllable source produces an env "
+            "value that, when spliced into a later stage's shell, is "
+            "the same threat shape as SEC4-JK-001's direct splice "
+            "but with the taint transiting through the env map.  "
+            "Review the assigning stage's provenance and sanitise "
+            "before writing to ``env.X``, or move the consuming "
+            "the consuming shell step to a single-quoted GString."
+        ),
+        pattern=RegexPattern(
+            match=(
+                r'(?:sh|bat|powershell)\s+"{1,3}.*\$\{?\s*env\s*\.\s*'
+                r"(?!(?:JOB_NAME|JOB_BASE_NAME|JOB_URL|"
+                r"BUILD_NUMBER|BUILD_ID|BUILD_TAG|BUILD_URL|"
+                r"BUILD_DISPLAY_NAME|STAGE_NAME|RUN_DISPLAY_URL|"
+                r"RUN_ARTIFACTS_DISPLAY_URL|RUN_CHANGES_DISPLAY_URL|"
+                r"WORKSPACE|JENKINS_HOME|JENKINS_URL|"
+                r"NODE_NAME|NODE_LABELS|EXECUTOR_NUMBER|"
+                r"PATH|HOME|USER|HOSTNAME|"
+                r"BRANCH_NAME|CHANGE_ID|CHANGE_TARGET|GIT_COMMIT|GIT_BRANCH|GIT_URL"
+                r")\b)[A-Za-z_]"
+            ),
+            exclude=[r"^\s*//"],
+        ),
+        remediation=(
+            "Either move the value through to the consumer's shell "
+            "via a single-quoted (non-interpolating) Groovy string so "
+            "the shell sees the literal expression and you can quote "
+            "it as a shell variable:\n"
+            "\n"
+            "  sh 'echo \"$MY_VAR\"'\n"
+            "\n"
+            "or sanitise at the assigning stage before writing to "
+            "``env.X``:\n"
+            "\n"
+            "  stage('Prep') {\n"
+            "    steps { script {\n"
+            "      env.SAFE_BRANCH = params.BRANCH.replaceAll(/[^A-Za-z0-9_.-]/, '')\n"
+            "    } }\n"
+            "  }\n"
+            "\n"
+            "This rule is review-needed because the taint source is "
+            "not visible from the consuming line alone — it depends "
+            "on the upstream assignment."
+        ),
+        reference="https://www.jenkins.io/doc/book/pipeline/jenkinsfile/#string-interpolation",
+        test_positive=[
+            '        sh "echo ${env.RELEASE_TAG}"',
+            '        sh "deploy.sh --env=${env.DEPLOY_TARGET}"',
+        ],
+        test_negative=[
+            '        sh "echo ${env.JOB_NAME}-${env.BUILD_NUMBER}"',
+            '        sh "checkout ${env.GIT_COMMIT}"',
+            "        sh 'echo \"$MY_VAR\"'",
+            '        // sh "echo ${env.RELEASE_TAG}"',
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "Jenkins pipeline env variables are a cross-stage transit "
+            "channel for attacker-controllable bytes.  SEC4-JK-001 "
+            "catches direct ``params.X`` splices; this rule surfaces "
+            "the transit form where an earlier stage assigns "
+            "``env.X = params.X`` and a later stage interpolates "
+            "``env.X`` into a GString."
+        ),
     ),
 ]

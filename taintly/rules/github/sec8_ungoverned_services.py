@@ -10,7 +10,38 @@ A compromised container image has read access to all secrets, source code,
 and build artefacts within the job.
 """
 
+import re
+
 from taintly.models import Platform, RegexPattern, Rule, Severity
+
+
+class DependabotMissingCooldownPattern:
+    _VERSION_2_RE = re.compile(r"^version:\s*[\"']?2[\"']?\s*(?:#.*)?$", re.MULTILINE)
+    _PACKAGE_RE = re.compile(r"^(\s*)-\s+package-ecosystem:")
+    _COOLDOWN_RE = re.compile(r"^\s+cooldown:")
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if not self._VERSION_2_RE.search(content):
+            return []
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith("#"):
+                continue
+            m = self._PACKAGE_RE.match(line)
+            if not m:
+                continue
+            item_indent = len(m.group(1))
+            block: list[str] = []
+            for following in lines[i + 1 :]:
+                stripped = following.strip()
+                indent = len(following) - len(following.lstrip(" \t"))
+                if stripped and indent <= item_indent:
+                    break
+                block.append(following)
+            if not any(self._COOLDOWN_RE.match(block_line) for block_line in block):
+                results.append((i + 1, line.strip()))
+        return results
+
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -181,5 +212,85 @@ RULES: list[Rule] = [
             "The risk exceeds unpinned actions because called workflows can themselves call "
             "further nested workflows, multiplying the scope."
         ),
+    ),
+    # =========================================================================
+    # SEC8-GH-005: dependabot.yml update spec missing ``cooldown:``
+    # =========================================================================
+    Rule(
+        id="SEC8-GH-005",
+        title="Dependabot update spec missing ``cooldown:`` — no post-release window",
+        severity=Severity.LOW,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-8",
+        review_needed=True,
+        confidence="low",
+        description=(
+            "A ``.github/dependabot.yml`` update spec does not declare "
+            "a ``cooldown:`` block.  Without cooldown, Dependabot "
+            "opens a PR within minutes of a new release — including "
+            "releases that turn out to be compromised hours later "
+            "(tj-actions, xz-utils, several Node ecosystem incidents).  "
+            "Set a short cooldown (3-7 days) to bound the window where "
+            "a freshly-published malicious version can reach your "
+            "main branch through automated bump PRs."
+        ),
+        pattern=DependabotMissingCooldownPattern(),
+        remediation=(
+            "Add a ``cooldown:`` block to each update spec.  3-7 days "
+            "covers the common-case where a malicious release is "
+            "spotted within a week:\n"
+            "\n"
+            "  version: 2\n"
+            "  updates:\n"
+            "    - package-ecosystem: npm\n"
+            "      directory: /\n"
+            "      schedule:\n"
+            "        interval: daily\n"
+            "      cooldown:\n"
+            "        default-days: 5\n"
+            "        semver-major-days: 7\n"
+        ),
+        reference="https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#cooldown",
+        test_positive=[
+            (
+                "version: 2\nupdates:\n  - package-ecosystem: npm\n"
+                "    directory: /\n    schedule:\n      interval: daily\n"
+            ),
+            (
+                "version: 2\nupdates:\n  - package-ecosystem: pip\n"
+                "    directory: /backend\n    schedule:\n      interval: weekly\n"
+            ),
+        ],
+        test_negative=[
+            (
+                "version: 2\nupdates:\n  - package-ecosystem: npm\n"
+                "    directory: /\n    schedule:\n      interval: daily\n"
+                "    cooldown:\n      default-days: 5\n"
+            ),
+            (
+                "name: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: pytest\n"
+            ),
+        ],
+        stride=["T"],
+        threat_narrative=(
+            "Several documented supply-chain compromises (tj-actions, "
+            "xz-utils, lottie-player, ua-parser-js, event-stream) "
+            "published malicious versions that were detected within "
+            "hours-to-days of release.  Repositories without "
+            "Dependabot cooldown auto-opened bump PRs on the "
+            "compromised version inside that detection window — and "
+            "any repo with auto-merge enabled merged before the alarm "
+            "was raised.  A short cooldown converts an "
+            "intra-minute exposure window into an intra-week one, "
+            "during which community detection routinely flags the "
+            "bad release."
+        ),
+        incidents=[
+            "tj-actions/changed-files (Mar 2025)",
+            "xz-utils (Mar 2024)",
+            "lottie-player (Oct 2024)",
+            "event-stream (Nov 2018)",
+        ],
     ),
 ]

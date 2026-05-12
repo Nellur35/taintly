@@ -1,0 +1,29 @@
+# release_pr_only_job.yml - safe fixture for SEC1-GH-001.
+#
+# A release preparation job can bump metadata and open a release PR
+# without publishing packages, pushing images, creating releases, or
+# deploying to production.
+name: Prepare release
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111
+        with:
+          persist-credentials: false
+      - name: Bump version
+        run: ./scripts/release.sh --bump patch
+      - name: Create Pull Request
+        run: gh pr create --base main --head release-branch --fill
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

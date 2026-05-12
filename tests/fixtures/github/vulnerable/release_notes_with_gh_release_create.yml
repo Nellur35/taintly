@@ -1,0 +1,20 @@
+# release_notes_with_gh_release_create.yml - vulnerable fixture for SEC1-GH-001.
+#
+# A release-notes-shaped job is not exempt when it actually creates a
+# release without an environment approval gate.
+name: Release notes publish
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-notes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111
+      - name: Create release
+        run: gh release create v1.2.3 --notes-file release-body.md

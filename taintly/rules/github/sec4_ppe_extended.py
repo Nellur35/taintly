@@ -21,6 +21,41 @@ from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePatter
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 
+
+class StepOutputShellInterpolationPattern:
+    _OUTPUT_RE = re.compile(
+        r"\$\{\{\s*steps\.[\w-]+\.outputs(?:\.[\w-]+|\[['\"][^'\"]+['\"]\])\s*\}\}"
+    )
+    _RUN_LINE_RE = re.compile(r"^\s*(?:-\s+)?run\s*:\s*(.*)$")
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        in_run_block = False
+        run_indent = 0
+        for i, line in enumerate(lines):
+            stripped = line.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            if in_run_block and indent <= run_indent:
+                in_run_block = False
+
+            m = self._RUN_LINE_RE.match(line)
+            if m:
+                value = m.group(1).strip()
+                if value in {"|", "|-", "|+", ">", ">-", ">+"}:
+                    in_run_block = True
+                    run_indent = indent
+                    continue
+                if self._OUTPUT_RE.search(value):
+                    results.append((i + 1, line.strip()))
+                continue
+
+            if in_run_block and self._OUTPUT_RE.search(line):
+                results.append((i + 1, line.strip()))
+        return results
+
+
 # ---------------------------------------------------------------------------
 # SEC4-GH-008 helpers — Phase 8 iteration 3 (2026-05-04).
 #
@@ -1426,5 +1461,82 @@ RULES: list[Rule] = [
             "looking like an opaque blob to a casual reviewer."
         ),
         incidents=["Ultralytics (Dec 2024)", "Trivy supply chain (Mar 2026)"],
+    ),
+    # =========================================================================
+    # SEC4-GH-023: ``${{ steps.X.outputs.Y }}`` interpolated into shell
+    #
+    # Step outputs are common transit for attacker-controllable bytes:
+    # an earlier step that scrapes a PR title via ``gh api``, reads a
+    # file the PR author wrote, or captures any ``github.event.*``
+    # value into ``$GITHUB_OUTPUT`` produces an output that carries
+    # attacker bytes.  Splicing that output into a ``run:`` body is
+    # shell injection — same threat shape as ``github.event.X`` direct
+    # splice (SEC4-GH-004), but the taint transits through the
+    # step-output map.  Maps to part of zizmor's
+    # ``template-injection`` audit.
+    # =========================================================================
+    Rule(
+        id="SEC4-GH-023",
+        title="Step output interpolated into shell — taint transit via outputs",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        review_needed=True,
+        confidence="low",
+        description=(
+            "A ``${{ steps.<id>.outputs.<name> }}`` reference is "
+            "spliced into a workflow expression outside of a safe "
+            "``env:`` assignment.  Step outputs are common transit "
+            "for attacker-controllable bytes: a previous step that "
+            "scrapes a PR title via ``gh api``, reads a file the PR "
+            "author wrote, or captures any ``github.event.*`` value "
+            "into ``$GITHUB_OUTPUT`` produces an output that carries "
+            "attacker bytes.  Splicing that output into a ``run:`` "
+            "body is shell injection — the same threat shape as "
+            "``${{ github.event.X }}`` direct interpolation, but the "
+            "taint transits through the step-output map.  Review the "
+            "upstream step that produces the output; if any upstream "
+            "value can come from a fork PR / issue / comment / "
+            "branch name, route through ``env:`` and validate."
+        ),
+        pattern=StepOutputShellInterpolationPattern(),
+        remediation=(
+            "Route the step output through an ``env:`` mapping at the "
+            "consuming step, then reference as a double-quoted shell "
+            "variable.  Validate against an allowlist if the upstream "
+            "value can come from a fork PR:\n"
+            "  env:\n    TITLE: ${{ steps.read-pr.outputs.title }}\n"
+            '  run: case "$TITLE" in [A-Za-z0-9\\ -]*) ;; *) exit 1;; esac\n'
+            "If the upstream step is itself sanitising attacker input "
+            "(``jq -R`` shell-escape, allowlist regex), document that "
+            "in a comment on the producing step so future readers see "
+            "the chain.  This rule is review-needed because the "
+            "taint source is not visible from the consuming line "
+            "alone — it depends on the upstream producer."
+        ),
+        reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable",
+        test_positive=[
+            '        run: echo "${{ steps.pr.outputs.title }}"',
+            "        run: gh release create v1 ${{ steps.tag.outputs.name }}",
+        ],
+        test_negative=[
+            "        env:\n          TITLE: ${{ steps.pr.outputs.title }}",
+            '        # run: echo "${{ steps.pr.outputs.title }}"',
+            "        if: steps.check.outputs.status == 'ok'",
+            "      - name: Build ${{ steps.cfg.outputs.label }}",
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "Step outputs are an opaque transit channel for attacker-"
+            "controllable bytes.  A workflow author who carefully avoids "
+            "``${{ github.event.X }}`` directly in a ``run:`` body can "
+            "still be compromised when an earlier step reads the same "
+            "value into an output and the later step splices it in.  "
+            "The Langflow and Ultralytics injections (2024-2025) both "
+            "had upstream-output forms in the wild — SEC4-GH-004 "
+            "catches the direct form; this rule catches the transit "
+            "form."
+        ),
+        incidents=["Ultralytics (Dec 2024)"],
     ),
 ]

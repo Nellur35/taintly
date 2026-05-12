@@ -135,6 +135,33 @@ def test_engine_err_on_crashing_rule(tmp_path):
     assert "BROKEN" in engine_errs[0].title
 
 
+def test_multiline_quoted_scalar_does_not_emit_structural_engine_err(tmp_path):
+    """Valid YAML multi-line quoted scalars should not degrade
+    structural coverage.  This mirrors LangChain's reusable release
+    workflow input description shape.
+    """
+    workflow = tmp_path / "release.yml"
+    workflow.write_text(
+        "on:\n"
+        "  workflow_call:\n"
+        "    inputs:\n"
+        "      allow-prereleases:\n"
+        "        type: boolean\n"
+        '        description: "Pass `--prerelease=allow` to wheel-install steps so\n'
+        "          transitive prerelease deps resolve. Use only when the release itself\n"
+        '          is a prerelease."\n'
+        "jobs:\n"
+        "  release:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo release\n"
+    )
+
+    findings = scan_file(str(workflow), rules=[])
+
+    assert not [f for f in findings if f.rule_id == "ENGINE-ERR"]
+
+
 # =============================================================================
 # Line number accuracy
 # =============================================================================

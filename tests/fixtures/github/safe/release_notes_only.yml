@@ -1,0 +1,23 @@
+# release_notes_only.yml - safe fixture for SEC1-GH-001.
+#
+# A release-notes job prepares text used by a later publish job. It is
+# not itself a production deploy/publish job and should not require an
+# environment gate.
+name: Release notes
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  release-notes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111
+      - name: Generate release body
+        run: python scripts/release_notes.py > release-body.md

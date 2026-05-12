@@ -25,6 +25,7 @@ collapse — no JavaScript required for the basic interaction.
 from __future__ import annotations
 
 import os
+import posixpath
 from datetime import datetime
 from html import escape
 from typing import TYPE_CHECKING
@@ -55,16 +56,19 @@ def _relpath_for_display(file: str, repo_path: str) -> str:
     """
     if not repo_path or not file:
         return file
-    if not os.path.isabs(file):
-        return file.replace(os.sep, "/")
     try:
-        rel = os.path.relpath(file, repo_path)
+        if file.startswith("/") and repo_path.startswith("/"):
+            rel = posixpath.relpath(file, repo_path)
+        elif os.path.isabs(file):
+            rel = os.path.relpath(file, repo_path)
+        else:
+            rel = file
     except (ValueError, OSError):
         return file
     # Normalise to forward slashes for consistent reading regardless
     # of the host OS — matches the slashes already used elsewhere in
     # the report.
-    return rel.replace(os.sep, "/")
+    return rel.replace("\\", "/")
 
 
 # ---------------------------------------------------------------------------
