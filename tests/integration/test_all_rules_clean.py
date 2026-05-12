@@ -50,7 +50,13 @@ def _is_stub_rule(rule) -> bool:
         behaviour.
     """
     from taintly.models import AbsencePattern, Severity
-    from taintly.rules.github.sec3_sec4_supply_chain_ppe import ImposterCommitPattern
+    from taintly.rules.github.sec3_sec4_supply_chain_ppe import (
+        ArchivedActionPattern,
+        ImposterCommitPattern,
+    )
+    from taintly.rules.gitlab.sec3_sec6_supply_chain_creds import (
+        ArchivedIncludeProjectPattern,
+    )
     from taintly.workflow_corpus import CorpusPattern
     if isinstance(rule.pattern, CorpusPattern):
         return True
@@ -59,6 +65,10 @@ def _is_stub_rule(rule) -> bool:
     # tests/unit/test_imposter_commits.py against a stub verifier;
     # the per-file test-sample contract isn't applicable.
     if isinstance(rule.pattern, ImposterCommitPattern):
+        return True
+    # SEC3-GH-010 (archived-uses) + SEC3-GL-008 (archived-includes) —
+    # opt-in network-dependent rules with the same exemption rationale.
+    if isinstance(rule.pattern, (ArchivedActionPattern, ArchivedIncludeProjectPattern)):
         return True
     if (
         getattr(rule, "review_needed", False)
@@ -195,16 +205,16 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         ]),
         ("github/vulnerable/ai_mcp_privileged.yml",      ["AI-GH-012"], [
             "AI-GH-006", "AI-GH-015", "AI-GH-020", "SEC10-GH-001",
-            "SEC3-GH-001", "SEC3-GH-006", "SEC6-GH-010",
+            "SEC3-GH-001", "SEC3-GH-006", "SEC4-GH-023", "SEC6-GH-010",
         ]),
         ("github/vulnerable/ai_agent_cli_on_pr.yml",     ["AI-GH-013"], ["AI-GH-015", "SEC10-GH-001"]),
         ("github/vulnerable/ai_agent_output_to_shell.yml", ["AI-GH-014"], [
             "AI-GH-006", "AI-GH-015", "AI-GH-020", "SEC10-GH-001",
-            "SEC3-GH-001", "SEC3-GH-006", "SEC6-GH-010",
+            "SEC3-GH-001", "SEC3-GH-006", "SEC4-GH-023", "SEC6-GH-010",
         ]),
         ("github/vulnerable/taint_agent_output.yml",    ["TAINT-GH-005"], [
             "AI-GH-006", "AI-GH-015", "AI-GH-020", "SEC10-GH-001",
-            "SEC3-GH-001", "SEC3-GH-006", "SEC6-GH-010",
+            "SEC3-GH-001", "SEC3-GH-006", "SEC4-GH-023", "SEC6-GH-010",
         ]),
         # ── GitLab ──────────────────────────────────────────────────────────────
         ("gitlab/vulnerable/ai_trust_remote_code.yml",           ["AI-GL-001"], ["SEC10-GL-002"]),
@@ -256,7 +266,7 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         ("jenkins/vulnerable/password_param.Jenkinsfile",           ["SEC2-JK-001"], ["SEC1-JK-002", "SEC10-JK-001", "SEC5-JK-001"]),
         ("jenkins/vulnerable/credentials_from_params.Jenkinsfile",  ["SEC2-JK-002"], ["SEC1-JK-002", "SEC10-JK-001", "SEC5-JK-001"]),
         ("jenkins/vulnerable/input_no_submitter.Jenkinsfile",       ["SEC4-JK-004"], ["SEC1-JK-002", "SEC10-JK-001", "SEC5-JK-001"]),
-        ("jenkins/vulnerable/pr_author_injection.Jenkinsfile",      ["SEC4-JK-005"], ["SEC1-JK-002", "SEC10-JK-001", "SEC4-JK-002", "TAINT-JK-001"]),
+        ("jenkins/vulnerable/pr_author_injection.Jenkinsfile",      ["SEC4-JK-005"], ["SEC1-JK-002", "SEC10-JK-001", "SEC4-JK-002", "SEC4-JK-008", "TAINT-JK-001"]),
         ("jenkins/vulnerable/no_disable_concurrent.Jenkinsfile",    ["SEC5-JK-001"], ["SEC1-JK-002"]),
         ("jenkins/vulnerable/docker_image_latest_step.Jenkinsfile", ["SEC3-JK-003"], ["SEC1-JK-002", "SEC10-JK-001"]),
         ("jenkins/vulnerable/curl_insecure.Jenkinsfile",            ["SEC6-JK-004"], ["SEC1-JK-002", "SEC10-JK-001"]),

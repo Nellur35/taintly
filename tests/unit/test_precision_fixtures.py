@@ -25,6 +25,7 @@ from taintly.rules.registry import load_all_rules
 
 _FIX = Path(__file__).parent.parent / "fixtures" / "precision"
 _SAFE_GH = Path(__file__).parent.parent / "fixtures" / "github" / "safe"
+_VULN_GH = Path(__file__).parent.parent / "fixtures" / "github" / "vulnerable"
 
 
 @pytest.fixture(scope="module")
@@ -624,4 +625,35 @@ def test_engine_handles_gitlab_reference_tag(gitlab_rules, tmp_path):
     engine_err = [f for f in findings if f.rule_id == "ENGINE-ERR"]
     assert not engine_err, (
         f"!reference must not trigger ENGINE-ERR; got {engine_err}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# SEC2-GH-002 - workflow_call-only reusable workflows are exempt
+#
+# Reusable workflows whose only top-level trigger is workflow_call inherit
+# the calling workflow's permissions block. A workflow that has
+# workflow_call and any other trigger is invocable directly and still
+# requires its own permissions block.
+# ---------------------------------------------------------------------------
+
+
+def test_sec2_gh_002_does_not_fire_on_workflow_call_only_reusable(gh_rules):
+    findings = scan_file(str(_SAFE_GH / "reusable_workflow_call_only.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC2-GH-002"]
+    assert not fired, (
+        "SEC2-GH-002 must not fire on a workflow_call-only reusable; "
+        f"the caller's permissions block inherits. Got: {fired}"
+    )
+
+
+def test_sec2_gh_002_still_fires_when_workflow_call_paired_with_push(gh_rules):
+    findings = scan_file(
+        str(_VULN_GH / "workflow_call_with_other_triggers_no_permissions.yml"), gh_rules
+    )
+    fired = [f for f in findings if f.rule_id == "SEC2-GH-002"]
+    assert fired, (
+        "SEC2-GH-002 must fire when workflow_call is paired with another "
+        "trigger (push) and no permissions block; the workflow can be "
+        "invoked directly without a caller setting permissions"
     )

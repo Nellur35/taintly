@@ -85,7 +85,7 @@ def _count_platform_checks() -> int:
         path = ROOT / "taintly" / "platform" / f"{plat}_checks.py"
         if not path.exists():
             continue
-        for match in pattern.finditer(path.read_text()):
+        for match in pattern.finditer(path.read_text(encoding="utf-8")):
             seen.add(match.group(1))
     return len(seen)
 

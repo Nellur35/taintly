@@ -1,0 +1,24 @@
+# release_pr_then_publish.yml - vulnerable fixture for SEC1-GH-001.
+#
+# PR preparation cues do not exempt the job when the same job performs
+# real package publication without an environment approval gate.
+name: Release PR and publish
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@1111111111111111111111111111111111111111
+      - name: Create Pull Request
+        run: gh pr create --base main --head release-branch --fill
+      - name: Publish package
+        run: npm publish --provenance --access public

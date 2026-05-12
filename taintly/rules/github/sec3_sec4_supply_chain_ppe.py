@@ -6,16 +6,14 @@ These two categories cover the exact attack vectors used in documented supply ch
 import re
 
 from taintly.models import (
-    _YAML_BOOL_FALSE,
     CompromisedActionPattern,
     ContextPattern,
     Platform,
     RegexPattern,
     Rule,
-    SequencePattern,
     Severity,
 )
-from taintly.platform import github_sha_verify
+from taintly.platform import github_archived_check, github_sha_verify
 from taintly.structural_pattern import StructuralPattern
 
 # ---------------------------------------------------------------------------
@@ -39,7 +37,28 @@ _BRANCH_REF_NAMES = frozenset({"main", "master", "develop", "dev"})
 # precision gain — the same threat is more usefully reported via
 # SEC3-GH-006 (third-party inventory).  See Phase 8 iteration 2
 # tuning doc for the corpus-baseline measurement.
-_FIRST_PARTY_ACTION_ORGS = frozenset({"actions", "github"})
+# First-party action publishers — actions in these orgs are
+# operationally trusted (the platform vendor itself or a vendor-
+# equivalent foundation).  SEC3-GH-001 silences fires here so the
+# rule's HIGH severity is reserved for genuinely third-party
+# unpinned actions; SEC3-GH-006's inventory review is the right
+# channel if a strict-pinning policy needs to enumerate first-party
+# actions for SHA pinning.
+#
+# Adding to this set is a trust-posture decision — the org must be
+# the documented vendor for the platforms / ecosystems we cover, not
+# just a popular third-party.
+_FIRST_PARTY_ACTION_ORGS = frozenset(
+    {
+        "actions",  # GitHub itself
+        "github",  # GitHub secondary org
+        "aws-actions",  # AWS official
+        "azure",  # Azure / Microsoft official
+        "google-github-actions",  # Google Cloud official
+        "googleapis",  # Google official
+        "pypa",  # Python Packaging Authority
+    }
+)
 
 # Attacker-controlled GitHub-context expressions that turn an
 # unguarded ``run:`` interpolation into shell injection.  Kept in
@@ -68,6 +87,126 @@ _DANGEROUS_GITHUB_CONTEXT_RE = re.compile(
     r"head_ref"
     r")"
 )
+
+
+# ---------------------------------------------------------------------------
+# SEC4-GH-005 — actions/checkout downstream-credential-consumer detector
+# ---------------------------------------------------------------------------
+#
+# The previous rule fired on every actions/checkout that didn't
+# explicitly set ``persist-credentials: false`` — corpus baseline
+# showed ~80% of fires were FP-density (the persisted credential
+# died with the runner, no later step used it).  That tradeoff is
+# why the severity was downgraded MEDIUM → LOW in iter-3.
+#
+# The path forward documented at the time was: fire only when a
+# downstream step in the same job actually consumes the persisted
+# credential.  Implementing that requires a job-scoped scan, which
+# this custom pattern provides.
+
+_CHECKOUT_USES_RE = re.compile(r"uses:\s*actions/checkout@", re.IGNORECASE)
+# YAML boolean false accepts ``false``/``False``/``FALSE`` and
+# ``no``/``No``/``NO``; quote the value or not.  IGNORECASE matches
+# all surface forms.
+_PERSIST_FALSE_RE = re.compile(
+    r"""persist-credentials:\s*['"]?(?:false|no)['"]?\b""",
+    re.IGNORECASE,
+)
+# Shell git operations that consume the persisted credential.
+_GIT_CREDENTIAL_OP_RE = re.compile(r"\bgit\s+(?:push|fetch\s+(?:https?://|ssh://|git@))\b")
+# Actions whose documented behaviour is "git push using the persisted
+# checkout token."  Each is the credential's actual consumer.
+_GIT_PUSH_ACTION_RE = re.compile(
+    r"uses:\s*(?:"
+    r"peaceiris/actions-gh-pages"
+    r"|ad-m/github-push-action"
+    r"|stefanzweifel/git-auto-commit-action"
+    r"|EndBug/add-and-commit"
+    r"|crazy-max/ghaction-github-pages"
+    r"|JamesIves/github-pages-deploy-action"
+    r"|s0/git-publish-subdir-action"
+    r"|cpina/github-action-push-to-another-repository"
+    r")",
+    re.IGNORECASE,
+)
+_LINE_COMMENT_RE = re.compile(r"^\s*#")
+_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?([A-Za-z_][\w-]*)['\"]?")
+
+
+def _credential_consumer_surface(lines: list[str]) -> str:
+    """Return executable-ish lines for the credential-consumer check.
+
+    This deliberately avoids treating comments and heredoc payload
+    text as downstream credential use.  It is still regex-based, but it
+    keeps SEC4-GH-005 from firing on prose or scripts merely written to
+    disk.
+    """
+    surface: list[str] = []
+    heredoc_end: str | None = None
+    for line in lines:
+        stripped = line.strip()
+        if heredoc_end:
+            if stripped == heredoc_end:
+                heredoc_end = None
+            continue
+        if _LINE_COMMENT_RE.match(line):
+            continue
+        code = line.split("#", 1)[0]
+        surface.append(code)
+        m = _HEREDOC_RE.search(code)
+        if m:
+            heredoc_end = m.group(1)
+    return "\n".join(surface)
+
+
+class _CheckoutDownstreamCredentialConsumerPattern:
+    """Pattern for SEC4-GH-005 (Phase 8 follow-up).
+
+    Fires when ALL of:
+
+    * a step uses ``actions/checkout@<ref>`` AND
+    * that step does NOT explicitly set ``persist-credentials: false``
+      within an 8-line lookahead AND
+    * a subsequent step IN THE SAME JOB consumes the persisted
+      credential — either a ``git push`` / ``git fetch <url>`` /
+      ``git config user`` shell op, OR a documented git-pushing
+      action (peaceiris/actions-gh-pages, ad-m/github-push-action,
+      stefanzweifel/git-auto-commit-action, etc.).
+
+    "Same job" is determined via ``_split_into_job_segments`` so a
+    sibling job's git push doesn't false-trigger a finding on this
+    job's checkout.
+
+    Conforms to ``PatternProtocol``.
+    """
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        from taintly.models import _split_into_job_segments
+
+        results: list[tuple[int, str]] = []
+        for seg_start, seg_lines in _split_into_job_segments(lines):
+            seg_text = _credential_consumer_surface(seg_lines)
+            has_consumer = bool(_GIT_CREDENTIAL_OP_RE.search(seg_text)) or bool(
+                _GIT_PUSH_ACTION_RE.search(seg_text)
+            )
+            if not has_consumer:
+                continue
+            for j, line in enumerate(seg_lines):
+                if _LINE_COMMENT_RE.match(line):
+                    continue
+                if not _CHECKOUT_USES_RE.search(line):
+                    continue
+                window = "\n".join(seg_lines[j : j + 8])
+                if _PERSIST_FALSE_RE.search(window):
+                    continue
+                downstream = _credential_consumer_surface(seg_lines[j + 1 :])
+                if not (
+                    _GIT_CREDENTIAL_OP_RE.search(downstream)
+                    or _GIT_PUSH_ACTION_RE.search(downstream)
+                ):
+                    continue
+                results.append((seg_start + j + 1, line.strip()))
+        return results
 
 
 def _has_dangerous_github_context(value: str, _value_kind: str, _path: tuple[object, ...]) -> bool:
@@ -104,10 +243,12 @@ def _is_unpinned_uses_value(value: str, _value_kind: str, _path: tuple[object, .
     head, _, ref = v.partition("@")
     if not ref:
         return False
-    # First-party allowlist: GitHub-published action namespaces are
-    # operationally trusted; SEC3-GH-006 is the right channel for
-    # any inventory review of these.
-    org = head.split("/", 1)[0] if "/" in head else ""
+    # First-party allowlist: platform-vendor-published action
+    # namespaces are operationally trusted; SEC3-GH-006 is the right
+    # channel for any inventory review of these.  GitHub matches
+    # ``uses:`` owner/repo case-insensitively, so we lowercase to
+    # match the set's canonical form.
+    org = head.split("/", 1)[0].lower() if "/" in head else ""
     if org in _FIRST_PARTY_ACTION_ORGS:
         return False
     # Branch refs are SEC3-GH-002's CRITICAL scope; don't double-
@@ -143,6 +284,55 @@ _USES_SHA_RE = re.compile(
     # or branch (SEC3-GH-001 covers those).
     r"\buses:\s+([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)@([0-9a-fA-F]{40})\b"
 )
+
+
+# ---------------------------------------------------------------------------
+# SEC3-GH-010 — archived-repo detection (opt-in, network-dependent)
+# ---------------------------------------------------------------------------
+#
+# A ``uses: owner/repo@<ref>`` reference whose target repository has
+# been archived on GitHub.  Archived repos are read-only — no new
+# releases, no security patches, no maintainer response to compromise
+# reports.  The check is opt-in via ``--check-archived-actions`` (per-
+# action GitHub API calls).
+
+_USES_OWNER_REPO_RE = re.compile(
+    r"\buses:\s+([A-Za-z0-9][\w-]*)/([A-Za-z0-9][\w.-]*)(?:/[\w./-]+)?@\S+"
+)
+
+
+class ArchivedActionPattern:
+    """Pattern for SEC3-GH-010.  Gated by
+    :func:`github_archived_check.is_enabled`.  Skips first-party orgs.
+    Conforms to ``PatternProtocol``."""
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if not github_archived_check.is_enabled():
+            return []
+        seen: set[tuple[str, str, int]] = set()
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            m = _USES_OWNER_REPO_RE.search(line)
+            if not m:
+                continue
+            owner, repo = m.group(1), m.group(2)
+            if owner.lower() in _FIRST_PARTY_ACTION_ORGS:
+                continue
+            key = (owner.lower(), repo.lower(), i + 1)
+            if key in seen:
+                continue
+            seen.add(key)
+            verdict = github_archived_check.is_archived(owner, repo)
+            if verdict is True:
+                snippet = (
+                    f"{owner}/{repo} is archived on GitHub — no new releases, "
+                    f"no security patches, no maintainer response to compromise."
+                )
+                results.append((i + 1, snippet))
+        return results
 
 
 class ImposterCommitPattern:
@@ -787,22 +977,16 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC4-GH-005",
-        title="Checkout persists credentials to disk",
-        # Severity downgraded MEDIUM -> LOW (Phase 8 tuning, 2026-05-03).
-        # Corpus baseline (35 repos, 2080 findings): SEC4-GH-005 fires
-        # in 31/31 repos with actions/checkout, including well-defended
-        # orgs (Microsoft, AWS, Google) where checkout is checkout-only
-        # with no downstream git push/config.  ~80% of fires are
-        # FP-density (the persisted credential dies with the runner;
-        # no later step uses it).  Rule remains precision-correct -
-        # it still flags persist-credentials: true as the
-        # actions/checkout default - but triage priority is
-        # informational, not MEDIUM.  A sharper tune (custom predicate
-        # scanning subsequent steps for git push/config) would let the
-        # rule fire HIGH only when downstream actually consumes the
-        # credential; that requires structural-reader hooks beyond
-        # SequencePattern's bounded lookahead and is deferred.
-        severity=Severity.LOW,
+        title="Checkout persists credentials AND a downstream step consumes them",
+        # Phase 8 follow-up (2026-05-10): tightened from "fires on every
+        # actions/checkout without persist-credentials: false" to "fires
+        # only when a downstream step in the same job actually uses the
+        # persisted credential" (git push/fetch/config or a documented
+        # git-pushing action).  Severity raised back to MEDIUM because
+        # remaining fires are now real risk, not posture-density noise.
+        # See _CheckoutDownstreamCredentialConsumerPattern below for
+        # the consumer detector.
+        severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
@@ -811,25 +995,62 @@ RULES: list[Rule] = [
             "under $RUNNER_TEMP and configures `.git/config` to reference it, so any "
             "subsequent step — including third-party actions — can read the token off "
             "disk and reuse it against the GitHub API without going through the secrets "
-            "facility. Set `persist-credentials: false` unless the job needs to push "
-            "commits from this clone."
+            "facility. This rule fires only when a downstream step in the same job "
+            "actually consumes that credential — a `git push` / `git fetch <url>` / "
+            "`git config user` shell op, or a documented git-pushing action "
+            "(peaceiris/actions-gh-pages, ad-m/github-push-action, "
+            "stefanzweifel/git-auto-commit-action, EndBug/add-and-commit, etc.). "
+            "Set `persist-credentials: false` on the checkout step (or scope the "
+            "downstream push to its own minimal-permissions checkout)."
         ),
-        pattern=SequencePattern(
-            pattern_a=r"uses:\s*actions/checkout@",
-            absent_within=rf"persist-credentials:\s*{_YAML_BOOL_FALSE}",
-            lookahead_lines=8,
-            exclude=[r"^\s*#"],
-        ),
+        pattern=_CheckoutDownstreamCredentialConsumerPattern(),
         remediation="Add 'persist-credentials: false' to the checkout step.",
         reference="https://github.com/actions/checkout#usage",
         test_positive=[
-            "      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0",
-            "      - uses: actions/checkout@abc123def456abc123def456abc123def456abc1",
+            # Checkout + downstream git push in the same job.
+            (
+                "jobs:\n  publish-pages:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - run: |\n"
+                "          git config user.email bot@example.com\n"
+                "          git push origin gh-pages\n"
+            ),
+            # Checkout + a documented git-pushing action.
+            (
+                "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - uses: peaceiris/actions-gh-pages@v3\n"
+                "        with:\n          publish_dir: ./public\n"
+            ),
         ],
         test_negative=[
-            "      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false",
-            "      - uses: actions/checkout@v4\n        with:\n          persist-credentials: no",
-            "      - uses: actions/checkout@v4\n        with:\n          persist-credentials: 'false'",
+            # persist-credentials: false explicitly.
+            (
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
+                "        with:\n          persist-credentials: false\n"
+                "      - run: git push origin main\n"
+            ),
+            # Checkout-only; no downstream consumer — used to fire LOW,
+            # now silent under the consumer-required tune.
+            (
+                "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
+                "      - run: pytest\n"
+            ),
+            # Cross-job: sibling job pushes, but THIS job doesn't.
+            (
+                "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
+                "      - run: pytest\n"
+                "  publish:\n    runs-on: ubuntu-latest\n"
+                "    needs: test\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
+                "        with:\n          persist-credentials: false\n"
+                "      - run: git push\n"
+            ),
         ],
         stride=["I", "T"],
         threat_narrative=(
@@ -838,15 +1059,10 @@ RULES: list[Rule] = [
             "subsequent step — including third-party actions — from the filesystem "
             "without any secrets API call. With write repository permissions, a token "
             "extracted this way can push malicious commits, modify branch protections, "
-            "or inject code into other workflows."
+            "or inject code into other workflows.  The risk is concrete only when a "
+            "downstream step actually uses the credential; this rule scopes to that "
+            "case to keep the signal-to-noise ratio actionable."
         ),
-        # Persist-credentials: false can legitimately be supplied via a
-        # YAML anchor merge (`<<: *checkout_opts`) whose body is defined
-        # at the top of the file, outside the SequencePattern lookahead
-        # window.  The anchor-aware suppression cross-checks against an
-        # expanded copy of the source so the fix-by-anchor pattern
-        # doesn't get reported as a false positive.
-        anchor_aware=True,
     ),
     # =========================================================================
     # SEC3-GH-007: Docker image reference (services.<name>.image: or
@@ -991,6 +1207,61 @@ RULES: list[Rule] = [
         ),
         confidence="high",
         review_needed=True,
+        finding_family="action_pin_drift",
+    ),
+    # =========================================================================
+    # SEC3-GH-010: Archived action repository (opt-in, network-dependent)
+    # =========================================================================
+    Rule(
+        id="SEC3-GH-010",
+        title="Action references an archived GitHub repository",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-3",
+        review_needed=True,
+        confidence="high",
+        description=(
+            "A ``uses: owner/repo@<ref>`` reference points to a GitHub "
+            "repository that is archived (read-only).  Archived repos "
+            "receive no new releases, no security patches, and the "
+            "maintainer is not actively monitoring compromise reports.  "
+            "A vulnerability disclosed against an archived action is "
+            "unlikely to be fixed; a maintainer-account compromise "
+            "against an archived repo may go unnoticed indefinitely.\n"
+            "\n"
+            "This rule is opt-in via ``--check-archived-actions`` "
+            "because verification requires a per-action GitHub API "
+            "call (``GET /repos/{owner}/{repo}`` reading the "
+            "``archived`` flag).  Recommended on a weekly cron rather "
+            "than per-PR.  First-party orgs are skipped — the platform "
+            "vendors don't archive their own action repos."
+        ),
+        pattern=ArchivedActionPattern(),
+        remediation=(
+            "Migrate to a maintained fork or an alternative action that "
+            "covers the same functionality.  Check the archived repo's "
+            "README for a recommended successor; if none, search the "
+            "GitHub Marketplace for actions with similar inputs.  If no "
+            "alternative exists and the action is critical, fork it "
+            "into your own org so security patches can be applied "
+            "in-house — pinning to your fork's SHA makes the supply-"
+            "chain explicit."
+        ),
+        reference="https://docs.github.com/en/repositories/archiving-a-github-repository/archiving-repositories",
+        test_positive=[],
+        test_negative=[],
+        stride=["T", "I"],
+        threat_narrative=(
+            "Archived action repositories are abandoned supply-chain "
+            "surface.  When a CVE is published against an archived "
+            "action, the disclosure-to-patch interval is unbounded.  "
+            "An attacker with the dormant maintainer account can "
+            "publish a new tag that downstream consumers will silently "
+            "pick up if they aren't SHA-pinned; the archived flag "
+            "prevents external PRs but doesn't prevent the owner "
+            "themselves from pushing fresh content.  Migrating off "
+            "archived dependencies is the cheapest mitigation."
+        ),
         finding_family="action_pin_drift",
     ),
 ]

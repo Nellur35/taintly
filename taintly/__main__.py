@@ -372,6 +372,30 @@ def main():
         ),
     )
     parser.add_argument(
+        "--check-archived-actions",
+        action="store_true",
+        help=(
+            "Enable SEC3-GH-010: per-action archived-repo check. "
+            "For each ``uses: owner/repo@<ref>`` reference (skipping "
+            "first-party orgs), query GET /repos/{owner}/{repo} to read "
+            "the ``archived`` flag.  Archived repos receive no new "
+            "releases or security patches.  Requires GITHUB_TOKEN; "
+            "recommended on a weekly cron rather than per-PR."
+        ),
+    )
+    parser.add_argument(
+        "--check-archived-gitlab-projects",
+        action="store_true",
+        help=(
+            "Enable SEC3-GL-008: per-include archived-project check. "
+            "For each ``include:project: namespace/project`` reference, "
+            "query GitLab's projects API to read the ``archived`` flag. "
+            "Archived GitLab projects receive no new releases or "
+            "security patches.  Requires GITLAB_TOKEN; recommended on "
+            "a weekly cron rather than per-pipeline."
+        ),
+    )
+    parser.add_argument(
         "--respect-zizmor-ignores",
         action="store_true",
         help=(
@@ -394,6 +418,16 @@ def main():
         from taintly.platform import github_sha_verify
 
         github_sha_verify.set_enabled(True)
+
+    if args.check_archived_actions:
+        from taintly.platform import github_archived_check
+
+        github_archived_check.set_enabled(True)
+
+    if args.check_archived_gitlab_projects:
+        from taintly.platform import gitlab_archived_check
+
+        gitlab_archived_check.set_enabled(True)
 
     if args.respect_zizmor_ignores:
         from taintly.suppressions import zizmor_compat

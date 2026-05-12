@@ -162,6 +162,24 @@ def test_double_quoted_value_with_escape():
     assert quoted[0].value == "line1\\nline2"
 
 
+def test_multiline_double_quoted_value_continues_until_closing_quote():
+    """Real GitHub workflows use YAML's multi-line quoted scalar
+    form for long input descriptions. The tokenizer should treat
+    the whole quoted run as one scalar instead of cutting off at the
+    first physical line.
+    """
+    src = (
+        'description: "Pass `--prerelease=allow` to wheel-install steps so\n'
+        "  transitive prerelease deps resolve. Use only when the release itself\n"
+        '  is a prerelease."\n'
+        "type: string\n"
+    )
+    quoted = [t for t in _tokens(src) if t.kind == TokenKind.SCALAR_QUOTED]
+    assert len(quoted) == 1
+    assert "transitive prerelease deps resolve" in quoted[0].value
+    assert quoted[0].line == 1
+
+
 # ---------------------------------------------------------------------------
 # Block scalars — chomping and indentation indicators
 # ---------------------------------------------------------------------------
@@ -346,6 +364,52 @@ def test_custom_tag_rejected():
     src = "name: !!str ci\n"
     with pytest.raises(TokenizerError):
         list(tokenize(src))
+
+
+def test_gitlab_reference_tag_consumed_as_opaque_scalar():
+    """``!reference [section, key]`` is the GitLab CI cross-section
+    value reference.  Treat it as an opaque scalar so the walker
+    doesn't bail — the structural reader can't resolve the reference,
+    but per-line rules see the source text and the rest of the file
+    keeps tokenizing.
+    """
+    src = (
+        "rules:\n"
+        "  - if: '$DAP_RELEASE_NOTES_TOKEN == null'\n"
+        "    when: never\n"
+        "  - !reference [.ai-gateway:rules:tagging, rules]\n"
+        "allow_failure: true\n"
+    )
+    tokens = list(tokenize(src))
+    refs = [t for t in tokens if "!reference" in t.value]
+    assert len(refs) == 1
+    assert refs[0].kind == TokenKind.SCALAR_PLAIN
+    assert refs[0].value == "!reference [.ai-gateway:rules:tagging, rules]"
+    keys = [t.value for t in tokens if t.kind == TokenKind.KEY]
+    assert "allow_failure" in keys
+
+
+def test_gitlab_reference_tag_handles_nested_brackets():
+    """Some GitLab !reference values contain nested flow sequences."""
+    src = "extends:\n  - !reference [.foo, [bar, baz]]\n"
+    tokens = list(tokenize(src))
+    refs = [t for t in tokens if "!reference" in t.value]
+    assert len(refs) == 1
+    assert refs[0].kind == TokenKind.SCALAR_PLAIN
+    assert refs[0].value == "!reference [.foo, [bar, baz]]"
+
+
+def test_other_custom_tags_still_rejected():
+    """The !reference allowance is narrowly scoped — other ``!``-prefixed
+    tags continue to raise so the caller falls back to regex scanning.
+    """
+    for src in (
+        "name: !!str ci\n",
+        "config: !CustomTag value\n",
+        "value: !MyApp/Tag thing\n",
+    ):
+        with pytest.raises(TokenizerError):
+            list(tokenize(src))
 
 
 def test_complex_key_rejected():

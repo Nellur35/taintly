@@ -172,6 +172,18 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "separator; the zero-space mutant is a known YAML-format edge in "
         "the same separator-fragility family."
     ),
+    ("SEC4-JK-008", "quote_swap"): (
+        "Quote-swap mutation flips a double-quoted Groovy GString "
+        '(``sh "...${env.X}..."``) into a single-quoted string '
+        "(``sh '...${env.X}...'``).  Single-quoted Groovy strings DO "
+        "NOT interpolate ``${...}`` — Groovy passes the literal "
+        "``${env.X}`` text to the shell, where ``$`` followed by ``{`` "
+        "is parsed as parameter expansion only if X is a SHELL env "
+        "variable, not the Groovy ``env`` object.  Single-quoted is "
+        "the SAFE form per SEC4-JK-001's well-documented remediation, "
+        "and the rule correctly does not fire.  This is an inherent "
+        "property of Groovy GStrings, not a precision gap."
+    ),
     ("AI-GH-023", "whitespace_pad"): (
         "Same family as AI-GH-019/020/021/022: requires-clause uses "
         "``AI_AGENT_USES_PATTERN``. See AI-GH-022 entry for full rationale."

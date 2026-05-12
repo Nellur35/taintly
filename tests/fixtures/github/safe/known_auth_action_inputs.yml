@@ -1,0 +1,38 @@
+# known_auth_action_inputs.yml - safe fixture for SEC6-GH-010.
+#
+# These action inputs are the documented credential surface for the
+# action itself. Routing the same value through env first does not add
+# masking value; the action is the consumer.
+name: Known action auth inputs
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bench-and-trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: CodSpeedHQ/action@1111111111111111111111111111111111111111
+        with:
+          mode: instrumentation
+          token: ${{ secrets.CODSPEED_TOKEN }}
+
+      - uses: digital-blueprint/gitlab-pipeline-trigger-action@1111111111111111111111111111111111111111
+        with:
+          host: gitlab.com
+          id: example/project
+          ref: main
+          trigger_token: ${{ secrets.GITLAB_TRIGGER_TOKEN }}
+          access_token: ${{ secrets.GITLAB_ACCESS_TOKEN }}
+
+      - uses: actions/download-artifact@1111111111111111111111111111111111111111
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: repo_name
+          run-id: ${{ github.run_id }}
+
+      - uses: google-github-actions/run-gemini-cli@1111111111111111111111111111111111111111
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          prompt: Summarize the release notes.
