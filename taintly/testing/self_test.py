@@ -89,7 +89,15 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
 # pass. Remove entries as the underlying rules are hardened; never
 # add entries to paper over a newly-introduced regression.
 #
-# Each value documents the failure flavour and follow-up pointer.
+# scripts/check_mutation_gap_count.py asserts the COUNT of entries here
+# does not grow vs a committed baseline — keeping kill-rate at 100%
+# only by adding entries here is detected and fails CI.
+#
+# Each value documents the failure flavour and follow-up pointer. As
+# this list approaches 100 entries the per-entry rationale starts
+# carrying owner / expected-fix-date metadata informally; future work
+# (out of scope for this audit pass) is to mirror the
+# ``.taintly.yml`` suppression schema (reason / owner / expires) here.
 _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ("SEC1-GH-001", "indent_shift"): (
         "SequencePattern's absent_within regex assumes a specific indent "
@@ -409,7 +417,8 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ("SEC8-GL-001", "whitespace_pad"): (
         "Same family as SEC8-GH-001/002/003; image-pin regex fragile to whitespace around `:`."
     ),
-    ("SEC8-GL-002", "whitespace_pad"): ("Same family as SEC8-GL-001."),
+    # SEC8-GL-002 retired iter-6 (duplicate of SEC3-GL-002); the
+    # whitespace_pad gap that lived here disappears with the rule.
     ("TAINT-GL-001", "comment_inject"): (
         "Inline `# comment` on the source line of a taint flow breaks the line-level regex anchor."
     ),
@@ -466,7 +475,11 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
 }
 
 
-def run_mutation_tests(rules: list[Rule]) -> list[TestResult]:
+def run_mutation_tests(
+    rules: list[Rule],
+    *,
+    include_semantic: bool = False,
+) -> list[TestResult]:
     """Apply mutations to test samples and verify rule resilience.
 
     A failing mutation becomes a TestResult with passed=False unless the
@@ -475,8 +488,17 @@ def run_mutation_tests(rules: list[Rule]) -> list[TestResult]:
     the top-level kill-rate gate doesn't fail the build while the
     underlying rule precision issue is being worked. See the docstring
     on `_KNOWN_MUTATION_GAPS` for the discipline.
+
+    ``include_semantic=True`` also runs the advisory semantic-equivalence
+    operators from ``SEMANTIC_MUTATION_OPERATORS``. Their survivors are
+    NOT counted toward the kill-rate gate — they're rule-engineering
+    gaps documented for follow-up rather than CI gates.
     """
-    from .mutations import MUTATION_OPERATORS
+    from .mutations import MUTATION_OPERATORS, SEMANTIC_MUTATION_OPERATORS
+
+    operators = dict(MUTATION_OPERATORS)
+    if include_semantic:
+        operators.update(SEMANTIC_MUTATION_OPERATORS)
 
     results = []
 
@@ -491,7 +513,7 @@ def run_mutation_tests(rules: list[Rule]) -> list[TestResult]:
     for rule in rules:
         # Mutate positive samples — should still trigger
         for sample in rule.test_positive:
-            for op_name, op_fn in MUTATION_OPERATORS.items():
+            for op_name, op_fn in operators.items():
                 mutants = op_fn(sample)
                 for mutant in mutants:
                     lines = mutant.splitlines()
@@ -511,7 +533,7 @@ def run_mutation_tests(rules: list[Rule]) -> list[TestResult]:
 
         # Mutate negative samples — should still NOT trigger
         for sample in rule.test_negative:
-            for op_name, op_fn in MUTATION_OPERATORS.items():
+            for op_name, op_fn in operators.items():
                 mutants = op_fn(sample)
                 for mutant in mutants:
                     lines = mutant.splitlines()
@@ -589,3 +611,98 @@ def format_test_results(
     )
 
     return "\n".join(out)
+
+
+def format_test_results_json(
+    self_results: list[TestResult],
+    mutation_results: list[TestResult] | None = None,
+) -> str:
+    """JSON formatter for ``--self-test-json``.
+
+    Why this exists: the human-readable formatter prints pass/fail
+    counts, but the actual per-rule survival rates over time — the
+    signal that tells you a rule got more fragile across releases —
+    is invisible in pass/fail text. JSON output makes the harness's
+    full state machine-readable so CI dashboards can graph kill-rate
+    per rule per commit. Pairs with the gap-growth gate at
+    scripts/check_mutation_gap_count.py.
+
+    Schema (stable; downstream dashboards depend on it):
+
+      {
+        "schema_version": 1,
+        "self_test": {
+          "total": int, "passed": int, "rules_tested": int,
+          "by_rule": {"<rule_id>": {"positive": [...], "negative": [...]}},
+          "failures": [{"rule_id": ..., "test_type": ..., ...}, ...]
+        },
+        "mutation": null | {
+          "total": int, "killed": int, "kill_rate": float,
+          "known_gaps": int,
+          "by_rule_op": {"<rule_id>:<op>": {"killed": int, "total": int}},
+          "survivors": [...]
+        }
+      }
+    """
+    import json
+
+    def _result_to_dict(r: TestResult) -> dict:
+        return {
+            "rule_id": r.rule_id,
+            "test_type": r.test_type,
+            "expected": r.expected,
+            "actual": r.actual,
+            "passed": r.passed,
+            "mutation_op": r.mutation_op or None,
+            "sample_prefix": r.sample,
+        }
+
+    by_rule: dict[str, dict[str, list[dict]]] = {}
+    for r in self_results:
+        rule_bucket = by_rule.setdefault(r.rule_id, {"positive": [], "negative": []})
+        if r.test_type in ("positive", "negative"):
+            rule_bucket[r.test_type].append(_result_to_dict(r))
+
+    self_block = {
+        "total": len(self_results),
+        "passed": sum(1 for r in self_results if r.passed),
+        "rules_tested": len({r.rule_id for r in self_results}),
+        "by_rule": by_rule,
+        "failures": [_result_to_dict(r) for r in self_results if not r.passed],
+    }
+
+    mutation_block: dict | None = None
+    if mutation_results:
+        total = len(mutation_results)
+        killed = sum(1 for r in mutation_results if r.passed)
+        # Cross-tabulate known gaps from the survivor set
+        known_gap_count = sum(
+            1
+            for r in mutation_results
+            if not r.passed and (r.rule_id, r.mutation_op) in _KNOWN_MUTATION_GAPS
+        )
+        by_rule_op: dict[str, dict[str, int]] = {}
+        for r in mutation_results:
+            key = f"{r.rule_id}:{r.mutation_op or '_'}"
+            entry = by_rule_op.setdefault(key, {"killed": 0, "total": 0})
+            entry["total"] += 1
+            if r.passed:
+                entry["killed"] += 1
+        mutation_block = {
+            "total": total,
+            "killed": killed,
+            "kill_rate": (killed / total) if total else 0.0,
+            "known_gaps": known_gap_count,
+            "by_rule_op": by_rule_op,
+            "survivors": [_result_to_dict(r) for r in mutation_results if not r.passed],
+        }
+
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "self_test": self_block,
+            "mutation": mutation_block,
+        },
+        indent=2,
+        sort_keys=True,
+    )

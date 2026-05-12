@@ -1,0 +1,25 @@
+# Evasion: AI-GH-005's prompt-injection-surface anchor checks step-level
+# `with:` keys for known LLM-prompt parameters (system_prompt,
+# instruction, etc.). When the prompt is sourced via env: var or
+# read from a file inside run:, the surface anchor never matches.
+#
+# Discovered: 2026-05-09  (audit chunk 3.1 — AI cluster evasion gap)
+# Severity:   HIGH
+# Platform:   github
+name: AI agent
+on: pull_request_target
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ai:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PROMPT: ${{ github.event.pull_request.body }}
+        run: |
+          # The prompt comes from env, not from a `with: system_prompt:`
+          # key — AI-GH-005's anchor doesn't match.
+          curl -s -X POST https://api.example.com/llm \
+            -d "{\"prompt\":\"$PROMPT\"}"

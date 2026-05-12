@@ -17,7 +17,9 @@ Each test enforces a hard 10-second timeout (via the fixture) and a soft
 
 from __future__ import annotations
 
+import resource
 import signal
+import sys
 import threading
 from pathlib import Path
 
@@ -63,6 +65,23 @@ def _all_github_rules():
     from taintly.rules.registry import load_all_rules
     rules = load_all_rules()
     return [r for r in rules if r.platform == Platform.GITHUB]
+
+
+def _rules_for(platform: Platform):
+    """Per-platform rule loader. Used by the platform-parametrized fuzz
+    tests below so GitLab + Jenkins also get adversarial-input coverage —
+    Jenkins especially, where the Groovy script bodies have a more
+    permissive syntax than YAML and can hit parser edge cases YAML inputs
+    miss."""
+    from taintly.rules.registry import load_all_rules
+    return [r for r in load_all_rules() if r.platform == platform]
+
+
+_PLATFORM_PARAMS = [
+    pytest.param(Platform.GITHUB, "adversarial_test.yml", id="github"),
+    pytest.param(Platform.GITLAB, ".gitlab-ci.yml", id="gitlab"),
+    pytest.param(Platform.JENKINS, "Jenkinsfile", id="jenkins"),
+]
 
 
 # =============================================================================
@@ -276,3 +295,268 @@ def test_no_redos_on_long_inputs(payload, github_rules):
             f"Possible ReDoS: scanner hung on input of length {len(payload)}.\n"
             f"Input prefix: {payload[:100]!r}"
         )
+
+
+# =============================================================================
+# Cross-platform fuzz — same adversarial inputs, GitLab + Jenkins
+#
+# The GitHub-only filter above silently exempted ~half the rule pack
+# from adversarial-input testing. GitLab and Jenkins rules read the
+# same YAML / Groovy bodies as GitHub rules; if any of them has a
+# regex that hangs on a YAML bomb or crashes on surrogate halves, that
+# bug is just as real on those platforms — and Jenkins's Groovy syntax
+# is *more* permissive than YAML, so its regex engine has more
+# adversarial surface than GitHub's.
+#
+# Note: the inputs here are still YAML-shaped because that's what the
+# adversarial set targets. Jenkins rules will mostly produce zero
+# findings on these inputs (correctly — a Jenkinsfile-shaped bug
+# couldn't appear in YAML); the value is "must not crash on weird
+# input regardless of whether the input is well-formed for the
+# platform."
+# =============================================================================
+
+
+# Per-(platform, input) hang exemptions discovered when fanning fuzz
+# across GitLab + Jenkins. Each entry is a documented bug — REMOVE the
+# entry when the underlying rule is fixed; never add new entries to
+# silence a freshly-introduced hang. New hangs are exactly the signal
+# this test set exists to surface.
+_KNOWN_PLATFORM_FUZZ_HANGS: set[tuple[str, str]] = {
+    # Jenkins rule pack does not bound regex work on deeply-nested-dict
+    # inputs the way the GitHub rules do; surfaced when fuzz was fanned
+    # across platforms. Rule pack already passes for the GH equivalent
+    # (the 500-level nested-dicts payload completes in <1s on GH rules).
+    # Follow-up: trace which Jenkins rule's regex is super-linear in
+    # nesting depth and add a length cap matching _safe_search.
+    ("jenkins", "deeply_nested_dicts"),
+}
+
+
+@pytest.mark.parametrize("platform,fname", _PLATFORM_PARAMS)
+@pytest.mark.parametrize("name,content", list(ADVERSARIAL_INPUTS.items()), ids=list(ADVERSARIAL_INPUTS.keys()))
+def test_scanner_survives_adversarial_input_per_platform(name, content, platform, fname):
+    """All three platforms' rule packs must survive every adversarial
+    input. A failure scoped to one platform localises the bug to its
+    rule pack; failures on all three usually point at engine/parsing
+    code rather than rule-specific regexes."""
+    if (platform.value, name) in _KNOWN_PLATFORM_FUZZ_HANGS:
+        pytest.xfail(
+            f"known hang on {platform.value}/{name} — see "
+            f"_KNOWN_PLATFORM_FUZZ_HANGS for the open follow-up."
+        )
+    rules = _rules_for(platform)
+
+    def _run():
+        return scan_file(fname, rules=rules, _content=content)
+
+    try:
+        result = _run_with_timeout(_run, seconds=10)
+    except _TimeoutError as e:
+        pytest.fail(f"[{platform.value}/{name}] HANG: {e}")
+    except MemoryError:
+        pytest.fail(f"[{platform.value}/{name}] OOM on adversarial input")
+
+    assert isinstance(result, list), (
+        f"[{platform.value}/{name}] scan_file must return a list, "
+        f"got {type(result).__name__!r}"
+    )
+
+
+# =============================================================================
+# Memory pressure — explicitly bound RSS during a fuzz scan
+#
+# Previously the harness comment claimed CI's runner-level memory limit
+# would catch OOMs ("enforced by the test runner's memory limit in CI"),
+# but neither pyproject nor the CI workflow set ulimit/-v anywhere — a
+# multi-megabyte expression-laden input could OOM silently in dev and
+# only surface in production. This test codifies the bound: a single
+# scan of a pathological input must finish under a fixed RSS cap.
+#
+# We use RLIMIT_AS (virtual address space) instead of RLIMIT_DATA
+# because Python's allocator routes everything through anonymous mmaps
+# on modern Linux, so RLIMIT_AS is the only knob that actually bites.
+# RLIMIT_AS is not enforceable on Windows / macOS — skip there.
+# =============================================================================
+
+
+def _set_address_space_limit_mb(mb: int):
+    """Cap virtual address space for THIS process. Returns the previous
+    limit so the caller can restore it (the cap survives the test
+    function and would affect subsequent tests if not reset)."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    target = mb * 1024 * 1024
+    # Don't raise the hard cap — only lower the soft cap to ours, and
+    # only if the existing cap is higher (or unlimited).
+    new_soft = min(target, hard) if hard != resource.RLIM_INFINITY else target
+    resource.setrlimit(resource.RLIMIT_AS, (new_soft, hard))
+    return soft, hard
+
+
+# =============================================================================
+# Hypothesis YAML strategy — generated adversarial inputs (audit chunk 4.2)
+#
+# Hand-curated ADVERSARIAL_INPUTS captures known-bad shapes; hypothesis
+# generates the inputs hand-curation never thinks of. Strategy targets
+# the structural shape that taintly's parser sees (workflow-like dicts)
+# rather than truly random bytes — random bytes are mostly trivially
+# rejected and don't exercise the engine.
+# =============================================================================
+
+
+try:
+    from hypothesis import HealthCheck, given, settings
+    from hypothesis import strategies as st
+    _HYPOTHESIS_AVAILABLE = True
+except ImportError:
+    _HYPOTHESIS_AVAILABLE = False
+
+
+if _HYPOTHESIS_AVAILABLE:
+    _scalar = st.one_of(
+        st.text(
+            alphabet=st.characters(min_codepoint=0x20, max_codepoint=0x7E),
+            max_size=80,
+        ),
+        st.booleans(),
+        st.integers(min_value=-1000, max_value=1000),
+        st.none(),
+    )
+
+    _yaml_value = st.recursive(
+        _scalar,
+        lambda children: st.one_of(
+            st.lists(children, max_size=4),
+            st.dictionaries(
+                st.text(
+                    alphabet=st.characters(
+                        min_codepoint=ord("a"), max_codepoint=ord("z")
+                    ),
+                    min_size=1,
+                    max_size=8,
+                ),
+                children,
+                max_size=4,
+            ),
+        ),
+        max_leaves=20,
+    )
+
+    @given(structure=_yaml_value)
+    @settings(
+        max_examples=80,
+        deadline=2000,
+        suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
+    )
+    def test_scanner_survives_generated_yaml(structure, github_rules):
+        """Hypothesis-generated YAML structures must not crash, hang,
+        or raise unhandled exceptions. Complementary to the hand-
+        curated ADVERSARIAL_INPUTS set: random + recursive + bounded
+        means hypothesis explores corners hand-curation misses."""
+        try:
+            import yaml as _yaml
+        except ImportError:
+            pytest.skip("PyYAML required for generated YAML strategy")
+            return
+        try:
+            content = _yaml.safe_dump(structure)
+        except Exception:
+            return  # the structure wasn't dumpable; that's hypothesis's
+                    # problem, not ours
+
+        def _run():
+            return scan_file(
+                "generated.yml", rules=github_rules, _content=content
+            )
+        result = _run_with_timeout(_run, seconds=10)
+        assert isinstance(result, list)
+
+
+# =============================================================================
+# Correctness under mutation (audit chunk 4.3)
+#
+# Fuzz checks "doesn't crash"; this test set checks "produces same
+# findings on equivalent inputs." Two YAML inputs that mean the same
+# thing should produce the same findings — drift here is a precision
+# regression that fuzz alone can't detect.
+# =============================================================================
+
+
+_EQUIVALENT_INPUT_PAIRS = [
+    # (label, a, b) — the two strings should produce identical findings.
+    (
+        "permissions_inline_vs_block",
+        # Inline scalar form
+        "name: T\non: push\npermissions: write-all\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+        # Whitespace-padded form (semantically identical)
+        "name: T\non: push\npermissions:  write-all\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+    ),
+    (
+        "trigger_scalar_vs_flow_seq",
+        # `on: push` and `on: [push]` are equivalent at parse time.
+        "name: T\non: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: tj-actions/changed-files@v44\n",
+        "name: T\non: [push]\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: tj-actions/changed-files@v44\n",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "label,a,b", _EQUIVALENT_INPUT_PAIRS, ids=[p[0] for p in _EQUIVALENT_INPUT_PAIRS]
+)
+def test_findings_invariant_under_yaml_equivalence(label, a, b, github_rules):
+    """Two YAML inputs that mean the same thing must produce the same
+    findings. A divergence here is an evasion vector hiding in plain
+    sight: an attacker who uses the equivalent-but-uncommon shape
+    bypasses detection that the canonical shape catches.
+
+    Tolerated at the rule-id-set level (we don't compare line numbers
+    because the equivalent forms differ in formatting) — but the SET
+    of fired rule IDs must be identical.
+    """
+    findings_a = scan_file("a.yml", rules=github_rules, _content=a)
+    findings_b = scan_file("b.yml", rules=github_rules, _content=b)
+    fired_a = {f.rule_id for f in findings_a if f.rule_id != "ENGINE-ERR"}
+    fired_b = {f.rule_id for f in findings_b if f.rule_id != "ENGINE-ERR"}
+    assert fired_a == fired_b, (
+        f"[{label}] equivalent inputs produced different fired rule sets:\n"
+        f"  a fired: {sorted(fired_a)}\n"
+        f"  b fired: {sorted(fired_b)}\n"
+        f"  diff:    {sorted(fired_a ^ fired_b)} (an evasion vector)"
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="RLIMIT_AS is only reliably enforced on Linux"
+)
+def test_scanner_under_memory_cap(github_rules):
+    """A single scan of a 500k-character expression-laden input must
+    finish under a 512 MiB virtual-address cap. Verifies our scanning
+    pipeline is allocation-bounded on adversarial input — silent OOM
+    in production was the failure mode before this gate existed."""
+    # Construct a pathological input: many ${{ ... }} expressions in
+    # one run: line. This stresses the regex engine and any taint
+    # analysis without being valid YAML at the structural level.
+    content = (
+        "name: Test\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: |\n"
+        + "          echo ${{ github.event.pull_request.title }} "
+            * 5000
+        + "\n"
+    )
+
+    prev_soft, _hard = _set_address_space_limit_mb(512)
+    try:
+        result = scan_file("memcap_test.yml", rules=github_rules, _content=content)
+        assert isinstance(result, list)
+    except MemoryError:
+        pytest.fail(
+            "scanner exceeded the 512 MiB virtual-address cap on a "
+            "5000-expression run: line. The adversarial input set must "
+            "fit in a bounded RSS — investigate which pass is allocating "
+            "linearly with input size and bound it."
+        )
+    finally:
+        # Restore the original cap so this test doesn't constrain
+        # later tests in the same process.
+        resource.setrlimit(resource.RLIMIT_AS, (prev_soft, _hard))

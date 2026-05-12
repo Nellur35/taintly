@@ -42,6 +42,13 @@ jobs:
       - name: README coverage table is in sync with rule pack
         run: python scripts/update_readme_coverage.py --check
 
+      - name: Doc/impl drift gate
+        # Catches the "documented contract isn't actually enforced"
+        # bug class. Audit chunk cross-cutting A — see the script
+        # for the four specific drift patterns it watches for. Fast
+        # heuristic; runs in <100ms.
+        run: python scripts/check_doc_impl_drift.py
+
       - name: No-rules-change gate (rule-pack output stable across fixtures)
         run: python scripts/no_rules_change_gate.py --check
 
@@ -120,7 +127,20 @@ jobs:
             --cov=taintly \
             --cov-branch \
             --cov-report=term-missing \
+            --cov-report=xml \
             --cov-fail-under=78
+
+      - name: Per-module coverage floors
+        # The global 78% gate above can hide per-module regressions —
+        # a PR could drop fixes.py from 46% to 30% while the global
+        # floor stays above 78. The pyproject [tool.coverage.report]
+        # ratchet plan documents per-module targets; this step
+        # enforces the CURRENT per-module floor (lower than the
+        # target — same growth-only discipline as
+        # _KNOWN_MUTATION_GAPS) so coverage in those modules can only
+        # go UP. Raise the floor in the same PR that lands new tests
+        # for that module.
+        run: python scripts/check_per_module_coverage.py coverage.xml
 
   # ---------------------------------------------------------------------------
   # Rule tests — self-test, mutation tests, integration tests (pattern layer)
@@ -149,9 +169,26 @@ jobs:
         run: python -m taintly --self-test --no-color
         # Exit 10 if any rule self-test fails
 
-      - name: Mutation tests (100% kill rate required)
+      - name: Mutation tests (100% kill rate modulo documented gaps)
+        # ``100% kill rate`` is the wall-clock claim, but the
+        # underlying harness counts entries in
+        # ``taintly.testing.self_test._KNOWN_MUTATION_GAPS`` as kills
+        # — every entry there is a documented rule-engineering gap
+        # that the kill-rate gate intentionally tolerates while it's
+        # being worked. The honest description: "100% kill rate
+        # modulo N documented gaps." See the docstring on
+        # ``_KNOWN_MUTATION_GAPS`` for the discipline (no new
+        # entries to silence freshly-introduced regressions).
         run: python -m taintly --self-test --mutate --no-color
         # Exit 12 if mutation kill rate < 100%
+
+      - name: Mutation gap-growth gate
+        # The 100%-modulo-allowlist gate above stays green even if
+        # someone adds a new entry to _KNOWN_MUTATION_GAPS to silence
+        # a freshly-broken rule. This step asserts the allowlist's
+        # SIZE has not grown vs the committed baseline — same growth-
+        # only discipline as scripts/check_per_module_coverage.py.
+        run: python scripts/check_mutation_gap_count.py
 
       - name: Integration tests
         run: python -m taintly --integration-test --no-color

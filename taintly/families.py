@@ -257,7 +257,7 @@ _FAMILIES: tuple[FindingFamily, ...] = (
                 "SEC8-GH-001",
                 "SEC8-GH-002",
                 "SEC8-GL-001",
-                "SEC8-GL-002",
+                # SEC8-GL-002 retired iter-6 (duplicate of SEC3-GL-002).
             }
         ),
     ),

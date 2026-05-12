@@ -964,7 +964,10 @@ RULES: list[Rule] = [
             # / change-request env var.  Reuse of _JK_PR_CONTEXT keeps
             # the trigger-detection logic in one place — aligned with
             # LOTP-JK-001 / AI-JK-005 / AI-JK-006.
-            requires=r"(?=[\s\S]*?" + _JK_PR_CONTEXT + r")",
+            # ``ContextPattern`` already searches the whole file for
+            # ``requires``. Keeping this direct avoids a superlinear
+            # ``[\s\S]*?`` lookahead on large no-match fuzz inputs.
+            requires=_JK_PR_CONTEXT,
             scope="file",
             exclude=[r"^\s*//", r"^\s*\*", r"^\s*#"],
         ),

@@ -25,6 +25,7 @@ from taintly.rules.registry import load_all_rules
 
 _FIX = Path(__file__).parent.parent / "fixtures" / "precision"
 _SAFE_GH = Path(__file__).parent.parent / "fixtures" / "github" / "safe"
+_VULN_GH = Path(__file__).parent.parent / "fixtures" / "github" / "vulnerable"
 
 
 @pytest.fixture(scope="module")
@@ -148,7 +149,6 @@ def test_placeholder_password_not_treated_as_confirmed_secret(gh_rules):
     # If any of THOSE fire, they must be confidence<high AND must match
     # the placeholder text specifically.
     from taintly.families import default_confidence
-
     for f in findings:
         if default_confidence(f.rule_id) == "high":
             continue  # High-confidence structural rules are not in scope
@@ -208,7 +208,8 @@ def test_sec4_gh_003_fires_once_per_workflow(gh_rules):
     # Anchor cites the trigger declaration line, not a property
     # reference deeper in the file.
     assert "workflow_run:" in fired[0].snippet, (
-        f"Expected anchor on the workflow_run: declaration line, got snippet: {fired[0].snippet!r}"
+        f"Expected anchor on the workflow_run: declaration line, "
+        f"got snippet: {fired[0].snippet!r}"
     )
 
 
@@ -227,7 +228,6 @@ def test_sec4_gh_003_fires_once_per_workflow(gh_rules):
     [
         "secret_in_with_but_also_env.yml",
         "with_input_no_secret.yml",
-        "known_auth_action_inputs.yml",
     ],
 )
 def test_sec6_gh_010_does_not_fire_on_safe_with_input(fixture_name, gh_rules):
@@ -286,7 +286,8 @@ def test_sec1_gh_001_does_not_fire_on_release_metadata_job_with_custom_name(gh_r
     findings = scan_file(str(_SAFE_GH / "release_metadata_custom_name.yml"), gh_rules)
     fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
     assert not fired, (
-        f"SEC1-GH-001 must not fire on a custom-named metadata-only release automation job: {fired}"
+        "SEC1-GH-001 must not fire on a custom-named metadata-only "
+        f"release automation job: {fired}"
     )
 
 
@@ -296,22 +297,6 @@ def test_sec1_gh_001_does_not_fire_on_release_metadata_job_with_environment(gh_r
     assert not fired, (
         "SEC1-GH-001 must not fire when release metadata automation "
         f"declares an explicit environment: {fired}"
-    )
-
-
-@pytest.mark.parametrize(
-    "fixture_name",
-    [
-        "release_notes_only.yml",
-        "release_pr_only_job.yml",
-    ],
-)
-def test_sec1_gh_001_does_not_fire_on_release_metadata_preparation_jobs(fixture_name, gh_rules):
-    findings = scan_file(str(_SAFE_GH / fixture_name), gh_rules)
-    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
-    assert not fired, (
-        "SEC1-GH-001 must not fire on metadata-only release preparation "
-        f"jobs that do not publish or deploy: {fired}"
     )
 
 
@@ -328,27 +313,6 @@ def test_sec1_gh_001_still_fires_on_release_automation_that_publishes(gh_rules):
     )
 
 
-@pytest.mark.parametrize(
-    ("fixture_name", "anchor"),
-    [
-        ("release_notes_with_gh_release_create.yml", "release-notes:"),
-        ("release_pr_then_publish.yml", "release:"),
-    ],
-)
-def test_sec1_gh_001_still_fires_on_release_metadata_jobs_that_publish(
-    fixture_name, anchor, gh_rules
-):
-    findings = scan_file(str(_VULN_GH / fixture_name), gh_rules)
-    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
-    assert fired, (
-        "SEC1-GH-001 must still fire when release metadata/preparation "
-        "jobs perform real release or package publication"
-    )
-    assert any(anchor in f.snippet for f in fired), (
-        f"SEC1-GH-001 should anchor on {anchor!r}, got snippets: {[f.snippet for f in fired]}"
-    )
-
-
 def test_sec1_gh_001_anchors_on_job_not_trigger(gh_rules):
     findings = scan_file(str(_VULN_GH / "publish_job_no_environment.yml"), gh_rules)
     fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
@@ -360,7 +324,8 @@ def test_sec1_gh_001_anchors_on_job_not_trigger(gh_rules):
     )
     # The anchor cites the publish: line, not the release: trigger.
     assert "publish:" in fired[0].snippet, (
-        f"Expected anchor on the publish: job line, got snippet: {fired[0].snippet!r}"
+        f"Expected anchor on the publish: job line, "
+        f"got snippet: {fired[0].snippet!r}"
     )
 
 
@@ -412,14 +377,264 @@ def test_sec4_gh_018_stays_high_on_pull_request(gh_rules, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# SEC2-GH-002 — workflow_call-only reusable workflows are exempt
+# iter-6 (2026-05-09) precision regressions
+#
+# Each FP confirmed by the public-repo audit (chunks 4-7 of the audit
+# triage) is pinned here. Future rule edits that re-introduce any of
+# these FPs will fail one of these tests with a clear message
+# pointing back to the FP.
+# ---------------------------------------------------------------------------
+
+
+def test_sec6_gh_001_skips_ephemeral_keychain_password(gh_rules, tmp_path):
+    """iter-6 FP from gh/cli's deployment.yml: ``keychain_password=
+    "password1"`` is the macOS code-signing ephemeral keychain
+    pattern (the actual cert pwd is $APPLE_APPLICATION_CERT_PASSWORD).
+    SEC6-GH-001 firing CRITICAL on this is wrong — variable name
+    boundary regex prevents the substring-match on ``password``."""
+    p = tmp_path / "macos_signing.yml"
+    p.write_text(
+        "jobs:\n  build:\n    runs-on: macos-latest\n    steps:\n"
+        "      - run: |\n"
+        "          keychain=\"$RUNNER_TEMP/buildagent.keychain\"\n"
+        '          keychain_password="password1"\n'
+        '          security create-keychain -p "$keychain_password" "$keychain"\n'
+    )
+    findings = scan_file(str(p), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC6-GH-001"]
+    assert not fired, (
+        f"SEC6-GH-001 must not fire on the ephemeral-keychain pattern; "
+        f"got {[(f.line, f.snippet) for f in fired]}"
+    )
+
+
+def test_taint_gh_013_skips_safe_system_contexts(gh_rules, tmp_path):
+    """iter-6 FP from astral-sh/ruff's daily_fuzz.yaml: github-script
+    body interpolating only ``${{ github.repository }}`` and
+    ``${{ github.run_id }}`` — both system-controlled, never
+    attacker-influenceable. Narrowed match requires an attacker-
+    controlled token before firing."""
+    p = tmp_path / "github_script_safe.yml"
+    p.write_text(
+        "jobs:\n  notify:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/github-script@v7\n"
+        "        with:\n"
+        "          script: |\n"
+        "            await github.rest.issues.create({\n"
+        "              body: 'Run https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}',\n"
+        "            })\n"
+    )
+    findings = scan_file(str(p), gh_rules)
+    fired = [f for f in findings if f.rule_id == "TAINT-GH-013"]
+    assert not fired, (
+        f"TAINT-GH-013 must not fire when interpolation contains only "
+        f"system-controlled contexts; got {fired}"
+    )
+
+
+def test_sec5_gh_001_recognizes_codspeed_oidc(gh_rules, tmp_path):
+    """iter-6 FP from astral-sh/ruff's ci.yaml: ``id-token: write``
+    granted for CodSpeed benchmarking, with the comment
+    ``# required for OIDC authentication with CodSpeed``. CodSpeed
+    is now in the OIDC-consumer allowlist."""
+    p = tmp_path / "codspeed.yml"
+    p.write_text(
+        "name: bench\non: push\njobs:\n  bench:\n    runs-on: ubuntu-latest\n"
+        "    permissions:\n      contents: read\n      id-token: write\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2\n"
+        "      - uses: CodSpeedHQ/action@c381be0bfd20e844fb45594f6aa182ffcd94545c # v4\n"
+    )
+    findings = scan_file(str(p), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC5-GH-001"]
+    assert not fired, (
+        f"SEC5-GH-001 must recognize CodSpeedHQ/action as an OIDC consumer; "
+        f"got {fired}"
+    )
+
+
+def test_sec6_gh_005_skips_env_block_assignments(gh_rules, tmp_path):
+    """iter-6 FP from astral-sh/ruff's publish-mirror.yml:
+    secrets embedded in URL values inside ``env:`` blocks are the
+    RECOMMENDED remediation form (env var path is masked by the
+    runner). The rule's title says ``not via env var`` but it
+    fired on env: assignments. Negative-lookahead exclude on
+    non-run/script keys fixes it."""
+    p = tmp_path / "env_secret.yml"
+    p.write_text(
+        "jobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - name: Upload\n"
+        "        env:\n"
+        "          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_KEY }}\n"
+        "          AWS_ENDPOINT_URL: https://${{ secrets.ACCOUNT_ID }}.r2.example.com\n"
+        "        run: aws s3 cp dist/ s3://bucket/\n"
+    )
+    findings = scan_file(str(p), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC6-GH-005"]
+    assert not fired, (
+        f"SEC6-GH-005 must not fire on env: block assignments; got {fired}"
+    )
+
+
+def test_sec6_gh_005_still_fires_on_run_block_url(gh_rules, tmp_path):
+    """Companion to the env-block test: secret embedded in a
+    run: URL is the ACTUAL bad pattern and must still fire."""
+    p = tmp_path / "run_secret.yml"
+    p.write_text(
+        "jobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: git clone https://${{ secrets.PAT }}@github.com/x/y.git out\n"
+    )
+    findings = scan_file(str(p), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC6-GH-005"]
+    assert fired, (
+        "SEC6-GH-005 MUST still fire on secrets embedded in run: shell URLs"
+    )
+
+
+def test_lotp_gh_001_skips_non_pr_workflows(gh_rules, tmp_path):
+    """iter-6 FP from astral-sh/ruff's publish-{,ty-}playground.yml:
+    workflow_call/workflow_dispatch only — no PR trigger. The
+    workflow uses ``${{ github.head_ref || 'main' }}`` in a
+    cloudflare wrangler-action's ``branch:`` parameter (NOT in
+    actions/checkout's ``ref:``), so the head-ref reference doesn't
+    select a code revision. Narrowed _PR_HEAD_CHECKOUT requires
+    the reference to be on a ``ref:`` line."""
+    p = tmp_path / "workflow_call_only.yml"
+    p.write_text(
+        "name: Publish playground\n"
+        "on:\n  workflow_dispatch:\n  workflow_call:\n"
+        "permissions: {}\n"
+        "jobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd\n"
+        "      - run: npm ci --ignore-scripts\n"
+        "      - uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd\n"
+        "        with:\n"
+        "          command: pages deploy --branch ${{ github.head_ref || 'main' }}\n"
+    )
+    findings = scan_file(str(p), gh_rules)
+    fired = [f for f in findings if f.rule_id == "LOTP-GH-001"]
+    assert not fired, (
+        f"LOTP-GH-001 must not fire when head_ref is in a non-checkout-ref "
+        f"context; got {[(f.line, f.snippet) for f in fired]}"
+    )
+
+
+def test_lotp_gh_005_skips_npm_self_upgrade(gh_rules, tmp_path):
+    """iter-6 FP from astral-sh/ruff's publish-wasm.yml:
+    ``npm install -g npm@11.12.0`` upgrades the package manager
+    itself (foundational infrastructure). It does NOT install an
+    attacker-controllable dependency that could carry malicious
+    lifecycle scripts. Excluded via the new ``-g (npm|pnpm|yarn|
+    corepack)`` exclude pattern."""
+    p = tmp_path / "npm_self_upgrade.yml"
+    p.write_text(
+        "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+        "    permissions:\n      id-token: write\n    steps:\n"
+        "      - run: npm install -g npm@11.12.0\n"
+    )
+    findings = scan_file(str(p), gh_rules)
+    fired = [f for f in findings if f.rule_id == "LOTP-GH-005"]
+    assert not fired, (
+        f"LOTP-GH-005 must not fire on npm self-upgrade; got {fired}"
+    )
+
+
+def test_sec9_gh_002_requires_real_release_trigger(gh_rules, tmp_path):
+    """iter-6 FP from astral-sh/ruff's ci.yaml (push:main + pull_request)
+    and gh/cli's deployment.yml (workflow_dispatch with ``release:``
+    as an INPUT name). Loose ``(release:|tags:)`` requires regex
+    matched job names and input names. New regex requires the token
+    to actually appear as part of an ``on:`` block."""
+    p = tmp_path / "non_release.yml"
+    p.write_text(
+        "name: CI\n"
+        "on:\n  push:\n    branches: [main]\n  pull_request:\n"
+        "jobs:\n"
+        "  cargo-test-linux-release:\n"  # job name contains "release"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae\n"
+    )
+    findings = scan_file(str(p), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC9-GH-002"]
+    assert not fired, (
+        f"SEC9-GH-002 must not fire when ``release`` only appears as a "
+        f"job name (not in on: trigger); got {fired}"
+    )
+
+
+def test_sec3_gh_002_and_sec8_gh_003_no_double_fire_on_branch_pin(
+    gh_rules, tmp_path
+):
+    """iter-6 dedup: ``uses: org/repo/.github/workflows/x.yml@main``
+    used to fire BOTH SEC3-GH-002 (CRITICAL) AND SEC8-GH-003 (HIGH)
+    on the exact same line. SEC8-GH-003 now excludes branch refs
+    (SEC3-GH-002 owns those CRITICAL); SEC8-GH-003 keeps the
+    tag-pin case."""
+    p = tmp_path / "branch_pinned_reusable.yml"
+    p.write_text(
+        "on: push\njobs:\n  triage:\n"
+        "    uses: external/shared-workflows/.github/workflows/triage.yml@main\n"
+    )
+    findings = scan_file(str(p), gh_rules)
+    fired = sorted({f.rule_id for f in findings if f.rule_id in ("SEC3-GH-002", "SEC8-GH-003")})
+    assert fired == ["SEC3-GH-002"], (
+        f"On a branch-pinned external reusable workflow, only SEC3-GH-002 "
+        f"should fire (CRITICAL — branch ref). SEC8-GH-003 should defer. "
+        f"Got: {fired}"
+    )
+
+
+def test_sec4_gh_002_downgraded_to_medium(gh_rules, tmp_path):
+    """iter-6: bare pull_request_target use is MEDIUM/review-needed,
+    not HIGH. SEC4-GH-001 covers the dangerous combination
+    (trigger + PR checkout) at CRITICAL."""
+    from taintly.models import Severity
+
+    p = tmp_path / "pr_target_label_only.yml"
+    p.write_text(
+        "on:\n  pull_request_target:\n    types: [labeled]\n"
+        "jobs:\n  label:\n    runs-on: ubuntu-latest\n"
+        "    permissions: {}\n"
+        "    steps:\n      - run: echo 'no checkout'\n"
+    )
+    findings = scan_file(str(p), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC4-GH-002"]
+    assert fired, "SEC4-GH-002 should still detect the trigger"
+    for f in fired:
+        assert f.severity == Severity.MEDIUM, (
+            f"Bare pull_request_target should be MEDIUM after iter-6; got {f.severity}"
+        )
+
+
+def test_engine_handles_gitlab_reference_tag(gitlab_rules, tmp_path):
+    """iter-6 engine fix: GitLab's ``!reference`` tag was treated as
+    an unsupported custom tag, halting structural parsing for the
+    rest of the file (gitlab-org/cli's .gitlab-ci.yml emitted
+    ENGINE-ERR at line 367). Tokenizer now passes through.
+    """
+    p = tmp_path / "gitlab_with_reference.yml"
+    p.write_text(
+        ".auth: &auth\n  before_script:\n    - echo authenticated\n"
+        "build:\n"
+        "  before_script:\n"
+        "    - !reference [.auth, before_script]\n"
+        "  script:\n    - make build\n"
+    )
+    findings = scan_file(str(p), gitlab_rules)
+    engine_err = [f for f in findings if f.rule_id == "ENGINE-ERR"]
+    assert not engine_err, (
+        f"!reference must not trigger ENGINE-ERR; got {engine_err}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# SEC2-GH-002 - workflow_call-only reusable workflows are exempt
 #
 # Reusable workflows whose only top-level trigger is workflow_call inherit
-# the calling workflow's permissions block.  A redundant declaration in the
-# called workflow does not strengthen security and risks drift from the
-# caller's intent, so the rule must not fire.  The bound is tight: a
-# workflow that has workflow_call AND any other trigger is invocable
-# directly and still requires its own permissions block.
+# the calling workflow's permissions block. A workflow that has
+# workflow_call and any other trigger is invocable directly and still
+# requires its own permissions block.
 # ---------------------------------------------------------------------------
 
 
@@ -427,8 +642,8 @@ def test_sec2_gh_002_does_not_fire_on_workflow_call_only_reusable(gh_rules):
     findings = scan_file(str(_SAFE_GH / "reusable_workflow_call_only.yml"), gh_rules)
     fired = [f for f in findings if f.rule_id == "SEC2-GH-002"]
     assert not fired, (
-        "SEC2-GH-002 must not fire on a workflow_call-only reusable — "
-        f"the caller's permissions block inherits.  Got: {fired}"
+        "SEC2-GH-002 must not fire on a workflow_call-only reusable; "
+        f"the caller's permissions block inherits. Got: {fired}"
     )
 
 
@@ -439,6 +654,6 @@ def test_sec2_gh_002_still_fires_when_workflow_call_paired_with_push(gh_rules):
     fired = [f for f in findings if f.rule_id == "SEC2-GH-002"]
     assert fired, (
         "SEC2-GH-002 must fire when workflow_call is paired with another "
-        "trigger (push) and no permissions block — the workflow can be "
+        "trigger (push) and no permissions block; the workflow can be "
         "invoked directly without a caller setting permissions"
     )

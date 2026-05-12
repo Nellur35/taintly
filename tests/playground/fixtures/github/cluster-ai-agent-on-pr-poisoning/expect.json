@@ -1,0 +1,16 @@
+{
+  "_comment": "Multi-rule interaction fixture (audit chunk 6.4). Exercises a realistic AI-agent attack surface that fires multiple rules in the same finding family — verifies the family clustering pipeline end-to-end through the CLI rather than rule-by-rule.",
+  "platform": "github",
+  "vulnerable": {
+    "must_fire_any_of": ["AI-GH-006", "AI-GH-008", "AI-GH-015", "AI-GH-020"],
+    "must_not_fire": []
+  },
+  "fixed": {
+    "must_fire": [],
+    "must_not_fire": ["AI-GH-006", "AI-GH-008"]
+  },
+  "fix_invariants": {
+    "still_parses": true,
+    "jobs": ["agent"]
+  }
+}

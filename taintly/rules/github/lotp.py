@@ -22,10 +22,30 @@ from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 # Evidence the job has checked out attacker-controlled code.  Matching any of
 # these in the same job segment as a build tool means the tool is operating
 # on untrusted source.
+#
+# iter-6 (2026-05-09): tightened anchoring to require the head-ref
+# reference to appear as the value of a ``ref:`` line (the only way
+# the reference actually CONTROLS what code gets checked out).
+# Previously matched any occurrence of ``github.head_ref`` etc. —
+# including defensive ``${{ github.head_ref || 'main' }}`` fallbacks
+# in command parameters of unrelated actions like wrangler-action.
+# Audit found 6 FPs on astral-sh/ruff publish-{,ty-}playground.yml
+# that use the head_ref-or-main pattern in cloudflare deploy
+# commands. The earlier loose regex assumed any reference to the
+# head ref meant a checkout; the new form requires the reference to
+# be in actions/checkout's ``ref:`` parameter (the only place where
+# it actually selects the code revision).
 _PR_HEAD_CHECKOUT = (
-    r"(?:github\.event\.pull_request\.head\.(?:sha|ref)"
+    # ``(?:^|\n)`` matches start-of-string or start-of-line in the
+    # segment content (ContextPattern doesn't compile with re.MULTILINE
+    # so ``^`` alone wouldn't match interior lines).
+    r"(?:^|\n)\s*ref:\s*\$\{\{[^}]*?"
+    r"(?:"
+    r"github\.event\.pull_request\.head\.(?:sha|ref)"
     r"|github\.head_ref"
-    r"|github\.event\.workflow_run\.head_branch)"
+    r"|github\.event\.workflow_run\.head_(?:branch|sha)"
+    r")"
+    r"[^}]*?\}\}"
 )
 
 # Evidence untrusted artefacts have been pulled into the job workspace.
@@ -119,6 +139,21 @@ RULES: list[Rule] = [
             "      - run: echo 'hello'",
             # Commented out
             "jobs:\n  build:\n    steps:\n      # - run: npm install\n      - run: echo ok",
+            # iter-6 (2026-05-09): defensive ``${{ github.head_ref ||
+            # 'main' }}`` fallback in a non-checkout context (e.g.
+            # cloudflare wrangler-action's ``branch:`` parameter).
+            # The reference is to a string fallback used as a deploy
+            # target name, not a code revision selector. Real-world
+            # FP from astral-sh/ruff publish-playground.yml. New
+            # _PR_HEAD_CHECKOUT regex requires the reference to be
+            # in a ``ref:`` line — this fixture pins the regression.
+            "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - run: npm ci --ignore-scripts\n"
+            "      - uses: cloudflare/wrangler-action@v3\n"
+            "        with:\n"
+            "          command: pages deploy --branch ${{ github.head_ref || 'main' }}",
         ],
         stride=["T", "E"],
         threat_narrative=(
@@ -378,6 +413,18 @@ RULES: list[Rule] = [
                 # `- ` list-item marker before the key (steps use
                 # `      - name: Foo` inline).
                 r"^\s*-?\s*(?:name|description|title):",
+                # iter-6 (2026-05-09): exclude package-manager
+                # self-bootstraps (``npm install -g npm@x``,
+                # ``npm install -g pnpm`` etc.). These install the
+                # package manager itself from the registry; they
+                # don't run lifecycle scripts of an attacker-
+                # controlled dependency. Found firing CRITICAL on
+                # astral-sh/ruff's publish-wasm.yml line that
+                # bumps npm to 11.12.0 to enable trusted publishing
+                # — explicitly the recommended hardening, not the
+                # attack vector. Also covers the analogous
+                # ``npm install -g yarn`` / ``-g pnpm`` shapes.
+                r"\b(?:npm|yarn|pnpm)\s+(?:install|i|add)\s+-g\s+(?:npm|pnpm|yarn|corepack)\b",
             ],
         ),
         remediation=(
@@ -439,6 +486,20 @@ RULES: list[Rule] = [
                 "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
                 "    permissions:\n      contents: read\n"
                 "    steps:\n      - run: npm install"
+            ),
+            # iter-6 (2026-05-09): package-manager self-bootstrap
+            # — ``npm install -g npm@x`` in a job with id-token:
+            # write. This installs the package manager itself
+            # (foundational infrastructure published by npm Inc.)
+            # and doesn't run lifecycle scripts of an attacker-
+            # controlled dependency. Real-world FP from astral-
+            # sh/ruff's publish-wasm.yml — they bump npm to 11.12.0
+            # specifically to enable trusted publishing, the
+            # recommended hardening.
+            (
+                "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+                "    permissions:\n      id-token: write\n"
+                "    steps:\n      - run: npm install -g npm@11.12.0"
             ),
             # NPM_TOKEN in job but install is commented out
             (
