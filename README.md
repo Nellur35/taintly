@@ -599,7 +599,7 @@ do not recompute risk.
 
 
 <!-- AUTOGEN:summary -->
-248 file-based rules and 29 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+248 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 
@@ -621,9 +621,13 @@ do not recompute risk.
 | TAINT — Multi-stage taint flows | 13 | 4 | 2 |
 <!-- /AUTOGEN:coverage -->
 
+<<<<<<< HEAD
+Plus 32 platform-posture rules in `--platform-audit` mode.
+=======
 
 
 Plus 29 platform-posture rules in `--platform-audit` mode.
+>>>>>>> origin/main
 
 
 

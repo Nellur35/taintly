@@ -1,0 +1,57 @@
+# dev/jenkins-test — verify the Jenkins posture rules against a real controller.
+#
+# This file launches an ephemeral Jenkins LTS instance configured for the
+# specific misconfigurations that PLAT-JK-001/004/005/006/007/010 detect.
+# It's a verification harness, not part of the test suite — running it
+# requires Docker, takes ~60s for first boot, and is intended for manual
+# end-to-end validation when changing posture-rule logic or shipping a
+# new Jenkins version.
+#
+# Usage:
+#   cd dev/jenkins-test
+#   docker compose up -d
+#   # wait ~60s for Jenkins to boot
+#   docker compose logs jenkins | grep -i "fully up"
+#
+#   # Run taintly's posture audit against it:
+#   JENKINS_USER=admin JENKINS_TOKEN=admin python -m taintly \
+#       --jenkins-url http://localhost:8080
+#
+# See docs/JENKINS_POSTURE_TESTING.md for the per-rule expected output
+# and instructions for spinning up "secure" / "compromised" variants.
+#
+# Why ephemeral and not the user's real Jenkins:
+#   1. Posture rules are read-only, but several of them require admin
+#      scope to evaluate fully (script console reachability, plugin list).
+#      Granting admin to a posture-audit tool against production is
+#      risky; verifying against a local throwaway is safer.
+#   2. Some misconfigurations we want to verify (security disabled,
+#      replaced update center URL) are deliberate damage to the
+#      controller — definitely don't do this on production.
+
+services:
+  jenkins:
+    image: jenkins/jenkins:lts-jdk17
+    container_name: taintly-jenkins-test
+    user: root  # avoid permission gymnastics on the bind-mounted home
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:50000:50000"
+    environment:
+      # ``runSetupWizard=false`` skips Jenkins's first-run security
+      # wizard. This is the EXACT misconfiguration PLAT-JK-007 targets:
+      # the resulting controller has ``useSecurity: false`` and accepts
+      # anonymous admin operations. So spinning up with this env var
+      # set is itself the verification fixture for PLAT-JK-007 firing.
+      #
+      # To verify the rule does NOT fire on a properly-configured
+      # Jenkins, run the "secure" variant in docs/JENKINS_POSTURE_TESTING.md.
+      JAVA_OPTS: "-Djenkins.install.runSetupWizard=false"
+    volumes:
+      # Persist plugin installs across restarts — speeds up iteration
+      # without surviving a ``docker compose down -v``.
+      - jenkins-home:/var/jenkins_home
+
+volumes:
+  jenkins-home:
+    name: taintly-jenkins-test-home
