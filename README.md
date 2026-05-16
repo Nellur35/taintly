@@ -12,11 +12,11 @@ Security scanner for CI/CD pipelines. Reads GitHub Actions, GitLab CI, and Jenki
 
 
 
-- Multi-stage taint analysis with provenance â€” traces attacker-controlled values through `env`, `$GITHUB_ENV`, `$GITHUB_OUTPUT`, and AI-agent step outputs across steps, with full source-to-sink chains.
+- Multi-stage taint analysis with provenance — traces attacker-controlled values through `env`, `$GITHUB_ENV`, `$GITHUB_OUTPUT`, and AI-agent step outputs across steps, with full source-to-sink chains.
 
-- Contextual exploitability â€” same rule, different verdict depending on whether the job has secrets, write permissions, or a fork-reachable trigger.
+- Contextual exploitability — same rule, different verdict depending on whether the job has secrets, write permissions, or a fork-reachable trigger.
 
-- AI / ML category â€” pickle deserialization, `trust_remote_code=True`, agent-output taint, MCP server hygiene.
+- AI / ML category — pickle deserialization, `trust_remote_code=True`, agent-output taint, MCP server hygiene.
 
 
 
@@ -24,7 +24,7 @@ Pure Python 3.10+. Zero runtime dependencies. No telemetry.
 
 
 
-**The score is computed against a fixed threat model:** public-OSS deployment, fork PRs reachable, runners shared, secrets repo-scoped, no OIDC-only posture. Whether a flagged pattern is actually exploitable in your deployment depends on context taintly cannot see â€” your network topology, your contributor policy, your runner posture. The score is a starting point for assessment, not a verdict. For details, see [docs/SCORING.md](docs/SCORING.md).
+**The score is computed against a fixed threat model:** public-OSS deployment, fork PRs reachable, runners shared, secrets repo-scoped, no OIDC-only posture. Whether a flagged pattern is actually exploitable in your deployment depends on context taintly cannot see — your network topology, your contributor policy, your runner posture. The score is a starting point for assessment, not a verdict. For details, see [docs/SCORING.md](docs/SCORING.md).
 
 
 
@@ -32,7 +32,7 @@ Pure Python 3.10+. Zero runtime dependencies. No telemetry.
 
 
 
-Pure stdlib, zero deps â€” clone and run:
+Pure stdlib, zero deps — clone and run:
 
 
 
@@ -72,7 +72,7 @@ Common flags:
 
 |---|---|
 
-| `--score` | Print a 0â€“100 grade and a debt profile |
+| `--score` | Print a 0–100 grade and a debt profile |
 
 | `--format {text,json,csv,sarif,html}` | Report format |
 
@@ -248,13 +248,13 @@ findings. Three patterns, each with a recipe.
 
 | `1` | Scan completed with HIGH-severity findings (or with findings at or above `--fail-on` severity) |
 
-| `2` | CLI argument error OR scan completed with CRITICAL-severity findings â€” distinguish via stderr (argparse usage on argument error vs. severity summary on findings) |
+| `2` | CLI argument error OR scan completed with CRITICAL-severity findings — distinguish via stderr (argparse usage on argument error vs. severity summary on findings) |
 
 | `3` | Configuration error (missing config file, invalid YAML, unknown rule ID) |
 
 | `10` | `--self-test` failed: a positive sample didn't fire, or a negative sample did, or `--integration-test` reported a non-bypass failure |
 
-| `11` | Scan completed but coverage was degraded â€” at least one `ENGINE-ERR` finding present (file unreadable, ReDoS cap hit, rule crashed) |
+| `11` | Scan completed but coverage was degraded — at least one `ENGINE-ERR` finding present (file unreadable, ReDoS cap hit, rule crashed) |
 
 | `12` | `--self-test --mutate` detected a surviving mutation |
 
@@ -268,7 +268,7 @@ wrong because it conflates findings with scanner errors.
 
 
 
-### Pattern A â€” fail-fast for clean codebases
+### Pattern A — fail-fast for clean codebases
 
 
 
@@ -314,7 +314,7 @@ jobs:
 
 
 
-### Pattern B â€” diff-only for repos with existing findings
+### Pattern B — diff-only for repos with existing findings
 
 
 
@@ -382,13 +382,13 @@ The baseline should be regenerated periodically (e.g., monthly) so
 
 fixed findings don't keep counting toward the silent-acceptance set.
 
-Don't regenerate it from a feature branch â€” the baseline represents
+Don't regenerate it from a feature branch — the baseline represents
 
 the team's agreed acceptance state of `main`.
 
 
 
-### Pattern C â€” scheduled deep scan
+### Pattern C — scheduled deep scan
 
 
 
@@ -534,15 +534,15 @@ When using taintly in CI, three sources can configure it:
 
 
 
-1. **CLI flags** (highest priority) â€” what the workflow sets via
+1. **CLI flags** (highest priority) — what the workflow sets via
 
    `extra-args` or `with:`.
 
-2. **`.taintly.yml`** at the repo root â€” versioned config the team
+2. **`.taintly.yml`** at the repo root — versioned config the team
 
    agrees on.
 
-3. **Defaults** â€” what taintly does without configuration.
+3. **Defaults** — what taintly does without configuration.
 
 
 
@@ -590,7 +590,7 @@ do not recompute risk.
 
 
 
-`--score` prints a 0â€“100 grade and a debt profile labelling each family Strong, Moderate, Weak, Needs review, or Not applicable. "Not applicable" is reserved for families whose rules had no candidate location to evaluate in this scan â€” distinct from "Strong" (rules ran, nothing was wrong).
+`--score` prints a 0–100 grade and a debt profile labelling each family Strong, Moderate, Weak, Needs review, or Not applicable. "Not applicable" is reserved for families whose rules had no candidate location to evaluate in this scan — distinct from "Strong" (rules ran, nothing was wrong).
 
 
 
@@ -621,13 +621,7 @@ do not recompute risk.
 | TAINT — Multi-stage taint flows | 13 | 4 | 2 |
 <!-- /AUTOGEN:coverage -->
 
-<<<<<<< HEAD
 Plus 32 platform-posture rules in `--platform-audit` mode.
-=======
-
-
-Plus 29 platform-posture rules in `--platform-audit` mode.
->>>>>>> origin/main
 
 
 
