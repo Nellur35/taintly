@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""No-rules-change gate for the structural-reader Phase 1 PR.
+"""No-rules-change gate — guard against silent fixture drift.
 
-Phase 1 ships a path-extraction reader without migrating any
-existing rules to use it — the reader is pure addition.  This
-script enforces that contract: it scans every fixture under
+Any commit that touches the rule pack, the engine, or the
+parser stack risks subtly changing what an existing fixture
+fires (or stops firing).  This script scans every fixture under
 ``tests/fixtures/`` with the standard rule pack, hashes the
 emitted JSON, and exits non-zero if the hash differs from the
-baseline.
+baseline.  When the change is intended, the baseline is
+regenerated and committed together with the rule change so the
+diff is reviewed deliberately.
 
 Usage:
 

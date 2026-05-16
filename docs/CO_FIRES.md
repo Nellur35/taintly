@@ -4,14 +4,14 @@ Several rules in the taintly pack are designed to *intentionally co-fire* on
 the same line. This document explains why so users don't read the duplication
 as the tool double-counting.
 
-It also lists the **dedup** decisions made in iter-6 — same-condition rule
-pairs that USED to co-fire and have been collapsed.
+It also lists **same-condition rule pairs that have been retired** —
+duplicates that used to co-fire and were collapsed.
 
 ---
 
-## Status (iter-6, 2026-05-09)
+## Retired duplicates
 
-After dedup, three GitHub-side same-condition pairs were retired:
+Three GitHub-side same-condition pairs have been collapsed:
 
 | Retired pair | Reason | Surviving rule |
 |---|---|---|
@@ -90,7 +90,7 @@ rule:
 
 1. **Assert the rules add distinct information.** If two rules say the same
    thing about the same line at different OWASP categories, retire one
-   (iter-6 retired three such pairs).
+   (see the retired-duplicates list above).
 2. **Name the layer in the title.** A user reading two findings on one line
    should be able to distinguish "agent has PR checkout" from "agent has
    write permissions" from "agent has no tool allowlist" without reading the
@@ -110,5 +110,5 @@ identical conditions*, that's a dedup candidate. File an issue with:
 - The minimal fixture that triggers both
 - Which severity you'd expect to win
 
-Pre-iter-6 the audit found three such pairs; the next round will close the
-ones below INFO threshold that auditing didn't surface.
+Prior audits surfaced three such pairs; future passes will close the
+ones below INFO threshold that automated auditing didn't surface.

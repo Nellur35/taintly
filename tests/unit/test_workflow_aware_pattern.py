@@ -1,8 +1,8 @@
 """WorkflowAwarePattern test pack — context API and rule contract.
 
-Phase 8 iteration 2: validates the ``PredicateContext`` helpers
-(siblings / descendants / step_uses / steps_after / is_reusable_workflow)
-and the ``WorkflowAwarePattern.check`` contract that surrounds them.
+Validates the ``PredicateContext`` helpers (siblings / descendants
+/ step_uses / steps_after / is_reusable_workflow) and the
+``WorkflowAwarePattern.check`` contract that surrounds them.
 
 The three concrete tunes that drove this infrastructure
 (SEC6-GH-010 safe-consumer allowlist, TAINT-GH-006 sink-kind
@@ -319,7 +319,7 @@ def test_block_scalar_predicate_runs_per_body_line():
 
 
 # ---------------------------------------------------------------------------
-# Phase 8 iter-4 (2026-05-04): caller-graph helpers for TAINT-GH-007
+# Caller-graph helpers (used by TAINT-GH-007)
 # ---------------------------------------------------------------------------
 
 
@@ -478,7 +478,7 @@ def test_find_callers_matrix_literal_passes_only_literals(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Phase 8 iter-3 (2026-05-04): repo_root helper for AI-GH-036
+# repo_root helper (used by AI-GH-036)
 # ---------------------------------------------------------------------------
 
 

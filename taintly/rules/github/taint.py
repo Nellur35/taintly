@@ -55,7 +55,7 @@ def _taint_gh_006_predicate(
     _path: tuple[object, ...],
     ctx,
 ) -> bool:
-    """Predicate for TAINT-GH-006 (Phase 8 iter-4 form).
+    """Predicate for TAINT-GH-006 — caller-graph form.
 
     Fires when:
 
@@ -69,8 +69,7 @@ def _taint_gh_006_predicate(
     or matrix-literal values to the input (no attacker-reachable
     context — see ``_ATTACKER_REACHABLE_CONTEXT_RE``), the rule
     suppresses.  Callees with no in-repo callers keep firing as
-    callee-side review-needed warnings (the rule's original
-    contract before iter-4).
+    callee-side review-needed warnings.
     """
     if not _INPUTS_REF_RE.search(value or ""):
         return False
@@ -1154,25 +1153,22 @@ RULES = [
             "confirm the input is either a trusted context (SHA, ref, "
             "actor login on a push-only trigger) or properly sanitised."
         ),
-        # Phase 8 iteration 2 (2026-05-04): converted from
-        # ContextPattern regex (any-line ``${{ inputs.X }}``
-        # reference) to WorkflowAwarePattern that fires only on
-        # SHELL SINKS — ``run:``, ``with: args/entrypoint/script/
-        # command``.  Identifier sinks (``name:``, ``id:``,
-        # ``outputs.x:``, ``environment:``, ``tag_name:``,
-        # ``timeout-minutes:``) cannot execute the substituted
-        # bytes; their FP density was the dominant noise source on
-        # the corpus baseline (2026-05-04: 125 firings / 7 repos,
-        # ~50-60% identifier-sink).
+        # WorkflowAwarePattern form fires only on SHELL SINKS —
+        # ``run:``, ``with: args/entrypoint/script/command``.
+        # Identifier sinks (``name:``, ``id:``, ``outputs.x:``,
+        # ``environment:``, ``tag_name:``, ``timeout-minutes:``)
+        # cannot execute the substituted bytes; their FP density
+        # was the dominant noise source under the prior any-line
+        # form.
         #
         # The reusable-workflow gate (``on: workflow_call``) is
         # checked via ``ctx.is_reusable_workflow()`` which covers
         # the three legal shapes (bare, block, list).
         #
-        # Phase 8 iteration 4 (2026-05-04) added caller-graph
-        # suppression: when EVERY in-repo caller of this reusable
-        # workflow passes literal / matrix-literal values to the
-        # input (no attacker-reachable context), the rule
+        # Caller-graph suppression: when EVERY in-repo caller of
+        # this reusable workflow passes literal / matrix-literal
+        # values to the input (no attacker-reachable context), the
+        # rule
         # suppresses.  Sample-and-label of 21 corpus fires found
         # 19/21 FP because of this exact shape (matrix-driven fan-
         # out into a callee that takes inputs).  The suppression
@@ -2321,7 +2317,7 @@ RULES = [
     #
     # Cross-tool corpus signal: 3 zizmor template-injection rows on
     # django/schedules.yml + django/screenshots.yml were taintly-misses
-    # in PR #151's labelled set; this rule closes that recall gap.
+    # in a labelled-corpus comparison; this rule closes that gap.
     # =========================================================================
     Rule(
         id="TAINT-GH-013",
@@ -2350,13 +2346,11 @@ RULES = [
             # line; matched lines extend through the step body until
             # indent drops back to the step level.
             block_anchor=r"^\s*-?\s*uses:\s*actions/github-script@",
-            # iter-6 (2026-05-09): narrowed match. Previously matched
-            # any ``${{ ... }}`` interpolation, which fired on safe
-            # system-controlled contexts like ``${{ github.repository
-            # }}`` and ``${{ github.run_id }}`` (audit found 1 FP on
-            # astral-sh/ruff's daily_fuzz.yaml issue-creation body
-            # that interpolated only system contexts). Now requires
-            # the expression body to reference at least one
+            # Narrow match: only ``${{ ... }}`` interpolations that
+            # reference an attacker-controllable token (not pure
+            # system contexts like ``${{ github.repository }}`` or
+            # ``${{ github.run_id }}``).  Requires the expression
+            # body to reference at least one
             # attacker-controllable token: github.event.*, inputs.*,
             # github.head_ref, github.actor, needs.*.outputs.*, or
             # steps.*.outputs.* (fork-reachable upstream output).
@@ -2459,13 +2453,12 @@ RULES = [
                 "    steps:\n"
                 "      - run: echo '${{ github.event.pull_request.title }}'\n"
             ),
-            # iter-6 (2026-05-09): system-controlled contexts are
-            # NOT attacker-influenceable. ``${{ github.repository }}``
-            # is the repo's own slug; ``${{ github.run_id }}`` is the
-            # runner-assigned ID. Real-world FP from astral-sh/ruff's
-            # daily_fuzz.yaml, which builds an issue body containing
-            # only these system contexts. Narrowed match excludes
-            # them; this fixture pins the regression.
+            # System-controlled contexts are NOT
+            # attacker-influenceable.  ``${{ github.repository }}``
+            # is the repo's own slug; ``${{ github.run_id }}`` is
+            # the runner-assigned ID.  Issue-body templates that
+            # interpolate only these system contexts must not fire.
+            # This fixture pins that boundary.
             (
                 "jobs:\n"
                 "  notify:\n"

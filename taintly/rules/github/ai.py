@@ -58,11 +58,10 @@ from taintly.workflow_aware_pattern import (
 # attacker-controlled directives in those files and have a downstream
 # operator's agent execute them with full operator trust — the
 # indirect-prompt-injection / supply-chain variant of the AI-agent
-# rule family.  Discovered during Phase 8 iter-3 corpus review when
-# the SEC6-GH-010 review agent encountered
-# ``corpus/repos/CrowdStrike__terraform-provider-crowdstrike/CLAUDE.md``
-# being auto-loaded by the Claude Code harness as user instructions.
-# The CrowdStrike file is benign; the *mechanism* is the surface.
+# rule family.  The mechanism (a coding-agent loading instructions
+# from a file checked into the repo it is asked to review) is the
+# surface here, regardless of whether any given instance file is
+# benign.
 # ---------------------------------------------------------------------------
 
 _AGENT_INSTRUCTION_FILES: tuple[str, ...] = (
@@ -72,10 +71,9 @@ _AGENT_INSTRUCTION_FILES: tuple[str, ...] = (
     "GEMINI.md",  # Gemini Code
     ".github/copilot-instructions.md",  # GitHub Copilot
     ".aider.conf.yml",  # Aider
-    # GitLab Duo — convention is evolving (Phase 8 Track C research,
-    # 2026-05-04). Probing is harmless when absent; if/when GitLab
-    # Duo formalises the path, repos that adopt it surface here
-    # without a rule change.
+    # GitLab Duo — convention is evolving. Probing is harmless when
+    # absent; if/when GitLab Duo formalises the path, repos that
+    # adopt it surface here without a rule change.
     ".gitlab/duo/instructions.md",
 )
 
@@ -539,8 +537,8 @@ _URL_RE = re.compile(r"https?://[^\s\"'<>)\]]+", re.IGNORECASE)
 # Documentation-domain allowlist.  URLs matching any of these hosts
 # OR matching ``github.com/<o>/<r>/{issues,pull,wiki,...}/`` paths
 # are docs / non-execution surfaces and don't qualify as mutable-
-# remote refs for NEW3.  Empirical list — extend if Phase 7 corpus
-# validation surfaces additional doc domains.
+# remote refs.  Empirical list — extend if corpus validation
+# surfaces additional doc domains.
 _DOC_DOMAIN_HOSTS: tuple[str, ...] = (
     "docs.",
     "developer.mozilla.org",
@@ -5622,9 +5620,9 @@ RULES: list[Rule] = [
     # =========================================================================
     # AI-GH-036: Repository contains agent-instruction file
     # =========================================================================
-    # Phase 8 iter-3 (2026-05-04): inventory rule for repo-root files
-    # that AI agent harnesses auto-load as user-trust-tier
-    # instructions when an agent runs against the repo.  The rule
+    # Inventory rule for repo-root files that AI agent harnesses
+    # auto-load as user-trust-tier instructions when an agent runs
+    # against the repo.  The rule
     # fires once per scan (project-scope; deduped by the engine) for
     # any repo containing any of:
     #

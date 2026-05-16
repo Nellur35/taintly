@@ -1,10 +1,10 @@
-"""StructuralPattern — Phase 2 of the structural CI YAML reader.
+"""StructuralPattern — rule-time pattern over the structural reader.
 
 A ``StructuralPattern`` is a rule-time pattern that uses the
 schema-bounded path-extraction reader at
 :mod:`taintly.parsers.structural` instead of regex matching.
 
-Phase 2 contract:
+Contract:
 
   * Conforms to ``PatternProtocol.check(content, lines) ->
     list[(line, snippet)]`` so existing engine code dispatches it

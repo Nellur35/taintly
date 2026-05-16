@@ -100,13 +100,13 @@ def _safe_search_chunked(compiled_pattern, content: str):
     """Run a compiled regex search across ``content`` with ReDoS
     protection AND length-cap safety.
 
-    Phase 8 iter-4 (2026-05-04) split: ``_safe_search`` returns
-    ``None`` outright when ``content > _MAX_SAFE_TEXT_LEN``, which
-    silently breaks ``ContextPattern.requires`` /
-    ``AbsencePattern.absent`` on legitimately-large workflows
-    (Microsoft / Azure / AWS routinely have files >50KB).  This
-    chunked variant scans the content in line-windowed chunks
-    bounded by ``_MAX_SAFE_TEXT_LEN``; each chunk pays the
+    The plain ``_safe_search`` returns ``None`` outright when
+    ``content > _MAX_SAFE_TEXT_LEN``, which silently breaks
+    ``ContextPattern.requires`` / ``AbsencePattern.absent`` on
+    legitimately-large workflows (Microsoft / Azure / AWS routinely
+    have files >50KB).  This chunked variant scans the content in
+    line-windowed chunks bounded by ``_MAX_SAFE_TEXT_LEN``; each
+    chunk pays the
     SIGALRM ReDoS timeout and the per-chunk length cap, and the
     overall search reaches the full file.
 

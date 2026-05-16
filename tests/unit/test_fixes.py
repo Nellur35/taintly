@@ -243,7 +243,7 @@ def test_quote_gitlab_refs_skips_quoted_heredoc(tmp_path):
 
 
 def test_quote_gitlab_refs_does_not_touch_sha_variable(tmp_path):
-    # CI_MERGE_REQUEST_SOURCE_BRANCH_SHA was removed from the rule in PR #65
+    # CI_MERGE_REQUEST_SOURCE_BRANCH_SHA is excluded from the rule
     # because SHAs are 40-char hex and can't carry shell metacharacters.
     original = "script:\n  - git log --format=%h $CI_MERGE_REQUEST_SOURCE_BRANCH_SHA\n"
     path = _write(tmp_path, original)

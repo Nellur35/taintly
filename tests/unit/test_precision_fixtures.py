@@ -1,5 +1,4 @@
-"""Precision fixtures — enforces the 'subtle safe-vs-unsafe' distinctions
-called out in the improvement report (Phase 3, item 14).
+"""Precision fixtures — enforces the 'subtle safe-vs-unsafe' distinctions.
 
 Each test runs the real engine on a fixture file and asserts on the
 shape of the findings, not just "did something fire".  The whole point
@@ -377,17 +376,16 @@ def test_sec4_gh_018_stays_high_on_pull_request(gh_rules, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# iter-6 (2026-05-09) precision regressions
+# Precision regressions
 #
-# Each FP confirmed by the public-repo audit (chunks 4-7 of the audit
-# triage) is pinned here. Future rule edits that re-introduce any of
-# these FPs will fail one of these tests with a clear message
-# pointing back to the FP.
+# Each FP confirmed by a public-repo audit is pinned here.  Future
+# rule edits that re-introduce any of these FPs will fail one of
+# these tests with a clear message pointing back to the FP.
 # ---------------------------------------------------------------------------
 
 
 def test_sec6_gh_001_skips_ephemeral_keychain_password(gh_rules, tmp_path):
-    """iter-6 FP from gh/cli's deployment.yml: ``keychain_password=
+    """FP from gh/cli's deployment.yml: ``keychain_password=
     "password1"`` is the macOS code-signing ephemeral keychain
     pattern (the actual cert pwd is $APPLE_APPLICATION_CERT_PASSWORD).
     SEC6-GH-001 firing CRITICAL on this is wrong — variable name
@@ -409,7 +407,7 @@ def test_sec6_gh_001_skips_ephemeral_keychain_password(gh_rules, tmp_path):
 
 
 def test_taint_gh_013_skips_safe_system_contexts(gh_rules, tmp_path):
-    """iter-6 FP from astral-sh/ruff's daily_fuzz.yaml: github-script
+    """FP from astral-sh/ruff's daily_fuzz.yaml: github-script
     body interpolating only ``${{ github.repository }}`` and
     ``${{ github.run_id }}`` — both system-controlled, never
     attacker-influenceable. Narrowed match requires an attacker-
@@ -433,7 +431,7 @@ def test_taint_gh_013_skips_safe_system_contexts(gh_rules, tmp_path):
 
 
 def test_sec5_gh_001_recognizes_codspeed_oidc(gh_rules, tmp_path):
-    """iter-6 FP from astral-sh/ruff's ci.yaml: ``id-token: write``
+    """FP from astral-sh/ruff's ci.yaml: ``id-token: write``
     granted for CodSpeed benchmarking, with the comment
     ``# required for OIDC authentication with CodSpeed``. CodSpeed
     is now in the OIDC-consumer allowlist."""
@@ -454,7 +452,7 @@ def test_sec5_gh_001_recognizes_codspeed_oidc(gh_rules, tmp_path):
 
 
 def test_sec6_gh_005_skips_env_block_assignments(gh_rules, tmp_path):
-    """iter-6 FP from astral-sh/ruff's publish-mirror.yml:
+    """FP from astral-sh/ruff's publish-mirror.yml:
     secrets embedded in URL values inside ``env:`` blocks are the
     RECOMMENDED remediation form (env var path is masked by the
     runner). The rule's title says ``not via env var`` but it
@@ -492,7 +490,7 @@ def test_sec6_gh_005_still_fires_on_run_block_url(gh_rules, tmp_path):
 
 
 def test_lotp_gh_001_skips_non_pr_workflows(gh_rules, tmp_path):
-    """iter-6 FP from astral-sh/ruff's publish-{,ty-}playground.yml:
+    """FP from astral-sh/ruff's publish-{,ty-}playground.yml:
     workflow_call/workflow_dispatch only — no PR trigger. The
     workflow uses ``${{ github.head_ref || 'main' }}`` in a
     cloudflare wrangler-action's ``branch:`` parameter (NOT in
@@ -520,7 +518,7 @@ def test_lotp_gh_001_skips_non_pr_workflows(gh_rules, tmp_path):
 
 
 def test_lotp_gh_005_skips_npm_self_upgrade(gh_rules, tmp_path):
-    """iter-6 FP from astral-sh/ruff's publish-wasm.yml:
+    """FP from astral-sh/ruff's publish-wasm.yml:
     ``npm install -g npm@11.12.0`` upgrades the package manager
     itself (foundational infrastructure). It does NOT install an
     attacker-controllable dependency that could carry malicious
@@ -540,7 +538,7 @@ def test_lotp_gh_005_skips_npm_self_upgrade(gh_rules, tmp_path):
 
 
 def test_sec9_gh_002_requires_real_release_trigger(gh_rules, tmp_path):
-    """iter-6 FP from astral-sh/ruff's ci.yaml (push:main + pull_request)
+    """FP from astral-sh/ruff's ci.yaml (push:main + pull_request)
     and gh/cli's deployment.yml (workflow_dispatch with ``release:``
     as an INPUT name). Loose ``(release:|tags:)`` requires regex
     matched job names and input names. New regex requires the token
@@ -566,7 +564,7 @@ def test_sec9_gh_002_requires_real_release_trigger(gh_rules, tmp_path):
 def test_sec3_gh_002_and_sec8_gh_003_no_double_fire_on_branch_pin(
     gh_rules, tmp_path
 ):
-    """iter-6 dedup: ``uses: org/repo/.github/workflows/x.yml@main``
+    """Dedup case: ``uses: org/repo/.github/workflows/x.yml@main``
     used to fire BOTH SEC3-GH-002 (CRITICAL) AND SEC8-GH-003 (HIGH)
     on the exact same line. SEC8-GH-003 now excludes branch refs
     (SEC3-GH-002 owns those CRITICAL); SEC8-GH-003 keeps the
@@ -586,7 +584,7 @@ def test_sec3_gh_002_and_sec8_gh_003_no_double_fire_on_branch_pin(
 
 
 def test_sec4_gh_002_downgraded_to_medium(gh_rules, tmp_path):
-    """iter-6: bare pull_request_target use is MEDIUM/review-needed,
+    """Bare pull_request_target use is MEDIUM/review-needed,
     not HIGH. SEC4-GH-001 covers the dangerous combination
     (trigger + PR checkout) at CRITICAL."""
     from taintly.models import Severity
@@ -603,12 +601,12 @@ def test_sec4_gh_002_downgraded_to_medium(gh_rules, tmp_path):
     assert fired, "SEC4-GH-002 should still detect the trigger"
     for f in fired:
         assert f.severity == Severity.MEDIUM, (
-            f"Bare pull_request_target should be MEDIUM after iter-6; got {f.severity}"
+            f"Bare pull_request_target should be MEDIUM; got {f.severity}"
         )
 
 
 def test_engine_handles_gitlab_reference_tag(gitlab_rules, tmp_path):
-    """iter-6 engine fix: GitLab's ``!reference`` tag was treated as
+    """Engine fix: GitLab's ``!reference`` tag was treated as
     an unsupported custom tag, halting structural parsing for the
     rest of the file (gitlab-org/cli's .gitlab-ci.yml emitted
     ENGINE-ERR at line 367). Tokenizer now passes through.

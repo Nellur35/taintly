@@ -1,11 +1,10 @@
 """Line-level regression tests for StructuralPattern's block-scalar
 per-line emission.
 
-After Phase 2 shipped, multi-line ``run: |`` block scalars reported
-findings at the block-scalar header line rather than the line
-containing the dangerous interpolation.  The Subtask 2 fix added a
-``block_lines`` field to LEAF_SCALAR events and taught
-StructuralPattern to run the predicate per body line and emit
+Multi-line ``run: |`` block scalars must report findings at the
+line containing the dangerous interpolation, not at the
+block-scalar header line.  LEAF_SCALAR carries ``block_lines``;
+StructuralPattern runs the predicate per body line and emits
 findings at the matched line's actual source coordinates.
 
 This module pins that behaviour with line-exact assertions so a

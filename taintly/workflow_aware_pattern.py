@@ -7,8 +7,7 @@ about cross-node state — sibling values, sink-key classification, or
 descendant search — that ``StructuralPattern``'s ``(value, value_kind,
 path)`` signature can't observe.
 
-Three concrete tunes drove the introduction (Phase 8 iteration 2,
-2026-05-04):
+Three concrete tunes drove the introduction:
 
   * SEC6-GH-010 — needs the parent step's ``uses:`` value to look up
     the action name and apply a ``(action_name, input_slot)`` safe-
@@ -267,7 +266,7 @@ class PredicateContext:
         return None
 
     # ------------------------------------------------------------------
-    # Caller-graph helpers — Phase 8 iter-4 (2026-05-04).
+    # Caller-graph helpers.
     #
     # Used by TAINT-GH-007 to suppress TAINT-GH-006 fires when every
     # in-repo caller of THIS reusable workflow passes literal /

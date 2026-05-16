@@ -1,10 +1,10 @@
 name: E2E canaries
 
-# Layer 3 of the "don't ship broken rules" enforcement.  The 76-repo
-# Phase 8 corpus is a fixed set; this workflow scans three OUTSIDE-
-# corpus canary repos (one per platform) on every PR so a scanner
-# regression that only surfaces on real-world repos gets caught BEFORE
-# merge, not after.
+# Layer 3 of the "don't ship broken rules" enforcement.  The
+# in-repo corpus is a fixed set; this workflow scans three
+# outside-corpus canary repos (one per platform) on every PR so a
+# scanner regression that only surfaces on real-world repos gets
+# caught before merge, not after.
 #
 # Gates (v1, smoke test):
 #   * taintly itself exits cleanly (no scanner crash, no Python

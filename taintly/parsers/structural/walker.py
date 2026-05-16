@@ -1,8 +1,7 @@
 """Path-tracking walker for the structural CI YAML reader.
 
 Consumes the tokenizer's output, maintains a key/index stack, and
-emits a stream of high-level events.  Public event types (per the
-Phase 1 contract):
+emits a stream of high-level events.  Public event types:
 
   * ``LEAF_SCALAR`` — a scalar value at a fully-resolved path.
   * ``CUTOFF`` — the tokenizer hit an unsupported construct in
@@ -12,8 +11,7 @@ Phase 1 contract):
     to surface but continue past (e.g., dangling alias).
 
 ENTER_MAPPING / LEAVE_MAPPING / ENTER_SEQUENCE / LEAVE_SEQUENCE are
-internal walker state and intentionally NOT exposed in Phase 1.
-Phase 1.5 reconsiders if Phase 2 migrations need them.
+internal walker state and intentionally NOT exposed.
 
 Cutoff-recovery contract (load-bearing for the
 ``coverage warning`` exit-11 path):
@@ -371,8 +369,8 @@ class _Walker:
                 TokenKind.FLOW_OPEN_SEQ,
                 TokenKind.FLOW_OPEN_MAP,
             ):
-                # Phase 1 flow handling: consume the bracketed run
-                # and emit indexed/keyed leaves.  ``_consume_flow``
+                # Flow handling: consume the bracketed run and emit
+                # indexed/keyed leaves.  ``_consume_flow``
                 # advances ``self._flow_end_idx`` to the token
                 # AFTER the matching close brace (handling any
                 # nested flow containers via recursion), so the
@@ -629,10 +627,9 @@ class _Walker:
         key) is captured first, then the nested flow is consumed
         with ``pre_key`` carrying that slot.  The recursive call
         pushes its own frame keyed by ``pre_key``, so leaves
-        inside the nested container resolve at the correct path
-        — this is the fix for the Phase 2 bug where
-        ``steps: [{uses: ...}]`` produced no leaves at the
-        ``uses`` key.
+        inside the nested container resolve at the correct path.
+        Without this, ``steps: [{uses: ...}]`` would produce no
+        leaves at the ``uses`` key.
         """
         first = tokens[start]
         # Determine the key under which this flow container's

@@ -1,8 +1,8 @@
 """Tests for v2 suppression metadata (reason / expires / owner).
 
-The improvement report's Phase 3 ask for suppression governance:
-justification and expiry to stop silent exceptions from accumulating.
-These tests lock in the parser contract and the warning emission.
+Suppression governance: each entry carries a justification and an
+expiry so silent exceptions do not accumulate.  These tests lock
+in the parser contract and the warning emission.
 """
 
 from __future__ import annotations

@@ -16,9 +16,8 @@ Five tests cover the precision boundary:
     A label gate is NOT a user-gate, so the suppression does not
     kick in.
   * test_pse_gh_006_suppressed_by_dependabot_autoapprove — the
-    canonical FP from phone-branch sample-label, must NOT fire
-    because the job's ``if:`` restricts execution to
-    ``github.actor == 'dependabot[bot]'``.
+    canonical FP shape, must NOT fire because the job's ``if:``
+    restricts execution to ``github.actor == 'dependabot[bot]'``.
   * test_pse_gh_006_no_fire_on_pull_request_trigger — same anatomy
     on ``pull_request`` (not ``pull_request_target``), must NOT fire
     because the default token from a fork is read-only.
@@ -136,8 +135,8 @@ def test_pse_gh_006_fires_on_workflow_run_chain():
 
 
 def test_pse_gh_006_suppressed_by_dependabot_autoapprove():
-    """Canonical FP from phone-branch sample-label.  Same pwn_request
-    anatomy, but the ``if: github.actor == 'dependabot[bot]'`` gate
+    """Canonical FP shape.  Same pwn_request anatomy, but the
+    ``if: github.actor == 'dependabot[bot]'`` gate
     means attacker-fork PRs cannot reach the job — dependabot's PRs
     come from the host repo's own bot account, not from external
     forks.  The rule's user-gate suppression must catch this.

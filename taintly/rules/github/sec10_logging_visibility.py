@@ -18,12 +18,10 @@ RULES: list[Rule] = [
     Rule(
         id="SEC10-GH-001",
         title="GitHub Actions job has no timeout — unlimited runtime allowed",
-        # iter-6 (2026-05-09): downgraded LOW -> INFO. Audit across 4
-        # public repos saw this fire 26 + 14 + 8 + 8 = 56 times — the
-        # most common single finding by 5x. Real concern but firing on
-        # every untimed job creates fatigue without proportional risk
-        # signal. INFO keeps it visible (review-needed=True surfaces
-        # it in scored reports) without dominating LOW-or-above runs.
+        # Severity is INFO (not LOW): firing on every untimed job
+        # creates fatigue without proportional risk signal.  INFO
+        # keeps it visible (review-needed=True surfaces it in scored
+        # reports) without dominating LOW-or-above runs.
         # Operators who specifically want timeout enforcement at LOW
         # severity can override with .taintly.yml.
         severity=Severity.INFO,

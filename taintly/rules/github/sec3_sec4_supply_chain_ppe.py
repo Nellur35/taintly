@@ -17,10 +17,9 @@ from taintly.platform import github_archived_check, github_sha_verify
 from taintly.structural_pattern import StructuralPattern
 
 # ---------------------------------------------------------------------------
-# Phase 2 migration helpers — regex-equivalent predicates the
-# StructuralPattern rules call.  Kept module-local so the migration
-# is reviewable as a single contract: regex on the left, predicate
-# on the right, side-by-side semantics.
+# Regex-equivalent predicates the StructuralPattern rules call.
+# Kept module-local so each predicate sits next to the rule that
+# uses it: structural target on the right, predicate body here.
 # ---------------------------------------------------------------------------
 
 _FULL_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
@@ -35,8 +34,7 @@ _BRANCH_REF_NAMES = frozenset({"main", "master", "develop", "dev"})
 # the corpus tag-pins these).  Firing HIGH on every
 # ``actions/checkout@v4`` produces severe FP-density without
 # precision gain — the same threat is more usefully reported via
-# SEC3-GH-006 (third-party inventory).  See Phase 8 iteration 2
-# tuning doc for the corpus-baseline measurement.
+# SEC3-GH-006 (third-party inventory).
 # First-party action publishers — actions in these orgs are
 # operationally trusted (the platform vendor itself or a vendor-
 # equivalent foundation).  SEC3-GH-001 silences fires here so the
@@ -97,7 +95,7 @@ _DANGEROUS_GITHUB_CONTEXT_RE = re.compile(
 # explicitly set ``persist-credentials: false`` — corpus baseline
 # showed ~80% of fires were FP-density (the persisted credential
 # died with the runner, no later step used it).  That tradeoff is
-# why the severity was downgraded MEDIUM → LOW in iter-3.
+# why the severity is LOW in the bare form (no downstream consumer).
 #
 # The path forward documented at the time was: fire only when a
 # downstream step in the same job actually consumes the persisted
@@ -189,7 +187,7 @@ def _credential_consumer_surface(lines: list[str]) -> str:
 
 
 class _CheckoutDownstreamCredentialConsumerPattern:
-    """Pattern for SEC4-GH-005 (Phase 8 follow-up).
+    """Pattern for SEC4-GH-005 — downstream-consumer form.
 
     Fires when ALL of:
 
@@ -421,9 +419,7 @@ RULES: list[Rule] = [
             "force-pushed to point at malicious code — a technique used in documented "
             "supply chain attacks against popular GitHub Actions (Trivy, Checkmarx, tj-actions)."
         ),
-        # Phase 2 migration: was ``RegexPattern`` with five
-        # excludes; now a path-glob query plus a Python predicate
-        # that encodes the same semantics.  See
+        # Path-glob query plus a Python predicate.  See
         # ``_is_unpinned_uses_value`` above for the conditions.
         pattern=StructuralPattern(
             path="**.uses",
@@ -826,16 +822,14 @@ RULES: list[Rule] = [
     Rule(
         id="SEC4-GH-002",
         title="pull_request_target trigger detected",
-        # iter-6 (2026-05-09): downgraded HIGH -> MEDIUM. SEC4-GH-002
-        # is the BARE-TRIGGER signal (rule already in
-        # ``_REVIEW_NEEDED_RULES`` per families.py). The actually-
-        # dangerous combination — pull_request_target + checkout-of-
-        # PR-code — is covered by SEC4-GH-001 [CRITICAL]. Audit found
-        # this rule firing HIGH on 7 gh/cli triage workflows that
-        # explicitly disclaim risk in YAML comments and never check
-        # out PR code. Bare-trigger detection at MEDIUM keeps the
-        # signal visible without crowding the HIGH bucket with
-        # known-safe trigger usage. SEC4-GH-001 still escalates the
+        # Severity is MEDIUM (not HIGH).  SEC4-GH-002 is the
+        # BARE-TRIGGER signal (already in ``_REVIEW_NEEDED_RULES``
+        # per families.py).  The actually-dangerous combination —
+        # pull_request_target + checkout-of-PR-code — is covered
+        # by SEC4-GH-001 [CRITICAL].  Bare-trigger detection at
+        # MEDIUM keeps the signal visible without crowding the
+        # HIGH bucket with known-safe trigger usage.  SEC4-GH-001
+        # still escalates the
         # dangerous combination to CRITICAL.
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
@@ -951,17 +945,13 @@ RULES: list[Rule] = [
             "Attacker can craft PR titles, issue bodies, branch names, or commit messages "
             "containing shell commands that execute in the runner context."
         ),
-        # Phase 2 migration: was a per-line ``RegexPattern`` with
-        # three exclude regexes (comment, ``if:`` context,
-        # value-is-the-whole-expression-passing-through).  The
-        # structural form scopes the query to ``run:`` keys
-        # directly — the path filter does the structural job the
-        # original excludes were approximating.  Inside multi-line
-        # ``run: |`` block scalars the structural form fires once
+        # Structural form scopes the query to ``run:`` keys
+        # directly — the path filter does the structural job that
+        # the regex form's excludes (comment, ``if:`` context,
+        # whole-expression-passthrough) were approximating.  Inside
+        # multi-line ``run: |`` block scalars the rule fires once
         # at the block-header line rather than once per dangerous
-        # interpolation; this is a deliberate shape change
-        # surfaced via the no-rules-change gate and documented in
-        # the Phase 2 PR body.
+        # interpolation, by design.
         pattern=StructuralPattern(
             path="**.run",
             predicate=_has_dangerous_github_context,
@@ -1007,14 +997,14 @@ RULES: list[Rule] = [
     Rule(
         id="SEC4-GH-005",
         title="Checkout persists credentials AND a downstream step consumes them",
-        # Phase 8 follow-up (2026-05-10): tightened from "fires on every
-        # actions/checkout without persist-credentials: false" to "fires
-        # only when a downstream step in the same job actually uses the
-        # persisted credential" (git push/fetch/config or a documented
-        # git-pushing action).  Severity raised back to MEDIUM because
-        # remaining fires are now real risk, not posture-density noise.
-        # See _CheckoutDownstreamCredentialConsumerPattern below for
-        # the consumer detector.
+        # Tightened from "fires on every actions/checkout without
+        # persist-credentials: false" to "fires only when a downstream
+        # step in the same job actually uses the persisted credential"
+        # (git push/fetch/config or a documented git-pushing action).
+        # Severity is MEDIUM because remaining fires are real risk,
+        # not posture-density noise.  See
+        # _CheckoutDownstreamCredentialConsumerPattern below for the
+        # consumer detector.
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",

@@ -59,6 +59,14 @@ jobs:
         # bypass the manifest entirely. See the script for the rules.
         run: python scripts/check_public_no_leaks.py
 
+      - name: No-internal-narrative gate (clean-repo)
+        # Fails on Phase-N milestone labels, iter-N labels, internal
+        # PR refs, and similar working-log shorthand left over from
+        # private R&D sessions. Companion to the no-leaks gate: that
+        # one blocks whole-file leaks, this one blocks in-file
+        # narrative leaks.
+        run: python scripts/check_internal_narrative.py --all-tracked
+
   # ---------------------------------------------------------------------------
   # mypy — static type check (PSE Domain 2.1)
   # Loose mode: enables the highest-value bug classes (undefined name,
@@ -275,12 +283,11 @@ jobs:
   # Windows test slice — preventive gate against path-separator
   # regressions and any other OS-specific behaviour drift.
   #
-  # Background: PR #135 fixed four Windows path-separator bugs that
-  # had silently slipped through Linux-only CI for several rule
-  # releases.  The scanner ran fine on Windows for read-only paths
-  # but `endswith` / `split("/")` / `"/ci/" in filepath` checks
-  # silently misclassified legitimate workflow files as non-matching
-  # because os.path.join produces `\`-separated paths on Windows.
+  # The scanner runs fine on Windows for read-only paths, but
+  # `endswith` / `split("/")` / `"/ci/" in filepath` checks can
+  # silently misclassify legitimate workflow files because
+  # os.path.join produces `\`-separated paths on Windows.  This
+  # job catches those classes of bug before merge.
   #
   # Discipline:
   # - Single Python version (3.12) — Windows-runner minutes are not

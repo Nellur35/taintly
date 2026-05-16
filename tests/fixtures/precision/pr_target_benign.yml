@@ -1,7 +1,7 @@
-# Precision fixture — from the improvement report's Phase 2 Scenario table:
+# Precision fixture — benign pull_request_target shape:
 #
-#   "pull_request_target with no checkout, no secrets, permissions: {}
-#    → Review-needed or lower priority, not top-severity alarm"
+#   pull_request_target with no checkout, no secrets, permissions: {}
+#   → review-needed or lower priority, not top-severity alarm.
 #
 # Expected behavior:
 #   - SEC4-GH-002 MUST fire (trigger is detected)

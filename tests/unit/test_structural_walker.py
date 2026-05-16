@@ -1,7 +1,5 @@
 """Walker test pack — path-tracking, leaf emission, cutoff
 recovery, and the anchor-merge-key contract.
-
-Phase 1 of the structural CI YAML reader.
 """
 
 from __future__ import annotations
@@ -232,10 +230,9 @@ def test_plain_scalar_with_colon_in_value_walks_correctly():
 
 
 # ---------------------------------------------------------------------------
-# Subtask 1 — flow-style mappings nested in flow-style sequences
-# (Phase 2 follow-up: ``_consume_flow`` did not push a frame for
-# nested flow containers, so leaves inside the nested mapping
-# vanished.  These tests lock in the recursion fix.)
+# Flow-style mappings nested in flow-style sequences — ``_consume_flow``
+# must push a frame for nested flow containers, otherwise leaves inside
+# the nested mapping vanish.  These tests lock in the recursion contract.
 # ---------------------------------------------------------------------------
 
 

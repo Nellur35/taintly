@@ -295,23 +295,20 @@ RULES: list[Rule] = [
 # has effectively handed every fork PR opener an RCE primitive holding
 # the host repo's write token.
 #
-# Phone-branch evidence sample-label (lab ``docs/lab/evidence-runs/
-# SAMPLE-LABEL-pse-gh-003.md``, 2026-05-15) gave 2/3 precision on n=3.
-# The two TPs were canonical pwn_request shapes on ActionsTOCTOU's
-# ``deployment_victim.yml`` and ``label_victim.yml``.  The FP was the
-# dependabot-autoapprove shape (aws-actions's configure-aws-credentials
-# repo) — the job's ``if:`` gated on ``user.login == 'dependabot[bot]'``,
-# so attacker-fork PRs cannot reach the tokened checkout in the first
-# place.  Hence the negative bot-user gate below.
+# Sample-label evidence (n=3) gave 2/3 precision.  The two TPs
+# were canonical pwn_request shapes on ActionsTOCTOU's
+# ``deployment_victim.yml`` and ``label_victim.yml``.  The FP was
+# the dependabot-autoapprove shape (aws-actions's
+# configure-aws-credentials repo) — the job's ``if:`` gated on
+# ``user.login == 'dependabot[bot]'``, so attacker-fork PRs cannot
+# reach the tokened checkout in the first place.  Hence the
+# negative bot-user gate below.
 #
-# Design choice — flat-join over the structural reader's leaf stream.
-# The lab's phone-branch built this on top of a Datalog-style closure
-# substrate (``combination_facts``, ``permissions_facts``, plus a
-# 172-LoC engine in ``taint_facts/``); none of that ships publicly.
-# Public taintly is dependency-free Python and uses ``WorkflowAwarePattern``
-# style flat joins on leaf paths instead.  Per the consolidated plan
-# (2026-05-16) this rule is the "~250-line plain joins" rewrite called
-# out as the substrate-free alternative for the public surface.
+# Design choice — flat-join over the structural reader's leaf
+# stream.  Public taintly is dependency-free Python and uses
+# ``WorkflowAwarePattern`` style flat joins on leaf paths, hence
+# the ~250-line plain-joins form below rather than a closure
+# substrate.
 # =============================================================================
 
 
@@ -452,10 +449,10 @@ _PSE6_TRUSTED_BOTS = (
 
 
 # Any literal-equality user gate in the job's ``if:`` value — covers
-# both the documented trusted-bot allowlist (the canonical FP from
-# the phone-branch sample-label, dependabot-autoapprove) and the more
-# general case where the workflow author restricts execution to a
-# named maintainer / org-member ``github.actor`` literal.  Either
+# both the documented trusted-bot allowlist (the canonical
+# dependabot-autoapprove FP) and the more general case where the
+# workflow author restricts execution to a named maintainer /
+# org-member ``github.actor`` literal.  Either
 # shape excludes attacker-fork PRs at the engine boundary, so the
 # rule must not fire on it.
 #
@@ -683,8 +680,7 @@ class _Pse006Pattern:
         # (2) Trusted-bot gate suppression — if the job's ``if:`` value
         #     contains an equality comparison against a known-trusted
         #     bot user, attacker-fork PRs cannot reach the job in the
-        #     first place.  Mirrors the dependabot-autoapprove FP
-        #     surfaced in the phone-branch sample-label.
+        #     first place.  Mirrors the dependabot-autoapprove FP.
         if_leaf = next(
             (ev for ev in job_leaves if len(ev.path) == 3 and ev.path[2] == "if"),
             None,
@@ -917,9 +913,9 @@ RULES.append(
             ),
         ],
         test_negative=[
-            # (1) dependabot-autoapprove shape — the FP from phone-branch
-            # sample-label.  Same pwn_request anatomy but the trusted-bot
-            # gate makes attacker-fork PRs unreachable.
+            # (1) dependabot-autoapprove shape — canonical FP.  Same
+            # pwn_request anatomy but the trusted-bot gate makes
+            # attacker-fork PRs unreachable.
             (
                 "on: pull_request_target\n"
                 "permissions:\n  contents: write\n  pull-requests: write\n"

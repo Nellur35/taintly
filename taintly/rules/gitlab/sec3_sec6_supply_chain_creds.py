@@ -498,8 +498,8 @@ RULES: list[Rule] = [
     Rule(
         id="SEC10-GL-002",
         title="Public pipelines may expose job logs",
-        # iter-6 (2026-05-09): downgraded MEDIUM -> INFO and marked
-        # review_needed. This is the ONLY ``AbsencePattern(...
+        # Severity is INFO (not MEDIUM) and review_needed=True.
+        # This is the ONLY ``AbsencePattern(...
         # INTENTIONALLY_DISABLED ...)`` always-fires rule in the
         # whole pack — it cannot be satisfied by any pipeline YAML
         # because the visibility control lives in GitLab project

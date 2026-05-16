@@ -2486,7 +2486,7 @@ RULES: list[Rule] = [
     # =========================================================================
     # SEC4-JK-006: ``base64 -d | shell`` obfuscation in pipeline shell call
     # =========================================================================
-    # Jenkins port of SEC4-GH-022 / SEC4-GL-008 (Phase 8 Track C, 2026-05-04).
+    # Jenkins port of SEC4-GH-022 / SEC4-GL-008.
     # Encoded payloads inside ``sh '...'`` (or ``bat``) calls bypass
     # diff-review and string-pattern scanners.  Same threat shape as
     # the GitHub Actions and GitLab CI rules; Jenkins's `sh ''` is the

@@ -23,8 +23,8 @@ from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 # these in the same job segment as a build tool means the tool is operating
 # on untrusted source.
 #
-# iter-6 (2026-05-09): tightened anchoring to require the head-ref
-# reference to appear as the value of a ``ref:`` line (the only way
+# Tight anchoring: the head-ref reference must appear as the value
+# of a ``ref:`` line (the only way
 # the reference actually CONTROLS what code gets checked out).
 # Previously matched any occurrence of ``github.head_ref`` etc. —
 # including defensive ``${{ github.head_ref || 'main' }}`` fallbacks
@@ -139,14 +139,13 @@ RULES: list[Rule] = [
             "      - run: echo 'hello'",
             # Commented out
             "jobs:\n  build:\n    steps:\n      # - run: npm install\n      - run: echo ok",
-            # iter-6 (2026-05-09): defensive ``${{ github.head_ref ||
-            # 'main' }}`` fallback in a non-checkout context (e.g.
-            # cloudflare wrangler-action's ``branch:`` parameter).
-            # The reference is to a string fallback used as a deploy
-            # target name, not a code revision selector. Real-world
-            # FP from astral-sh/ruff publish-playground.yml. New
-            # _PR_HEAD_CHECKOUT regex requires the reference to be
-            # in a ``ref:`` line — this fixture pins the regression.
+            # Defensive ``${{ github.head_ref || 'main' }}`` fallback
+            # in a non-checkout context (e.g. cloudflare
+            # wrangler-action's ``branch:`` parameter): the reference
+            # is a string fallback used as a deploy target name, not
+            # a code revision selector. The _PR_HEAD_CHECKOUT regex
+            # requires the reference to be in a ``ref:`` line — this
+            # fixture pins that regression.
             "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
             "    steps:\n"
             "      - uses: actions/checkout@v4\n"
@@ -413,15 +412,13 @@ RULES: list[Rule] = [
                 # `- ` list-item marker before the key (steps use
                 # `      - name: Foo` inline).
                 r"^\s*-?\s*(?:name|description|title):",
-                # iter-6 (2026-05-09): exclude package-manager
-                # self-bootstraps (``npm install -g npm@x``,
-                # ``npm install -g pnpm`` etc.). These install the
-                # package manager itself from the registry; they
-                # don't run lifecycle scripts of an attacker-
-                # controlled dependency. Found firing CRITICAL on
-                # astral-sh/ruff's publish-wasm.yml line that
-                # bumps npm to 11.12.0 to enable trusted publishing
-                # — explicitly the recommended hardening, not the
+                # Exclude package-manager self-bootstraps
+                # (``npm install -g npm@x``, ``npm install -g
+                # pnpm`` etc.). These install the package manager
+                # itself from the registry; they don't run
+                # lifecycle scripts of an attacker-controlled
+                # dependency. Bumping npm to enable trusted
+                # publishing is the recommended hardening, not the
                 # attack vector. Also covers the analogous
                 # ``npm install -g yarn`` / ``-g pnpm`` shapes.
                 r"\b(?:npm|yarn|pnpm)\s+(?:install|i|add)\s+-g\s+(?:npm|pnpm|yarn|corepack)\b",
@@ -487,15 +484,14 @@ RULES: list[Rule] = [
                 "    permissions:\n      contents: read\n"
                 "    steps:\n      - run: npm install"
             ),
-            # iter-6 (2026-05-09): package-manager self-bootstrap
-            # — ``npm install -g npm@x`` in a job with id-token:
-            # write. This installs the package manager itself
-            # (foundational infrastructure published by npm Inc.)
-            # and doesn't run lifecycle scripts of an attacker-
-            # controlled dependency. Real-world FP from astral-
-            # sh/ruff's publish-wasm.yml — they bump npm to 11.12.0
-            # specifically to enable trusted publishing, the
-            # recommended hardening.
+            # Package-manager self-bootstrap — ``npm install -g
+            # npm@x`` in a job with id-token: write.  This installs
+            # the package manager itself (foundational
+            # infrastructure published by npm Inc.) and doesn't
+            # run lifecycle scripts of an attacker-controlled
+            # dependency.  Bumping npm to a specific version to
+            # enable trusted publishing is the recommended
+            # hardening, not a supply-chain risk.
             (
                 "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
                 "    permissions:\n      id-token: write\n"

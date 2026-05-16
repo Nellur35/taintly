@@ -7,7 +7,7 @@ defence — but it lives in the lab, and history shows two ways it can
 fail:
 
   1. the manifest can over-list (decision-log files, retrospectives,
-     phone-review notes get whitelisted by accident); and
+     internal-review notes get whitelisted by accident); and
   2. files can land in the public repo *outside* the manifest entirely
      via direct edits or older publish paths.
 
@@ -117,7 +117,7 @@ def main() -> int:
         "user-facing tool content — add it to ALLOWED_FILES (or extend "
         "ALLOWED_PREFIXES) in scripts/check_public_no_leaks.py with a "
         "one-line rationale.  Private R&D artifacts (ADRs, retros, "
-        "phone-review notes, design rationale) belong in the lab repo, "
+        "internal-review notes, design rationale) belong in the lab repo, "
         "not here."
     )
     return 1

@@ -99,9 +99,8 @@ def test_fires_when_cursor_rules_dir_present(tmp_path):
 
 def test_fires_when_gitlab_duo_instructions_present(tmp_path):
     """``.gitlab/duo/instructions.md`` (GitLab Duo agent-instruction
-    file, added in PR #32 for Phase 8 Track C) fires via the
-    ``_AGENT_INSTRUCTION_FILES`` arm.  The probe walks up to the
-    repo root and verifies the path under it."""
+    file) fires via the ``_AGENT_INSTRUCTION_FILES`` arm.  The probe
+    walks up to the repo root and verifies the path under it."""
     workflow = _build_repo(
         tmp_path,
         {".gitlab/duo/instructions.md": "# duo instructions\n"},

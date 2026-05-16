@@ -57,7 +57,7 @@ class StepOutputShellInterpolationPattern:
 
 
 # ---------------------------------------------------------------------------
-# SEC4-GH-008 helpers — Phase 8 iteration 3 (2026-05-04).
+# SEC4-GH-008 helpers — path-aware predicate.
 #
 # Sample-and-label of 30 corpus fires found 17/30 (57%) FP, all
 # concentrated in path-shape false positives the previous regex form
@@ -127,7 +127,7 @@ def _is_dispatch_input_in_shell_sink(
     path: tuple[object, ...],
     ctx: PredicateContext,
 ) -> bool:
-    """Predicate for SEC4-GH-008 (Phase 8 iteration 3 form).
+    """Predicate for SEC4-GH-008 — path-aware form.
 
     Fires when an ``${{ inputs.X }}`` / ``${{ github.event.inputs.X }}``
     reference reaches a shell sink:
@@ -291,12 +291,12 @@ RULES: list[Rule] = [
             "Manually triggered inputs are user-controlled and may contain shell metacharacters. "
             "Exploited in the Langflow and Ultralytics supply chain incidents (2024-2025)."
         ),
-        # Phase 8 iteration 3 (2026-05-04): converted from
-        # RegexPattern to WorkflowAwarePattern with a path-aware
-        # predicate.  Sample-and-label of 30 corpus fires found
-        # 17/30 (57%) FP concentrated in path-shape false positives
-        # (env-block multi-expression concats, job/step ``name:``
-        # strings, ``concurrency.group:``, ``with:`` slots whose
+        # WorkflowAwarePattern with a path-aware predicate.
+        # Sample-and-label of 30 corpus fires under the original
+        # regex form found 17/30 (57%) FP concentrated in
+        # path-shape false positives (env-block multi-expression
+        # concats, job/step ``name:`` strings, ``concurrency.group:``,
+        # ``with:`` slots whose
         # action consumes them as plain strings).  The threat shape
         # is shell-source splicing — covered by ``run:`` and a
         # narrow allowlist of shell-executing ``with:`` slots
@@ -970,15 +970,13 @@ RULES: list[Rule] = [
             "rule — they're hygiene at most and are covered by "
             "SEC4-GH-020."
         ),
-        # Note (iter-6 revert, 2026-05-09): an earlier iter-6 attempt
-        # converted this to ContextPattern with a fork-reachable
-        # trigger requires. That broke the existing severity
-        # downgrade contract: when the only trigger is push:tags /
-        # workflow_dispatch / schedule, the engine's
+        # Pattern stays RegexPattern (not ContextPattern with a
+        # fork-reachable trigger requires).  When the only trigger
+        # is push:tags / workflow_dispatch / schedule, the engine's
         # ``_downgrade_maintainer_gated_findings`` postprocessor
-        # already drops HIGH -> MEDIUM (covers the audit's flask FP
-        # on publish.yaml). Reverted to RegexPattern; the engine
-        # postprocessor handles the maintainer-gated case correctly.
+        # already drops HIGH -> MEDIUM, so the FP on
+        # maintainer-only-trigger publish workflows is handled there
+        # rather than by a trigger filter on the pattern itself.
         pattern=RegexPattern(
             match=(r"\$\{?(GITHUB_REF_NAME|GITHUB_HEAD_REF|GITHUB_ACTOR)\}?"),
             exclude=[
@@ -1239,7 +1237,6 @@ RULES: list[Rule] = [
     # =========================================================================
     # SEC4-GH-021: ``github.actor`` (or bot-login) used as a trust gate
     # =========================================================================
-    # Phase 8 iter-4 (2026-05-04): ``github.actor``-as-trust-gate.
     # Workflows commonly gate privileged operations on
     # ``github.actor == 'dependabot[bot]'`` or similar, under the
     # assumption that the actor field is a safe bot identity.  In
@@ -1386,8 +1383,8 @@ RULES: list[Rule] = [
     # =========================================================================
     # SEC4-GH-022: ``base64 -d | shell`` obfuscation in run-block
     # =========================================================================
-    # Phase 8 (2026-05-04): a ``run:`` block decodes a base64-encoded
-    # string and pipes the decoded bytes directly into a shell or
+    # A ``run:`` block decodes a base64-encoded string and pipes
+    # the decoded bytes directly into a shell or
     # interpreter.  Encoded payloads are the canonical fingerprint of
     # supply-chain attack code: diff reviewers and string-pattern
     # scanners can't match the literal commands.  Industry peer audits

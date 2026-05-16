@@ -1,4 +1,4 @@
-"""Regression tests for the PR #46-#49 second-pass review findings."""
+"""Regression tests for second-pass review findings."""
 
 from __future__ import annotations
 

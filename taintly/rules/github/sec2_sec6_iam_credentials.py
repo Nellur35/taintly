@@ -115,7 +115,7 @@ class _OverbroadWorkflowPermissionsPattern:
     # indent, blank lines require only whitespace before the newline
     # — so the regex engine has no backtracking ambiguity on adversarial
     # whitespace-heavy input.  Same ReDoS-avoidance shape as SEC2-GH-002's
-    # _NoExplicitPermissionsPattern after the PR #46 CodeQL review.
+    # _NoExplicitPermissionsPattern.
     _PERMS_BLOCK_RE = re.compile(
         r"(?ms)^permissions:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
     )
@@ -467,9 +467,8 @@ RULES: list[Rule] = [
             "Self-hosted runners are not ephemeral by default. They persist state between "
             "workflow runs — a compromised job can leave malware or stolen credentials for the next job."
         ),
-        # Phase 2 migration: was ``RegexPattern(match=r"runs-on:.*self-hosted", ...)``;
-        # the structural form queries the ``runs-on`` key at any
-        # depth and fires when the value contains ``self-hosted``.
+        # Structural form: queries the ``runs-on`` key at any depth
+        # and fires when the value contains ``self-hosted``.
         # Handles string, flow-sequence, and block-sequence shapes
         # uniformly because the walker emits a leaf per scalar
         # element regardless of the surrounding container shape.
