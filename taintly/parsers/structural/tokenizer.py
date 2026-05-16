@@ -219,6 +219,24 @@ class _Tokenizer:
                         continue
                     if (len(nxt) - len(nxt.lstrip())) <= key_col:
                         break
+                    # Stop folding if the next line LOOKS like YAML
+                    # structure (sibling key, sequence item, flow
+                    # open, anchor/alias/tag, merge key, block-scalar
+                    # header).  The key-column threshold above is
+                    # the primary stop, but in compact-dash notation
+                    # combined with 2x-scaled indents (e.g. mutation
+                    # testing), a sibling key like ``with:`` can sit
+                    # at a column deeper than the parent ``uses:`` key
+                    # — the column threshold then wrongly allows it
+                    # to fold and the entire child mapping disappears
+                    # into the scalar value.  Same exclusion set as
+                    # the bare-key fold below.
+                    if (
+                        s.startswith(("- ", "[", "{", "'", '"', "&", "*", "!", "<<", "?", "|", ">"))
+                        or s == "-"
+                        or _CHILD_KEY_RE.match(s)
+                    ):
+                        break
                     folded.append(s)
                     self._line_idx += 1
                 if folded:
@@ -264,9 +282,7 @@ class _Tokenizer:
             elif (
                 len(line_tokens) >= 1
                 and line_tokens[-1].kind == TokenKind.KEY
-                and not any(
-                    t.kind in _NON_FOLD_TOKEN_KINDS for t in line_tokens
-                )
+                and not any(t.kind in _NON_FOLD_TOKEN_KINDS for t in line_tokens)
                 and self._flow_depth == 0
                 and not self._in_block_scalar
             ):
