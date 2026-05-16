@@ -34,6 +34,7 @@ to regex):
 
 from __future__ import annotations
 
+import re
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass
 from enum import Enum
@@ -89,6 +90,35 @@ def tokenize(content: str) -> Iterator[Token]:
     Callers should catch and degrade gracefully.
     """
     yield from _Tokenizer(content).run()
+
+
+# Bare-key plain-scalar fold helpers (see ``_Tokenizer.run``).
+#
+# A child mapping key has the shape ``<word>:`` (optionally with a
+# value).  YAML keys may include ``-``, ``_``, ``$``, dots in
+# extended forms; this regex is intentionally narrow to the common
+# CI-config shapes and is paired with positive evidence (the line is
+# indented deeper than the bare key) before being trusted.
+_CHILD_KEY_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_.\-]*\s*:(\s|$)")
+
+# Token kinds whose presence on the bare-key line proves we are NOT
+# looking at the ``<key>:`` (no inline value) shape — anchors and
+# aliases sit between the key and the value in some YAML, and a flow-
+# open token means the value lives in a flow collection (handled
+# elsewhere).  Keep this set tight: every kind added here silently
+# disables the bare-key fold for that shape.
+_NON_FOLD_TOKEN_KINDS = frozenset(
+    {
+        TokenKind.SCALAR_PLAIN,
+        TokenKind.SCALAR_QUOTED,
+        TokenKind.SCALAR_BLOCK_HEADER,
+        TokenKind.FLOW_OPEN_SEQ,
+        TokenKind.FLOW_OPEN_MAP,
+        TokenKind.SEQUENCE_DASH,
+        TokenKind.ANCHOR,
+        TokenKind.ALIAS,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -152,8 +182,141 @@ class _Tokenizer:
                 self._line_idx += 1
                 continue
 
-            yield from self._tokenize_line(raw, line_no)
+            line_tokens = list(self._tokenize_line(raw, line_no))
             self._line_idx += 1
+
+            # Multi-line plain scalar folding — inline-value form.
+            # When a line is ``<key>: <plain scalar>`` (KEY immediately
+            # followed by trailing SCALAR_PLAIN), any following lines
+            # indented strictly MORE than the *key's column* are a
+            # continuation of that scalar — a key that already has an
+            # inline scalar value cannot also have child
+            # mappings/sequences, so a deeper-indented next line can
+            # only be a fold.  Consume them into the scalar's value
+            # instead of re-tokenising them as structure: this is what
+            # stops a multi-line ``if: contains(fromJSON('[ ... ]'),
+            # ...)`` value from spilling stray ``'`` / ``[`` / ``,``
+            # tokens (or a CUTOFF) onto the lines that follow it.
+            #
+            # The threshold is the key's *column*, not the line
+            # indent: in compact notation (``- id: write``) the key
+            # sits at dash+2, and its sibling keys (``env:``, ``run:``)
+            # share that column — they must NOT be folded.
+            if (
+                len(line_tokens) >= 2
+                and line_tokens[-1].kind == TokenKind.SCALAR_PLAIN
+                and line_tokens[-2].kind == TokenKind.KEY
+                and self._flow_depth == 0
+                and not self._in_block_scalar
+            ):
+                key_col = line_tokens[-2].column - 1
+                folded: list[str] = []
+                while self._line_idx < len(self._lines):
+                    nxt = self._lines[self._line_idx]
+                    s = nxt.strip()
+                    if not s or s.startswith("#"):
+                        self._line_idx += 1
+                        continue
+                    if (len(nxt) - len(nxt.lstrip())) <= key_col:
+                        break
+                    folded.append(s)
+                    self._line_idx += 1
+                if folded:
+                    last = line_tokens[-1]
+                    line_tokens[-1] = Token(
+                        last.kind,
+                        last.line,
+                        last.column,
+                        last.value + " " + " ".join(folded),
+                        last.indent,
+                    )
+
+            # Multi-line plain scalar folding — bare-key form.
+            # When a line is ``<key>:`` with NO inline value (only a
+            # KEY token, no trailing SCALAR_PLAIN), the value may still
+            # be a multi-line plain scalar starting on the *next* line:
+            #
+            #     run:
+            #       dotnet run scan --Verbosity Verbose
+            #       --DockerImagesToScan "..."
+            #       --DetectorArgs ...
+            #
+            # YAML treats this as ``run: dotnet run scan ... ...``
+            # (single folded plain scalar).  Without this fold, the
+            # walker tokenises each continuation line as structure and
+            # emits LEAF_SCALAR events with an EMPTY PATH TUPLE, which
+            # makes downstream path-glob filters
+            # (``jobs.*.steps[*].run``) miss the events entirely —
+            # silent under-reporting on every TAINT/SEC rule that
+            # filters on ``run:`` slots.
+            #
+            # Distinguishing value-continuation from child structure
+            # at the first following non-empty line:
+            #   ``- ``                  → sequence item
+            #   ``[``, ``{``            → multi-line flow open
+            #   ``'``, ``"``            → quoted child key / scalar
+            #   ``&``, ``*``, ``!``     → anchor / alias / tag
+            #   ``<<``                  → merge key
+            #   ``?``                   → complex-key marker
+            #   ``|``, ``>``            → block-scalar header
+            #   ``<word>:``             → regex-detected child key
+            # Anything else at deeper indent is a value continuation.
+            elif (
+                len(line_tokens) >= 1
+                and line_tokens[-1].kind == TokenKind.KEY
+                and not any(
+                    t.kind in _NON_FOLD_TOKEN_KINDS for t in line_tokens
+                )
+                and self._flow_depth == 0
+                and not self._in_block_scalar
+            ):
+                key = line_tokens[-1]
+                key_col = key.column - 1
+                peek_idx = self._line_idx
+                while peek_idx < len(self._lines):
+                    cand = self._lines[peek_idx]
+                    cand_s = cand.strip()
+                    if cand_s and not cand_s.startswith("#"):
+                        break
+                    peek_idx += 1
+                else:
+                    cand = ""
+                    cand_s = ""
+                cand_indent = len(cand) - len(cand.lstrip()) if cand else 0
+                is_continuation = (
+                    bool(cand_s)
+                    and cand_indent > key_col
+                    and not cand_s.startswith("- ")
+                    and cand_s != "-"
+                    and not _CHILD_KEY_RE.match(cand_s)
+                    and not cand_s.startswith(
+                        ("|", ">", "[", "{", "'", '"', "&", "*", "!", "<<", "?")
+                    )
+                )
+                if is_continuation:
+                    folded2: list[str] = []
+                    while self._line_idx < len(self._lines):
+                        nxt = self._lines[self._line_idx]
+                        s = nxt.strip()
+                        if not s or s.startswith("#"):
+                            self._line_idx += 1
+                            continue
+                        if (len(nxt) - len(nxt.lstrip())) <= key_col:
+                            break
+                        folded2.append(s)
+                        self._line_idx += 1
+                    if folded2:
+                        line_tokens.append(
+                            Token(
+                                TokenKind.SCALAR_PLAIN,
+                                line=key.line,
+                                column=key.column + len(key.value) + 2,
+                                value=" ".join(folded2),
+                                indent=key.indent,
+                            )
+                        )
+
+            yield from line_tokens
 
         yield Token(TokenKind.EOF, line=0, column=0, value="", indent=0)
 

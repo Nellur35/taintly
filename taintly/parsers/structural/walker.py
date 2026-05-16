@@ -447,7 +447,16 @@ class _Walker:
         # this indent.
         top = self._stack[-1]
         if not (top.container == "sequence" and top.indent == indent):
-            if self._open_key is not None and indent > self._open_key.indent:
+            # Standard YAML allows the dash to share indent with the
+            # parent key (``steps:\n- foo\n- bar``) as well as sit
+            # deeper (``steps:\n  - foo``).  Both shapes mean ``steps:
+            # [foo, bar]``; both need the parent key recorded as the
+            # sequence frame's ``key`` so events resolve at the
+            # ``steps.[*]`` path rather than dropping the ``steps``
+            # component.  Without the same-indent linkage, downstream
+            # rules' path-glob filters (``jobs.*.steps[*].uses`` etc.)
+            # silently miss every step on the same-indent style.
+            if self._open_key is not None and indent >= self._open_key.indent:
                 self._stack.append(
                     _Frame(
                         key=self._open_key.value,
