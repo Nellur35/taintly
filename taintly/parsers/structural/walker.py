@@ -447,7 +447,7 @@ class _Walker:
         # this indent.
         top = self._stack[-1]
         if not (top.container == "sequence" and top.indent == indent):
-            if self._open_key is not None and indent > self._open_key.indent:
+            if self._open_key is not None and indent >= self._open_key.indent:
                 self._stack.append(
                     _Frame(
                         key=self._open_key.value,
