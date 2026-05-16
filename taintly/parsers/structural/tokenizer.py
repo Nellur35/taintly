@@ -182,6 +182,18 @@ class _Tokenizer:
                 self._line_idx += 1
                 continue
 
+            # Comment-only lines (``# foo`` after optional indent)
+            # carry no structural content.  Emitting their INDENT
+            # token drives the walker's frame-management to pop back
+            # to the comment's indent — which closes any open parent
+            # mapping (e.g. ``jobs:`` at indent 0) when a commented-
+            # out fragment sits between two real children.  Skip the
+            # line entirely; inline comments (``foo: bar # note``)
+            # still emit COMMENT tokens via ``_tokenize_line``.
+            if stripped_full.startswith("#"):
+                self._line_idx += 1
+                continue
+
             line_tokens = list(self._tokenize_line(raw, line_no))
             self._line_idx += 1
 

@@ -265,10 +265,29 @@ def test_comment_to_eol():
 
 
 def test_comment_only_line():
+    """Comment-only lines emit zero tokens.
+
+    Previous contract: 1 COMMENT token per comment-only line.  That
+    drove the walker to mis-pop frames when a commented-out fragment
+    sat between two real children at deeper indent.  New contract:
+    comment-only lines are structurally invisible.  Inline comments
+    (``foo: bar # note``) still emit COMMENT tokens via
+    ``_tokenize_line``.
+    """
     src = "# preamble\nname: ci\n"
     tokens = _tokens(src)
     comments = [t for t in tokens if t.kind == TokenKind.COMMENT]
-    assert len(comments) == 1
+    assert len(comments) == 0
+
+
+def test_comment_only_line_does_not_pop_indent():
+    """Comment-only lines also emit no INDENT, so their column
+    position can't drive walker frame-management.
+    """
+    src = "jobs:\n  foo:\n    runs-on: linux\n# popper\n    steps: []\n"
+    tokens = _tokens(src)
+    line4 = [t for t in tokens if t.line == 4]
+    assert line4 == []
 
 
 # ---------------------------------------------------------------------------
