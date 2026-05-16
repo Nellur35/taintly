@@ -241,7 +241,18 @@ class _Walker:
                 # its anchor.
                 if self._block_buffer is not None:
                     yield self._flush_block()
-                self._adjust_to_indent(tok.indent)
+                # Look ahead at the next significant token kind so
+                # _adjust_to_indent knows whether a same-indent
+                # sequence frame should be popped (next is non-DASH
+                # → the sequence is done) or kept (next is DASH →
+                # sequence continues with another element).
+                next_kind: Optional[TokenKind] = None
+                for la in tokens[i + 1 :]:
+                    if la.kind in (TokenKind.INDENT, TokenKind.COMMENT):
+                        continue
+                    next_kind = la.kind
+                    break
+                self._adjust_to_indent(tok.indent, next_kind=next_kind)
                 i += 1
                 continue
 
@@ -383,15 +394,35 @@ class _Walker:
                 out.append(f.key)
         return tuple(out)
 
-    def _adjust_to_indent(self, indent: int) -> None:
+    def _adjust_to_indent(self, indent: int, *, next_kind: Optional[TokenKind] = None) -> None:
         # Pop frames whose indent is STRICTLY DEEPER than the new
         # one.  A frame at indent N holds keys at indent N (its
         # children); a sibling KEY at the same indent stays inside
         # the same frame.  An open key without a value at the
         # dropping level becomes an implicit-null leaf; for Phase
         # 1 we simply drop it.
-        while len(self._stack) > 1 and self._stack[-1].indent > indent:
-            self._stack.pop()
+        #
+        # Same-indent SEQUENCE frames are the one exception: a non-
+        # DASH token at the same indent as an open sequence means
+        # the sequence's last element has ended and the new token is
+        # a sibling of the sequence's *parent* (not an element of the
+        # sequence).  Pop the sequence frame.  Without this pop,
+        # ``needs:`` (list value) silently swallows subsequent sibling
+        # keys like ``runs-on:``, ``permissions:``, ``steps:``.
+        while len(self._stack) > 1:
+            top = self._stack[-1]
+            if top.indent > indent:
+                self._stack.pop()
+                continue
+            if (
+                top.indent == indent
+                and top.container == "sequence"
+                and next_kind is not None
+                and next_kind != TokenKind.SEQUENCE_DASH
+            ):
+                self._stack.pop()
+                continue
+            break
         # Stop capturing under an anchor when we've returned to an
         # indent at or shallower than the anchor's defining line.
         # The anchor's body lives at deeper indents; once we reach
