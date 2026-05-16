@@ -1567,17 +1567,33 @@ RULES: list[Rule] = [
                 r"[^\n#]*\|\s*(?:bash|sh|eval\b|python\s*-c)\b"
                 r"|"
                 # Form 2: LLM command substitution written to
-                # $GITHUB_ENV / $GITHUB_OUTPUT.
+                # $GITHUB_ENV / $GITHUB_OUTPUT — ``$(...)`` form.
                 r"echo\s+[^\n#]*\$\([^)]*"
                 r"(?:openai|anthropic|\bllm\s+|\baider|\bclaude\s+-p"
                 r"|api\.(?:openai|anthropic))"
                 r"[^)]*\)[^\n#]*>>\s*\$GITHUB_(?:ENV|OUTPUT)"
                 r"|"
-                # Form 3: eval of an LLM command substitution.
+                # Form 2 (backtick form): same threat shape via
+                # legacy backtick command substitution.  POSIX shell
+                # treats ``$(...)`` and `` `...` `` identically; the
+                # rule must too.  Surfaced by the lab bashlex oracle.
+                r"echo\s+[^\n#]*`[^`]*"
+                r"(?:openai|anthropic|\bllm\s+|\baider|\bclaude\s+-p"
+                r"|api\.(?:openai|anthropic))"
+                r"[^`]*`[^\n#]*>>\s*\$GITHUB_(?:ENV|OUTPUT)"
+                r"|"
+                # Form 3: eval of an LLM command substitution —
+                # ``$(...)`` form.
                 r"eval\s+[\"']?\$\([^)]*"
                 r"(?:openai|anthropic|\bllm\s+|\baider|\bclaude\s+-p"
                 r"|api\.(?:openai|anthropic))"
                 r"[^)]*\)"
+                r"|"
+                # Form 3 (backtick form): legacy backtick eval.
+                r"eval\s+[\"']?`[^`]*"
+                r"(?:openai|anthropic|\bllm\s+|\baider|\bclaude\s+-p"
+                r"|api\.(?:openai|anthropic))"
+                r"[^`]*`"
                 r")"
             ),
             exclude=[r"^\s*#", r"^\s*//"],
@@ -1606,6 +1622,10 @@ RULES: list[Rule] = [
             '      - run: llm -m claude-sonnet-4 "label this" | sh',
             '      - run: echo "RESULT=$(openai api complete -m gpt-4 -p x)" >> $GITHUB_ENV',
             "      - run: eval \"$(llm -m gpt-4 'generate config')\"",
+            # Backtick form of Forms 2 and 3 — POSIX-equivalent to
+            # ``$(...)``, same threat shape.
+            "      - run: echo \"RESULT=`openai api complete -m gpt-4 -p x`\" >> $GITHUB_ENV",
+            "      - run: eval \"`llm -m gpt-4 'generate config'`\"",
         ],
         test_negative=[
             "      - run: openai api chat.completions.create -m gpt-4 > out.json",
