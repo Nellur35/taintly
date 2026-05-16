@@ -324,13 +324,65 @@ _PSE6_FORK_TRIGGER_RE = re.compile(
     r"(?:"
     # bare string form: ``on: pull_request_target`` / ``on: workflow_run`` / ``on: issue_comment``
     r"(?:^|\n)on:\s*(?:pull_request_target|workflow_run|issue_comment)\s*(?:#.*)?$"
-    # block form: ``on:\n  pull_request_target:`` (and the same for the other two events)
-    r"|(?:^|\n)\s{2,}(?:pull_request_target|workflow_run|issue_comment)\s*:"
+    # block form: ``on:\n  pull_request_target:`` (and the same for the other two events).
+    # Accept ANY whitespace indent (``\s+``) rather than ``\s{2,}`` so the
+    # ``indent_shift`` mutator's 1-space indent variant still resolves.
+    r"|(?:^|\n)\s+(?:pull_request_target|workflow_run|issue_comment)\s*:"
     # flow-list form: ``on: [push, pull_request_target]``
     r"|(?:^|\n)on:\s*\[[^\]]*(?:pull_request_target|workflow_run|issue_comment)[^\]]*\]"
     r")",
     re.MULTILINE,
 )
+
+
+# Reserved GitHub Actions ``on:`` event names that are NOT fork-reachable
+# in the threat model — used to filter false matches when the broadened
+# ``\s+`` block-form arm above happens to match an indented ``push:`` or
+# ``schedule:`` key.  We only need this as a sanity check on the leaf-
+# path detection below; the regex above already restricts to the three
+# events we care about so this is mostly for documentation.
+_PSE6_FORK_REACHABLE_TRIGGERS: frozenset[str] = frozenset(
+    {"pull_request_target", "workflow_run", "issue_comment"}
+)
+
+
+def _has_fork_reachable_trigger(content: str, leaves) -> bool:
+    """Detect a fork-reachable write-context trigger.
+
+    Two paths stacked so neither is load-bearing:
+
+      * Structural leaves under ``('on', <event-name>, ...)`` — works
+        for the block-form trigger shape with sub-keys (``on:\\n
+        pull_request_target:\\n  types: [labeled]``) including the
+        1-space ``indent_shift`` mutator's variant, because the
+        structural reader's tokenizer is whitespace-insensitive on
+        indent depth.
+      * Text regex (:data:`_PSE6_FORK_TRIGGER_RE`) — works for the
+        bare-string form (``on: pull_request_target``) and the
+        empty-block form (``on:\\n  pull_request_target:`` with no
+        sub-keys), neither of which surfaces a structural leaf event.
+
+    Either path firing means the trigger is present.
+    """
+    for ev in leaves:
+        path = ev.path
+        # Block form with sub-keys: leaf path is ``('on', <event>, ...)``.
+        if len(path) >= 2 and path[0] == "on" and path[1] in _PSE6_FORK_REACHABLE_TRIGGERS:
+            return True
+        # Bare-string form: ``on: pull_request_target`` →
+        # leaf path == ``('on',)``, value is the event name.
+        if path == ("on",) and (ev.value or "") in _PSE6_FORK_REACHABLE_TRIGGERS:
+            return True
+        # Flow-list form: ``on: [push, pull_request_target]`` →
+        # leaf path == ``('on', <int>)``, value is the event name.
+        if (
+            len(path) == 2
+            and path[0] == "on"
+            and isinstance(path[1], int)
+            and (ev.value or "") in _PSE6_FORK_REACHABLE_TRIGGERS
+        ):
+            return True
+    return bool(_PSE6_FORK_TRIGGER_RE.search(content))
 
 
 # Tainted checkout — attacker-fork-head ref / sha / repo splice into
@@ -455,13 +507,6 @@ class _Pse006Pattern:
     """
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        # Quick win: if the file does not contain any fork-reachable
-        # write-context trigger, no job can possibly fire.  Done first
-        # so the structural walk is skipped on push-only / dispatch-only
-        # workflows — the common case.
-        if not _PSE6_FORK_TRIGGER_RE.search(content):
-            return []
-
         try:
             leaves = [
                 ev
@@ -470,12 +515,41 @@ class _Pse006Pattern:
             ]
         except Exception:
             # Conservative on parser failure: structural read broken —
-            # don't fire.  The engine's ENGINE-ERR path surfaces the
-            # parse failure separately.
+            # don't fire on the structural path.  The text-fallback
+            # below covers the YAML-unparseable case (zero-space
+            # ``whitespace_pad`` mutant collapses every ``key:value``
+            # into a single scalar that the reader can't tokenize).
+            leaves = []
+
+        # Stacked detection: structural-leaf check first (handles the
+        # ``indent_shift`` mutant whose 1-space indent breaks textual
+        # regexes), text-regex fallback for the bare-string and
+        # empty-block-form shapes the structural reader doesn't
+        # surface as leaf events.
+        if not _has_fork_reachable_trigger(content, leaves):
             return []
 
+        # Structural pass returned no leaves — fall through to the
+        # text-only join.  Happens when the YAML is malformed in a way
+        # the recoverable reader can't tokenize (zero-space
+        # ``key:value`` shapes the ``whitespace_pad`` mutator
+        # produces), but the threat shape is still apparent in the
+        # raw text.
         if not leaves:
-            return []
+            return self._text_fallback(content, lines)
+
+        # Structural pass produced leaves but no ``steps`` paths.
+        # That means the YAML tokenizer choked partway through (the
+        # canonical ``whitespace_pad`` mutant where ``key:value``
+        # collapse forces the reader to treat each job's body as a
+        # single scalar value).  Fall through to the text-only join
+        # — the same threat shape is still apparent in the raw text
+        # and would otherwise be missed.
+        has_step_leaf = any(
+            len(ev.path) >= 4 and ev.path[0] == "jobs" and ev.path[2] == "steps" for ev in leaves
+        )
+        if not has_step_leaf:
+            return self._text_fallback(content, lines)
 
         # Workflow-level permissions: any ``('permissions', ...)`` leaf
         # — covers both the bare-string ``permissions: write-all`` shape
@@ -510,6 +584,66 @@ class _Pse006Pattern:
             results.append(anchor)
         results.sort(key=lambda r: r[0])
         return results
+
+    # ------------------------------------------------------------------
+    # Text-only fallback
+    #
+    # Used when the structural reader produces zero leaves (the
+    # ``whitespace_pad`` mutator's ``:`` → ``:`` collapse breaks YAML
+    # tokenization at every key).  In that case every ingredient of
+    # the 5-way join is still apparent in the raw text — we just
+    # can't bucket it by job-id any more, so we fire conservatively
+    # only when ALL five ingredients are present anywhere in the
+    # file AND no user-gate equality is present anywhere.  The
+    # fallback's precision boundary is necessarily wider than the
+    # structural path's because we can't tie the ingredients to the
+    # same job; documented as a documented mutation-resilience
+    # tradeoff rather than a load-bearing precision claim.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _text_fallback(content: str, lines: list[str]) -> list[tuple[int, str]]:
+        # User-gate suppression in the text fallback uses the same
+        # ``_PSE6_USER_GATE_RE`` as the structural path; the trade-
+        # off is that ANY user-gate anywhere in the file suppresses,
+        # not just the user-gate of the same job.  Acceptable here
+        # because the alternative (no fire) is also conservative.
+        if _PSE6_USER_GATE_RE.search(content):
+            return []
+        # Tainted ref / repo splice anywhere in the content.
+        ref_match = _PSE6_TAINTED_REF_RE.search(content) or _PSE6_TAINTED_REPO_RE.search(content)
+        if not ref_match:
+            return []
+        # ``actions/checkout`` substring.  Required so the tainted
+        # ref-splice isn't a coincidental string in a deploy comment.
+        if "actions/checkout" not in content:
+            return []
+        # Shell-running ``run:`` body anywhere in the file.
+        if not _PSE6_SHELL_RUN_RE.search(content):
+            return []
+        # Write-token signal: either an explicit write-permission
+        # token, or no ``permissions`` key at all.  In the
+        # ``whitespace_pad`` mutant, ``permissions:contents:write``
+        # collapses to a single scalar but the substring is preserved.
+        has_write_permission = bool(
+            re.search(
+                r"permissions?\s*:?\s*(?:write-all|write\b|contents\s*:?\s*write|"
+                r"pull-requests\s*:?\s*write)",
+                content,
+                re.IGNORECASE,
+            )
+        )
+        no_permissions_block = "permissions" not in content.lower()
+        if not (has_write_permission or no_permissions_block):
+            return []
+        # Cite the line carrying the tainted splice — same anchor
+        # rationale as the structural path.
+        for i, line in enumerate(lines, 1):
+            if _PSE6_TAINTED_REF_RE.search(line) or _PSE6_TAINTED_REPO_RE.search(line):
+                return [(i, line.strip())]
+        # Defensive: a finding was deserved but no line carried the
+        # splice; fall back to the first line of the file.
+        return [(1, lines[0].strip() if lines else "")]
 
     # ------------------------------------------------------------------
     # Per-job evaluation
