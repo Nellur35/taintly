@@ -30,7 +30,7 @@ Starter version:
 import re
 
 from taintly.models import ContextPattern, Platform, Rule, Severity
-from taintly.parsers.structural import EventKind, walk_workflow
+from taintly.parsers.structural import Event, EventKind, walk_workflow
 from taintly.taint import AI_AGENT_USES_PATTERN
 
 # Fork-reachable events — any of these means external contributors
@@ -346,7 +346,7 @@ _PSE6_FORK_REACHABLE_TRIGGERS: frozenset[str] = frozenset(
 )
 
 
-def _has_fork_reachable_trigger(content: str, leaves) -> bool:
+def _has_fork_reachable_trigger(content: str, leaves: list[Event]) -> bool:
     """Detect a fork-reachable write-context trigger.
 
     Two paths stacked so neither is load-bearing:
@@ -560,7 +560,7 @@ class _Pse006Pattern:
 
         # Group job leaves by job-id.  A leaf is "in job J" when its
         # path starts with ``('jobs', J, ...)``.
-        jobs: dict[str, list] = {}
+        jobs: dict[str, list[Event]] = {}
         for ev in leaves:
             p = ev.path
             if len(p) >= 2 and p[0] == "jobs" and isinstance(p[1], str):
@@ -652,7 +652,7 @@ class _Pse006Pattern:
     def _evaluate_job(
         self,
         *,
-        job_leaves: list,
+        job_leaves: list[Event],
         wf_has_permissions_block: bool,
         wf_has_write_token: bool,
         lines: list[str],
@@ -719,7 +719,7 @@ class _Pse006Pattern:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _permissions_imply_write(perm_leaves: list, *, root_path_len: int) -> bool:
+    def _permissions_imply_write(perm_leaves: list[Event], *, root_path_len: int) -> bool:
         """True when the permissions block grants write on at least one
         scope.  Accepts both bare-string forms (``permissions: write-all``
         / ``permissions: write``) and per-scope block forms.
@@ -745,7 +745,7 @@ class _Pse006Pattern:
         return False
 
     @staticmethod
-    def _find_tainted_checkout(job_leaves: list, lines: list[str]) -> tuple[int, str] | None:
+    def _find_tainted_checkout(job_leaves: list[Event], lines: list[str]) -> tuple[int, str] | None:
         """Return the (line, snippet) anchor for a step that checks out
         a fork-attacker-controlled ref.  None if no such step exists.
 
@@ -755,34 +755,29 @@ class _Pse006Pattern:
             splices ``github.event.pull_request.head.{ref,sha}`` or
             ``head.repo.full_name``
         """
-        # Bucket leaves by (job_id, step_idx) for cheap lookup.
-        steps: dict[int, dict[str, object]] = {}
+        # Bucket leaves by step index using two parallel typed maps
+        # — keeps the mypy story clean (no ``dict[str, object]``)
+        # and the access pattern direct.
+        step_uses: dict[int, str] = {}
+        step_with: dict[int, dict[str, tuple[str, int]]] = {}
         for ev in job_leaves:
             p = ev.path
-            if len(p) >= 5 and p[2] == "steps" and isinstance(p[3], int):
-                step_i = p[3]
-                slot = steps.setdefault(step_i, {})
-                if p[4] == "uses" and len(p) == 5:
-                    slot["uses"] = ev.value
-                elif p[4] == "with" and len(p) >= 6:
-                    with_map: dict[str, tuple[str, int]]
-                    with_map = slot.setdefault("with", {})  # type: ignore[assignment]
-                    if isinstance(p[5], str):
-                        with_map[p[5]] = ((ev.value or ""), ev.line)
+            if not (len(p) >= 5 and p[2] == "steps" and isinstance(p[3], int)):
+                continue
+            step_i = p[3]
+            if p[4] == "uses" and len(p) == 5 and ev.value:
+                step_uses[step_i] = ev.value
+            elif p[4] == "with" and len(p) >= 6 and isinstance(p[5], str):
+                step_with.setdefault(step_i, {})[p[5]] = (ev.value or "", ev.line)
 
-        for step_i in sorted(steps.keys()):
-            slot = steps[step_i]
-            uses_val = slot.get("uses")
-            if not isinstance(uses_val, str) or not uses_val.startswith("actions/checkout@"):
+        for step_i in sorted(step_uses.keys()):
+            if not step_uses[step_i].startswith("actions/checkout@"):
                 continue
-            with_map = slot.get("with")
-            if not isinstance(with_map, dict):
+            with_map = step_with.get(step_i)
+            if not with_map:
                 continue
-            for slot_name, pair in with_map.items():
-                if not isinstance(pair, tuple):
-                    continue
-                value, line_no = pair
-                if slot_name in ("ref",) and _PSE6_TAINTED_REF_RE.search(value):
+            for slot_name, (value, line_no) in with_map.items():
+                if slot_name == "ref" and _PSE6_TAINTED_REF_RE.search(value):
                     snippet = lines[line_no - 1].strip() if 0 < line_no <= len(lines) else value
                     return (line_no, snippet)
                 if slot_name == "repository" and _PSE6_TAINTED_REPO_RE.search(value):
@@ -791,7 +786,7 @@ class _Pse006Pattern:
         return None
 
     @staticmethod
-    def _has_shell_run(job_leaves: list) -> bool:
+    def _has_shell_run(job_leaves: list[Event]) -> bool:
         """True if any step in the job has a ``run:`` body matching
         ``_PSE6_SHELL_RUN_RE``."""
         for ev in job_leaves:
