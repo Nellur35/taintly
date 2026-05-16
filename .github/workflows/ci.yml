@@ -52,6 +52,13 @@ jobs:
       - name: No-rules-change gate (rule-pack output stable across fixtures)
         run: python scripts/no_rules_change_gate.py --check
 
+      - name: No-leaks gate (public repo allow-list)
+        # Second-tier defence against private R&D artifacts leaking
+        # from the lab. The first tier is the lab's publish manifest;
+        # this one runs from the public repo so it catches paths that
+        # bypass the manifest entirely. See the script for the rules.
+        run: python scripts/check_public_no_leaks.py
+
   # ---------------------------------------------------------------------------
   # mypy — static type check (PSE Domain 2.1)
   # Loose mode: enables the highest-value bug classes (undefined name,
