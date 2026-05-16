@@ -1624,7 +1624,7 @@ RULES: list[Rule] = [
             "      - run: eval \"$(llm -m gpt-4 'generate config')\"",
             # Backtick form of Forms 2 and 3 — POSIX-equivalent to
             # ``$(...)``, same threat shape.
-            "      - run: echo \"RESULT=`openai api complete -m gpt-4 -p x`\" >> $GITHUB_ENV",
+            '      - run: echo "RESULT=`openai api complete -m gpt-4 -p x`" >> $GITHUB_ENV',
             "      - run: eval \"`llm -m gpt-4 'generate config'`\"",
         ],
         test_negative=[
