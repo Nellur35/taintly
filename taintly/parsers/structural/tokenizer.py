@@ -334,9 +334,7 @@ class _Tokenizer:
                     and cand_s != "-"
                     and not _CHILD_KEY_RE.match(cand_s)
                     and not _QUOTED_KEY_RE.match(cand_s)
-                    and not cand_s.startswith(
-                        ("|", ">", "[", "{", "&", "*", "!", "<<", "?")
-                    )
+                    and not cand_s.startswith(("|", ">", "[", "{", "&", "*", "!", "<<", "?"))
                 )
                 if is_continuation:
                     folded2: list[str] = []
