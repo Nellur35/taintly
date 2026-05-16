@@ -394,9 +394,7 @@ class _Walker:
                 out.append(f.key)
         return tuple(out)
 
-    def _adjust_to_indent(
-        self, indent: int, *, next_kind: Optional[TokenKind] = None
-    ) -> None:
+    def _adjust_to_indent(self, indent: int, *, next_kind: Optional[TokenKind] = None) -> None:
         # Pop frames whose indent is STRICTLY DEEPER than the new
         # one.  A frame at indent N holds keys at indent N (its
         # children); a sibling KEY at the same indent stays inside
