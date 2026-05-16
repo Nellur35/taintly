@@ -109,14 +109,106 @@ def _normalize_when_body(when_block: str) -> str:
 
 
 def _stage_blocks(content: str) -> list[tuple[int, int]]:
+    """Find declarative-pipeline ``stage("name") { ... }`` blocks.
+
+    Skips regex matches whose start position lies inside a string-
+    literal or ``//`` comment span — those are phantom ``stage(...)``
+    text that the old regex wrongly admitted into
+    ``find_dead_jenkins_stage_ranges`` / ``is_jenkinsfile_whole_dead``.
+    Surfaced as a real bug by the tree-sitter-groovy lab oracle
+    (``tests/lab/test_jenkins_parser_oracle.py``).
+    """
+    code_mask = _groovy_code_mask(content)
     blocks: list[tuple[int, int]] = []
     pattern = re.compile(r"\bstage\s*\(\s*(['\"]).*?\1\s*\)\s*\{", re.DOTALL)
     for match in pattern.finditer(content):
+        # Phantom check: the ``stage`` token's first character must
+        # be in CODE (not inside a string-literal or comment).  The
+        # mask is a parallel array of booleans the size of content.
+        if not code_mask[match.start()]:
+            continue
         open_brace = match.end() - 1
         close_brace = _find_matching_brace(content, open_brace)
         if close_brace is not None:
             blocks.append((match.start(), close_brace + 1))
     return blocks
+
+
+def _groovy_code_mask(content: str) -> list[bool]:
+    """Return a parallel ``list[bool]`` the size of ``content`` where
+    ``True`` means "this character is in Groovy code position" and
+    ``False`` means "this character is inside a string-literal or
+    a ``//`` / ``/* */`` comment".
+
+    Handles Groovy:
+      - single-quoted ``'...'``
+      - double-quoted ``"..."``
+      - triple-single-quoted ``'''...'''``
+      - triple-double-quoted ``\"\"\"...\"\"\"``
+      - line comments ``// ... \\n``
+      - block comments ``/* ... */``
+
+    The opening delimiter of a string is considered IN-string (False)
+    so ``stage("foo")`` shows the ``s`` of ``stage`` as code (True)
+    and the ``"`` / ``foo`` / ``"`` as not-code (False).  This is the
+    right granularity for "is this regex match starting in real
+    code?" — the regex's anchor is the ``s`` of ``stage``, not the
+    quote.
+    """
+    mask = [True] * len(content)
+    i = 0
+    n = len(content)
+    while i < n:
+        ch = content[i]
+        if ch == "/" and i + 1 < n:
+            nxt = content[i + 1]
+            if nxt == "/":
+                end = content.find("\n", i)
+                if end == -1:
+                    end = n
+                for k in range(i, end):
+                    mask[k] = False
+                i = end
+                continue
+            if nxt == "*":
+                end = content.find("*/", i + 2)
+                if end == -1:
+                    end = n
+                else:
+                    end += 2
+                for k in range(i, end):
+                    mask[k] = False
+                i = end
+                continue
+        if ch in ("'", '"'):
+            triple = content.startswith(ch * 3, i)
+            quote = ch
+            if triple:
+                end_marker = quote * 3
+                end = content.find(end_marker, i + 3)
+                if end == -1:
+                    end = n
+                else:
+                    end += 3
+            else:
+                j = i + 1
+                while j < n:
+                    if content[j] == "\\" and j + 1 < n:
+                        j += 2
+                        continue
+                    if content[j] == quote:
+                        j += 1
+                        break
+                    if content[j] == "\n" and not triple:
+                        break
+                    j += 1
+                end = j
+            for k in range(i, end):
+                mask[k] = False
+            i = end
+            continue
+        i += 1
+    return mask
 
 
 def _extract_when_block(stage_body: str) -> str | None:
