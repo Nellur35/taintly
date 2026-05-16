@@ -101,6 +101,15 @@ def tokenize(content: str) -> Iterator[Token]:
 # indented deeper than the bare key) before being trusted.
 _CHILD_KEY_RE = re.compile(r"^[A-Za-z_$][A-Za-z0-9_.\-]*\s*:(\s|$)")
 
+# A quoted child key has the shape ``'foo':`` / ``"foo":`` —
+# closing quote followed by ``:``.  ``'failure'`` alone (without
+# the trailing ``:``) is a plain-scalar value continuation, not a
+# structural key, and must NOT block the multi-line plain-scalar
+# fold.  Surfaced by SalesforceDX-VSCode E2E workflows where a
+# multi-line ``if:`` value continues with ``          'failure'``
+# at deeper indent.
+_QUOTED_KEY_RE = re.compile(r"""^(?:'[^']*'|"[^"]*")\s*:(\s|$)""")
+
 # Token kinds whose presence on the bare-key line proves we are NOT
 # looking at the ``<key>:`` (no inline value) shape — anchors and
 # aliases sit between the key and the value in some YAML, and a flow-
@@ -243,10 +252,17 @@ class _Tokenizer:
                     # to fold and the entire child mapping disappears
                     # into the scalar value.  Same exclusion set as
                     # the bare-key fold below.
+                    # ``'`` and ``"`` are EXCLUDED via the precise
+                    # _QUOTED_KEY_RE check (quoted-key shape with
+                    # trailing colon) rather than the broad prefix
+                    # check — a continuation line like
+                    # ``          'failure'`` is plain-scalar text,
+                    # not a quoted key, and must keep folding.
                     if (
-                        s.startswith(("- ", "[", "{", "'", '"', "&", "*", "!", "<<", "?", "|", ">"))
+                        s.startswith(("- ", "[", "{", "&", "*", "!", "<<", "?", "|", ">"))
                         or s == "-"
                         or _CHILD_KEY_RE.match(s)
+                        or _QUOTED_KEY_RE.match(s)
                     ):
                         break
                     folded.append(s)
@@ -317,8 +333,9 @@ class _Tokenizer:
                     and not cand_s.startswith("- ")
                     and cand_s != "-"
                     and not _CHILD_KEY_RE.match(cand_s)
+                    and not _QUOTED_KEY_RE.match(cand_s)
                     and not cand_s.startswith(
-                        ("|", ">", "[", "{", "'", '"', "&", "*", "!", "<<", "?")
+                        ("|", ">", "[", "{", "&", "*", "!", "<<", "?")
                     )
                 )
                 if is_continuation:
