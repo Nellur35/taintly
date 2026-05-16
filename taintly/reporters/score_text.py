@@ -44,8 +44,7 @@ def format_score(report: ScoreReport, use_color: bool = True) -> str:
     # at the bottom of the report) ensures CI consumers see it.  This
     # is disclosure, NOT a basis for score adjustment — taintly takes
     # no position on what the user's deployment actually is.  The
-    # phrase "required, not optional" is load-bearing — see
-    # docs/decisions/threat-model-disclosure-not-adjustment.md.
+    # phrase "required, not optional" is load-bearing.
     lines.append(
         f"  {b}Threat model:{r} public-OSS deployment "
         "(fork PRs reachable, runners shared, secrets repo-scoped)."

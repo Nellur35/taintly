@@ -1,8 +1,7 @@
 # AI-assisted triage of taintly findings
 
 taintly scores against a fixed public-OSS threat model
-(`docs/SCORING.md`) and does not auto-adjust to your deployment
-(`docs/decisions/threat-model-disclosure-not-adjustment.md`).
+(`docs/SCORING.md`) and does not auto-adjust to your deployment.
 Closing the "does this apply to me?" loop is the user's job.
 
 Below is one paste-ready prompt for handing taintly's JSON output

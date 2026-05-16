@@ -46,8 +46,6 @@ from pathlib import Path
 ALLOWLISTED_PATHS: dict[str, str] = {
     # doc whose subject is AI assistance — marker words are the topic, not contamination
     "docs/AI_TRIAGE.md": "doc whose subject is AI assistance",
-    # decision file naming agent vendors by example for the "do not endorse" point
-    "docs/decisions/ai-assisted-triage-pointer.md": "decision file naming systems by example",
     # this script itself defines the marker regex, so its source contains the markers
     "scripts/check_premerge_hygiene.py": "script source defines the marker regex",
     # tests for this script carry synthetic marker strings by design

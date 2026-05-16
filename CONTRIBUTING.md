@@ -50,9 +50,9 @@ When adding or modifying a rule, the PR review checks:
    most-common false-positive shape.**  Negative samples should
    demonstrate that the rule does NOT fire on legitimate code that
    superficially resembles the attack pattern.
-3. **Severity changes require a decision-log entry.**  See
-   `docs/decisions/README.md` for the format.  The entry cites the
-   corpus or threat-model evidence that justified the change.
+3. **Severity changes require corpus or threat-model justification
+   in the PR description** — cite the specific finding, mutation
+   result, or attack shape that drove the change.
 4. **Self-test must pass** (`python -m taintly --self-test`).  All
    `test_positive` samples must fire; all `test_negative` samples
    must not.  Self-test runs as part of CI but is also worth running
