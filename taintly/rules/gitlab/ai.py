@@ -125,6 +125,12 @@ RULES: list[Rule] = [
                 r"(?:openai|anthropic|\bllm\s+|\baider|\bclaude\s+-p"
                 r"|api\.(?:openai|anthropic))"
                 r"[^)]*\)"
+                # Backtick form of the eval shape — POSIX-equivalent
+                # to ``$(...)``, same threat.  Mirrors AI-GH-007.
+                r"|eval\s+[\"']?`[^`]*"
+                r"(?:openai|anthropic|\bllm\s+|\baider|\bclaude\s+-p"
+                r"|api\.(?:openai|anthropic))"
+                r"[^`]*`"
                 r")"
             ),
             exclude=[r"^\s*#"],
@@ -142,6 +148,7 @@ RULES: list[Rule] = [
             "  script:\n    - openai api chat.completions.create -m gpt-4 | bash",
             '  script:\n    - llm -m claude-sonnet-4 "label this" | sh',
             "  script:\n    - eval \"$(llm -m gpt-4 'generate config')\"",
+            "  script:\n    - eval \"`llm -m gpt-4 'generate config'`\"",
         ],
         test_negative=[
             "  script:\n    - openai api chat.completions.create -m gpt-4 > out.json",
