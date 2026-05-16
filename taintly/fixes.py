@@ -732,7 +732,7 @@ _GITLAB_REF_VARS = (
 _GITLAB_REF_VAR_RE = re.compile(r"\$\{?(?:" + "|".join(_GITLAB_REF_VARS) + r")\}?")
 # Skip rules mirror SEC4-GL-003's exclude list in gitlab/sec1_sec4_sec6_sec7_sec9.py.
 # Does NOT include CI_MERGE_REQUEST_SOURCE_BRANCH_SHA — 40-char hex SHAs can't
-# carry shell metacharacters, so unquoted usage is safe (dropped in PR #65).
+# carry shell metacharacters, so unquoted usage is safe.
 _GITLAB_REF_SKIP_RES = (
     re.compile(r"^\s*#"),
     re.compile(r"^\s*[\w_]+:\s*\$\{?CI_"),

@@ -30,9 +30,6 @@ Walks a CI YAML file and yields a stream of events:
 - **Does not introduce a YAML library dependency.**  Hand-rolled
   reader; the project's zero-runtime-dependency promise is
   preserved.
-- **Does not migrate any existing rules in Phase 1.**  Pure
-  addition.  Phase 2 (separate PR) migrates the first three rules
-  and measures F1 delta.
 
 ## Supported features
 
@@ -48,10 +45,9 @@ Each supported feature has at least one named test in
   vice versa, with leaves emitted at the correct indexed/keyed
   paths
   (`test_flow_mapping_inside_flow_sequence_yields_keyed_leaves`,
-  `test_flow_sequence_inside_flow_mapping`).  Earlier behaviour
-  silently dropped leaves inside nested flow containers; the
-  Phase 2 follow-up rebuilt `_consume_flow` around recursion to
-  push and pop a frame per nested container.
+  `test_flow_sequence_inside_flow_mapping`).  `_consume_flow` is
+  recursion-based, pushing and popping a frame per nested
+  container so leaves at any depth land at the correct path.
 - Plain scalars including the colon-in-value case
   (`test_plain_scalar_with_colon_in_value`).
 - URLs as plain scalars (`test_plain_scalar_with_url_value`).
@@ -75,9 +71,7 @@ Each supported feature has at least one named test in
   the block-scalar header
   (`test_block_scalar_carries_per_line_breakdown`).
   `StructuralPattern` uses this to run its predicate against
-  each body line individually for block-scalar leaves; the
-  Phase 2-shipped behaviour of reporting at the header line is
-  superseded.
+  each body line individually for block-scalar leaves.
 - Comments to end-of-line (`test_comment_to_eol`,
   `test_comment_only_line`).
 - Anchors, aliases, merge keys (`test_anchor_and_alias`,
@@ -134,19 +128,14 @@ exit-11 path:
   counterpart of the existing `ENGINE-ERR` mechanism), and the
   process exits 11 (coverage degraded) rather than 0 (clean).
 
-Phase 2 wires the `STRUCTURAL-COVERAGE-WARNING` mechanism when
-the first rule migrates.  Phase 1 ships the `CUTOFF` event
-without a consumer.
-
 ## Anchor / alias / merge-key behaviour
 
 - **Anchor capture** (`&name`) records every leaf encountered
   inside the anchor's body.  Capture stops when the walker
   returns to the indent of the anchor's defining line.
-- **Bare alias** (`*name` outside a merge-key context) — Phase 1
-  surfaces as an `ERROR` event without expanding.  Bare aliases
-  are uncommon in CI YAML in practice; expansion lands in Phase
-  1.5 if Phase 2 migrations need it.
+- **Bare alias** (`*name` outside a merge-key context) surfaces
+  as an `ERROR` event without expanding.  Bare aliases are
+  uncommon in CI YAML in practice.
 - **Merge key** (`<<: *name`) — every captured leaf under the
   named anchor is replayed at the alias's line under the alias's
   current path.  This matches the line a rule's report should
@@ -155,33 +144,16 @@ without a consumer.
 
 ## Jenkinsfile
 
-Out of scope for Phase 1.  Jenkinsfile is Groovy DSL, not YAML;
-the tokenizer's invariants (indent-driven structure, key-colon
+Out of scope.  Jenkinsfile is Groovy DSL, not YAML; the
+tokenizer's invariants (indent-driven structure, key-colon
 disambiguation, etc.) don't hold.  Jenkins rules continue to use
-regex-based detection.  A Groovy-DSL structural reader is a
-separate decision (Phase 1.5 or later) and is not a
-half-supporting variant of this reader.
+regex-based detection.
 
 ## Schema-lookup performance
 
 The schema layer is consulted via path-glob lookup at query time.
-Phase 1 uses linear iteration over the schema dict's entries
+Lookup is linear iteration over the schema dict's entries
 (O(N) per leaf for an N-entry schema).  At the current schema size
-(~80 entries) and typical workflow depth, this is negligible.
-
-If profiling under Phase 2 reveals it as a hot path, the schema
-will switch to a path-trie representation (O(depth) per leaf).
-The choice will be recorded as a separate decision-log entry; no
-runtime work is done speculatively.
-
-## What changes in Phase 2 / Phase 3
-
-- **Phase 2** (separate PR, gated on Phase 1 success): migrates
-  the top-3 rules from the audit (locked by
-  `(use_count desc, known_precision_issue_rank desc)` lex sort
-  recorded in this PR's body) to a `StructuralPattern` form;
-  measures F1 delta on a labelled corpus.
-- **Phase 3** (decision point, gated on Phase 2 measurement):
-  expands migrations if F1 delta ≥ +2pp; parks the reader
-  otherwise (the three migrated rules stay migrated as sunk
-  cost).
+(~80 entries) and typical workflow depth, this is negligible.  If
+profiling ever reveals it as a hot path, a path-trie representation
+(O(depth) per leaf) is the natural escape hatch.

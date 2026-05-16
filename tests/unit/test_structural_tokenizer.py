@@ -1,8 +1,7 @@
 """Tokenizer test pack — every supported shape and rejection case
 gets a named test so the contract is documented in code.
 
-Phase 1 of the structural CI YAML reader.  See
-``docs/STRUCTURAL_READER_SCOPE.md`` for the supported feature
+See ``docs/STRUCTURAL_READER_SCOPE.md`` for the supported feature
 list.
 """
 
@@ -337,9 +336,8 @@ def test_document_separator_skipped():
 
     Bug history: previously raised TokenizerError, which bubbled up
     as ENGINE-ERR ('Structural coverage degraded: file partially
-    unparseable from line 1') across ~17 of 18 ENGINE-ERRs in the
-    Phase 8 corpus baseline scan (2026-05-03).  All affected files
-    were valid GHA workflows that started with `---`.
+    unparseable from line 1') on valid GHA workflows that started
+    with `---`.
     """
     src = "---\nname: ci\non: push\n"
     tokens = list(tokenize(src))

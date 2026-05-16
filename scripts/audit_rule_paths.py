@@ -5,23 +5,20 @@ Walks ``taintly/rules/{github,gitlab}/`` and extracts the schema
 paths each rule's regex appears to be targeting.  Output is a
 markdown table of paths ordered by query count.
 
-Used by Phase 1 of the structural reader work to:
+Useful for:
 
-1. **Pre-budget validation.**  Confirms the "~60-80 distinct paths"
-   assumption before committing to the tokenizer/walker/schemas
-   build.  If the distinct count is significantly higher (>120),
-   the schema layer is materially larger and the 5-day budget
-   needs reassessment.
+1. **Schema-size validation.**  Confirms that the distinct-path
+   count fits the schema layer's design budget (~60-80 entries).
+   A materially higher count means the schema layer is larger than
+   intended.
 
-2. **Phase 2 migration locking.**  The top-N entries by
+2. **Migration candidate ranking.**  The top-N entries by
    ``(use_count desc, known_precision_issue_rank desc)`` are the
-   first migration candidates — the choice is recorded in the
-   Phase 1 PR body before Phase 2 runs, so the F1-delta
-   measurement can't be cherry-picked.
+   strongest candidates for migration to a ``StructuralPattern``
+   form (best precision payoff per migration).
 
 Jenkins rules are intentionally out of scope (Jenkinsfile is
-Groovy, not YAML; a separate Groovy-DSL reader is a different
-decision).
+Groovy, not YAML).
 """
 
 from __future__ import annotations
@@ -263,7 +260,7 @@ def main() -> int:
     print()
     print("## Budget interpretation")
     if distinct <= 80:
-        print(f"- Distinct path count ({distinct}) is within the original 60-80 budget assumption.  Phase 1 schema layer holds.")
+        print(f"- Distinct path count ({distinct}) is within the original 60-80 budget assumption.  Schema layer holds.")
     elif distinct <= 120:
         print(f"- Distinct path count ({distinct}) is moderately above the 60-80 estimate but under the 120 reassessment threshold.  Schema layer grows; budget holds.")
     else:

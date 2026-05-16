@@ -1146,7 +1146,7 @@ RULES: list[Rule] = [
     # =========================================================================
     # SEC4-GL-008: ``base64 -d | shell`` obfuscation in script block
     # =========================================================================
-    # GitLab port of SEC4-GH-022 (Phase 8 Track C, 2026-05-04).
+    # GitLab port of SEC4-GH-022.
     # Encoded payloads in ``script:`` blocks bypass diff-review
     # heuristics and string-pattern scanners.  Same threat shape as
     # the GitHub-Actions rule.

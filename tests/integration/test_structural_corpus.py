@@ -1,11 +1,9 @@
 """Integration test: walk every YAML fixture in the corpus.
 
-The structural reader is pure addition in Phase 1 — no rules
-consume it yet.  This test catches a much narrower regression:
-the walker should not crash on any file in the existing rule-pack
-corpus, and recovery mode should produce a CUTOFF event (rather
-than an exception) for any file that uses an unsupported
-construct.
+Catches walker-crash regressions: the walker should not crash on
+any file in the existing rule-pack corpus, and recovery mode
+should produce a CUTOFF event (rather than an exception) for any
+file that uses an unsupported construct.
 """
 
 from __future__ import annotations

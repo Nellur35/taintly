@@ -505,10 +505,10 @@ def test_ai_triage_doc_has_untrusted_evidence_framing():
 
 
 # ---------------------------------------------------------------------------
-# Phase 8 iter-4 (2026-05-04): chunked search preserves rule coverage on
-# files larger than ``_MAX_SAFE_TEXT_LEN``.  Pre-fix, ContextPattern's
-# requires regex returned None outright on >50KB content, silently
-# disabling rules like AI-GH-005 / SEC4-GH-001/003 on real workflows.
+# Chunked search preserves rule coverage on files larger than
+# ``_MAX_SAFE_TEXT_LEN``.  The plain ``_safe_search`` returns ``None``
+# on >50KB content, which would silently disable file-scope rules like
+# AI-GH-005 / SEC4-GH-001/003 on real workflows.
 # ---------------------------------------------------------------------------
 
 

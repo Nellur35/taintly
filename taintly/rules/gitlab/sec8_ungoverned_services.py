@@ -104,8 +104,7 @@ RULES: list[Rule] = [
     # fired on every ``include: project:`` without a pinned ref. The
     # distinction was OWASP-category framing (SEC-8 ungoverned-services
     # vs SEC-3 supply-chain) but at the line level it produced 2x the
-    # findings on the same workflow line. Removed in iter-6 (2026-05-09)
-    # after audit confirmed 1:1 line overlap with SEC3-GL-002 on real
-    # repos (gitlab-org/cli .gitlab-ci.yml line 71). Use SEC3-GL-002.
+    # findings on the same workflow line.  Removed after a 1:1 line
+    # overlap with SEC3-GL-002 was confirmed.  Use SEC3-GL-002.
     # =========================================================================
 ]

@@ -168,16 +168,15 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
     r"pypa/gh-action-pypi-publish",
     r"sigstore/gh-action-sigstore",
     r"actions/attest-build-provenance",
-    # iter-5 (2026-05-04): three OIDC-consuming actions found
-    # legitimately requesting ``id-token: write`` in the corpus
-    # baseline that the previous list missed.  All three are
-    # documented OIDC-only flows where the token is the actual
-    # auth surface, not a misconfigured permission.
+    # OIDC-consuming actions that legitimately need
+    # ``id-token: write`` (documented OIDC-only flows where the
+    # token is the actual auth surface, not a misconfigured
+    # permission).
     r"ossf/scorecard-action",
     r"actions/deploy-pages",
     r"slsa-framework/slsa-github-generator",
-    # iter-6 (2026-05-09): CodSpeed benchmarking action requires
-    # ``id-token: write`` for OIDC-based result attestation.
+    # CodSpeed benchmarking action requires ``id-token: write``
+    # for OIDC-based result attestation.
     r"CodSpeedHQ/action",
     # Shell-form.  ``--`` is two non-word characters, so a leading
     # ``\b`` would never match on the flag — the preceding space is
@@ -342,7 +341,7 @@ def _is_unmasked_secret_input(
     path: tuple[object, ...],
     ctx: PredicateContext,
 ) -> bool:
-    """Predicate for SEC6-GH-010 (Phase 8 iteration 2 form).
+    """Predicate for SEC6-GH-010 — path-aware form.
 
     Fires when:
 
@@ -649,9 +648,9 @@ RULES: list[Rule] = [
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: twine upload --use-oidc dist/*",
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: cargo publish",
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: npm publish --provenance --access public",
-            # iter-5 (2026-05-04): three OIDC consumers added to the
-            # allowlist after sample-and-label found 12/17 FPs in
-            # the corpus baseline used these actions legitimately.
+            # Three OIDC consumers added to the allowlist after
+            # sample-and-label found these actions legitimately
+            # used in workflows that fired as FPs.
             "permissions:\n  id-token: write\njobs:\n  scorecard:\n    steps:\n      - uses: ossf/scorecard-action@v2.4.0\n        with:\n          publish_results: true",
             "permissions:\n  id-token: write\njobs:\n  pages:\n    steps:\n      - uses: actions/deploy-pages@v4",
             "permissions:\n  id-token: write\njobs:\n  release:\n    steps:\n      - uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0",
@@ -817,10 +816,10 @@ RULES: list[Rule] = [
                 # environment variable (env:). The dangerous pattern is embedding ${{ }} inside a
                 # larger shell string (e.g. inside a `run:` command).
                 r"""^\s*[\w.-]+:\s*["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
-                # iter-5 (2026-05-04): exclude lines whose entire
-                # content is a bare ``${{ secrets.X }}`` reference
-                # (possibly quoted, possibly with a hyphen prefix
-                # for YAML list items).  This is the block-scalar
+                # Exclude lines whose entire content is a bare
+                # ``${{ secrets.X }}`` reference (possibly quoted,
+                # possibly with a hyphen prefix for YAML list
+                # items).  This is the block-scalar
                 # action-input shape (e.g. ``secret-ids: |`` body
                 # lines in aws-actions/configure-aws-credentials):
                 # the value passes through to the action as a
@@ -831,10 +830,11 @@ RULES: list[Rule] = [
                 # risk because real shell-injection contexts always
                 # carry other tokens on the same line.
                 r"""^\s*-?\s*["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
-                # iter-6 (2026-05-09): exclude env-block assignments
-                # where the secret is embedded in a larger value. The
-                # risk this rule owns is literal secret interpolation into
-                # generated shell script bodies, not runner-managed env.
+                # Exclude env-block assignments where the secret is
+                # embedded in a larger value.  The risk this rule
+                # owns is literal secret interpolation into
+                # generated shell script bodies, not runner-managed
+                # env.
                 r"^\s*(?!run\s*:|script\s*:)[\w._-]+:\s*\S",
             ],
         ),
@@ -859,11 +859,10 @@ RULES: list[Rule] = [
             "        with:\n          token: ${{ secrets.GITHUB_TOKEN }}",
             '        with:\n          repoToken: "${{ secrets.GITHUB_TOKEN }}"',
             "        # run: curl ${{ secrets.TOKEN }}",
-            # iter-5 (2026-05-04): block-scalar list-item shape.
-            # ``secret-ids: |`` body lines pass each secret to the
-            # action as a literal string, same trust path as the
-            # ``key: ${{ secrets.X }}`` form.  Sample-and-label
-            # found 4 fires of this shape in the corpus baseline.
+            # Block-scalar list-item shape.  ``secret-ids: |`` body
+            # lines pass each secret to the action as a literal
+            # string, same trust path as the ``key: ${{ secrets.X }}``
+            # form.
             "        with:\n          secret-ids: |\n            ${{ secrets.AWS_KEY_1 }}\n            ${{ secrets.AWS_KEY_2 }}",
             # Same shape with a YAML list-item dash prefix.
             "        with:\n          tokens:\n            - ${{ secrets.GH_TOKEN }}\n            - ${{ secrets.NPM_TOKEN }}",
@@ -1143,7 +1142,7 @@ RULES: list[Rule] = [
             "`with: cache:` is set — using them without `cache:` is the common "
             "case and firing on bare `uses: actions/setup-python@` produces FPs "
             "everywhere someone just wants an interpreter. Those cases are "
-            "tracked as a follow-up recall gap (see ROADMAP Phase 1.5)."
+            "an accepted recall gap until a per-action cache-default model lands."
         ),
         pattern=ContextPattern(
             # actions/cache — caching is the action's whole purpose.
@@ -1652,9 +1651,8 @@ RULES: list[Rule] = [
     # =========================================================================
     # SEC9-GH-006: pipe-bash / iex(Invoke-WebRequest) — runtime supply chain
     # =========================================================================
-    # Phase 8 iter-4 (2026-05-04): port of taintly's existing
-    # SEC6-GL-006 (GitLab) and SEC9-JK-001 (Jenkins) rules to
-    # GitHub Actions, closing the platform-coverage gap.  Even
+    # GitHub Actions port of SEC6-GL-006 (GitLab) and SEC9-JK-001
+    # (Jenkins), closing the platform-coverage gap.  Even
     # when the workflow itself is hardened (SHA-pinned actions,
     # pinned images), a ``run: ... | bash`` step downloads and
     # executes content the workflow author never reviewed.  DNS
@@ -2176,13 +2174,12 @@ RULES: list[Rule] = [
     # block reads as ``predicate=_is_unmasked_secret_input`` rather
     # than carrying the allowlist lookup inline).
     #
-    # Phase 8 iteration 2 (2026-05-04): converted from ContextPattern
-    # regex to WorkflowAwarePattern.  Adds a safe-consumer allowlist:
-    # action+input pairs whose documented purpose IS to consume the
-    # secret (the action's primary auth surface).  Routing those
-    # specific pairs through env: is over-defensive — the secret is
-    # already at its destination — and produces noise without
-    # precision gain.
+    # WorkflowAwarePattern form (path-aware over the structural
+    # reader).  A safe-consumer allowlist covers action+input pairs
+    # whose documented purpose IS to consume the secret (the
+    # action's primary auth surface).  Routing those specific pairs
+    # through env: is over-defensive — the secret is already at
+    # its destination — and produces noise without precision gain.
     # =========================================================================
     # SEC6-GH-010: Secret passed as action input without env-block masking
     # =========================================================================
@@ -2219,9 +2216,8 @@ RULES: list[Rule] = [
             "``${{ env.NAME }}`` — the env-block path is masked, the "
             "with-input is then a non-secret reference."
         ),
-        # Phase 8 iteration 2 (2026-05-04): converted from
-        # ContextPattern regex to WorkflowAwarePattern.  The
-        # workflow-aware predicate gives us:
+        # WorkflowAwarePattern form (path-aware over the structural
+        # reader).  The workflow-aware predicate gives us:
         #   1. exact path-shape filtering (only with: keys under a
         #      step's ``with`` map) — the regex anchor was line-shape-
         #      only and could match nested non-step contexts.
@@ -2346,8 +2342,8 @@ RULES: list[Rule] = [
     # =========================================================================
     # SEC6-GH-011: ``secrets: inherit`` in reusable-workflow caller
     # =========================================================================
-    # Phase 8 iter-4 (2026-05-04): credential-blast-radius warning
-    # for over-broad secret forwarding into reusable workflows.
+    # Credential-blast-radius warning for over-broad secret
+    # forwarding into reusable workflows.
     # When a caller invokes a reusable workflow and uses
     # ``secrets: inherit``, every secret available to the caller is
     # forwarded to the callee — even if the callee only needs one

@@ -37,15 +37,14 @@ _CACHE = Path(os.environ.get("TAINTLY_SCAN_CACHE", "/tmp/taintly_scan_cache"))
 # Pinned scan corpus + budget. Each entry: (label, repo url, clone
 # subdir, scan target relative to clone, platform, max-finding budget).
 #
-# Budgets are the validated finding count from the iter-6 audit
-# (2026-05-09) post-fix. New rule additions OR precision regressions
+# Budgets are validated finding counts after the most recent
+# precision pass.  New rule additions OR precision regressions
 # trip the gate; closing FPs allows lowering the budget.
 _TARGETS: list[tuple[str, str, str, str, str, int]] = [
     (
-        # ripgrep — Rust release pipeline. Pre-iter-6 audit: 25
-        # findings. Post-iter-6 (SEC10-GH-001 → INFO, dedup work):
-        # 17 findings. Budget 20 gives a 3-finding buffer for
-        # reasonable rule additions before manual review.
+        # ripgrep — Rust release pipeline. 17 findings observed
+        # under current rules; budget 20 gives a 3-finding buffer
+        # for reasonable rule additions before manual review.
         "ripgrep",
         "https://github.com/BurntSushi/ripgrep.git",
         "gh_ripgrep",
@@ -54,8 +53,8 @@ _TARGETS: list[tuple[str, str, str, str, str, int]] = [
         20,
     ),
     (
-        # flask — Pallets project, hardening-conscious. Pre-iter-6:
-        # 10 findings; post-iter-6: 2. Budget 5.
+        # flask — Pallets project, hardening-conscious. 2 findings
+        # observed under current rules. Budget 5.
         "flask",
         "https://github.com/pallets/flask.git",
         "gh_flask",

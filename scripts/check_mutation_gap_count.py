@@ -28,10 +28,6 @@ from pathlib import Path
 # Lower this number when entries are removed (real fixes); never
 # raise it to silence a regression.
 #
-# History:
-#   75 → 74 (iter-6, 2026-05-09): SEC8-GL-002 retired as duplicate of
-#                                  SEC3-GL-002, removing its
-#                                  whitespace_pad gap entry.
 _BASELINE = 74
 
 

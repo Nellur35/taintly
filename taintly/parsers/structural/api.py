@@ -55,16 +55,15 @@ def walk_workflow(
             and stops.  If False, the underlying ``TokenizerError``
             propagates.
 
-    Schema disambiguation lands in Phase 1.5 — the schema name is
-    accepted today so consumers can write forward-compatible call
-    sites; the walker currently treats every path as
-    ``ValueShape.UNKNOWN`` and infers shape from the token stream.
+    The schema name is accepted for forward compatibility; the
+    walker currently treats every path as ``ValueShape.UNKNOWN``
+    and infers shape from the token stream.
     """
     if content is None:
         content = Path(filepath).read_text(encoding="utf-8", errors="replace")
-    # Schema currently looked up but not consumed.  When the schema-
-    # consultation hook lands in Phase 1.5, this is where it wires
-    # into the walker.
+    # Schema currently looked up but not consumed; the lookup site
+    # is preserved so a future schema-consultation hook wires in
+    # here without touching the call sites.
     _ = schema or detect_schema_for_path(filepath)
     yield from _walk(content, query=query, recover=recover)
 

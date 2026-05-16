@@ -1,14 +1,14 @@
 """Workflow context analysis — per-file exploitability signals.
 
-The improvement report's Phase 2 ask is dual-dimension severity:
+Severity is dual-dimension:
 
     base severity + contextual modifiers = final analyst-facing priority
 
-The scoring model already down-weights low-confidence and review-needed
-findings (v2 Phase 1).  This module adds the **file-level** context layer
-the report called out: the same rule hit in two different workflows can
-represent very different real-world risk depending on whether the
-workflow sees secrets, runs on fork-controlled triggers, has write
+The scoring model already down-weights low-confidence and
+review-needed findings.  This module adds the **file-level** context
+layer: the same rule hit in two different workflows can represent
+very different real-world risk depending on whether the workflow
+sees secrets, runs on fork-controlled triggers, has write
 permissions, or checks out untrusted code.
 
 What we detect (intentionally shallow — regex only, no full YAML parse)

@@ -203,8 +203,7 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ),
     ("SEC8-GH-003", "whitespace_pad"): ("Same family; fragile to whitespace around `:` separator."),
     ("SEC6-GH-010", "whitespace_pad"): (
-        "Phase 8 iteration 2 (2026-05-04) refactored the rule onto "
-        "WorkflowAwarePattern with a path glob "
+        "Rule sits on WorkflowAwarePattern with a path glob "
         "``jobs.*.steps[*].with.*``.  The structural reader requires "
         "whitespace after `:` to recognise a YAML mapping; the zero-"
         "space mutant produces no step paths, so the pattern's path "
@@ -218,8 +217,7 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "spirit as SEC10-GH-004 / AI-GH-019 / TAINT-GH-010."
     ),
     ("TAINT-GH-006", "whitespace_pad"): (
-        "Phase 8 iteration 2 (2026-05-04) refactored the rule onto "
-        "WorkflowAwarePattern with path globs "
+        "Rule sits on WorkflowAwarePattern with path globs "
         "``jobs.*.steps[*].run`` / ``with.{args,entrypoint,script,"
         "command}``.  Same structural-reader fragility as SEC6-GH-"
         "010: the zero-space mutant produces no step paths so neither "
@@ -229,8 +227,7 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "every other rule that queries step-scoped paths."
     ),
     ("SEC4-GH-008", "whitespace_pad"): (
-        "Phase 8 iteration 3 (2026-05-04) refactored the rule onto "
-        "WorkflowAwarePattern with path globs "
+        "Rule sits on WorkflowAwarePattern with path globs "
         "``jobs.*.steps[*].run`` / ``jobs.*.steps[*].with.*``.  "
         "Same structural-reader fragility as SEC6-GH-010 / TAINT-"
         "GH-006: the zero-space mutant produces no step paths so "
@@ -250,10 +247,10 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ("TAINT-GH-002", "indent_shift"): ("Same TaintPattern family as TAINT-GH-001."),
     ("TAINT-GH-001", "quote_swap"): (
         "Single-quoted ``$VAR`` in a ``run:`` block does not interpolate "
-        "in bash; the precision pass in PR #104 deliberately stops "
-        "matching that case. quote_swap mutations that produce a single-"
-        "quoted sink are SEMANTICALLY SAFER, not equivalent — the rule "
-        "correctly does not fire."
+        "in bash; the rule deliberately does not match that case. "
+        "quote_swap mutations that produce a single-quoted sink are "
+        "SEMANTICALLY SAFER, not equivalent — the rule correctly does "
+        "not fire."
     ),
     ("TAINT-GH-002", "quote_swap"): (
         "Same single-quote-precision rationale as TAINT-GH-001. The "
@@ -272,9 +269,9 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ),
     ("TAINT-GH-009", "quote_swap"): (
         "Same single-quote-precision rationale as TAINT-GH-001/002/003 — "
-        "single-quoted shell references are not sinks (PR #104). "
-        "quote_swap mutations that produce a single-quoted consumer-side "
-        "sink are SEMANTICALLY SAFER, not equivalent."
+        "single-quoted shell references are not sinks. quote_swap "
+        "mutations that produce a single-quoted consumer-side sink are "
+        "SEMANTICALLY SAFER, not equivalent."
     ),
     ("TAINT-GH-012", "indent_shift"): (
         "Same TaintPattern family as TAINT-GH-001/009: doubled-indent variants "
@@ -417,7 +414,7 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ("SEC8-GL-001", "whitespace_pad"): (
         "Same family as SEC8-GH-001/002/003; image-pin regex fragile to whitespace around `:`."
     ),
-    # SEC8-GL-002 retired iter-6 (duplicate of SEC3-GL-002); the
+    # SEC8-GL-002 retired (duplicate of SEC3-GL-002); the
     # whitespace_pad gap that lived here disappears with the rule.
     ("TAINT-GL-001", "comment_inject"): (
         "Inline `# comment` on the source line of a taint flow breaks the line-level regex anchor."

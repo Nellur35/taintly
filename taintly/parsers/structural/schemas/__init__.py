@@ -6,9 +6,8 @@ where the token stream alone is ambiguous (most commonly: a key
 whose value is a single-line scalar that happens to start with
 a flow-indicator character).
 
-Phase 1 ships GitHub Actions and GitLab CI schemas.  Jenkinsfile
-is intentionally out of scope (Groovy DSL, not YAML); a separate
-Groovy-DSL reader is a different decision.
+GitHub Actions and GitLab CI schemas are bundled here.
+Jenkinsfile is intentionally out of scope (Groovy DSL, not YAML).
 
 Schemas are populated lazily — modules import these only when the
 auto-detect path needs them.

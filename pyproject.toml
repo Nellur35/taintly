@@ -44,6 +44,55 @@ dev = [
     # break the existing 886-test baseline.
     "pytest-snapshot>=0.9",
 ]
+# Lab-only deps: never ship publicly.  Used as oracles in tests/lab/
+# to validate in-house implementations against reference libraries.
+# Public clones (zero deps by design) skip the gated tests via
+# pytest.importorskip.  Lab installs: `pip install -e .[dev,lab]`.
+lab = [
+    # YAML reference parser for tests/lab/test_yaml_parser_oracle.py.
+    # The in-house structural reader (taintly/parsers/structural/) is
+    # checked against ruamel's leaf-extraction on every corpus workflow;
+    # divergences flag in-house parser bugs before they leak into a
+    # corpus scan.
+    "ruamel.yaml>=0.18",
+    # Property-based fuzz generator from JSON Schema for
+    # tests/lab/test_yaml_parser_property.py.  Generates well-formed
+    # workflows that the fixed corpus doesn't have, paired with the
+    # ruamel oracle for verdict.  Catches long-tail parser bugs corpus
+    # alone misses.
+    "hypothesis-jsonschema>=0.23",
+    # Shell reference parser for tests/lab/test_shell_parser_oracle.py.
+    # Several taintly rules (notably ``rules/github/ai.py`` AI-GH-010)
+    # inspect ``run:`` shell content with ``\$\([^)]*\)`` regexes that
+    # cannot reason about nested ``$(...)``, backticks, or quote-aware
+    # substitution boundaries.  bashlex provides a pure-Python bash AST
+    # used as ground truth so we can ratchet the divergence count
+    # downward as precision fixes land.
+    #
+    # NOTE — license: bashlex is GPL-3.0.  This is fine for a lab-only
+    # oracle (taintly-lab never publishes), but bashlex must NEVER
+    # become a runtime dependency of the public taintly package, which
+    # is MIT.  The lab-only constraint is enforced by:
+    #   1. import-gated tests under tests/lab/ (excluded via
+    #      public-sync-exclude.txt),
+    #   2. ``pytest.importorskip`` in every gated test so public
+    #      clones simply skip,
+    #   3. this dep living under ``[lab]`` extras, never plain
+    #      project dependencies.
+    "bashlex>=0.18",
+    # Groovy CST for tests/lab/test_jenkins_parser_oracle.py.
+    # Jenkinsfiles are scripted/declarative Groovy; the in-house
+    # regex-based parser in taintly/jenkinsguard.py matches stage(),
+    # node(), etc. as plain-text patterns and confuses ``stage("...")``
+    # inside string literals and comments with real Groovy statements.
+    # tree-sitter-groovy provides a CST that distinguishes literal
+    # text from real syntax — the oracle catches that class of bug.
+    # Spike results: 88.1% clean parse rate on 42 real Jenkinsfile
+    # fixtures (see oracle-deps-jenkins-spike-results.md).  Windows
+    # wheels on Python 3.13 install cleanly, no compiler needed.
+    "tree-sitter>=0.21",
+    "tree-sitter-groovy>=0.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/Nellur35/taintly"
