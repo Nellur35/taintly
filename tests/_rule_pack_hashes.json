@@ -4,7 +4,7 @@
   "github/edge_cases/crlf_endings.yml": "c917027340385c975cf499bdbf3c4bcee189c0e97facb34814685937c209e068",
   "github/edge_cases/deeply_nested.yml": "20349e1a56445992bcc92ddc1a418b8c0acc18c35f8b6326b62f3fb7253f3d34",
   "github/edge_cases/empty.yml": "f18268588a1d8aec35bb6c41e384a8cb52c444e9bf17a4a1f8d5b710d8e741a7",
-  "github/edge_cases/flow_style_step_uses.yml": "8b8cd38c8d6328790f1ba5704ce6ea402b79250eb0b803591a28f8e4148e16af",
+  "github/edge_cases/flow_style_step_uses.yml": "be5631197416ca57f7a9a4f73cfd89280f303bf2773969432f6b3a7662278c16",
   "github/edge_cases/flow_style_step_uses_pinned.yml": "9e853f165ed8ef5278c27d1167fe331af4257e2a04e2fe9f1f4d14c81b0cbfd0",
   "github/edge_cases/partial_dead_workflow.yml": "1a88317c31c949089baf63b64d8730e9fa272dc48093c7aa1641572b5f3af85e",
   "github/edge_cases/runs_on_via_merge_key.yml": "fe93bb65fd66b40452e1881fff1603dd6384f007bbaa414bf47ac1e3d685ab7a",
