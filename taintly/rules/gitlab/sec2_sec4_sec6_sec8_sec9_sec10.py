@@ -628,9 +628,7 @@ RULES: list[Rule] = [
             "GitLab's project-level default is usually 1 hour — far too long for "
             "most jobs."
         ),
-        reference=(
-            "https://docs.gitlab.com/ee/ci/yaml/#timeout"
-        ),
+        reference=("https://docs.gitlab.com/ee/ci/yaml/#timeout"),
         test_positive=[
             "build:\n  script:\n    - make build",
             "build:\n  timeout: nope\n  script:\n    - make build",
