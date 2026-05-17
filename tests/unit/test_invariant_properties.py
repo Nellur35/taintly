@@ -238,7 +238,12 @@ def test_registry_rule_ids_follow_naming_convention() -> None:
         # cross-workflow cache poisoning).  Letter-suffix variants
         # share the family ID and route findings into severity tiers
         # without inventing a new rule number.
-        r"|XF-(GH|GL|JK)-\d{3}[A-Z]?)$"
+        r"|XF-(GH|GL|JK)-\d{3}[A-Z]?"
+        # CHAIN-* — composer rules whose conjuncts are co-occurring
+        # threat shapes across the resolved-corpus join (entry file
+        # + local includes).  Same distinct prefix convention as
+        # XF-* so reports make the cross-file nature explicit.
+        r"|CHAIN-(GH|GL|JK)-\d{3})$"
     )
     bad = [r.id for r in load_all_rules() if not pattern.match(r.id)]
     assert not bad, f"rule IDs violating the naming convention: {bad}"

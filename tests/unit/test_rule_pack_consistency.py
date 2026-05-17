@@ -36,10 +36,17 @@ def all_rules() -> list[Rule]:
 def _is_stub_rule(rule: Rule) -> bool:
     """Mirror of the integration-test stub filter — rules that opt out
     of per-file sample contracts."""
+    from taintly.gitlab_workflow_corpus import GitLabCorpusPattern
     from taintly.rules.github.sec3_sec4_supply_chain_ppe import ImposterCommitPattern
     from taintly.workflow_corpus import CorpusPattern
 
     if isinstance(rule.pattern, CorpusPattern):
+        return True
+    # GitLabCorpusPattern is the GL parallel — same stub treatment.
+    # Composer/CHAIN-GL-* rules have no per-file sample shape because
+    # their evidence is the resolved-corpus join across the entry file
+    # plus its local includes.
+    if isinstance(rule.pattern, GitLabCorpusPattern):
         return True
     if isinstance(rule.pattern, ImposterCommitPattern):
         return True
