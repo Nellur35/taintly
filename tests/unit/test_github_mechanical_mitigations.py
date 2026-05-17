@@ -222,6 +222,79 @@ def test_github_ref_name_downgrades_when_maintainer_only(github_rules, tmp_path)
     assert all("Maintainer-gated trigger path" in f.calibration_reason for f in findings)
 
 
+def _lotp_gh_001_findings(path: Path, github_rules):
+    return [f for f in scan_file(str(path), github_rules) if f.rule_id == "LOTP-GH-001"]
+
+
+def test_lotp_gh_001_downgrades_on_pr_head_in_fallback_with_maintainer_triggers(
+    github_rules, tmp_path
+):
+    """FP-repro from May 17 audit (llama.cpp server-*.yml).  The
+    ``ref:`` is a ``||`` fallback chain containing
+    ``pull_request.head.sha`` as one alternative, but the only
+    triggers are ``workflow_dispatch`` + ``push:branches`` — both
+    maintainer-gated.  Severity must downgrade CRITICAL → HIGH.
+    """
+    path = _write_fixture_workflow(tmp_path, "lotp_pr_head_in_fallback_maintainer_gated.yml")
+
+    findings = _lotp_gh_001_findings(path, github_rules)
+
+    assert findings, "LOTP-GH-001 should still fire (rule body unchanged)"
+    assert {f.severity for f in findings} == {Severity.HIGH}, (
+        "Severity must downgrade CRITICAL → HIGH on the FP shape"
+    )
+    assert all("Maintainer-gated trigger path" in (f.calibration_reason or "") for f in findings)
+
+
+def test_lotp_gh_001_stays_critical_on_pull_request_target_with_single_head_sha(
+    github_rules, tmp_path
+):
+    """TP-regression: the genuine attack shape — fork-reachable
+    trigger (``pull_request_target``) + single-use head-sha in
+    ``ref:`` (no ``||`` fallback) — must keep CRITICAL severity.
+    """
+    path = _write_fixture_workflow(tmp_path, "lotp_pr_head_single_pull_request_target.yml")
+
+    findings = _lotp_gh_001_findings(path, github_rules)
+
+    assert findings, "LOTP-GH-001 must fire on the canonical attack shape"
+    assert {f.severity for f in findings} == {Severity.CRITICAL}
+    # Sanity: calibration_reason should be empty / unset — no downgrade applied.
+    assert all(not (f.calibration_reason or "") for f in findings)
+
+
+def test_lotp_gh_001_stays_critical_when_fallback_present_but_trigger_is_pull_request(
+    github_rules, tmp_path
+):
+    """Negative-of-negative: same ``||`` fallback shape as the FP
+    fixture, but with a ``pull_request`` trigger added.  The
+    workflow is no longer maintainer-gated-only, so the downgrade
+    must NOT apply — severity stays CRITICAL.
+    """
+    path = _write_workflow(
+        tmp_path,
+        "on:\n"
+        "  workflow_dispatch:\n"
+        "  pull_request:\n"
+        "  push:\n"
+        "    branches: [master]\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n"
+        "          ref: ${{ github.event.inputs.sha || github.event.pull_request.head.sha"
+        " || github.sha }}\n"
+        "      - run: pip install .\n",
+    )
+
+    findings = _lotp_gh_001_findings(path, github_rules)
+
+    assert findings
+    assert {f.severity for f in findings} == {Severity.CRITICAL}
+
+
 def test_compound_repo_comparison_guard_does_not_suppress_findings(github_rules, tmp_path):
     path = _write_workflow(
         tmp_path,

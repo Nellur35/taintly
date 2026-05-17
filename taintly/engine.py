@@ -516,9 +516,87 @@ _INPUTS_REF_RE = re.compile(
     r"\$\{\{\s*(?:github\.event\.inputs|inputs)\.[a-zA-Z0-9_]+\s*\}\}",
     re.IGNORECASE,
 )
-_MAINTAINER_DOWNGRADE_PATTERNS: tuple[tuple[str | None, str, re.Pattern[str]], ...] = (
-    (None, "script_injection", _REF_NAME_REF_RE),
-    ("SEC4-GH-008", "script_injection", _INPUTS_REF_RE),
+# LOTP-GH-001 severity-inflation FP: workflows whose ``ref:`` is a
+# ``||`` fallback chain that *includes* ``pull_request.head.sha`` as
+# one alternative but whose triggers are all maintainer-gated.  No
+# ``pull_request`` event can ever fire the job, so the head-ref branch
+# of the fallback never evaluates — the headline CRITICAL severity is
+# inflated.  Pinned to LOTP-GH-001 because the finding's snippet is
+# the build-tool line, not the ``ref:`` line that carries the FP
+# signal: we have to scan the file content, not the snippet.
+#
+# The fallback shape (at least one ``||`` flanking the head-ref
+# reference) is what discriminates the FP from the genuine attack
+# (single-use ``ref: ${{ github.event.pull_request.head.sha }}``,
+# which on a maintainer-gated trigger is dead code, not severity-
+# inflated, and would not be reached here anyway because the rule's
+# checkout-reference detector would still classify it as the
+# attacker-controlled path).  The two-anchor form ``|| <ref> ||`` or
+# ``<ref> ||`` or ``|| <ref>`` is the operator-defensive idiom.
+_LOTP_PR_HEAD_IN_FALLBACK_RE = re.compile(
+    # ``ref:`` value with ``${{ ... }}`` expression containing
+    # ``github.event.pull_request.head.(sha|ref)`` adjacent (on either
+    # side, possibly both) to a ``||`` operator.
+    r"ref\s*:\s*\$\{\{[^}]*"
+    r"(?:"
+    # head-ref followed by ``||`` (head-ref is not the last term).
+    r"github\.event\.pull_request\.head\.(?:sha|ref)\s*\|\|"
+    r"|"
+    # head-ref preceded by ``||`` (head-ref is not the first term).
+    r"\|\|\s*github\.event\.pull_request\.head\.(?:sha|ref)"
+    r")"
+    r"[^}]*\}\}",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class _DowngradePattern:
+    """One entry in the maintainer-gated downgrade table.
+
+    Exactly one of ``snippet_regex`` / ``content_regex`` should be set:
+
+    * ``snippet_regex`` — match against ``finding.snippet`` only.  Use
+      this when the FP signal lives on the same line as the finding
+      (e.g. ``$GITHUB_REF_NAME`` is on the offending ``run:`` line).
+    * ``content_regex`` — match against the whole file's content.  Use
+      this when the FP signal lives on a *different* line than the
+      finding (e.g. LOTP-GH-001's snippet is the build-tool line, but
+      the signal is the fallback-chain ``ref:`` line in the checkout
+      step earlier in the job).
+
+    Both forms still gate on the workflow being maintainer-gated only
+    (``_is_maintainer_gated_only``) and on the finding's family /
+    optional rule_id matching.
+    """
+
+    rule_id: str | None
+    family: str
+    snippet_regex: re.Pattern[str] | None = None
+    content_regex: re.Pattern[str] | None = None
+
+
+_MAINTAINER_DOWNGRADE_PATTERNS: tuple[_DowngradePattern, ...] = (
+    _DowngradePattern(
+        rule_id=None,
+        family="script_injection",
+        snippet_regex=_REF_NAME_REF_RE,
+    ),
+    _DowngradePattern(
+        rule_id="SEC4-GH-008",
+        family="script_injection",
+        snippet_regex=_INPUTS_REF_RE,
+    ),
+    # LOTP-GH-001 FP class: PR-head-sha appears as a ``||`` fallback
+    # alternative in ``ref:`` on a workflow whose only triggers are
+    # maintainer-gated.  Downgrade CRITICAL → HIGH; the head-ref branch
+    # of the fallback never evaluates because no pull_request event can
+    # fire the job.
+    _DowngradePattern(
+        rule_id="LOTP-GH-001",
+        family="script_injection",
+        content_regex=_LOTP_PR_HEAD_IN_FALLBACK_RE,
+    ),
 )
 
 
@@ -558,17 +636,24 @@ def _suppress_dead_findings(
 
 
 def _downgrade_maintainer_gated_findings(findings: list[Finding], content: str) -> None:
-    """Mutate ``findings`` in place: for findings in the
-    script-injection family that cite ``$GITHUB_REF_NAME`` (or
-    ``github.ref_name``) on a workflow whose triggers are all
-    maintainer-gated, downgrade severity by one tier.
+    """Mutate ``findings`` in place: for findings matching any entry
+    in ``_MAINTAINER_DOWNGRADE_PATTERNS`` on a workflow whose
+    triggers are all maintainer-gated, downgrade severity by one tier.
 
-    Rationale: exploitability presumes attacker control of
-    ``$GITHUB_REF_NAME``, but tag-push / release / schedule events
-    are maintainer-only firing paths.  HIGH severity with low
-    exploitability is internally inconsistent — when the only
-    attacker path requires maintainer compromise, MEDIUM is the
-    correct calibration.
+    Rationale: exploitability presumes attacker control of the cited
+    reference, but tag-push / release / schedule / workflow_dispatch
+    events are maintainer-only firing paths.  CRITICAL/HIGH severity
+    with low exploitability is internally inconsistent — when the
+    only attacker path requires maintainer compromise, one-tier-down
+    is the correct calibration.
+
+    Two pattern shapes are supported:
+
+    * snippet-anchored — the FP signal lives on the finding's own
+      line (``$GITHUB_REF_NAME``, ``${{ inputs.X }}``).
+    * content-anchored — the FP signal lives elsewhere in the file
+      (LOTP-GH-001's ``ref:`` fallback chain, where the snippet is
+      the build-tool line in a later step).
     """
     if not findings:
         return
@@ -584,7 +669,7 @@ def _downgrade_maintainer_gated_findings(findings: list[Finding], content: str) 
     }
 
     for f in findings:
-        if not _matches_maintainer_downgrade_pattern(f):
+        if not _matches_maintainer_downgrade_pattern(f, content):
             continue
         new_sev = _downgrade.get(f.severity)
         if new_sev is not None and new_sev != f.severity:
@@ -596,14 +681,32 @@ def _downgrade_maintainer_gated_findings(findings: list[Finding], content: str) 
             )
 
 
-def _matches_maintainer_downgrade_pattern(finding: Finding) -> bool:
-    for rule_id, family, pattern in _MAINTAINER_DOWNGRADE_PATTERNS:
-        if rule_id is not None and finding.rule_id != rule_id:
+def _matches_maintainer_downgrade_pattern(finding: Finding, content: str) -> bool:
+    """Return True when ``finding`` matches any downgrade-table entry.
+
+    Each entry checks the finding's ``family`` (and optional pinned
+    ``rule_id``) plus one of:
+
+    * ``snippet_regex`` against ``finding.snippet`` — original shape,
+      used when the FP signal is on the offending line itself.
+    * ``content_regex`` against ``content`` (the whole file) — used
+      when the FP signal lives on a *different* line than the finding
+      (e.g. LOTP-GH-001 where the snippet is the build-tool line but
+      the signal is the ``ref:`` fallback chain in the checkout step).
+    """
+    for entry in _MAINTAINER_DOWNGRADE_PATTERNS:
+        if entry.rule_id is not None and finding.rule_id != entry.rule_id:
             continue
-        if getattr(finding, "finding_family", "") != family:
+        if getattr(finding, "finding_family", "") != entry.family:
             continue
-        if pattern.search(finding.snippet or ""):
-            return True
+        if entry.snippet_regex is not None:
+            if entry.snippet_regex.search(finding.snippet or ""):
+                return True
+            continue
+        if entry.content_regex is not None:
+            if entry.content_regex.search(content):
+                return True
+            continue
     return False
 
 
