@@ -46,6 +46,7 @@ ALLOWED_FILES: dict[str, str] = {
     "docs/AI_TRIAGE.md": "user-facing AI-triage guide",
     "docs/CO_FIRES.md": "user-facing co-fire matrix",
     "docs/CONTEXT.md": "user-facing context-file format reference",
+    "docs/JENKINSFILE_READER_SCOPE.md": "user-facing parser-scope contract for the optional [jenkins-structural] extra",
     "docs/JENKINS_POSTURE_TESTING.md": "user-facing Jenkins runbook",
     "docs/SCORING.md": "user-facing scoring model",
     "docs/STRUCTURAL_READER_SCOPE.md": "user-facing parser-scope contract",

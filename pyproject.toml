@@ -93,6 +93,20 @@ lab = [
     "tree-sitter>=0.21",
     "tree-sitter-groovy>=0.1",
 ]
+# Optional extra: ship the structural Jenkinsfile reader to users.
+# The default install is zero-runtime-dependency; users who want
+# structural-reader-backed Jenkinsfile rules (rather than the
+# regex-only path) opt in with:
+#     pip install 'taintly[jenkins-structural]'
+# tree-sitter-groovy ships as a prebuilt wheel on Windows / Linux /
+# macOS for Python 3.10+ — no compiler needed and no JVM required.
+# Importing taintly.parsers.jenkinsfile without these installed
+# raises ImportError with an install hint; rules that depend on it
+# must guard their import and fall back to regex detection.
+jenkins-structural = [
+    "tree-sitter>=0.21",
+    "tree-sitter-groovy>=0.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/Nellur35/taintly"
