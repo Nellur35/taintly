@@ -37,6 +37,7 @@ from .staticguard import (
     find_dead_line_ranges,
     is_workflow_whole_dead,
 )
+from .gitlab_workflow_corpus import GitLabCorpusPattern, build_gitlab_corpus
 from .workflow_context import analyze as analyze_workflow
 from .workflow_context import compute_exploitability
 from .workflow_corpus import CorpusPattern, build_corpus
@@ -1067,6 +1068,13 @@ def scan_repo(
             # ContextPattern / …) are unaffected because their
             # CorpusPattern siblings stub `check()` to return [].
             all_findings.extend(_run_corpus_rules(repo_path, platform_rules))
+        if plat == Platform.GITLAB:
+            # GitLab CHAIN composer pass: build the GitLabWorkflowCorpus
+            # (entry file + resolved local includes) once per scan and
+            # run any rule whose pattern is a GitLabCorpusPattern.
+            # Mirrors the GH _run_corpus_rules shape; per-file rules
+            # are unaffected because GitLabCorpusPattern.check stubs to [].
+            all_findings.extend(_run_gitlab_corpus_rules(repo_path, platform_rules))
         for f in _dedupe_project_scope(all_findings):
             report.add(f)
 
@@ -1118,6 +1126,68 @@ def _run_corpus_rules(repo_path: str, rules: list[Rule]) -> list[Finding]:
                 # to derive exploitability from — the rule's own logic is
                 # the exploitability gate.  Default to "medium" so the
                 # reporter doesn't downrank the finding without basis.
+                findings.append(
+                    Finding(
+                        rule_id=rule.id,
+                        severity=rule.severity,
+                        title=rule.title,
+                        description=rule.description,
+                        file=filepath,
+                        line=line_num,
+                        snippet=snippet,
+                        remediation=rule.remediation,
+                        reference=rule.reference,
+                        owasp_cicd=rule.owasp_cicd,
+                        stride=rule.stride,
+                        threat_narrative=rule.threat_narrative,
+                        incidents=rule.incidents,
+                        origin="cross-workflow",
+                        finding_family=family,
+                        confidence=confidence,
+                        exploitability="medium",
+                        review_needed=review_needed,
+                    )
+                )
+    return findings
+
+
+def _run_gitlab_corpus_rules(repo_path: str, rules: list[Rule]) -> list[Finding]:
+    """Build a GitLabWorkflowCorpus and run every GitLabCorpusPattern
+    rule against it.
+
+    Mirrors :func:`_run_corpus_rules` but for the GitLab side.  Returns
+    findings already wrapped in :class:`Finding` with the rule's
+    metadata.  No-op when no GitLabCorpusPattern rules are loaded; the
+    corpus build is then skipped entirely so non-cross-file GL scans
+    don't pay the walk cost.
+    """
+    corpus_rules = [r for r in rules if isinstance(r.pattern, GitLabCorpusPattern)]
+    if not corpus_rules:
+        return []
+
+    corpus = build_gitlab_corpus(repo_path)
+    findings: list[Finding] = []
+    with scan_session():
+        for rule in corpus_rules:
+            corpus_pattern = rule.pattern
+            assert isinstance(corpus_pattern, GitLabCorpusPattern)  # nosec B101
+            try:
+                hits = corpus_pattern.check_corpus(corpus)
+            except Exception as e:
+                findings.append(
+                    Finding(
+                        rule_id="ENGINE-ERR",
+                        severity=Severity.INFO,
+                        title=f"GitLab corpus rule {rule.id} failed: {e}",
+                        description=str(e),
+                        file=repo_path,
+                    )
+                )
+                continue
+            for filepath, line_num, snippet in hits:
+                family = rule.finding_family or classify_rule(rule.id, rule.owasp_cicd)
+                confidence = rule.confidence or default_confidence(rule.id)
+                review_needed = rule.review_needed or default_review_needed(rule.id)
                 findings.append(
                     Finding(
                         rule_id=rule.id,

@@ -57,8 +57,17 @@ def _is_stub_rule(rule) -> bool:
     from taintly.rules.gitlab.sec3_sec6_supply_chain_creds import (
         ArchivedIncludeProjectPattern,
     )
+    from taintly.gitlab_workflow_corpus import GitLabCorpusPattern
     from taintly.workflow_corpus import CorpusPattern
     if isinstance(rule.pattern, CorpusPattern):
+        return True
+    # GitLabCorpusPattern is the GL parallel of CorpusPattern —
+    # CHAIN-GL composer rules whose test_positive / test_negative
+    # samples are full ``.gitlab-ci.yml`` repos (with optional
+    # ``include: local:`` files) rather than single YAML strings.
+    # These rules are exercised by the integration tests in
+    # tests/unit/test_chain_gl_composer.py.
+    if isinstance(rule.pattern, GitLabCorpusPattern):
         return True
     # SEC3-GH-009 (imposter-commit) is opt-in via --check-imposter-commits
     # and depends on a network call.  Its samples live in
