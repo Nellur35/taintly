@@ -69,6 +69,184 @@ class _NodeBlockWithoutLabelPattern:
         return results
 
 
+# =========================================================================
+# Shared shell-body predicate infrastructure.
+#
+# Rules in this module that need to reason about the CONTENT of a
+# ``sh '...'`` / ``bat '...'`` / ``powershell '...'`` body — and only
+# the body, not arbitrary string literals elsewhere in the
+# Jenkinsfile — consume the structural reader at
+# ``taintly.parsers.jenkinsfile``.  The reader is gated on the
+# optional ``[jenkins-structural]`` extra (tree-sitter-groovy).  When
+# the extra is not installed, the pattern below returns ``[]`` so the
+# default install stays zero-runtime-dependency and the rule simply
+# does not fire on that file (regex-based JK rules continue to
+# cover their respective shapes).
+# =========================================================================
+
+
+class _JenkinsfileShellLeafPattern:
+    """Fire on ``sh|bat|powershell`` body strings matching a predicate.
+
+    The structural Jenkinsfile reader yields ``LEAF`` events with
+    ``value_kind="shell"`` for the body string of every shell sink
+    in the Jenkinsfile.  This pattern routes every such body
+    through ``predicate(body) -> bool`` and emits one finding per
+    matching body, anchored at the call's line.
+
+    The snippet anchored at ``ev.line`` is the call-site line
+    (e.g. ``sh '''`` for a triple-quoted body), which preserves the
+    pattern-contract requirement that snippet text derives from the
+    cited line.  For multi-line bodies the call-site line carries the
+    structural cue; reviewers follow up by reading the body.
+
+    Why a custom Pattern (not RegexPattern):
+      * RegexPattern matches each line in isolation, so it cannot
+        tell whether a regex match sits INSIDE a ``sh '''...'''``
+        body (vulnerability) or inside an unrelated string literal /
+        Groovy comment (false positive).
+      * The structural reader gives us the body — and only the body
+        — as a single string, eliminating the FP class.
+
+    Failure-soft contract:
+      * Import of the structural reader is gated on the optional
+        ``[jenkins-structural]`` extra.  Missing extra ⇒ return [].
+      * Parse errors in the Jenkinsfile produce a ``CUTOFF`` event
+        from the walker; we honour that by stopping the walk.
+    """
+
+    def __init__(self, predicate):
+        self._predicate = predicate
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        try:
+            from taintly.parsers.jenkinsfile import walk_jenkinsfile, EventKind
+        except ImportError:
+            # Optional [jenkins-structural] extra not installed; rule
+            # is silent rather than failing.  Documented in the
+            # rule's description so users know to install the extra.
+            return []
+
+        results: list[tuple[int, str]] = []
+        seen: set[tuple[int, str]] = set()
+        try:
+            for ev in walk_jenkinsfile(content, recover=True):
+                if ev.kind == EventKind.CUTOFF:
+                    break
+                if ev.kind != EventKind.LEAF or ev.value_kind != "shell":
+                    continue
+                if not ev.value:
+                    continue
+                if not self._predicate(ev.value):
+                    continue
+                if 0 < ev.line <= len(lines):
+                    snippet = lines[ev.line - 1].strip() or ev.value.strip()
+                else:
+                    snippet = ev.value.strip()
+                key = (ev.line, snippet)
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(key)
+        except Exception:  # nosec B110 - walker failures (Tree-sitter init / unexpected node shape) must not break scans; fall back to no findings
+            return []
+        return results
+
+
+# Predicate for SEC9-JK-004: download-pipe-to-interpreter and PowerShell
+# remote-execution shapes the line-scoped SEC9-JK-001 regex cannot
+# reach.  Compiled once at module load.  The command-start anchor
+# (``^`` / whitespace / ``;`` / ``&&`` / ``||`` / ``|`` / ``(`` /
+# backtick) keeps the predicate from firing on text that merely
+# *contains* the literal substring ``curl ... | bash`` inside an
+# unrelated argument.
+#
+# Critical scoping: alternative 1 (download pipe to interpreter)
+# DELIBERATELY EXCLUDES ``bash`` / ``sh`` / ``zsh`` / ``dash`` /
+# ``ksh`` from the interpreter list.  Those are SEC9-JK-001's
+# coverage when the shell sink and the pipe live on the same line.
+# Listing them here would produce a redundant co-fire with
+# SEC9-JK-001 on every classic ``sh 'curl ... | bash'`` fixture,
+# which is bad rule hygiene — the reviewer sees two findings for
+# one defect, and the no-rules-change-gate hash drifts on every
+# pre-existing SEC9-JK-001 fixture.  The multi-line triple-quoted
+# ``sh '''…curl…|bash…'''`` case is handled by the dedicated
+# alternative below that requires a newline inside the body — the
+# walker presents the body as a single string, so the predicate
+# can detect "this body spans multiple source lines, therefore
+# SEC9-JK-001's line-scoped regex cannot have matched it."
+_SEC9_JK_004_PREDICATE_RE = re.compile(
+    r"(?:"
+    # 1) curl / wget / fetch piped directly to a NON-shell scripting
+    #    interpreter (with optional sudo).  Shell interpreters
+    #    (bash/sh/zsh/dash/ksh) are intentionally excluded — see
+    #    the block comment above; SEC9-JK-001 owns the single-line
+    #    shell-pipe shape on its own line.
+    r"(?:^|[;&|()`$]|\s)\s*"
+    r"(?:curl|wget|fetch)\b[^|\n]+\|\s*(?:sudo\s+)?"
+    r"(?:python(?:2|3)?|perl|ruby|node|php)\b"
+    # 2) Process-substitution: ``bash <(curl ...)`` / ``sh <(...)``.
+    #    No ``|`` token between curl and the interpreter, so the
+    #    SEC9-JK-001 ``\|\s*(ba)?sh`` predicate cannot fire here.
+    r"|(?:^|[;&|()`$]|\s)\s*(?:bash|sh|zsh)\s+<\s*\(\s*(?:curl|wget|fetch)\b"
+    # 3) PowerShell ``iex(Invoke-WebRequest ...)`` and equivalents:
+    #    ``iex(IWR …)``, ``iex(Invoke-RestMethod …)``,
+    #    ``iex(New-Object … DownloadString …)``.  Semantic equivalent
+    #    of ``curl | bash`` for Jenkins Windows agents.
+    r"|(?:iex|Invoke-Expression)\s*[\(\s]+(?:[^)]*?\b"
+    r"(?:Invoke-WebRequest|iwr|Invoke-RestMethod|irm"
+    r"|New-Object\s+System\.Net\.WebClient|DownloadString)\b)"
+    # 4) PowerShell alt arrangement: ``IWR ... | iex`` /
+    #    ``Invoke-RestMethod ... | iex``.
+    r"|\b(?:Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\b[^|\n]+"
+    r"\|\s*(?:iex|Invoke-Expression)\b"
+    # 5) Command-substitution flavour: ``$(curl ...) | bash``.
+    r"|\$\(\s*(?:curl|wget)\b[^)]+\)\s*\|\s*(?:bash|sh|zsh|python|perl|ruby)"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+# Auxiliary predicate for the multi-line triple-quoted case: the
+# body spans multiple source lines (contains a newline) AND
+# contains ``curl|wget ... | (ba)?sh`` somewhere inside.  The
+# walker presents this body as one string so the predicate can
+# see the pipe; the line-scoped SEC9-JK-001 regex cannot.  This
+# is the ONLY case where SEC9-JK-004 fires on the ``| bash`` /
+# ``| sh`` shape that SEC9-JK-001 also targets — and it fires
+# precisely because SEC9-JK-001 structurally can't.
+_SEC9_JK_004_MULTILINE_SHELL_PIPE_RE = re.compile(
+    r"(?:^|[;&|()`$]|\s)\s*(?:curl|wget|fetch)\b[^|\n]+"
+    r"\|\s*(?:sudo\s+)?(?:bash|sh|zsh|dash|ksh)\b",
+    re.IGNORECASE,
+)
+
+
+def _sec9_jk_004_predicate(shell_body: str) -> bool:
+    """Return True when a shell body matches a download-pipe-to-
+    interpreter or PowerShell remote-execution shape that the
+    line-scoped SEC9-JK-001 regex cannot reach.
+
+    Three classes of match:
+      * Non-shell interpreter pipes / process substitution / iex(IWR).
+        These never matched SEC9-JK-001's regex at all.
+      * Multi-line triple-quoted shell body containing
+        ``curl ... | bash``.  The walker hands us the body as one
+        string spanning multiple source lines; SEC9-JK-001's
+        per-line regex cannot see the curl-and-bash on different
+        source lines.  Gated on the body containing a newline so
+        the single-line shell-pipe case stays SEC9-JK-001's.
+    """
+    if _SEC9_JK_004_PREDICATE_RE.search(shell_body):
+        return True
+    # Multi-line shell-pipe case.  Require an explicit newline so
+    # the single-line ``sh 'curl|bash'`` (SEC9-JK-001's coverage)
+    # is not double-reported.
+    if "\n" in shell_body and _SEC9_JK_004_MULTILINE_SHELL_PIPE_RE.search(shell_body):
+        return True
+    return False
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # SEC3-JK-001: Shared library loaded without SHA pinning
@@ -2631,6 +2809,219 @@ RULES: list[Rule] = [
             "the transit form where an earlier stage assigns "
             "``env.X = params.X`` and a later stage interpolates "
             "``env.X`` into a GString."
+        ),
+    ),
+    # =========================================================================
+    # SEC9-JK-004: download-pipe-to-interpreter / process-substitution /
+    # PowerShell remote-execution inside a Jenkinsfile shell sink.
+    #
+    # Consumes the structural Jenkinsfile reader (optional
+    # ``[jenkins-structural]`` extra) so the predicate only sees
+    # actual ``sh|bat|powershell`` bodies — not arbitrary Groovy
+    # string literals.  Net-new over SEC9-JK-001 (which is regex /
+    # line-scoped) on three shapes the line-regex can't reach:
+    #
+    #   * ``curl ... | python -c "..."`` and other non-shell
+    #     interpreter pipes (the SEC9-JK-001 regex stops at ``(ba)?sh``).
+    #   * ``bash <(curl ...)`` process substitution (no ``|`` token).
+    #   * Multi-line triple-quoted bodies where the offending
+    #     curl-pipe-bash is on a body line, not the ``sh '''`` opener
+    #     (the line-scoped regex never sees the pair on one line).
+    #
+    # SEC9-JK-001 / SEC9-JK-003 stay in place to cover the
+    # zero-runtime-dependency default install (no extra) and the
+    # narrower line-scoped shapes they already handle reliably.
+    # =========================================================================
+    Rule(
+        id="SEC9-JK-004",
+        title=(
+            "Jenkinsfile shell sink runs downloaded content "
+            "(curl|interpreter, process substitution, iex(IWR))"
+        ),
+        severity=Severity.HIGH,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-9",
+        description=(
+            "A Jenkins pipeline shell sink (``sh '...'`` / "
+            "``bat '...'`` / ``powershell '...'``) downloads content "
+            "from a remote host and executes it without integrity "
+            "verification.  Catches three shapes the line-scoped "
+            "SEC9-JK-001 / SEC9-JK-003 regexes cannot reach:\n"
+            "\n"
+            "  1. ``curl|wget`` piped to a non-shell interpreter "
+            "(``| python``, ``| python3``, ``| perl``, ``| ruby``, "
+            "``| node``, ``| php``) — same RCE shape, different "
+            "interpreter.\n"
+            "  2. Process substitution: ``bash <(curl ...)`` / "
+            "``sh <(curl ...)``.  No ``|`` token, so ``\\|\\s*(ba)?sh`` "
+            "regexes miss it.\n"
+            "  3. PowerShell ``iex(Invoke-WebRequest ...)`` / "
+            "``iwr ... | iex`` / ``Invoke-Expression(New-Object "
+            "System.Net.WebClient).DownloadString(...)`` — the "
+            "Windows-agent equivalent of curl|bash.\n"
+            "\n"
+            "Consumes the structural Jenkinsfile reader so only "
+            "actual shell-sink bodies are scanned — not arbitrary "
+            "Groovy string literals or comments that merely "
+            "contain the substring ``curl | bash``.  Requires the "
+            "optional ``[jenkins-structural]`` extra "
+            "(``pip install 'taintly[jenkins-structural]'``).  "
+            "Default install: rule is silent and SEC9-JK-001 / "
+            "SEC9-JK-003 continue to cover the line-scoped shapes."
+        ),
+        pattern=_JenkinsfileShellLeafPattern(_sec9_jk_004_predicate),
+        remediation=(
+            "Download the script separately, verify its SHA-256 "
+            "checksum (or signature), then execute:\n\n"
+            "  // BAD — non-shell interpreter pipe\n"
+            "  sh 'curl -fsSL https://x.com/install.py | python3'\n\n"
+            "  // BAD — process substitution\n"
+            "  sh 'bash <(curl -fsSL https://x.com/install.sh)'\n\n"
+            "  // BAD — PowerShell remote execution\n"
+            "  powershell 'iex(Invoke-WebRequest -Uri "
+            "https://x.com/setup.ps1).Content'\n\n"
+            "  // GOOD — fetch, verify, execute\n"
+            "  sh '''\n"
+            "      curl -fsSL https://x.com/install.sh -o install.sh\n"
+            "      echo 'abc123def456...  install.sh' | "
+            "sha256sum --check\n"
+            "      bash install.sh\n"
+            "      rm install.sh\n"
+            "  '''\n"
+        ),
+        reference=(
+            "https://owasp.org/www-project-top-10-ci-cd-security-risks/"
+            "CICD-SEC-09-Improper-Artifact-Integrity-Validation"
+        ),
+        test_positive=[
+            # 1) curl | non-shell interpreter (walker-only — SEC9-JK-001 misses)
+            (
+                "pipeline {\n"
+                "  agent any\n"
+                "  stages {\n"
+                "    stage('Setup') {\n"
+                "      steps {\n"
+                "        sh 'curl -fsSL https://x.com/i.py | python3'\n"
+                "      }\n"
+                "    }\n"
+                "  }\n"
+                "}\n"
+            ),
+            # 2) bash <(curl ...) process substitution (walker-only)
+            (
+                "pipeline {\n"
+                "  agent any\n"
+                "  stages {\n"
+                "    stage('Setup') {\n"
+                "      steps {\n"
+                "        sh 'bash <(curl -fsSL https://x.com/i.sh)'\n"
+                "      }\n"
+                "    }\n"
+                "  }\n"
+                "}\n"
+            ),
+            # 3) PowerShell iex(Invoke-WebRequest ...) (walker-only)
+            (
+                "pipeline {\n"
+                "  agent { label 'windows' }\n"
+                "  stages {\n"
+                "    stage('Setup') {\n"
+                "      steps {\n"
+                "        powershell 'iex(Invoke-WebRequest -Uri "
+                "https://x.com/s.ps1).Content'\n"
+                "      }\n"
+                "    }\n"
+                "  }\n"
+                "}\n"
+            ),
+            # 4) iwr | iex alt arrangement
+            (
+                "pipeline {\n"
+                "  agent { label 'windows' }\n"
+                "  stages {\n"
+                "    stage('Setup') {\n"
+                "      steps {\n"
+                "        powershell 'iwr -useb https://x.com/s.ps1 | iex'\n"
+                "      }\n"
+                "    }\n"
+                "  }\n"
+                "}\n"
+            ),
+        ],
+        test_negative=[
+            # Safe: separate fetch + sha256sum verify + bash <file>.
+            (
+                "pipeline {\n"
+                "  agent any\n"
+                "  stages {\n"
+                "    stage('Setup') {\n"
+                "      steps {\n"
+                "        sh '''\n"
+                "            curl -fsSL https://x.com/i.sh -o i.sh\n"
+                "            echo 'abc i.sh' | sha256sum --check\n"
+                "            bash i.sh\n"
+                "        '''\n"
+                "      }\n"
+                "    }\n"
+                "  }\n"
+                "}\n"
+            ),
+            # Curl to API endpoint piped to jq — not an interpreter, safe.
+            (
+                "pipeline {\n"
+                "  agent any\n"
+                "  stages {\n"
+                "    stage('Check') {\n"
+                "      steps {\n"
+                "        sh 'curl -s https://api.x.com/v1 | jq .ok'\n"
+                "      }\n"
+                "    }\n"
+                "  }\n"
+                "}\n"
+            ),
+            # Pure bash with a local file — no remote download.
+            (
+                "pipeline {\n"
+                "  agent any\n"
+                "  stages {\n"
+                "    stage('Build') {\n"
+                "      steps {\n"
+                "        sh 'bash ./build.sh && echo done'\n"
+                "      }\n"
+                "    }\n"
+                "  }\n"
+                "}\n"
+            ),
+            # Literal substring in an unrelated environment{} string —
+            # walker yields value_kind='string', not 'shell', so this
+            # pattern's predicate never sees it.
+            (
+                "pipeline {\n"
+                "  agent any\n"
+                "  environment {\n"
+                "    DOC_NOTE = 'avoid curl https://x | bash patterns'\n"
+                "  }\n"
+                "  stages {\n"
+                "    stage('Build') { steps { sh 'make' } }\n"
+                "  }\n"
+                "}\n"
+            ),
+        ],
+        stride=["T"],
+        threat_narrative=(
+            "A Jenkins build agent that fetches a remote payload and "
+            "feeds it straight to an interpreter executes whatever the "
+            "remote endpoint returns at build time.  A CDN compromise, "
+            "DNS hijack, or hosting-account takeover substitutes "
+            "attacker-chosen bytes for the expected installer, and the "
+            "payload runs with the agent's bound credentials, "
+            "``withCredentials`` scope, and persistent workspace.  This "
+            "rule covers the non-shell interpreter pipes, process-"
+            "substitution shapes, and PowerShell remote-execution "
+            "shapes that the line-scoped SEC9-JK-001 regex cannot "
+            "see; the structural reader limits firing to actual "
+            "``sh|bat|powershell`` bodies so unrelated Groovy literals "
+            "do not produce false positives."
         ),
     ),
 ]
