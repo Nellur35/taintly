@@ -3527,6 +3527,15 @@ RULES: list[Rule] = [
                 r"|\bdisallowed_tools\s*:"
                 # Copilot's equivalent
                 r"|\btools[_-]whitelist\s*:"
+                # FP-audit class E (P5b): claude-code-action's newer
+                # schema declares allowlist via ``settings:`` JSON
+                # containing ``permissions.allow`` / ``permissions.deny``.
+                # Without this arm, workflows using the new schema
+                # produce hard FPs even though they ARE properly scoped.
+                # The JSON-key shape covers both inline and heredoc
+                # forms of the ``settings:`` input.
+                r"|(?:[\"']?permissions[\"']?\s*:\s*\{[^}]*[\"']?(?:allow|deny)[\"']?\s*:)"
+                r"|(?:[\"']?(?:allow|deny)[\"']?\s*:\s*\[)"
                 r")"
             ),
             scope="file",
