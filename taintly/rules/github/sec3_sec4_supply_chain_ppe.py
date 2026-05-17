@@ -841,7 +841,19 @@ RULES: list[Rule] = [
             "If the workflow also checks out PR code, SEC4-GH-001 escalates to CRITICAL."
         ),
         pattern=RegexPattern(
-            match=r"pull_request_target",
+            # FP-audit class A: bare substring matched
+            # ``pull_request_target`` ANYWHERE in the file, including
+            # inside defensive conditionals like ``github.event_name ==
+            # 'pull_request_target'`` (which routes untrusted triggers
+            # to safe code paths — the OPPOSITE of vulnerable).
+            # Restrict to trigger-declaration shapes: block-form key,
+            # list element, inline-form value, or list-shorthand.
+            match=(
+                r"^\s*pull_request_target\s*:"               # block-form key
+                r"|^\s*-\s*pull_request_target\s*$"          # YAML list item
+                r"|^on\s*:\s*pull_request_target\s*$"        # inline form
+                r"|^on\s*:\s*\[[^\]]*\bpull_request_target\b[^\]]*\]"  # list shorthand
+            ),
             exclude=[r"^\s*#"],
         ),
         remediation="Use 'pull_request' trigger if write access is not required.",
@@ -854,6 +866,11 @@ RULES: list[Rule] = [
         test_negative=[
             "  pull_request:",
             "  # pull_request_target:",
+            # FP-audit: defensive conditional that mentions the trigger
+            # name as a string-literal comparand, NOT as a trigger.
+            "ref: ${{ (github.event_name == 'pull_request_target') && 'main' || github.sha }}",
+            "# fallback if event is pull_request_target",
+            "echo \"event=$EVENT_NAME pull_request_target=$PRT\"",
         ],
         stride=["E"],
         threat_narrative=(
@@ -892,7 +909,20 @@ RULES: list[Rule] = [
             # (preceded by ``.``) and identifiers that happen to end
             # in ``workflow_run`` (preceded by a word char).
             anchor=r"(?<![.\w])workflow_run\s*(?::|,|\]|$)",
-            requires=r"workflow_run",
+            # FP-audit class A: bare ``workflow_run`` substring in
+            # ``requires`` matched step names like
+            # ``Trigger scheduled AMD CI via workflow_run`` and echo
+            # bodies — content, not triggers.  Tighten to require a
+            # real trigger-declaration shape.  ``(?m)`` because
+            # ContextPattern compiles regexes without MULTILINE.
+            requires=(
+                r"(?m)("
+                r"^\s*workflow_run\s*:"
+                r"|^\s*-\s*workflow_run\s*$"
+                r"|^on\s*:\s*workflow_run\s*$"
+                r"|^on\s*:\s*\[[^\]]*\bworkflow_run\b[^\]]*\]"
+                r")"
+            ),
             requires_absent=r"workflow_run\.conclusion",
             exclude=[r"^\s*#"],
         ),

@@ -33,7 +33,7 @@
   "github/safe/secret_in_with_but_also_env.yml": "7d33a325b6c393f9dceb16a53ec6b0c34e98b1a538d562c440280a405669ac2b",
   "github/safe/with_input_no_secret.yml": "0ed14ac6f3f11a5c0f83d59385332aa393b49ce702121265902da88987e052a3",
   "github/vulnerable/ai_agent_cli_on_pr.yml": "38f96b6c0424f3eb3f024ce6af344868b48b385706b85e374d59bd96cf3e58e9",
-  "github/vulnerable/ai_agent_dangerous_flags.yml": "403859c4f527b61959a24e294c54896fa048601ce3ba7bfc4c1af1a0d6108288",
+  "github/vulnerable/ai_agent_dangerous_flags.yml": "3b0d48d30a631d9bf9722207dc594b958c93c091afe843f343edd061699d49a6",
   "github/vulnerable/ai_agent_on_pr.yml": "a661d3ae2af0370c0822faeac1b8790a9013958266093e446c39c528f7e6ab8a",
   "github/vulnerable/ai_agent_output_to_shell.yml": "b7bf319de0b1faebac0c9c1406247c8fd97061b7aa195ff6a4e35884f5d1e055",
   "github/vulnerable/ai_agent_with_pr_checkout.yml": "0c2c8dbac8e35e4e7c1addaadbf553fdc1befb3325a65673ea3e82f5ef8e9582",

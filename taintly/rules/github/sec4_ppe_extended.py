@@ -556,7 +556,25 @@ RULES: list[Rule] = [
             # files.  The shared anchor's `pip install` arm only matches the
             # repo-file-reading forms: `.`, `-e .`, `--editable .`, `-r <file>`.
             anchor=_BUILD_TOOL_ANCHOR,
-            requires=r"pull_request_target",
+            # FP-audit class A: bare ``pull_request_target`` substring
+            # in ``requires`` matched the trigger name anywhere in the
+            # file, including inside defensive conditionals
+            # (``github.event_name == 'pull_request_target'``) where
+            # the workflow routes untrusted triggers to the trusted
+            # ``main`` branch.  That produced the ONLY CRITICAL FP in
+            # the audit (transformers/slack-report.yml).  Tightened to
+            # require a real trigger-declaration shape.  ``(?m)`` is
+            # needed because ContextPattern compiles regexes without
+            # MULTILINE by default and ``requires`` is a file-wide
+            # check.
+            requires=(
+                r"(?m)("
+                r"^\s*pull_request_target\s*:"
+                r"|^\s*-\s*pull_request_target\s*$"
+                r"|^on\s*:\s*pull_request_target\s*$"
+                r"|^on\s*:\s*\[[^\]]*\bpull_request_target\b[^\]]*\]"
+                r")"
+            ),
             exclude=[
                 r"^\s*#",
                 # BUG-8a: exclude "make" in JSON-style YAML string values like "message": "...make..."

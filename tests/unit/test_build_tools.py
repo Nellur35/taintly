@@ -79,6 +79,29 @@ _KNOWN_NEGATIVES = [
     "    - run: poetry --version",
     "    - run: poetry run pytest",
     "    - run: poetry show",
+    # bundle exec runs a command in bundler context — does NOT invoke
+    # install hooks.  Excluded from the build-tool anchor as of the
+    # FP-audit Class B fix.  Including it produces LOTP-* soft-FPs
+    # on every Rails CI pipeline.
+    "    - run: bundle exec rake",
+    "    - run: bundle exec rspec",
+    "    - run: bundle exec rails test",
+    # yarn.lock filename mentioned in rules:changes globs, paths
+    # filters, cache keys.  ``\byarn\b`` would match the ``yarn``
+    # prefix; the lookahead ``(?![.-])`` blocks it.
+    "    - '{yarn.lock,*/yarn.lock,*/*/yarn.lock}'",
+    "    - 'ee/frontend/{package.json,yarn.lock}'",
+    # .yarn-cache referenced in GitLab !reference cache directives.
+    # ``\byarn\b`` matches at the boundary after ``.``; the lookbehind
+    # ``(?<![./\-])`` blocks it.
+    "    - !reference [.yarn-cache, cache]",
+    # yarn-${VERSION} inside an image-tag string.
+    '    DEFAULT_CI_IMAGE: "${REGISTRY_HOST}/ci-yarn-${YARN_VERSION}-base"',
+    # Absolute-path / wrapped invocations are a known false-negative
+    # of the lookbehind form — confirms the design tradeoff.  If
+    # these need to fire, users can run with a custom rule or rely
+    # on the broader SEC4-GH-* shell-injection rules instead.
+    "    - run: /usr/bin/yarn install",
 ]
 
 

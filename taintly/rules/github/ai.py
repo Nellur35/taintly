@@ -1306,7 +1306,16 @@ RULES: list[Rule] = [
                 r")"
             ),
             scope="file",
-            exclude=[r"^\s*#"],
+            exclude=[
+                r"^\s*#",
+                # FP-audit class E: ``\b(?:open_?ai|anthropic)\s*[.(]``
+                # matches the ``.`` in ``anthropic.com`` (e.g. inside
+                # ``Co-Authored-By: Claude <noreply@anthropic.com>`` git
+                # footers).  Excluding email-shaped and angle-bracketed
+                # contexts removes the FPs without losing real SDK calls.
+                r"Co-[Aa]uthored-[Bb]y",
+                r"<[^>]*@(?:openai|anthropic)\.(?:com|ai)",
+            ],
         ),
         remediation=(
             "Treat LLM output on attacker-controlled input as untrusted data.\n"
@@ -2603,10 +2612,18 @@ RULES: list[Rule] = [
             # empty values.  The URL shape check is deliberately
             # minimal — any non-empty assignment is worth surfacing
             # because the vendor docs never recommend one.
+            #
+            # AZURE_OPENAI_ENDPOINT is INTENTIONALLY EXCLUDED: Azure
+            # OpenAI has NO default endpoint — every tenant gets a
+            # unique URL (``<your-resource>.openai.azure.com``).
+            # Setting AZURE_OPENAI_ENDPOINT is the normal, required
+            # configuration, not an off-vendor override.  Including
+            # it produced FPs on every Azure-OpenAI workflow
+            # (FP-audit class E).
             match=(
                 r"^\s*(?:ANTHROPIC_BASE_URL|OPENAI_BASE_URL|OPENAI_API_BASE|"
                 r"GOOGLE_API_BASE_URL|GOOGLE_GENERATIVE_AI_API_BASE|"
-                r"AWS_BEDROCK_ENDPOINT|AZURE_OPENAI_ENDPOINT|"
+                r"AWS_BEDROCK_ENDPOINT|"
                 r"CLAUDE_CODE_BASE_URL|CURSOR_API_BASE_URL)\s*:\s*\S"
             ),
             exclude=[
@@ -2909,6 +2926,14 @@ RULES: list[Rule] = [
                 # lines.  Excluding install lines from the anchor keeps
                 # the double-fire from being noise.
                 r"^\s*-?\s*run:.*\b(?:npm|pip|pipx|brew|apt|yum|dnf)\s+install\b",
+                # FP-audit class E: action ``with:`` inputs whose values
+                # legitimately carry agent-CLI flags as a string the
+                # action parses internally — NOT a shell invocation.
+                # ``claude_args:`` on anthropics/claude-code-action and
+                # similar shapes on other agent actions.  Including them
+                # in the anchor produced false positives on every workflow
+                # using the newer claude-code-action schema.
+                r"^\s+(?:claude_args|cli_args|extra_args|args|prompt|settings)\s*:",
             ],
         ),
         remediation=(
