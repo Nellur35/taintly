@@ -52,9 +52,7 @@ def _get_parser() -> Any:
         lang = Language(_tsg.language())
         _TS_PARSER = Parser(lang)
     except Exception as exc:  # pragma: no cover - tree-sitter init failure
-        err = ImportError(
-            f"failed to initialise tree-sitter-groovy ({exc!r})\n\n{_install_hint()}"
-        )
+        err = ImportError(f"failed to initialise tree-sitter-groovy ({exc!r})\n\n{_install_hint()}")
         _TS_INIT_ERROR = err
         raise err from exc
     return _TS_PARSER

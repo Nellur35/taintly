@@ -849,9 +849,9 @@ RULES: list[Rule] = [
             # Restrict to trigger-declaration shapes: block-form key,
             # list element, inline-form value, or list-shorthand.
             match=(
-                r"^\s*pull_request_target\s*:"               # block-form key
-                r"|^\s*-\s*pull_request_target\s*$"          # YAML list item
-                r"|^on\s*:\s*pull_request_target\s*$"        # inline form
+                r"^\s*pull_request_target\s*:"  # block-form key
+                r"|^\s*-\s*pull_request_target\s*$"  # YAML list item
+                r"|^on\s*:\s*pull_request_target\s*$"  # inline form
                 r"|^on\s*:\s*\[[^\]]*\bpull_request_target\b[^\]]*\]"  # list shorthand
             ),
             exclude=[r"^\s*#"],
@@ -870,7 +870,7 @@ RULES: list[Rule] = [
             # name as a string-literal comparand, NOT as a trigger.
             "ref: ${{ (github.event_name == 'pull_request_target') && 'main' || github.sha }}",
             "# fallback if event is pull_request_target",
-            "echo \"event=$EVENT_NAME pull_request_target=$PRT\"",
+            'echo "event=$EVENT_NAME pull_request_target=$PRT"',
         ],
         stride=["E"],
         threat_narrative=(

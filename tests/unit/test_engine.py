@@ -287,6 +287,64 @@ def test_discover_files_jenkins_nested_paths(tmp_path):
     assert os.path.join("jenkins", "build.groovy") in names
 
 
+def test_discover_files_jenkins_descends_hidden_directories(tmp_path):
+    """``.jenkins/Jenkinsfile`` and similar dot-prefixed CI dirs must be
+    discovered.  apache/cassandra and many Apache projects use
+    ``.jenkins/Jenkinsfile`` as the canonical path; ``glob.glob(recursive
+    =True)`` SKIPS hidden directories by default (``include_hidden=True``
+    is 3.11+), so the old recursive-glob implementation silently missed
+    them.  Surfaced by 2026-05-18 audit on apache/cassandra (667-line
+    Jenkinsfile completely invisible to taintly).
+    """
+    (tmp_path / ".jenkins").mkdir()
+    (tmp_path / ".jenkins" / "Jenkinsfile").write_text("pipeline {}\n")
+    (tmp_path / ".ci").mkdir()
+    (tmp_path / ".ci" / "Jenkinsfile.nightly").write_text("pipeline {}\n")
+
+    files = discover_files(str(tmp_path), Platform.JENKINS)
+    rel = sorted(os.path.relpath(f, str(tmp_path)) for f in files)
+    assert os.path.join(".jenkins", "Jenkinsfile") in rel
+    assert os.path.join(".ci", "Jenkinsfile.nightly") in rel
+
+
+def test_discover_files_jenkins_underscore_and_dash_variants(tmp_path):
+    """``Jenkinsfile_k8s`` / ``Jenkinsfile-prod`` are the documented
+    convention for per-platform / per-environment pipelines.
+    jenkinsci/jenkins.io ships a ``Jenkinsfile_k8s`` for the Kubernetes
+    runner variant; the old ``Jenkinsfile.*`` glob (literal dot) missed
+    underscore- and dash-suffixed variants.  Surfaced by 2026-05-18
+    audit on jenkinsci/jenkins.io.
+    """
+    (tmp_path / "Jenkinsfile").write_text("pipeline {}\n")
+    (tmp_path / "Jenkinsfile_k8s").write_text("pipeline {}\n")
+    (tmp_path / "Jenkinsfile-prod").write_text("pipeline {}\n")
+
+    files = discover_files(str(tmp_path), Platform.JENKINS)
+    rel = sorted(os.path.relpath(f, str(tmp_path)) for f in files)
+    assert "Jenkinsfile" in rel
+    assert "Jenkinsfile_k8s" in rel
+    assert "Jenkinsfile-prod" in rel
+
+
+def test_discover_files_jenkins_rejects_doc_extensions(tmp_path):
+    """``jenkinsfile.adoc`` is the asciidoc filename used by
+    jenkinsci/jenkins.io to document the Jenkinsfile syntax — NOT a
+    pipeline script.  On case-insensitive filesystems (Windows, macOS)
+    a naive ``Jenkinsfile.*`` glob slurped these and produced CUTOFF
+    events from the structural reader.  Reject documented doc-format
+    extensions explicitly.
+    """
+    (tmp_path / "Jenkinsfile.adoc").write_text("= Jenkinsfile syntax\n")
+    (tmp_path / "Jenkinsfile.md").write_text("# Jenkinsfile\n")
+    (tmp_path / "Jenkinsfile.html").write_text("<html/>\n")
+    # Anchor the assertion with a real one.
+    (tmp_path / "Jenkinsfile").write_text("pipeline {}\n")
+
+    files = discover_files(str(tmp_path), Platform.JENKINS)
+    rel = [os.path.relpath(f, str(tmp_path)) for f in files]
+    assert rel == ["Jenkinsfile"]
+
+
 def test_discover_files_jenkins_excludes_vendor_dirs(tmp_path):
     """Third-party dependency trees shouldn't be scanned — they're noise
     and slow. Verify node_modules/.git/vendor/__pycache__ are pruned even

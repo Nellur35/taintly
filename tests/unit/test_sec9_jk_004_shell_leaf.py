@@ -183,6 +183,112 @@ def test_does_not_fire_on_safe_fetch_verify_execute(tmp_path, jenkins_rules):
     assert "SEC9-JK-004" not in _ids(scan_file(str(f), jenkins_rules))
 
 
+def test_fires_on_two_step_wget_then_bash(tmp_path, jenkins_rules):
+    """May-18 audit on apache/cassandra ``.jenkins/Jenkinsfile``:
+
+        sh '''
+            wget -q ${agentScriptsUrl}/docker_agent_cleaner.sh
+            bash docker_agent_cleaner.sh ${maxBuildHours}
+        '''
+
+    Download on line A, ``bash <file>`` on line B (not piped), no
+    checksum verification — the classic two-step LOTP supply-chain
+    shape that motivated the SEC9-JK family.  SEC9-JK-001 needs the
+    pipe on one line; SEC9-JK-003 needs wget + filename on the same
+    line as ``sh``; neither sees the two commands on different lines
+    inside one triple-quoted body.  SEC9-JK-004 owns the structural
+    cross-line view.
+    """
+    f = _write(
+        tmp_path,
+        "pipeline {\n"
+        "  agent any\n"
+        "  stages {\n"
+        "    stage('clean') {\n"
+        "      steps {\n"
+        "        sh '''\n"
+        "            wget -q https://example.com/agent_scripts/cleaner.sh\n"
+        "            bash cleaner.sh 6\n"
+        "        '''\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "}\n",
+    )
+    assert "SEC9-JK-004" in _ids(scan_file(str(f), jenkins_rules))
+
+
+def test_fires_on_two_step_curl_then_python(tmp_path, jenkins_rules):
+    """Same two-step shape with Python instead of bash — interpreter
+    diversity matters because the cassandra fixture also downloads
+    ``docker_image_pruner.py``."""
+    f = _write(
+        tmp_path,
+        "pipeline {\n"
+        "  agent any\n"
+        "  stages {\n"
+        "    stage('s') {\n"
+        "      steps {\n"
+        "        sh '''\n"
+        "            curl -fsSL https://e.com/setup.py -o setup.py\n"
+        "            python setup.py install\n"
+        "        '''\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "}\n",
+    )
+    assert "SEC9-JK-004" in _ids(scan_file(str(f), jenkins_rules))
+
+
+def test_does_not_fire_on_two_step_with_sha256_verify(tmp_path, jenkins_rules):
+    """The two-step exec shape with an in-band sha256sum verification
+    in between is the documented safe form — must not fire (presumed
+    verified)."""
+    f = _write(
+        tmp_path,
+        "pipeline {\n"
+        "  agent any\n"
+        "  stages {\n"
+        "    stage('s') {\n"
+        "      steps {\n"
+        "        sh '''\n"
+        "            wget -q https://example.com/installer.sh\n"
+        "            sha256sum -c installer.sh.sha256\n"
+        "            bash installer.sh\n"
+        "        '''\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "}\n",
+    )
+    assert "SEC9-JK-004" not in _ids(scan_file(str(f), jenkins_rules))
+
+
+def test_does_not_fire_on_two_step_with_cosign_verify_blob(tmp_path, jenkins_rules):
+    """cosign verify-blob is the sigstore equivalent of sha256sum --check
+    for blob artifacts.  The two-step shape gated by cosign verify
+    must not fire — same exemption rationale as sha256sum above."""
+    f = _write(
+        tmp_path,
+        "pipeline {\n"
+        "  agent any\n"
+        "  stages {\n"
+        "    stage('s') {\n"
+        "      steps {\n"
+        "        sh '''\n"
+        "            curl -fsSL https://e.com/release.sh -o release.sh\n"
+        "            cosign verify-blob --signature release.sh.sig release.sh\n"
+        "            bash release.sh\n"
+        "        '''\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "}\n",
+    )
+    assert "SEC9-JK-004" not in _ids(scan_file(str(f), jenkins_rules))
+
+
 def test_does_not_fire_on_curl_pipe_jq(tmp_path, jenkins_rules):
     """``curl ... | jq`` — jq is not an interpreter; the predicate
     must NOT classify it as a download-pipe-to-RCE."""

@@ -189,6 +189,72 @@ def test_sec4_gl_001_and_003_zero_findings_on_gitlabhq_shape(tmp_path):
     )
 
 
+def test_inline_if_with_hanging_operator_masks_continuations():
+    """May-18 audit FP on GNOME/glib `.gitlab-ci.yml`:
+
+        - if: $CI_PIPELINE_SOURCE == "push" &&
+              $CI_PROJECT_NAMESPACE == "GNOME" &&
+              $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+          when: never
+
+    The first line has an inline value (`$CI_PIPELINE_SOURCE ==
+    "push" &&`) but the expression continues on lines 2-3 via YAML
+    plain-style flow-continuation.  The continuation lines mention
+    `$CI_PROJECT_NAMESPACE` / `$CI_COMMIT_BRANCH`, which fired
+    SEC4-GL-001 as a false positive.  The fixed helper detects
+    deeper-indented lines following ANY `if:` (not just block-scalar
+    openers) as continuations.
+    """
+    lines = _split(
+        """
+        rules:
+          - if: $CI_PIPELINE_SOURCE == "push" &&
+                $CI_PROJECT_NAMESPACE == "GNOME" &&
+                $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+            when: never
+        """
+    )
+    # The first ``- if:`` line (index 1 after dedent+strip) is NOT
+    # masked — the rule's same-line ``^\s*-?\s*if:`` exclude covers it.
+    # Lines 2 + 3 (the continuation lines) MUST be masked.
+    masked = _gitlab_rules_if_body_lines(lines)
+    assert 2 in masked, f"line 2 (first continuation) not masked: {masked}"
+    assert 3 in masked, f"line 3 (second continuation) not masked: {masked}"
+    # The `when: never` sibling sits at the SAME indent as `- if:` and
+    # MUST NOT be masked (it could legitimately reference shell vars in
+    # other rules — keep the surface honest).
+    assert 4 not in masked, f"sibling key `when:` should terminate masking: {masked}"
+
+
+def test_sec4_gl_001_wrapping_quoted_string_excluded(tmp_path):
+    """May-18 audit FP on GNOME/glib `.gitlab-ci.yml` line 1090:
+
+        curl "https://..." \\
+            --form description="${CI_COMMIT_SHA} / ${CI_COMMIT_TITLE} / ${CI_COMMIT_REF_NAME}"
+
+    The variables are wrapped in ONE long double-quoted string (the
+    `--form description="..."` value), not each individually quoted.
+    Bash word-splitting is suppressed identically to the
+    direct-wrap form `"$VAR"`.  Pre-fix SEC4-GL-001 only excluded
+    `"$VAR"` / `"${VAR}"` (quotes immediately around the variable).
+    """
+    fixture = tmp_path / ".gitlab-ci.yml"
+    fixture.write_text(
+        'job:\n'
+        '  script:\n'
+        '    - curl "https://scan.example.com/builds"\n'
+        '           --form description="${CI_COMMIT_SHA} / ${CI_COMMIT_TITLE}"\n',
+        encoding="utf-8",
+    )
+    rules = [r for r in load_all_rules() if r.id == "SEC4-GL-001"]
+    findings = scan_file(str(fixture), rules=rules)
+    real = [f for f in findings if f.rule_id == "SEC4-GL-001"]
+    assert real == [], (
+        "wrapping-quoted-string idiom should not fire SEC4-GL-001; "
+        f"got {[(f.line, f.snippet[:80]) for f in real]}"
+    )
+
+
 def test_sec4_gl_003_still_fires_on_real_shell_usage(tmp_path):
     """Negative-of-negative: don't over-suppress.  An unquoted
     ``$CI_COMMIT_REF_NAME`` in an actual ``script:`` block must still

@@ -790,13 +790,50 @@ def _file_matches_platform(filepath: str, platform: Platform) -> bool:
         norm = os.path.normpath(filepath).replace(os.sep, "/")
         return "/.gitlab/" in norm or "/ci/" in norm
     if platform == Platform.JENKINS:
-        return (
-            name == "Jenkinsfile"
-            or name.startswith("Jenkinsfile.")
-            or name.endswith(".jenkinsfile")
-            or name.endswith(".groovy")
-        )
+        return _is_jenkinsfile_name(name) or name.endswith(".groovy")
     raise ValueError(f"unsupported platform: {platform}")
+
+
+# Extensions that look like Jenkinsfile-prefixed files but are actually
+# documentation, not pipeline scripts.  ``content/doc/.../jenkinsfile.adoc``
+# on case-insensitive filesystems (Windows, macOS) matches a naive
+# ``Jenkinsfile.*`` glob and gets parsed as Groovy — causing CUTOFF
+# events and noise.  Surfaced by the 2026-05-18 audit on jenkinsci/
+# jenkins.io which ships exactly this layout.
+_JENKINSFILE_DENIED_EXTS: frozenset[str] = frozenset(
+    {"adoc", "md", "txt", "html", "rst", "asciidoc", "rtf", "pdf"}
+)
+
+
+def _is_jenkinsfile_name(name: str) -> bool:
+    """Return True when ``name`` is a Jenkinsfile-shaped filename.
+
+    Matches:
+      * ``Jenkinsfile`` (exact, case-sensitive)
+      * ``Jenkinsfile.<ext>`` for non-doc extensions (e.g.
+        ``Jenkinsfile.groovy``, ``Jenkinsfile.ci``).  Doc-format
+        extensions in :data:`_JENKINSFILE_DENIED_EXTS` are rejected.
+      * ``Jenkinsfile_<suffix>`` / ``Jenkinsfile-<suffix>`` for
+        operator-specific variants (``Jenkinsfile_k8s``,
+        ``Jenkinsfile-prod``) — common in production setups.  Audit
+        2026-05-18 found jenkinsci/jenkins.io ships ``Jenkinsfile_k8s``.
+      * ``<name>.jenkinsfile`` — uncommon but documented in Jenkins
+        editor-mode hints.
+
+    Case-sensitive on the ``Jenkinsfile`` prefix because case-insensitive
+    filesystems (Windows, macOS) would otherwise slurp
+    ``jenkinsfile.adoc`` doc files.
+    """
+    if name == "Jenkinsfile":
+        return True
+    if name.startswith("Jenkinsfile") and len(name) > len("Jenkinsfile"):
+        sep = name[len("Jenkinsfile")]
+        if sep in "_-":
+            return True
+        if sep == ".":
+            ext = name[len("Jenkinsfile.") :].lower()
+            return bool(ext) and ext not in _JENKINSFILE_DENIED_EXTS
+    return name.endswith(".jenkinsfile")
 
 
 def detect_platform(repo_path: str) -> Platform | None:
@@ -869,28 +906,35 @@ def discover_files(repo_path: str, platform: Platform) -> list[str]:
             files.extend(glob.glob(os.path.join(repo_path, pattern), recursive=True))
 
     elif platform == Platform.JENKINS:
-        # Root-level canonical names first — cheap, deterministic.
-        for name in ("Jenkinsfile", "Jenkinsfile.groovy"):
-            p = os.path.join(repo_path, name)
-            if os.path.isfile(p):
-                files.append(p)
-        files.extend(glob.glob(os.path.join(repo_path, "Jenkinsfile.*")))
-        # Nested pipelines: monorepos, ci/, scripts/, jenkins/, per-vendor
-        # subtrees. Four patterns cover the common nesting shapes.
-        # Filter out vendor/dep dirs to avoid scanning third-party code.
+        # ``glob.glob(recursive=True)`` SKIPS hidden directories by
+        # default on every Python version (``include_hidden=True`` is
+        # 3.11+; lab supports 3.10+).  Apache and infra projects
+        # commonly use ``.jenkins/Jenkinsfile`` / ``.ci/Jenkinsfile``
+        # layouts that the old glob never visited — apache/cassandra
+        # has a 667-line ``.jenkins/Jenkinsfile`` that 2026-05-18
+        # audit found was completely missed.  Walk manually so we
+        # descend into dot-prefixed dirs while still pruning the
+        # documented vendor/dep dirs.
         excluded_segments = {"node_modules", ".git", "vendor", "__pycache__"}
-        for pattern in (
-            "**/Jenkinsfile",
-            "**/Jenkinsfile.*",
-            "**/*.jenkinsfile",
-            "jenkins/**/*.groovy",
-        ):
-            for match in glob.glob(os.path.join(repo_path, pattern), recursive=True):
-                # Path-segment check avoids matching node_modules_old etc.
-                rel = os.path.relpath(match, repo_path)
-                if any(seg in excluded_segments for seg in rel.split(os.sep)):
-                    continue
-                files.append(match)
+        for root, dirs, names in os.walk(repo_path):
+            # Prune vendor/dep dirs in-place so os.walk doesn't
+            # descend.  Hidden dirs (``.jenkins``, ``.ci``, etc.)
+            # stay in the list — that's the point of the rewrite.
+            dirs[:] = [d for d in dirs if d not in excluded_segments]
+            rel_root = os.path.relpath(root, repo_path)
+            in_jenkins_dir = rel_root != "." and (
+                rel_root.split(os.sep)[0] == "jenkins"
+                or "jenkins" in rel_root.replace(os.sep, "/").split("/")
+            )
+            for name in names:
+                if _is_jenkinsfile_name(name):
+                    files.append(os.path.join(root, name))
+                elif name.endswith(".groovy") and in_jenkins_dir:
+                    # ``jenkins/**/*.groovy`` form — only inside a
+                    # ``jenkins`` directory.  Skip random ``*.groovy``
+                    # files elsewhere in the repo (these are usually
+                    # build-tool scripts, not pipeline definitions).
+                    files.append(os.path.join(root, name))
 
     # Normalise separators before deduping.  Windows paths returned by
     # ``os.path.join`` use ``\`` while ``glob`` recursion can produce

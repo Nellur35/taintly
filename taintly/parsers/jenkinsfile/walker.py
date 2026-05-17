@@ -207,9 +207,7 @@ def _handle_call(node: Any, src: bytes, path: tuple[object, ...]) -> Iterator[Ev
         yield from _walk(child, src, path)
 
 
-def _handle_typed_decl(
-    node: Any, src: bytes, path: tuple[object, ...]
-) -> Iterator[Event]:
+def _handle_typed_decl(node: Any, src: bytes, path: tuple[object, ...]) -> Iterator[Event]:
     """``agent any`` / ``agent none`` / ``tool jdk`` shapes.
 
     Groovy parses these as typed declarations: first child is a
@@ -221,9 +219,7 @@ def _handle_typed_decl(
     type_id = None
     for child in node.children:
         if child.type == "type_identifier":
-            type_id = src[child.start_byte : child.end_byte].decode(
-                "utf-8", errors="replace"
-            )
+            type_id = src[child.start_byte : child.end_byte].decode("utf-8", errors="replace")
             break
     if type_id is None:
         # Not the shape we expected; descend so any inner leaves
@@ -236,9 +232,7 @@ def _handle_typed_decl(
             continue
         for sub in child.children:
             if sub.type == "identifier":
-                arg = src[sub.start_byte : sub.end_byte].decode(
-                    "utf-8", errors="replace"
-                )
+                arg = src[sub.start_byte : sub.end_byte].decode("utf-8", errors="replace")
                 yield Event(
                     kind=EventKind.LEAF,
                     path=path + (type_id,),
@@ -248,9 +242,7 @@ def _handle_typed_decl(
                 )
 
 
-def _handle_binary(
-    node: Any, src: bytes, path: tuple[object, ...]
-) -> Iterator[Event]:
+def _handle_binary(node: Any, src: bytes, path: tuple[object, ...]) -> Iterator[Event]:
     """``KEY = 'value'`` inside an ``environment { }`` block (or
     elsewhere).  Treat the lhs identifier as a path step and the rhs
     string as the LEAF.  Recurse on anything else.
@@ -295,9 +287,7 @@ def _call_name(node: Any, src: bytes) -> str:
     """Name of the called method (first identifier child)."""
     for child in node.children:
         if child.type == "identifier":
-            return src[child.start_byte : child.end_byte].decode(
-                "utf-8", errors="replace"
-            )
+            return src[child.start_byte : child.end_byte].decode("utf-8", errors="replace")
     return ""
 
 
@@ -375,8 +365,6 @@ def _identifier_args(args: Any, src: bytes) -> Iterator[tuple[str, int]]:
             for sub in child.children:
                 if sub.type == "identifier":
                     yield (
-                        src[sub.start_byte : sub.end_byte].decode(
-                            "utf-8", errors="replace"
-                        ),
+                        src[sub.start_byte : sub.end_byte].decode("utf-8", errors="replace"),
                         sub.start_point[0] + 1,
                     )

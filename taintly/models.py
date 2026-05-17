@@ -447,20 +447,24 @@ def _gitlab_rules_if_body_lines(lines: list[str]) -> set[int]:
         if not m:
             i += 1
             continue
-        value = m.group("value").strip()
-        # Same-line inline value (e.g. ``if: $CI_COMMIT_BRANCH == "main"``)
-        # has no continuation lines — leave it for the per-rule
-        # same-line exclude to suppress.
-        # We continue into multi-line handling for:
-        #   - block-scalar indicators ``|``, ``|+``, ``|-``, ``>``,
-        #     ``>+``, ``>-`` (possibly followed by a comment)
-        #   - empty value (implicit plain-scalar continuation)
-        is_block_scalar = bool(re.match(r"^[|>][+\-]?\s*(#.*)?$", value))
-        is_empty = value == "" or value.startswith("#")
-        if not (is_block_scalar or is_empty):
-            i += 1
-            continue
-
+        # ALWAYS check for deeper-indented continuation lines, regardless
+        # of whether the value is a block-scalar (``|`` / ``>``), empty,
+        # or inline.  The original implementation gated continuation
+        # detection on block-scalar / empty values only, which missed
+        # the YAML flow-style continuation idiom used widely in real
+        # GitLab configs:
+        #
+        #     - if: $CI_PIPELINE_SOURCE == "push" &&
+        #           $CI_PROJECT_NAMESPACE == "GNOME" &&
+        #           $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+        #
+        # Lines 2-3 are continuation of the ``if:`` expression but the
+        # first-line value ``$CI_PIPELINE_SOURCE == "push" &&`` is
+        # neither empty nor a block-scalar opener.  Indent comparison
+        # alone is sufficient — sibling YAML keys (``when:``,
+        # ``allow_failure:``) sit at the same indent as ``if:`` and
+        # correctly terminate the continuation walk.  Surfaced by
+        # 2026-05-18 audit on GNOME/glib.
         key_indent = len(m.group("key_prefix"))
         # Continuation lines must be indented strictly deeper than the
         # ``if:`` key line.  Walk forward, masking deeper-indented
