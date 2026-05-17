@@ -104,6 +104,14 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "level; doubled-indent variants look like a different structure."
     ),
     ("SEC10-GH-001", "indent_shift"): ("Same SequencePattern family as SEC1-GH-001."),
+    ("SEC10-GL-003", "indent_shift"): (
+        "ContextPattern's anchor ``^\\s{2,}script\\s*:`` requires "
+        "the GitLab job's ``script:`` key at indent >= 2; indent_shift "
+        "mutations that drop the indent below 2 break the anchor. Real "
+        "GitLab CI uses 2-space indent universally; broadening the "
+        "anchor to ``^\\s*script\\s*:`` would FP on top-level template "
+        "fragments and ``include:`` body lines."
+    ),
     ("SEC10-GH-004", "whitespace_pad"): (
         "Rule's requires=``uses:\\s+actions/upload-artifact@`` needs "
         "at least one space after ``uses:``. YAML permits ``uses:foo`` "
