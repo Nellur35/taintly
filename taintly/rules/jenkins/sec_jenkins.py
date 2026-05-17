@@ -222,6 +222,55 @@ _SEC9_JK_004_MULTILINE_SHELL_PIPE_RE = re.compile(
 )
 
 
+# Two-step download-then-execute shape within one multi-line shell
+# body — surfaced by 2026-05-18 audit on apache/cassandra
+# `.jenkins/Jenkinsfile`:
+#
+#     sh """#!/bin/bash
+#         wget -q ${agentScriptsUrl}/docker_agent_cleaner.sh
+#         bash docker_agent_cleaner.sh ${maxBuildHours}
+#     """
+#
+# SEC9-JK-001 (sh '...curl|bash') needs the pipe on a single line.
+# SEC9-JK-003 (sh '...wget ... .sh') needs the wget and the filename
+# on the same line as the `sh` token, and its SequencePattern matcher
+# applies the regex per line — neither sees a download command on
+# line A + a `bash X` command on line B inside the same triple-quoted
+# body.  This predicate sees the whole body as one string (the
+# structural walker concatenates) and flags the two-step shape when:
+#   1. Body downloads a script-like file via curl / wget / fetch
+#   2. Body later invokes an interpreter on a script-like file
+#   3. Body contains NO checksum verification command between them
+_SEC9_JK_004_TWO_STEP_DOWNLOAD_RE = re.compile(
+    r"\b(?:curl|wget|fetch)\b[^\n]*\S+\.(?:sh|py|pl|rb|js|ps1|bash|zsh|fish)\b",
+    re.IGNORECASE,
+)
+_SEC9_JK_004_TWO_STEP_EXEC_RE = re.compile(
+    # Standalone interpreter invocation on a script-like filename.
+    # The (?<![|`]\s{0,5}) lookbehind avoids matching the pipe form
+    # (``... | bash``) which SEC9-JK-001 / the multi-line shell-pipe
+    # branch above already cover.
+    r"(?<![|`])"
+    r"(?:^|[;&\n]|\b(?:then|do|else)\b)\s*"
+    r"(?:sudo\s+)?(?:bash|sh|zsh|dash|ksh|python(?:2|3)?|perl|ruby|node|php)"
+    r"\s+(?:-[\w]+\s+)*\S+\.(?:sh|py|pl|rb|js|ps1|bash|zsh|fish)\b",
+    re.IGNORECASE,
+)
+# Common in-band integrity-verification primitives.  When ANY of
+# these appears in the body, the two-step download-exec is presumed
+# verified — don't fire.  This is heuristic: we don't try to confirm
+# the verification ACTUALLY covers the downloaded filename.  Operators
+# who want strict cosign/sha-pair binding can disable suppression in
+# .taintly.yml.
+_SEC9_JK_004_TWO_STEP_CHECKSUM_RE = re.compile(
+    r"\b(?:sha(?:1|224|256|384|512)sum|md5sum|b3sum"
+    r"|cosign\s+verify|gpg\s+--verify|gpg\s+verify"
+    r"|sigstore\s+verify|cosign\s+verify-blob"
+    r"|openssl\s+dgst)\b",
+    re.IGNORECASE,
+)
+
+
 def _sec9_jk_004_predicate(shell_body: str) -> bool:
     """Return True when a shell body matches a download-pipe-to-
     interpreter or PowerShell remote-execution shape that the
@@ -242,10 +291,29 @@ def _sec9_jk_004_predicate(shell_body: str) -> bool:
     # Multi-line shell-pipe case.  Require an explicit newline so
     # the single-line ``sh 'curl|bash'`` (SEC9-JK-001's coverage)
     # is not double-reported.
-    return bool(
-        "\n" in shell_body
-        and _SEC9_JK_004_MULTILINE_SHELL_PIPE_RE.search(shell_body)
-    )
+    if "\n" in shell_body and _SEC9_JK_004_MULTILINE_SHELL_PIPE_RE.search(shell_body):
+        return True
+    # Two-step download-then-execute case: body has both a curl/wget
+    # of a script-like file AND a subsequent interpreter invocation
+    # on a script-like file, with no checksum-verification command
+    # in between.  The download and exec must be on DIFFERENT lines —
+    # the single-line ``wget x.sh && bash x.sh`` shape is SEC9-JK-003's
+    # coverage.  Surfaced by 2026-05-18 audit on apache/cassandra
+    # ``.jenkins/Jenkinsfile``.
+    if not _SEC9_JK_004_TWO_STEP_CHECKSUM_RE.search(shell_body):
+        download_lines = {
+            i
+            for i, line in enumerate(shell_body.splitlines())
+            if _SEC9_JK_004_TWO_STEP_DOWNLOAD_RE.search(line)
+        }
+        exec_lines = {
+            i
+            for i, line in enumerate(shell_body.splitlines())
+            if _SEC9_JK_004_TWO_STEP_EXEC_RE.search(line)
+        }
+        if download_lines and exec_lines and max(exec_lines) > min(download_lines):
+            return True
+    return False
 
 
 RULES: list[Rule] = [

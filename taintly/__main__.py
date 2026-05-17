@@ -1158,8 +1158,7 @@ def main():
             _print_engine_errors_to_stderr(report)
         wrapped = {
             "reports": [
-                json.loads(format_json(report, score_report=score_report))
-                for report in reports
+                json.loads(format_json(report, score_report=score_report)) for report in reports
             ],
         }
         print(json.dumps(wrapped, indent=2))

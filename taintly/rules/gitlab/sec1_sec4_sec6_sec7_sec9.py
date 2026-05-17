@@ -126,8 +126,27 @@ RULES: list[Rule] = [
                 r"^\s*[\w_]+:\s*'[^']*\$",  # YAML key-value where value is a single-quoted string (variable inside string literal, not in shell)
                 r"^\s*[\w_]+:\s*\"[^\"]*\$",  # YAML key-value where value is a double-quoted string
                 r"^\s*-?\s*if:",  # rules:if blocks — evaluated by GitLab engine, not shell
-                r'"\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?"',  # double-quoted usage in shell
-                r"'\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?'",  # single-quoted shell usage: `$VAR` is literal, no expansion
+                # Variable wrapped DIRECTLY in double quotes: `"$VAR"` /
+                # `"${VAR}"` — bash word-splitting / glob suppressed.
+                r'"\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?"',
+                # Variable inside a WRAPPING double-quoted string that
+                # spans other text — e.g. ``--form description="${A} /
+                # ${B} / ${CI_COMMIT_SHA}"``.  The bash word-splitting
+                # protection is identical to the direct-wrap form above;
+                # the wrap just spans more bytes.  Surfaced by 2026-05-18
+                # audit on GNOME/glib (curl --form description chain
+                # idiom is ubiquitous in release/scan/notification jobs).
+                # Match: an opening ``"``, any non-``"`` payload that
+                # contains the variable, and a closing ``"`` — all on
+                # the same line.  Per-line evaluation is intentional;
+                # we accept the tradeoff that a line with BOTH a quoted
+                # form AND a separate unquoted form would also suppress
+                # the unquoted one, which is rare in practice and the
+                # operator can split into separate lines if needed.
+                r'"[^"\n]*\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?[^"\n]*"',
+                # Variable inside SINGLE quotes: `$VAR` is literal text
+                # in bash, no expansion happens — no injection surface.
+                r"'\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?'",
             ],
             # Quoted-marker heredoc bodies (<<'EOF' / <<"EOF" / <<\EOF)
             # suppress $VAR expansion per Bash §3.6.6; skip those lines.

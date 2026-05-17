@@ -440,7 +440,9 @@ def _extract_local_include_paths(content: str) -> list[str]:
             # Shorthand: a bare `- "path/to/file.yml"` list item directly
             # under `include:` is treated as a local include per the
             # GitLab docs.
-            m_bare = re.match(r"^\s*-\s*['\"]?(?P<value>[^\s'\"#:]+\.ya?ml)['\"]?\s*(?:#.*)?$", line)
+            m_bare = re.match(
+                r"^\s*-\s*['\"]?(?P<value>[^\s'\"#:]+\.ya?ml)['\"]?\s*(?:#.*)?$", line
+            )
             if m_bare:
                 val = m_bare.group("value")
                 if "://" not in val:
