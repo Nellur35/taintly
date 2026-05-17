@@ -319,6 +319,37 @@ _WRITE_TO_INSTRUCTION_FILE_RE = re.compile(
     r")"
 )
 
+# FP-audit class F: defensive workflows produce three false-positive
+# shapes that the broad write-to-instruction-file regex catches:
+#   1. ``cp CLAUDE.md /tmp/...`` — CLAUDE.md is the *source*, not the
+#      destination; this is a defensive backup, opposite of attack.
+#   2. ``echo '...' > /tmp/...`` — redirect to scratch.
+#   3. ``echo '... CLAUDE.md ...' > .git/hooks/post-checkout`` —
+#      writing INTO a git-hook script whose CONTENT references
+#      CLAUDE.md.  The hook restores main's version after a fork
+#      checkout — anti-injection hardening, not the attack.
+# Diffusers/claude_review.yml had all three shapes.
+_INSTRUCTION_FILE_NAMES = (
+    "CLAUDE.md",
+    ".cursorrules",
+    "AGENTS.md",
+    "GEMINI.md",
+    ".aider.conf.yml",
+    "copilot-instructions.md",
+)
+_DEFENSIVE_WRITE_SHAPES_RE = re.compile(
+    # cp/mv with the instruction file in SOURCE position (first arg).
+    # The destination (any path) is irrelevant — what makes this safe
+    # is that CLAUDE.md is being READ from, not written to.
+    r"\b(?:cp|mv)\s+(?:" + "|".join(re.escape(n) for n in _INSTRUCTION_FILE_NAMES) + r")\b"
+    # Redirect target is /tmp/ or /dev/null (scratch, not repo).
+    r"|>{1,2}\s*/(?:tmp|dev/null)\b"
+    # Redirect target is .git/hooks/ (writing INTO a hook script;
+    # the script's content may name the instruction file but the
+    # write itself isn't touching the repo's CLAUDE.md).
+    r"|>{1,2}\s*\.git/hooks/"
+)
+
 # Attacker-influenceable github-expression contexts.  Strict subset of
 # taintly.taint's broader set, narrowed to fork-attacker-controllable
 # inputs that NEW2 must guard against.  Inline ``${{ ... }}`` form is
@@ -463,6 +494,14 @@ def _ai_gh_037_predicate(
     """
     if not _WRITE_TO_INSTRUCTION_FILE_RE.search(value):
         return _AI_GH_037_FIXTURE_MARKER in value
+    # FP-audit class F: suppress defensive-workflow shapes that the
+    # broad write-vehicle regex catches.  Backup-style ``cp
+    # CLAUDE.md /tmp/...`` (instruction file is SOURCE not destination),
+    # redirects to /tmp/ scratch, and writes INTO .git/hooks/ (the
+    # hook's string content may name the instruction file but the
+    # write itself doesn't touch repo CLAUDE.md).
+    if _DEFENSIVE_WRITE_SHAPES_RE.search(value):
+        return False
     full_value = ctx.get_value(path) or value
     # Same-step push (compact attack shape) — check full block text.
     if _GIT_PUSH_RE.search(full_value):
@@ -724,8 +763,17 @@ class _AgentInstructionWritePattern:
             return []
         results: list[tuple[int, str]] = []
         for i, line in enumerate(lines, 1):
-            if _WRITE_TO_INSTRUCTION_FILE_RE.search(line):
-                results.append((i, line.strip()))
+            if not _WRITE_TO_INSTRUCTION_FILE_RE.search(line):
+                continue
+            # FP-audit class F: same defensive-write exclusions the
+            # structural predicate uses.  Without this, the fallback
+            # fires on ``cp CLAUDE.md /tmp/...`` (source-position
+            # backup), redirects to /tmp/, and writes INTO
+            # ``.git/hooks/`` (string content references the
+            # instruction file but the write target is the hook).
+            if _DEFENSIVE_WRITE_SHAPES_RE.search(line):
+                continue
+            results.append((i, line.strip()))
         return results
 
 
