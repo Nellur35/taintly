@@ -1,0 +1,24 @@
+# FP-repro fixture for LOTP-GH-001 severity inflation.
+#
+# Shape derived from llama.cpp server-self-hosted.yml / server-sanitize.yml
+# (May 17 FP audit).  The ``ref:`` is a ``||`` fallback chain that
+# *includes* ``github.event.pull_request.head.sha`` as one alternative,
+# but the only triggers are ``workflow_dispatch`` + ``push:branches`` —
+# both maintainer-gated, so no ``pull_request`` event can ever cause
+# the head-sha branch of the fallback to evaluate.  Headline severity
+# should downgrade from CRITICAL to HIGH; the underlying rule still
+# fires (the checkout-reference detector matches the head-sha term
+# even when it's a fallback alternative), but the calibration_reason
+# is set and the severity is one tier lower.
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.sha || github.event.pull_request.head.sha || github.sha || github.head_ref || github.ref_name }}
+      - run: pip install .

@@ -1,0 +1,19 @@
+# TP-regression fixture for LOTP-GH-001.
+#
+# Counterpart to ``lotp_pr_head_in_fallback_maintainer_gated.yml``:
+# the trigger is fork-reachable (``pull_request_target``) and the
+# ``ref:`` is the genuine attack shape (single-use head-sha, no
+# ``||`` fallback).  The finding must remain CRITICAL — the
+# maintainer-gated downgrade must not apply because (a) the trigger
+# is not maintainer-gated and (b) the content regex requires a
+# ``||`` adjacent to the head-sha reference, which is absent here.
+on:
+  pull_request_target:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: pip install .

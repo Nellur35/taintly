@@ -14,6 +14,8 @@
   "github/mechanical/dead_job_repo_mismatch.yml": "7505543b104969aa21fdcfb4ed9a53ca33c96a985144e67fed0d1fdbc8800a34",
   "github/mechanical/dead_step_inside_live_job.yml": "666aa6ff722ec0622dd8f33b53c47980ada9b6a433a8d3cef981c3dc55dd7333",
   "github/mechanical/live_job_runtime_guard.yml": "0a9c3c3ce01bb79daee18560bc4378a09ef09c875dd1ffca997e5cfe01854c6a",
+  "github/mechanical/lotp_pr_head_in_fallback_maintainer_gated.yml": "1a2407996463a9492e496f2967a92a229ba952fd1e21894982db62f8b4389a07",
+  "github/mechanical/lotp_pr_head_single_pull_request_target.yml": "13813de66a6d0d2c222bdee2140fd6aa8d89d27b893e479d2affe36554599f7f",
   "github/mechanical/workflow_dispatch_input_plus_pr.yml": "2bad4a08dced4df33feb6095799c51e78c2f9ab92c09bbe426de296459439727",
   "github/mechanical/workflow_dispatch_input_shell.yml": "d2f5003aa186a0c0649b162a26587ac7058157ef9702b2e426fe87c2ecef4c9a",
   "github/safe/anchor_merge_inject.yml": "10a64fe38334cd9d241f74c9b07b9164afde4cad14569c7209524eac6a76b4ec",
