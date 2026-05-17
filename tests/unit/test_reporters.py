@@ -1351,3 +1351,113 @@ def test_summary_omits_gitlab_ctx_line_when_empty():
     report.summarize()
     output = format_text(report, use_color=False)
     assert "GitLab CI context" not in output
+
+
+# ---------------------------------------------------------------------------
+# Multi-platform JSON output is well-formed (regression test for the
+# bug where two top-level reports were concatenated as
+# ``{...}\n{...}`` instead of a single document).
+# ---------------------------------------------------------------------------
+
+
+def test_multi_platform_json_output_is_valid_single_document(tmp_path):
+    """A repo with both GitHub workflows and a Jenkinsfile produces a
+    single well-formed JSON document, not two concatenated objects.
+
+    Bug history: ``--format json`` iterated over per-platform reports
+    and printed each separately, producing output of the shape
+    ``{...gh report...}\n{...jenkins report...}`` — invalid JSON
+    that broke ``json.load`` / ``jq`` and the
+    ``docs/AI_TRIAGE.md`` paste-ready prompt.  Fix wraps multi-report
+    output in ``{"reports": [...]}``; single-platform output keeps
+    its current shape for backwards compatibility.
+    """
+    import subprocess
+    import sys
+
+    # Set up a repo with one GHA workflow + one Jenkinsfile so the
+    # scanner produces two reports.
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "ci.yml").write_text(
+        "on: push\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+    )
+    (tmp_path / "Jenkinsfile").write_text(
+        "pipeline {\n"
+        "  agent any\n"
+        "  stages {\n"
+        "    stage('Build') { steps { sh 'echo hi' } }\n"
+        "  }\n"
+        "}\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "taintly", str(tmp_path), "--format", "json"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    # Exit code may be non-zero (findings present); we only care that
+    # stdout is valid JSON.
+    try:
+        parsed = json.loads(result.stdout)
+    except json.JSONDecodeError as e:  # pragma: no cover - failure detail
+        raise AssertionError(
+            f"multi-platform --format json is not valid JSON: {e}; "
+            f"first 500 chars of stdout: {result.stdout[:500]!r}"
+        ) from e
+
+    assert isinstance(parsed, dict), (
+        "multi-platform JSON should be a top-level object with `reports` key, "
+        f"got {type(parsed).__name__}"
+    )
+    assert "reports" in parsed, (
+        f"multi-platform JSON missing `reports` key; got keys: {sorted(parsed.keys())}"
+    )
+    assert len(parsed["reports"]) >= 2, (
+        f"expected >=2 reports (GH + Jenkins), got {len(parsed['reports'])}"
+    )
+    platforms = {r.get("platform") for r in parsed["reports"]}
+    assert "github" in platforms and "jenkins" in platforms, (
+        f"expected platforms github + jenkins, got {platforms}"
+    )
+
+
+def test_single_platform_json_output_unchanged(tmp_path):
+    """Single-platform JSON output stays as a top-level object with
+    ``findings`` / ``summary`` / ``platform`` keys (no ``reports``
+    wrapper).  Confirms the multi-platform fix didn't break existing
+    JSON consumers.
+    """
+    import subprocess
+    import sys
+
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "ci.yml").write_text(
+        "on: push\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "taintly", str(tmp_path), "--format", "json"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    parsed = json.loads(result.stdout)
+    assert "reports" not in parsed, (
+        "single-platform JSON should NOT be wrapped in `reports` (back-compat)"
+    )
+    assert parsed.get("platform") == "github"
+    assert "findings" in parsed
+    assert "summary" in parsed
