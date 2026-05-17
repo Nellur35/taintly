@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .families import classify_rule, default_confidence, default_review_needed
+from .gitlab_workflow_corpus import GitLabCorpusPattern, build_gitlab_corpus
 from .gitlabguard import (
     GitLabContext,
     detect_gitlab_context,
@@ -37,7 +38,6 @@ from .staticguard import (
     find_dead_line_ranges,
     is_workflow_whole_dead,
 )
-from .gitlab_workflow_corpus import GitLabCorpusPattern, build_gitlab_corpus
 from .workflow_context import analyze as analyze_workflow
 from .workflow_context import compute_exploitability
 from .workflow_corpus import CorpusPattern, build_corpus

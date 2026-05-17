@@ -120,7 +120,7 @@ class _JenkinsfileShellLeafPattern:
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         try:
-            from taintly.parsers.jenkinsfile import walk_jenkinsfile, EventKind
+            from taintly.parsers.jenkinsfile import EventKind, walk_jenkinsfile
         except ImportError:
             # Optional [jenkins-structural] extra not installed; rule
             # is silent rather than failing.  Documented in the
@@ -242,9 +242,10 @@ def _sec9_jk_004_predicate(shell_body: str) -> bool:
     # Multi-line shell-pipe case.  Require an explicit newline so
     # the single-line ``sh 'curl|bash'`` (SEC9-JK-001's coverage)
     # is not double-reported.
-    if "\n" in shell_body and _SEC9_JK_004_MULTILINE_SHELL_PIPE_RE.search(shell_body):
-        return True
-    return False
+    return bool(
+        "\n" in shell_body
+        and _SEC9_JK_004_MULTILINE_SHELL_PIPE_RE.search(shell_body)
+    )
 
 
 RULES: list[Rule] = [

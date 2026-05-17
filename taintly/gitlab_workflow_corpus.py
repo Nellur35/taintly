@@ -399,8 +399,7 @@ def _extract_local_include_paths(content: str) -> list[str]:
     # children.  Bare `include: ./file.yml` on one line is the inline-
     # string shape; block items follow under a list.
     in_include_block = False
-    include_indent: int | None = None
-    for i, line in enumerate(lines):
+    for line in lines:
         stripped = line.lstrip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -424,12 +423,10 @@ def _extract_local_include_paths(content: str) -> list[str]:
                         if s and "://" not in s:
                             out.append(s)
             in_include_block = True
-            include_indent = 0
             continue
         if in_include_block:
             if indent == 0:
                 in_include_block = False
-                include_indent = None
                 continue
             # Look for `- local: ...` shorthand and `local: ...` inside
             # a block item.  Either way we extract the value.

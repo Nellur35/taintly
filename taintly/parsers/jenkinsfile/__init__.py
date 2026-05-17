@@ -29,7 +29,7 @@ Usage::
 
 from __future__ import annotations
 
-from .events import Event, EventKind
 from .api import walk_jenkinsfile
+from .events import Event, EventKind
 
 __all__ = ["Event", "EventKind", "walk_jenkinsfile"]

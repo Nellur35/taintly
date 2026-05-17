@@ -42,12 +42,12 @@ def _get_parser() -> Any:
     if _TS_INIT_ERROR is not None:
         raise _TS_INIT_ERROR
     try:
-        import tree_sitter_groovy as _tsg  # noqa: F401
+        import tree_sitter_groovy as _tsg
         from tree_sitter import Language, Parser
     except ImportError as exc:
         err = ImportError(f"{exc.msg}\n\n{_install_hint()}")
         _TS_INIT_ERROR = err
-        raise err
+        raise err from exc
     try:
         lang = Language(_tsg.language())
         _TS_PARSER = Parser(lang)
@@ -56,7 +56,7 @@ def _get_parser() -> Any:
             f"failed to initialise tree-sitter-groovy ({exc!r})\n\n{_install_hint()}"
         )
         _TS_INIT_ERROR = err
-        raise err
+        raise err from exc
     return _TS_PARSER
 
 
