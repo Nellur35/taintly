@@ -328,11 +328,24 @@ class RegexPattern:
     on the body, so any rule targeting expansion shapes (unquoted
     `$VAR` etc.) must ignore those lines. Unquoted heredocs (`<<EOF`)
     DO expand; their bodies are not masked.
+
+    GitLab ``rules.*.if:`` block-scalar context is handled via
+    ``gitlab_if_block_aware=True``.  When set, the check method
+    pre-scans ``lines`` for ``if:`` keys whose value spans multiple
+    lines (block scalars `|` / `>` or implicit plain-scalar
+    continuations indented under the ``if:`` line) and masks the
+    continuation lines before applying the regex.  GitLab's
+    ``rules.*.if:`` is a tiny boolean expression DSL evaluated by the
+    GitLab CI engine — NOT a shell — so any rule targeting shell-
+    expansion shapes (unquoted ``$VAR`` etc.) must ignore those lines
+    even when the ``if:`` key itself is several lines above the
+    matching continuation.
     """
 
     match: str
     exclude: list[str] = field(default_factory=list)
     heredoc_aware: bool = False
+    gitlab_if_block_aware: bool = False
 
     def __post_init__(self):
         self._compiled = re.compile(self.match)
@@ -344,6 +357,8 @@ class RegexPattern:
     # form of this contract.
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         skip = _quoted_heredoc_body_lines(lines) if self.heredoc_aware else set()
+        if self.gitlab_if_block_aware:
+            skip = skip | _gitlab_rules_if_body_lines(lines)
         results = []
         for i, line in enumerate(lines):
             if i in skip:
@@ -383,6 +398,99 @@ def _quoted_heredoc_body_lines(lines: list[str]) -> set[int]:
             marker = None
             continue
         skip.add(i)
+    return skip
+
+
+# Matches a YAML mapping key ``if:`` (optionally preceded by a list
+# marker ``- ``) used by GitLab's ``rules:`` blocks.  ``key_prefix``
+# captures everything up to (but not including) the ``if`` literal so
+# its length gives the COLUMN at which the key starts.  In YAML, a
+# list-item mapping like ``- if: ...\n  when: ...`` makes ``if`` and
+# ``when`` siblings at the same column even though one has ``- ``
+# before it — using leading-whitespace alone would incorrectly treat
+# the sibling as a continuation.  ``value`` captures the text after
+# the colon so we can detect block-scalar indicators (`|`, `>`, with
+# optional `+`/`-` chomping) vs an inline expression vs an empty
+# value.
+_GITLAB_IF_KEY = re.compile(r"^(?P<key_prefix>\s*(?:-\s+)?)if:(?P<value>.*)$")
+
+
+def _gitlab_rules_if_body_lines(lines: list[str]) -> set[int]:
+    """Return 0-based indices of continuation lines belonging to a
+    multi-line GitLab ``rules.*.if:`` value.
+
+    GitLab's ``rules:if:`` is a small boolean expression DSL evaluated
+    by the GitLab CI engine — NOT a shell — so its continuation lines
+    can contain shapes that look like shell ``$VAR`` references but
+    have no shell-injection surface.  This helper walks ``lines`` and
+    marks every continuation line that belongs to the value of an
+    ``if:`` key, covering both block-scalar styles (``if: |`` /
+    ``if: >`` with optional ``+``/``-`` chomping) and implicit
+    plain-scalar continuations indented under the key.
+
+    A continuation line belongs to the value when it is more deeply
+    indented than the ``if:`` key line; the run stops at the first
+    non-blank line indented at or below the key.  The opener line
+    itself is NOT masked — the rules' existing same-line
+    ``^\\s*-?\\s*if:`` exclude already covers it.
+
+    Comment-only and blank lines mid-block do not terminate the run
+    (they're whitespace, not structural siblings) and ARE included in
+    the mask so a comment inside a multi-line ``if:`` value is not
+    matched on its own.
+    """
+    skip: set[int] = set()
+    n = len(lines)
+    i = 0
+    while i < n:
+        m = _GITLAB_IF_KEY.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        value = m.group("value").strip()
+        # Same-line inline value (e.g. ``if: $CI_COMMIT_BRANCH == "main"``)
+        # has no continuation lines — leave it for the per-rule
+        # same-line exclude to suppress.
+        # We continue into multi-line handling for:
+        #   - block-scalar indicators ``|``, ``|+``, ``|-``, ``>``,
+        #     ``>+``, ``>-`` (possibly followed by a comment)
+        #   - empty value (implicit plain-scalar continuation)
+        is_block_scalar = bool(re.match(r"^[|>][+\-]?\s*(#.*)?$", value))
+        is_empty = value == "" or value.startswith("#")
+        if not (is_block_scalar or is_empty):
+            i += 1
+            continue
+
+        key_indent = len(m.group("key_prefix"))
+        # Continuation lines must be indented strictly deeper than the
+        # ``if:`` key line.  Walk forward, masking deeper-indented
+        # lines (and intervening blanks/comments) until we hit a
+        # non-blank line at the same or shallower indent.
+        j = i + 1
+        while j < n:
+            cont = lines[j]
+            stripped = cont.lstrip(" \t")
+            if not stripped:
+                # Blank line — provisionally include but don't
+                # terminate; YAML allows blank lines inside a block
+                # scalar body.
+                skip.add(j)
+                j += 1
+                continue
+            cont_indent = len(cont) - len(stripped)
+            if cont_indent <= key_indent:
+                break
+            skip.add(j)
+            j += 1
+        # Trim trailing blank lines from the mask: a blank line that
+        # only appears between the last body line and the next sibling
+        # is structurally outside the block and shouldn't be masked.
+        # (Harmless either way for our usage, but keeps the contract
+        # tight: skip only contains lines we actively want suppressed.)
+        while j - 1 > i and lines[j - 1].strip() == "" and (j - 1) in skip:
+            skip.discard(j - 1)
+            j -= 1
+        i = j if j > i else i + 1
     return skip
 
 

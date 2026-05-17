@@ -132,6 +132,13 @@ RULES: list[Rule] = [
             # Quoted-marker heredoc bodies (<<'EOF' / <<"EOF" / <<\EOF)
             # suppress $VAR expansion per Bash §3.6.6; skip those lines.
             heredoc_aware=True,
+            # GitLab ``rules.*.if:`` is a tiny expression DSL evaluated
+            # by the GitLab CI engine, NOT a shell.  Multi-line ``if: |``
+            # block scalars (common in gitlabhq/.gitlab/ci/rules.gitlab-ci.yml)
+            # have continuation lines like ``$CI_COMMIT_REF_NAME == ...``
+            # that the same-line ``^\s*-?\s*if:`` exclude misses.  Mask
+            # them too.  (FP-audit class C, 2026-05-17.)
+            gitlab_if_block_aware=True,
         ),
         remediation=(
             "Double-quote the variable in shell, or sanitize before use.\n"
@@ -668,6 +675,14 @@ RULES: list[Rule] = [
                 r"\[\[[^\n]*\$\{?(CI_COMMIT_REF_NAME|CI_COMMIT_TAG|CI_BUILD_REF_NAME)\}?[^\n]*\]\]",
             ],
             heredoc_aware=True,
+            # GitLab ``rules.*.if:`` is a tiny expression DSL evaluated
+            # by the GitLab CI engine, NOT a shell.  Multi-line ``if: |``
+            # block scalars in gitlabhq's `.gitlab/ci/rules.gitlab-ci.yml`
+            # produced 7 of this rule's 7 FPs in the May-17 audit because
+            # continuation lines like ``$CI_COMMIT_REF_NAME == ...`` sit
+            # below an ``if: |`` opener that the same-line
+            # ``^\s*-?\s*if:`` exclude cannot reach.  Mask the body.
+            gitlab_if_block_aware=True,
         ),
         remediation=(
             "Double-quote the variable or sanitize before use:\n"
