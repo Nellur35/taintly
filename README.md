@@ -599,7 +599,7 @@ do not recompute risk.
 
 
 <!-- AUTOGEN:summary -->
-250 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+254 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 
@@ -615,7 +615,7 @@ do not recompute risk.
 | SEC-6 — Insufficient Credential Hygiene | 10 | 9 | 8 |
 | SEC-7 — Insecure System Configuration | 4 | 1 | 3 |
 | SEC-8 — Ungoverned 3rd Party Services | 5 | 2 | 4 |
-| SEC-9 — Improper Artifact Integrity | 6 | 3 | 3 |
+| SEC-9 — Improper Artifact Integrity | 6 | 3 | 4 |
 | SEC-10 — Insufficient Logging | 4 | 2 | 1 |
 | AI / ML | 39 | 16 | 12 |
 | TAINT — Multi-stage taint flows | 13 | 4 | 2 |
