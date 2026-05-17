@@ -101,6 +101,7 @@
   "jenkins/realistic/release_pipeline.Jenkinsfile": "b9317842ec48995a352f677a79f06c345fd966eca2bfabfcb69b3e53f02b311f",
   "jenkins/realistic/web_app_deploy.Jenkinsfile": "79fb268ab47ca284d8179b21c49dec66d83d7b69a10e754a916138b07931ff08",
   "jenkins/safe/Jenkinsfile": "3a0973fd4ffac6517cde5660d841441c72434b08a22cb8cca3b89a3623c977ca",
+  "jenkins/safe/sec9_jk_004_safe_download.Jenkinsfile": "7b0570d6850d75d6b7d8ca3e82cd4e7324ea35edfcd9d98a398da94ed1143ed3",
   "jenkins/vulnerable/agent_any.Jenkinsfile": "e0cfc35421fefce20b6cf3fbcb7a317cfe5609ce16f6c2fab6ccb3eabdfc41d7",
   "jenkins/vulnerable/ai_joblib_load.Jenkinsfile": "dae7641d718f91ae2e7c029cba7af215798dbef4030fc6609426633b4db6528c",
   "jenkins/vulnerable/ai_llm_output_to_shell.Jenkinsfile": "b4daee44654cce7a249f634d4f3c0982275cbdbe304e8ed44e97adba548fccb1",
@@ -132,6 +133,7 @@
   "jenkins/vulnerable/prod_deploy_no_input.Jenkinsfile": "051c2465b82fe387347a9367fc03f31e01e591da9a14af26ffd6f2a61d1f1427",
   "jenkins/vulnerable/remote_groovy_script.Jenkinsfile": "e56d84f1d981fc39567419600f1a60d2cc177b6dea0f29efdb3e531a2c0c1d35",
   "jenkins/vulnerable/scm_env_injection.Jenkinsfile": "bffd43c8651a7207ef49e8303acfc26e65f57b8ba02474d736a20c143637cf4d",
+  "jenkins/vulnerable/sec9_jk_004_curl_pipe_interpreter.Jenkinsfile": "300443884cfce76909a717bdaeea08181b5720f522a2368d6100085bf23cb73d",
   "jenkins/vulnerable/unpinned_shared_library.Jenkinsfile": "88d5f8f0c226fa7e6b9657b3b0c8077e475358ef24dcbedd0c767b5512b89c6c",
   "jenkins/vulnerable/wget_no_checksum.Jenkinsfile": "4accd6099bb1a194bc2011cb166c9dd9cc2203a168d7a9f5560c9efb2af0e9b0",
   "jenkins/vulnerable/writefile_private_key.Jenkinsfile": "9376e4f6740cbed993ab7b54a38e6bef894ef0257662a4b43a77525c5182c395"
