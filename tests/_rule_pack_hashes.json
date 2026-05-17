@@ -64,6 +64,7 @@
   "gitlab/mechanical/pipeline_source_never.yml": "77e3f773bc0708d34059e177edc7a9880920e2e2569e9393ed89a8f0c4b71f01",
   "gitlab/mechanical/runtime_guard.yml": "77e3f773bc0708d34059e177edc7a9880920e2e2569e9393ed89a8f0c4b71f01",
   "gitlab/safe/fully_hardened.yml": "f18268588a1d8aec35bb6c41e384a8cb52c444e9bf17a4a1f8d5b710d8e741a7",
+  "gitlab/safe/rules_if_block_scalar.yml": "f18268588a1d8aec35bb6c41e384a8cb52c444e9bf17a4a1f8d5b710d8e741a7",
   "gitlab/vulnerable/ai_agent_cli_on_mr.yml": "0d164c50c84e26d5ca39290e9cb09ff460e76f95f2f16fdd95734a87daf7e87c",
   "gitlab/vulnerable/ai_hf_no_revision.yml": "b0643a2d29a4e69096a73baeb1bc41b084a08d048b4e05721161243f43d0c40e",
   "gitlab/vulnerable/ai_joblib_load.yml": "f4200b6ef7fd819b826684689d16ae224821d340dcf6ae061304b77135ade0e0",
