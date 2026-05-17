@@ -28,8 +28,14 @@ BUILD_TOOL_FRAGMENTS: list[str] = [
     # - run/build/test execute user scripts defined in package.json, which
     #   the attacker can redefine via a PR to package.json
     r"\bnpm\s+(?:install|ci|i|update|pack|publish|run|build|test)\b",
-    # yarn with a subcommand OR bare (defaults to install)
-    r"\byarn(?:\s+(?:install|run|build|test))?\b",
+    # yarn with a subcommand OR bare (defaults to install).
+    # Lookbehind ``(?<![./\-])`` excludes ``.yarn-cache``, ``/usr/bin/yarn``,
+    # and ``-yarn`` contexts; lookahead ``(?![.\-])`` excludes
+    # ``yarn.lock`` (filename), ``yarn-${VERSION}`` (image-tag string).
+    # Without these the bare arm fires catastrophically on real GitLab
+    # configs that mention yarn.lock in ``rules: changes:`` globs and
+    # ``.yarn-cache`` in ``cache:`` blocks (FP-audit Class B).
+    r"(?<![./\-])\byarn(?![.\-])(?:\s+(?:install|run|build|test))?\b",
     r"\bpnpm\s+(?:install|i|run|build|test)\b",
     # Python
     # - pip install . / -e . / --editable . / -r <file> reads attacker manifests
@@ -72,8 +78,12 @@ BUILD_TOOL_FRAGMENTS: list[str] = [
     r"(?:\bmvn\b|\./mvnw\b)",
     # PHP — composer runs post-install / post-update scripts by default
     r"\bcomposer\s+(?:install|update)\b",
-    # Ruby — native-extension compilation during bundle install
-    r"\bbundle\s+(?:install|exec)\b",
+    # Ruby — native-extension compilation during bundle install.
+    # ``bundle exec`` is INTENTIONALLY EXCLUDED: it runs a command in
+    # the bundler context (``bundle exec rake``, ``bundle exec rspec``)
+    # and does NOT invoke install hooks.  Including it produces
+    # LOTP-* soft-FPs on every Rails CI pipeline (FP-audit Class B).
+    r"\bbundle\s+install\b",
     # Container builds — RUN directives execute at build time
     r"\bdocker\s+build\b",
 ]
@@ -87,7 +97,8 @@ BUILD_TOOL_FRAGMENTS: list[str] = [
 BUILD_TOOL_ANCHOR: str = (
     r"(?:"
     r"\bn(?:pm\s+(?:install|ci|i|update|pack|publish|run|build|test)\b)"
-    r"|\by(?:arn(?:\s+(?:install|run|build|test))?\b)"
+    # yarn arm — lookbehind/lookahead match BUILD_TOOL_FRAGMENTS form.
+    r"|(?<![./\-])\by(?:arn(?![.\-])(?:\s+(?:install|run|build|test))?\b)"
     r"|\bp(?:"
     r"npm\s+(?:install|i|run|build|test)\b"
     # pip / pip3 / pip3.11 install . / -e . / --editable . / -r <file>
@@ -109,7 +120,8 @@ BUILD_TOOL_ANCHOR: str = (
     r"|\bg(?:o\s+(?:build|generate|install|run)\b|radle\b)"
     r"|\bmvn\b"
     r"|\bd(?:ocker\s+build\b)"
-    r"|\bb(?:undle\s+(?:install|exec)\b)"
+    # bundle arm — exec is excluded; see BUILD_TOOL_FRAGMENTS comment.
+    r"|\bb(?:undle\s+install\b)"
     r"|(?<![\w/])make(?:\s+\w+)*"
     r"|\./(?:gradlew|mvnw)\b"
     r")"

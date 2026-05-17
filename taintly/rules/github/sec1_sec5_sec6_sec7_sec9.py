@@ -312,6 +312,23 @@ _SAFE_ACTION_INPUT_PAIRS: frozenset[tuple[str, str]] = frozenset(
         # Gemini action's API key input is its documented model auth
         # surface.
         ("google-github-actions/run-gemini-cli", "gemini_api_key"),
+        # ---- FP-audit additions (4 pairs, 2026-05-17) --------------
+        # 6 fires across AWS production repos confirmed each of these
+        # actions is single-purpose and the token slot IS the action's
+        # documented auth.  See audit class E.
+        # AWS-published issue-closure bot — repo-token is its auth.
+        ("aws-actions/closed-issue-message", "repo-token"),
+        # AWS-published stale-issue bot — repo-token is its auth
+        # (same trust tier as actions/stale).
+        ("aws-actions/stale-issue-cleanup", "repo-token"),
+        # GitHub-published Dependabot helper — github-token is its
+        # documented metadata-fetch auth (same trust tier as the
+        # actions/* allowlist entries).
+        ("dependabot/fetch-metadata", "github-token"),
+        # marvinpinto/action-automatic-releases — single-purpose:
+        # release-creation using the supplied repo_token (note the
+        # underscore — distinct slot name from actions/stale's hyphen).
+        ("marvinpinto/action-automatic-releases", "repo_token"),
     }
 )
 
@@ -937,12 +954,18 @@ RULES: list[Rule] = [
             # payload — bare `iex (Get-Content ./local.ps1)` is local
             # dynamic dispatch, not curl-pipe-bash, and firing on it
             # produces a high-severity FP with no remote-fetch risk.
+            #
+            # The ``| python -c`` alternation MUST require a
+            # curl/wget precondition.  Without it, ``echo $LOCAL_VAR
+            # | python -c '...'`` (a JSON parser, no remote fetch)
+            # fires HIGH.  Sibling rule SEC9-GH-006 already uses the
+            # correct shape; this is the synced form.
             match=(
                 r"(curl\s[^|\n]*\|\s*(bash|sh|zsh|python|perl|ruby))"
                 r"|(wget\s[^|\n]*\|\s*(bash|sh|zsh|python|perl))"
                 r"|(bash\s*<\s*\(\s*curl)"
                 r"|(iex\s*\([^)]*(Invoke-WebRequest|Invoke-RestMethod|DownloadString|DownloadFile|WebClient|Net\.Http))"
-                r"|(\|\s*python\s+-c\s+['\"])"
+                r"|((?:curl|wget)\s+[^|\n#]*\|\s*python\s+-c\s+['\"])"
             ),
             exclude=[r"^\s*#"],
         ),
