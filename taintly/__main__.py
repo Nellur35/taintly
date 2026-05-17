@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -1144,8 +1145,27 @@ def main():
             families_with_ctx_coverage=agg_ctx_coverage,
         )
 
-    for report in reports:
-        _output_report(report, args, score_report=score_report)
+    # JSON format with multiple reports needs a wrapper to stay
+    # well-formed.  Without it, ``--format json`` on a multi-platform
+    # repo (e.g. GH workflows + Jenkinsfile) emitted two concatenated
+    # top-level objects: invalid JSON, breaking ``json.load`` / ``jq``
+    # and the docs/AI_TRIAGE.md paste-ready prompt that assumes a
+    # parseable document.  Single-platform output is unchanged for
+    # backwards compatibility; multi-platform wraps in
+    # ``{"reports": [...]}``.
+    if args.format == "json" and len(reports) > 1:
+        for report in reports:
+            _print_engine_errors_to_stderr(report)
+        wrapped = {
+            "reports": [
+                json.loads(format_json(report, score_report=score_report))
+                for report in reports
+            ],
+        }
+        print(json.dumps(wrapped, indent=2))
+    else:
+        for report in reports:
+            _output_report(report, args, score_report=score_report)
 
     if score_report is not None and args.format != "html":
         print(format_score(score_report, use_color=not args.no_color))
@@ -1155,7 +1175,10 @@ def main():
     # completed but degraded coverage is distinguishable from a
     # genuinely clean run.  ENGINE-ERR is excluded from the worst-
     # severity calculation so its LOW severity doesn't masquerade as
-    # a real LOW finding.
+    # a real LOW finding.  CRITICAL wins regardless of fail_on so a
+    # CI gate can distinguish CRITICAL from HIGH at the exit-code
+    # layer; see _exit_for_severity for the same ordering and the
+    # full rationale.
     real = [f for f in all_findings if f.rule_id != "ENGINE-ERR"]
     worst = Severity.INFO
     for f in real:
@@ -1163,16 +1186,15 @@ def main():
             worst = f.severity
     has_coverage_warning = any(f.rule_id == "ENGINE-ERR" for f in all_findings)
 
+    if worst == Severity.CRITICAL:
+        sys.exit(2)
     if effective_fail_on and worst >= effective_fail_on:
         sys.exit(1)
-    elif worst == Severity.CRITICAL:
-        sys.exit(2)
-    elif worst == Severity.HIGH:
+    if worst == Severity.HIGH:
         sys.exit(1)
-    elif has_coverage_warning:
+    if has_coverage_warning:
         sys.exit(11)
-    else:
-        sys.exit(0)
+    sys.exit(0)
 
 
 def _print_engine_errors_to_stderr(report) -> None:
@@ -1225,7 +1247,7 @@ def _exit_for_severity(report, fail_on: Severity | None = None):
     Exit codes:
       * 0  — clean scan, no findings or only INFO-grade
       * 1  — HIGH finding, or fail-on threshold reached
-      * 2  — CRITICAL finding
+      * 2  — CRITICAL finding (always — takes precedence over fail-on)
       * 11 — scanned cleanly BUT one or more files exceeded the
              scanner cap and file-scope rule coverage was degraded
              (ENGINE-ERR findings present). Distinct from 0 so CI can
@@ -1235,6 +1257,12 @@ def _exit_for_severity(report, fail_on: Severity | None = None):
              Real-finding exit codes (1/2) take precedence: if
              findings AND coverage warnings both exist, the finding
              code wins.
+
+    Severity-distinguishing precedence: CRITICAL always returns 2,
+    even when ``--fail-on CRITICAL`` is set or ``audit_config.fail_on``
+    is HIGH (or lower).  Before this ordering, a fail-on threshold
+    reached by a CRITICAL finding collapsed to exit 1 — losing the
+    CRITICAL-vs-HIGH distinction CI gates need to page on.
     """
     # Exclude ENGINE-ERR (severity LOW) from the "worst finding" logic
     # so a coverage warning alone doesn't masquerade as a LOW finding.
@@ -1244,16 +1272,19 @@ def _exit_for_severity(report, fail_on: Severity | None = None):
         if f.severity > worst:
             worst = f.severity
     has_coverage_warning = any(f.rule_id == "ENGINE-ERR" for f in report.findings)
+    # CRITICAL wins regardless of fail_on — preserves the
+    # CRITICAL-vs-HIGH distinction at the exit-code layer.
+    if worst == Severity.CRITICAL:
+        sys.exit(2)
+    # fail_on threshold reached at a sub-CRITICAL severity.
     if fail_on and worst >= fail_on:
         sys.exit(1)
-    elif worst == Severity.CRITICAL:
-        sys.exit(2)
-    elif worst == Severity.HIGH:
+    # Default behaviour: HIGH always exits 1.
+    if worst == Severity.HIGH:
         sys.exit(1)
-    elif has_coverage_warning:
+    if has_coverage_warning:
         sys.exit(11)
-    else:
-        sys.exit(0)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

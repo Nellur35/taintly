@@ -58,12 +58,19 @@ def test_config_error_exits_three(tmp_path: Path):
     assert code == 3, f"expected 3 (config error: missing --config file), got {code}"
 
 
-def test_findings_above_fail_on_exits_one(tmp_path: Path):
-    """Findings above --fail-on severity → exit 1.
+def test_critical_findings_exit_two_even_with_fail_on_high(tmp_path: Path):
+    """CRITICAL findings → exit 2, even when ``--fail-on HIGH`` is set.
 
-    HIGH-severity finding in the workflow + ``--fail-on HIGH`` puts
-    the scan on the fail-on path before any of the severity-summary
-    fallback branches can fire.
+    The README documents:
+      * 1 = HIGH (or fail-on threshold reached at sub-CRITICAL)
+      * 2 = CRITICAL (or CLI argument error)
+
+    CRITICAL takes precedence over fail-on so a CI gate can
+    distinguish "the worst was HIGH" from "the worst was CRITICAL"
+    regardless of where the fail-on bar is set.  Prior behaviour
+    collapsed CRITICAL into exit 1 when fail-on was reached, which
+    broke the documented contract on any config setting
+    ``fail_on: HIGH`` (or lower).
     """
     wf_dir = tmp_path / ".github" / "workflows"
     wf_dir.mkdir(parents=True)
@@ -78,11 +85,35 @@ def test_findings_above_fail_on_exits_one(tmp_path: Path):
         "          ref: ${{ github.event.pull_request.head.sha }}\n"
     )
     code = _run([str(tmp_path), "--fail-on", "HIGH"])
-    # SEC4-GH-001 fires CRITICAL on this shape, but --fail-on HIGH
-    # routes through the explicit threshold-comparison path which
-    # exits 1.  Without --fail-on the CRITICAL severity would route
-    # through the worst-severity fallback (exit 2).
-    assert code == 1, f"expected 1 (findings >= --fail-on), got {code}"
+    # SEC4-GH-001 fires CRITICAL on this shape.  CRITICAL wins
+    # regardless of --fail-on.
+    assert code == 2, f"expected 2 (CRITICAL severity wins), got {code}"
+
+
+def test_high_findings_with_fail_on_high_exit_one(tmp_path: Path):
+    """HIGH findings + ``--fail-on HIGH`` → exit 1.
+
+    Sub-CRITICAL findings that reach the fail-on threshold route
+    through the threshold-comparison path.  This is the
+    fail-on-gates-CI shape: any HIGH-or-above triggers a non-zero
+    exit, but CRITICAL still distinguishes via exit 2 (see
+    :func:`test_critical_findings_exit_two_even_with_fail_on_high`).
+    """
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    # SEC2-GH-001 fires HIGH (not CRITICAL) on bare ``permissions:
+    # write-all`` plus a single safe step.
+    (wf_dir / "writeall.yml").write_text(
+        "on: push\n"
+        "permissions: write-all\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+    )
+    code = _run([str(tmp_path), "--fail-on", "HIGH"])
+    assert code == 1, f"expected 1 (HIGH findings reach --fail-on HIGH), got {code}"
 
 
 def test_self_test_clean_exits_zero():

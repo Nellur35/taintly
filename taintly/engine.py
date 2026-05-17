@@ -123,6 +123,23 @@ def _is_suppressed(line: str, rule_id: str) -> bool:
     return False
 
 
+# Anchor-aware suppression: how many lines may a SEC-NN-NNN finding's
+# pre-expansion line number drift from its post-expansion equivalent
+# while still being recognised as the same match?  Drift comes from
+# ``<<: *anchor`` merge-key expansion inlining a multi-line anchor
+# body above the SEC line.
+#
+# Empirical max drift observed in the in-repo corpus is bounded by
+# the typical anchor-body height (3-8 lines for permissions blocks,
+# 5-15 lines for step-templates).  The tolerance is set generously
+# above that to absorb stacked-merge cases (two ``<<: *X`` merges
+# in the same file).  ``tests/unit/test_anchor_expansion_tolerance.py``
+# pins the threshold against a constructed worst-case anchor with
+# known drift; lowering this value without updating that test will
+# break suppression on stacked-merge workflows.
+_ANCHOR_EXPANSION_LINE_TOLERANCE = 30
+
+
 def scan_file(
     filepath: str,
     rules: list[Rule],
@@ -274,7 +291,7 @@ def scan_file(
                 # anchor expansion would NOT produce the match, treat
                 # it as an anchor-mediated false positive.  We never
                 # ADD findings via expansion — only suppress.  The
-                # 30-line tolerance handles cases where the anchor
+                # tolerance below handles cases where the anchor
                 # expansion shifts subsequent line numbers downward.
                 if matches and getattr(rule, "anchor_aware", False):
                     expanded_content, expanded_lines = _get_expanded()
@@ -284,7 +301,10 @@ def scan_file(
                         matches = [
                             (ln, snip)
                             for ln, snip in matches
-                            if any(abs(ln - eln) <= 30 for eln in expanded_lineset)
+                            if any(
+                                abs(ln - eln) <= _ANCHOR_EXPANSION_LINE_TOLERANCE
+                                for eln in expanded_lineset
+                            )
                         ]
                 for line_num, snippet in matches:
                     # Honour inline suppression comments on the matched line.
