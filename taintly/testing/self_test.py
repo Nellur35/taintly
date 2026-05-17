@@ -135,6 +135,13 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "separator; broadening to ``\\s*`` would weaken precision across "
         "every rule that shares the pattern."
     ),
+    ("SEC4-GH-026", "whitespace_pad"): (
+        "Same ``uses:\\s+`` anchor family as AI-GH-019/020/021/022/035 "
+        "and TAINT-GH-010 — anchor matches ``uses:\\s+actions/cache@`` "
+        "and the zero-space mutant ``uses:foo`` would require "
+        "broadening to ``\\s*`` which weakens precision across every "
+        "rule that shares the anchor pattern."
+    ),
     ("AI-GH-035", "whitespace_pad"): (
         "Same family as AI-GH-019/020/021/022: anchor uses "
         "``AI_AGENT_USES_PATTERN`` whose ``uses:\\s+`` requires "

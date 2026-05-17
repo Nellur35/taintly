@@ -1563,4 +1563,141 @@ RULES: list[Rule] = [
         ),
         incidents=["Ultralytics (Dec 2024)"],
     ),
+    # =========================================================================
+    # SEC4-GH-026: cache poisoning surface — fork-reachable trigger writes
+    # to a workflow cache that subsequent privileged runs read from.
+    # =========================================================================
+    # GitHub Actions' cache (``actions/cache`` and ``setup-*`` actions
+    # with ``cache:`` enabled) is partitioned by repository + branch
+    # ref + cache key.  A pull_request workflow that WRITES the cache
+    # creates an entry attacker-controlled in content, keyed on a value
+    # that a later push/release workflow may LOOK UP (cache-restore
+    # falls back across branches via ``restore-keys:``).  When that
+    # later workflow is privileged (write token, OIDC mint, deploy
+    # job), the poisoned cache becomes a PPE chain: PR diff modifies
+    # build output -> cache write captures it -> main-branch build
+    # restores it -> privileged step executes poisoned artifact.
+    #
+    # Single-file shape — gap surfaced by the 2026-05-17 comparison
+    # study; zizmor's ``cache-poisoning`` catches this on the same
+    # workflow; taintly's CHAIN-GH-001 requires cross-workflow
+    # evidence and misses the same-file form.  INFO + ``review_needed``
+    # because not every PR cache write is exploitable (some keys are
+    # PR-number-scoped and never matched by main restores).
+    Rule(
+        id="SEC4-GH-026",
+        title="Cache write under fork-reachable trigger - cache-poisoning surface",
+        severity=Severity.INFO,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A workflow whose ``on:`` block includes a fork-reachable "
+            "trigger (``pull_request`` / ``pull_request_target``) writes "
+            "to the GitHub Actions cache - either via ``uses: actions/"
+            "cache@`` (the direct form) or via a ``setup-*`` action "
+            "with ``cache:`` enabled (the implicit form, where "
+            "``setup-node``/``setup-python``/``setup-go``/``setup-java`` "
+            "store dependency caches keyed by lockfile hash).\n"
+            "\n"
+            "The cache is partitioned per repo + branch ref + key, but "
+            "``restore-keys:`` and the default fallback rules let cache "
+            "entries written from a PR branch be looked up by later "
+            "main-branch runs.  When a subsequent privileged workflow "
+            "(release, deploy, OIDC mint) restores the poisoned entry, "
+            "attacker-controlled bytes execute with the privileged "
+            "run's token.\n"
+            "\n"
+            "INFO + ``review_needed``: many cache keys are PR-number-"
+            "scoped (``${{ github.run_id }}`` / ``${{ github.event."
+            "number }}``) and never matched by main-branch restores, "
+            "so this rule's threat model only applies when the cache "
+            "key shape allows cross-branch restoration.  Operators who "
+            "want LOW enforcement can override via ``.taintly.yml``."
+        ),
+        pattern=ContextPattern(
+            # Anchor on the cache write - both direct (actions/cache /
+            # actions/cache/save) and the implicit setup-* form
+            # (cache: <package-manager>).
+            anchor=(
+                r"(?:"
+                r"uses:\s+actions/cache(?:/save)?@"
+                r"|cache:\s*(?:true|npm|yarn|pip|pipenv|poetry|gradle|maven|sbt|go|cargo)"
+                r")"
+            ),
+            # Workflow must declare a fork-reachable trigger in its
+            # ``on:`` block.  Tolerant of both block form (``on:\n  "
+            # pull_request:``) and inline list/flow forms.
+            requires=r"(?ms)^on:\s*(?:\n\s+|\[?\s*).*?pull_request",
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Pick one:\n"
+            "  1. Scope the cache key to a value that NEVER matches a "
+            "later non-PR run:\n"
+            "     - ``key: ${{ github.event.number }}-${{ hashFiles('lockfile') }}``\n"
+            "     - Avoid bare ``hashFiles('package-lock.json')`` keys "
+            "without a PR-bound prefix.\n"
+            "  2. Drop ``restore-keys:`` entirely - no fallback means "
+            "no cross-branch lookup.\n"
+            "  3. Move the cache write to a non-PR-triggered workflow "
+            "(``push`` on protected branches only).\n"
+            "  4. If the cache content is build output rather than "
+            "dependency lock material, verify the build output is "
+            "deterministic and re-derived from pinned inputs each run."
+        ),
+        reference=(
+            "https://docs.github.com/en/actions/using-workflows/"
+            "caching-dependencies-to-speed-up-workflows"
+        ),
+        test_positive=[
+            (
+                "on:\n  pull_request:\n    branches: [main]\njobs:\n"
+                "  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/cache@v4\n        with:\n"
+                "          path: ./node_modules\n"
+                "          key: ${{ hashFiles('package-lock.json') }}\n"
+            ),
+            (
+                "on:\n  pull_request: {}\njobs:\n  test:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/setup-node@v4\n        with:\n"
+                "          node-version: 20\n          cache: npm\n"
+            ),
+        ],
+        test_negative=[
+            # No fork-reachable trigger.
+            (
+                "on:\n  push:\n    branches: [main]\njobs:\n  build:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/cache@v4\n        with:\n"
+                "          path: ./out\n"
+                "          key: ${{ hashFiles('lockfile') }}\n"
+            ),
+            # Cache-restore-only - we anchor on the save / unified
+            # cache, not restore-only.
+            (
+                "on:\n  pull_request: {}\njobs:\n  test:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/cache/restore@v4\n        with:\n"
+                "          key: ${{ hashFiles('lockfile') }}\n"
+            ),
+            # Comment-only mention.
+            "      # uses: actions/cache@v4",
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "A pull request modifies a built artifact - a webpack "
+            "bundle, a compiled binary, a generated config - in a way "
+            "the lockfile hash doesn't reflect.  The PR-triggered "
+            "workflow's cache write captures the modified output under "
+            "a key derived from the lockfile hash.  Later, a release "
+            "or deploy workflow on main looks up the same key, falls "
+            "back via ``restore-keys:`` to the PR's entry, and runs "
+            "the attacker-shaped bytes with the privileged workflow's "
+            "token.  The lockfile never changed, the PR was never "
+            "merged, but the cache became a transit channel for the "
+            "attacker's payload."
+        ),
+        review_needed=True,
+    ),
 ]
