@@ -378,6 +378,84 @@ _QUOTED_HEREDOC_OPENER = re.compile(
 )
 
 
+def _strip_groovy_comments(content: str) -> str:
+    """Return ``content`` with Groovy ``//`` and ``/* */`` comments
+    replaced by spaces (newlines preserved).
+
+    Used by file-scope :class:`ContextPattern` checks so a
+    documentation comment that mentions a gating token
+    (``env.CHANGE_ID``, ``NPM_TOKEN``) doesn't satisfy the
+    ``requires`` / ``requires_absent`` gate on a Jenkinsfile.
+
+    String literals (single, double, triple-single, triple-double) are
+    preserved verbatim — a shell body that contains ``//`` or ``/*``
+    inside a ``sh '''...'''`` block keeps its content.  YAML files
+    don't carry these constructs, so the helper is a no-op on
+    GitHub Actions / GitLab CI workflows in practice.
+
+    Line numbers are preserved by replacing each stripped character
+    with a space (newlines kept), so downstream line-number
+    references remain valid.
+    """
+    if "//" not in content and "/*" not in content:
+        return content
+    out: list[str] = []
+    i = 0
+    n = len(content)
+    while i < n:
+        ch = content[i]
+        # String literals — copy through verbatim (no comment recognition
+        # inside).  Order matters: check triple-quoted before single.
+        if ch in ("'", '"'):
+            triple = content.startswith(ch * 3, i)
+            quote = ch
+            if triple:
+                end_marker = quote * 3
+                end = content.find(end_marker, i + 3)
+                end = n if end == -1 else end + 3
+            else:
+                j = i + 1
+                while j < n:
+                    if content[j] == "\\" and j + 1 < n:
+                        j += 2
+                        continue
+                    if content[j] == quote:
+                        j += 1
+                        break
+                    if content[j] == "\n":
+                        break
+                    j += 1
+                end = j
+            out.append(content[i:end])
+            i = end
+            continue
+        if ch == "/" and i + 1 < n:
+            nxt = content[i + 1]
+            if nxt == "/" and (i == 0 or content[i - 1] != ":"):
+                # Line comment — blank to end of line, keep the newline.
+                # The ``i-1 != ':'`` guard avoids stripping ``://`` in a
+                # URL scheme inside a YAML scalar value.
+                end = content.find("\n", i)
+                if end == -1:
+                    out.append(" " * (n - i))
+                    return "".join(out)
+                out.append(" " * (end - i))
+                i = end
+                continue
+            if nxt == "*":
+                # Block comment — blank through closing ``*/``, but
+                # preserve any newlines so line numbers stay aligned.
+                end = content.find("*/", i + 2)
+                end = n if end == -1 else end + 2
+                for k in range(i, end):
+                    out.append("\n" if content[k] == "\n" else " ")
+                i = end
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _quoted_heredoc_body_lines(lines: list[str]) -> set[int]:
     """Return 0-based indices of lines inside a quoted-marker heredoc body.
 
@@ -818,9 +896,20 @@ class ContextPattern:
         # legitimate large workflows (>50KB) don't silently lose
         # rule coverage to the ReDoS length cap.  See
         # ``_safe_search_chunked`` for the chunking semantics.
-        if not _safe_search_chunked(self._requires_re, content):
+        #
+        # Groovy ``//`` and ``/* */`` comments are blanked out before
+        # the requires / requires_absent checks so a documentation
+        # comment that *mentions* a PR-context variable
+        # (``env.CHANGE_ID``) or a credential name doesn't satisfy
+        # the gate.  The per-line anchor pass below still sees the
+        # original ``lines`` — the existing ``exclude`` patterns
+        # cover leading-comment anchor matches.
+        gated_content = _strip_groovy_comments(content)
+        if not _safe_search_chunked(self._requires_re, gated_content):
             return []
-        if self._requires_absent_re and _safe_search_chunked(self._requires_absent_re, content):
+        if self._requires_absent_re and _safe_search_chunked(
+            self._requires_absent_re, gated_content
+        ):
             return []
 
         # Build per-line job-segment content map if we need per-job anchor suppression.
