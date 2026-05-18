@@ -522,6 +522,35 @@ class AbsencePattern:
         return []
 
 
+_JENKINSFILE_MARKERS = (
+    re.compile(r"^\s*pipeline\s*\{"),
+    re.compile(r"^\s*node\s*[\({]"),
+    re.compile(r"^#!\s*/?\S*\bgroovy\b"),
+    re.compile(r"^#!\s*groovy\b"),
+    re.compile(r"^\s*def\s+\w+\s*[=\(]"),
+    re.compile(r"^\s*//"),  # Groovy line comment — YAML uses ``#``
+    re.compile(r"^\s*/\*"),  # Groovy block comment opener
+)
+
+
+def _looks_like_jenkinsfile(lines: list[str]) -> bool:
+    """Heuristic: does ``lines`` look like Groovy / Jenkinsfile content?
+
+    Looks for any of: a ``pipeline { ... }`` block opener, a ``node { ... }``
+    or ``node('label') { ... }`` opener, a Groovy shebang
+    (``#!/usr/bin/env groovy`` / ``#!groovy``), a top-level
+    ``def name(...)`` / ``def name = ...`` declaration, or a Groovy
+    ``//`` / ``/* ... */`` comment.  Any one match is enough — these
+    constructs don't appear in well-formed GitHub Actions or GitLab CI
+    YAML (which uses ``#`` for comments and has no block structure).
+    """
+    for line in lines:
+        for marker in _JENKINSFILE_MARKERS:
+            if marker.search(line):
+                return True
+    return False
+
+
 def _split_into_job_segments(lines: list[str]) -> list[tuple[int, list[str]]]:
     """Split a CI/CD config into per-job segments for scoped ContextPattern checks.
 
@@ -533,11 +562,17 @@ def _split_into_job_segments(lines: list[str]) -> list[tuple[int, list[str]]]:
       top-level key. Each 2-space-indented key inside that block starts a new segment.
     - GitLab CI: jobs are 0-indent keys that are not reserved keywords. Each such key
       starts a new segment.
-    - Falls back to a single segment covering the whole file if neither pattern is found.
+    - Jenkinsfile (Groovy): single segment covering the whole file. A Jenkinsfile is
+      one job by construction — splitting it on YAML-style heuristics would treat
+      ``//`` line-comments that contain a colon (e.g. license-header URLs) as fake
+      job boundaries.
+    - Falls back to a single segment covering the whole file if no pattern is found.
 
     The pre-job content (``on:``, ``name:``, global ``permissions:``, etc.) is included
     in the first segment so that file-level context is preserved.
     """
+    if _looks_like_jenkinsfile(lines):
+        return [(0, lines)]
     _GITLAB_KEYWORDS = frozenset(
         [
             "stages",
