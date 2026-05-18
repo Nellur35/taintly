@@ -567,4 +567,86 @@ RULES: list[Rule] = [
             "pipelines, or access the package registry."
         ),
     ),
+    # =========================================================================
+    # SEC10-GL-003: Job missing timeout
+    # =========================================================================
+    # Port of SEC10-GH-001.  GitLab's project-level default is 1 hour
+    # but the per-job ``timeout:`` keyword (and the ``default:
+    # timeout:`` top-level key) override it.  Workflows that rely on
+    # the implicit project default have no in-YAML evidence of an
+    # upper bound, and a compromised step gets the full hour to
+    # exfiltrate, mine, or interact with downstream systems before
+    # GitLab's runner forces a SIGKILL.
+    Rule(
+        id="SEC10-GL-003",
+        title="GitLab CI job has no timeout — relies on project default",
+        severity=Severity.INFO,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-10",
+        description=(
+            "A GitLab CI job runs under the project-level default timeout (1 hour on "
+            "GitLab.com, configurable per-project) because neither the job nor a "
+            "``default:`` block sets the ``timeout:`` keyword. Without an explicit "
+            "in-YAML timeout, a compromised or hung step runs for the full project "
+            "default — long enough to exfiltrate secrets, interact with downstream "
+            "systems, or mine cryptocurrency before any time-based alert fires. An "
+            "explicit per-job timeout (or a ``default: timeout: ...`` at the file "
+            "top) bounds the impact and makes anomalous run durations immediately "
+            "visible in the pipeline UI.\n"
+            "\n"
+            "INFO severity with review-needed: firing on every untimed job creates "
+            "fatigue without proportional risk signal. Operators who specifically "
+            "want timeout enforcement at LOW severity can override with .taintly.yml."
+        ),
+        pattern=ContextPattern(
+            anchor=r"^\s{2,}script\s*:",
+            requires=r"script\s*:",
+            # Fires when the file has no parseable ``timeout:`` value
+            # anywhere — covers both per-job and the ``default:``
+            # block's timeout key.  ``timeout: nope`` should not
+            # silence the rule; GitLab expects a duration such as
+            # ``10m`` or ``30 minutes``.
+            requires_absent=(
+                r"(?m)^\s+timeout\s*:\s*['\"]?\d+\s*"
+                r"(?:milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d)"
+                r"(?:\s+\d+\s*"
+                r"(?:milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d))*"
+                r"['\"]?\s*(?:#.*)?$"
+            ),
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Set an explicit ``timeout:`` on each job, or at the top level via "
+            "``default:``:\n\n"
+            "default:\n"
+            "  timeout: 30m   # applies to every job unless overridden\n\n"
+            "build:\n"
+            "  timeout: 10m   # tighter per-job bound\n"
+            "  script:\n"
+            "    - make build\n\n"
+            "Use a timeout that is at least 2x your typical build duration. "
+            "GitLab's project-level default is usually 1 hour — far too long for "
+            "most jobs."
+        ),
+        reference=("https://docs.gitlab.com/ee/ci/yaml/#timeout"),
+        test_positive=[
+            "build:\n  script:\n    - make build",
+            "build:\n  timeout: nope\n  script:\n    - make build",
+        ],
+        test_negative=[
+            "build:\n  timeout: 10m\n  script:\n    - make build",
+            "build:\n  timeout: 30 minutes\n  script:\n    - make build",
+            "default:\n  timeout: 30m\nbuild:\n  script:\n    - make build",
+        ],
+        stride=["D", "R"],
+        threat_narrative=(
+            "Without a timeout, a compromised step runs for the full GitLab "
+            "project-level default (1 hour on GitLab.com) — exfiltrating "
+            "secrets, interacting with downstream systems, or mining "
+            "cryptocurrency before any time-based alert fires. An explicit "
+            "in-YAML timeout bounds the impact and makes anomalous build "
+            "durations immediately visible in the pipeline UI."
+        ),
+        review_needed=True,
+    ),
 ]
