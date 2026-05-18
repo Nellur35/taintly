@@ -54,6 +54,13 @@ class Event:
         first encountered the unrecoverable construct.
       detail: free-form context string (e.g. an error message for
         CUTOFF / ERROR events).
+      degraded: True when this event was recovered by the regex
+        fallback rather than the structural walker.  Consumers that
+        require high-precision structural context (a known enclosing
+        block path) should ignore degraded events; rules that only
+        need the body string (shell-body grep, secret pattern) can
+        use them as a coverage lift on parse-broken Jenkinsfiles.
+        Default False.
     """
 
     kind: EventKind
@@ -62,3 +69,4 @@ class Event:
     value_kind: str | None = None
     line: int = 0
     detail: str | None = None
+    degraded: bool = False

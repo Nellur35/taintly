@@ -71,6 +71,14 @@ def walk_jenkinsfile(content: str, *, recover: bool = True) -> Iterator[Event]:
         :class:`Event` instances.  See :class:`EventKind` for the
         documented stream contract.
 
+        When the parser's error coverage exceeds
+        :data:`taintly.parsers.jenkinsfile.fallback._ERROR_RATIO_THRESHOLD`,
+        additional shell-body LEAFs are emitted via a regex fallback
+        with ``degraded=True``.  Consumers that need a known enclosing
+        block path should filter those out; consumers that only need
+        the shell body string can use them as a coverage lift on
+        parse-broken Jenkinsfiles.
+
     Raises:
         ImportError: when the optional ``[jenkins-structural]`` extra
             isn't installed.
@@ -87,9 +95,23 @@ def walk_jenkinsfile(content: str, *, recover: bool = True) -> Iterator[Event]:
     # could-not-evaluate (mirrors the YAML walker's CUTOFF contract).
     cutoff_emitted = False
 
+    from .fallback import _ERROR_RATIO_THRESHOLD, error_byte_ratio, regex_fallback_leaves
     from .walker import iter_leaves
 
-    yield from iter_leaves(root, src)
+    # Emit walker events first.  Track the (line, value) of each
+    # shell-body LEAF so the regex fallback can de-dup.
+    seen_shell_keys: set[tuple[int, str]] = set()
+    for ev in iter_leaves(root, src):
+        if ev.kind == EventKind.LEAF and ev.value_kind == "shell" and ev.value is not None:
+            seen_shell_keys.add((ev.line, ev.value))
+        yield ev
+
+    # Regex fallback: only when the parse tree is mostly errors.
+    # Skips clean parses entirely (zero overhead on jenkins.io /
+    # maven / jcasc) and lifts shell-body recovery on cassandra-
+    # class files.
+    if root.has_error and error_byte_ratio(root) > _ERROR_RATIO_THRESHOLD:
+        yield from regex_fallback_leaves(content, exclude_keys=seen_shell_keys)
 
     if root.has_error:
         if recover and not cutoff_emitted:
