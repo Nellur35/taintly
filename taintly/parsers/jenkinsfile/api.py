@@ -104,7 +104,7 @@ def _first_error_line(node: Any) -> int | None:
     """Find the 1-based line number of the first ERROR node under
     ``node``, or None if none."""
     if node.type == "ERROR" or getattr(node, "is_missing", False):
-        return node.start_point[0] + 1
+        return int(node.start_point[0] + 1)
     for child in node.children:
         line = _first_error_line(child)
         if line is not None:

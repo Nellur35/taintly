@@ -332,7 +332,11 @@
             }
           ]
         }
-      ]
+      ],
+      "properties": {
+        "findings_count": 5,
+        "inventory_count": 0
+      }
     }
   ]
 }
