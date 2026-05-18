@@ -161,6 +161,50 @@ def test_jenkinsfile_with_def_helper_is_single_segment():
     assert _split_into_job_segments(lines) == [(0, lines)]
 
 
+def test_github_actions_with_inline_python_still_segments():
+    """A GitHub Actions workflow that embeds Python via inline
+    ``run: |`` blocks must not be misclassified as a Jenkinsfile.
+    Python ``def name(...):`` declarations inside a ``run: |``
+    block are always indented under YAML structure — the
+    Jenkinsfile heuristic's ``def`` marker requires column 0 so
+    indented Python ``def`` lines don't trigger it.
+    """
+    lines = (
+        dedent(
+            """
+        name: ci
+        on: workflow_dispatch
+        jobs:
+          report:
+            runs-on: ubuntu-latest
+            steps:
+              - name: Process
+                run: |
+                  import os
+                  from pathlib import Path
+
+                  def count_failures(data):
+                      return len(data)
+
+                  def filter_and_format_report(data):
+                      return data
+          publish:
+            runs-on: ubuntu-latest
+            steps:
+              - run: echo done
+        """
+        )
+        .lstrip()
+        .splitlines()
+    )
+    # Pre-job preamble + 2 jobs (report, publish) — NOT a single segment.
+    segments = _split_into_job_segments(lines)
+    assert len(segments) == 3, (
+        f"expected 3 segments (preamble + 2 jobs), got {len(segments)}: "
+        f"Python `def` inside run: | may have triggered the Jenkinsfile heuristic"
+    )
+
+
 def test_github_actions_with_inline_javascript_still_segments():
     """A GitHub Actions workflow that embeds JavaScript via
     ``actions/github-script@v7`` ``script: |`` blocks must not be

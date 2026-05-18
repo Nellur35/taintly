@@ -527,13 +527,14 @@ _JENKINSFILE_MARKERS = (
     re.compile(r"^\s*node\s*[\({]"),
     re.compile(r"^#!\s*/?\S*\bgroovy\b"),
     re.compile(r"^#!\s*groovy\b"),
-    re.compile(r"^\s*def\s+\w+\s*[=\(]"),
-    # ``//`` / ``/* */`` markers REQUIRE column 0 (no leading whitespace).
-    # GitHub Actions workflows often embed JavaScript via
-    # ``actions/github-script@v7`` ``script: |`` blocks whose ``//``
-    # comments are always indented; those must not trigger the
-    # Jenkinsfile heuristic.  Real Jenkinsfile top-level comments are at
-    # column 0 (license headers, vim modelines, shared-library notes).
+    # Column-0-only markers.  GitHub Actions workflows often embed
+    # other languages (JavaScript via ``actions/github-script@v7``,
+    # Python via inline ``run: |`` blocks) whose ``//`` comments,
+    # ``/* */`` blocks, or ``def name(...):`` declarations live
+    # inside ``script: |`` / ``run: |`` bodies and are always
+    # indented under YAML structure.  Real Jenkinsfile top-level
+    # ``def`` helpers and license-header comments are at column 0.
+    re.compile(r"^def\s+\w+\s*[=\(]"),
     re.compile(r"^//"),
     re.compile(r"^/\*"),
 )
