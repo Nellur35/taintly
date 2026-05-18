@@ -78,10 +78,10 @@ class _NodeBlockWithoutLabelPattern:
 # Jenkinsfile — consume the structural reader at
 # ``taintly.parsers.jenkinsfile``.  The reader is gated on the
 # optional ``[jenkins-structural]`` extra (tree-sitter-groovy).  When
-# the extra is not installed, the pattern below returns ``[]`` so the
-# default install stays zero-runtime-dependency and the rule simply
-# does not fire on that file (regex-based JK rules continue to
-# cover their respective shapes).
+# the extra is not installed, the pattern below falls back to a small
+# Groovy-mask-aware regex extractor for literal shell-call bodies.  That
+# keeps default installs and CI self-tests honest without claiming full
+# tree-sitter coverage.
 # =========================================================================
 
 
@@ -110,7 +110,8 @@ class _JenkinsfileShellLeafPattern:
 
     Failure-soft contract:
       * Import of the structural reader is gated on the optional
-        ``[jenkins-structural]`` extra.  Missing extra ⇒ return [].
+        ``[jenkins-structural]`` extra.  Missing extra ⇒ use the
+        regex shell-body fallback below.
       * Parse errors in the Jenkinsfile produce a ``CUTOFF`` event
         from the walker; we honour that by stopping the walk.
     """
@@ -122,10 +123,7 @@ class _JenkinsfileShellLeafPattern:
         try:
             from taintly.parsers.jenkinsfile import EventKind, walk_jenkinsfile
         except ImportError:
-            # Optional [jenkins-structural] extra not installed; rule
-            # is silent rather than failing.  Documented in the
-            # rule's description so users know to install the extra.
-            return []
+            return self._regex_fallback(content, lines)
 
         results: list[tuple[int, str]] = []
         seen: set[tuple[int, str]] = set()
@@ -148,8 +146,51 @@ class _JenkinsfileShellLeafPattern:
                     continue
                 seen.add(key)
                 results.append(key)
-        except Exception:  # nosec B110 - walker failures (Tree-sitter init / unexpected node shape) must not break scans; fall back to no findings
+        except ImportError:
+            # ``walk_jenkinsfile`` imports cleanly without the optional
+            # extra; the ImportError is raised lazily on first parse.
+            return self._regex_fallback(content, lines)
+        except Exception:  # nosec B110 - walker failures (unexpected node shape) must not break scans; fall back to no findings
             return []
+        return results
+
+    _SHELL_CALL_RE = re.compile(
+        r"\b(?:sh|bat|powershell)\s*(?:\(\s*)?(?P<quote>'''|\"\"\"|'|\")",
+        re.IGNORECASE,
+    )
+
+    def _regex_fallback(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        """Fallback shell-body extractor for default installs.
+
+        It is deliberately narrower than the structural reader: only
+        literal ``sh|bat|powershell '...'`` / ``"..."`` calls are
+        extracted, and Groovy strings/comments are masked so prose does
+        not satisfy the shell-call opener.  Complex named-argument forms
+        remain tree-sitter territory.
+        """
+        from taintly.jenkinsguard import _groovy_code_mask
+
+        code_mask = _groovy_code_mask(content)
+        results: list[tuple[int, str]] = []
+        seen: set[tuple[int, str]] = set()
+        for match in self._SHELL_CALL_RE.finditer(content):
+            if not code_mask[match.start()]:
+                continue
+            quote = match.group("quote")
+            body_start = match.end()
+            body_end = content.find(quote, body_start)
+            if body_end < 0:
+                continue
+            body = content[body_start:body_end]
+            if not self._predicate(body):
+                continue
+            line_num = content.count("\n", 0, match.start()) + 1
+            snippet = lines[line_num - 1].strip() if 0 < line_num <= len(lines) else body.strip()
+            key = (line_num, snippet or body.strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(key)
         return results
 
 

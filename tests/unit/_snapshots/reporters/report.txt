@@ -14,6 +14,7 @@ Summary
   Findings:       5
   Distinct risks: 4 confirmed, 1 review-needed
   By severity:    CRITICAL:1  HIGH:1  MEDIUM:1  LOW:2
+  Repository identity: unknown (no git remote, no --github-repo) - repo-mismatch suppression disabled
 
 Top distinct risks
   [CRITICAL exploitability:high] Mutable dependency references (1 finding across 1 file)
