@@ -743,6 +743,9 @@ def _normalize_input_path(path: str) -> tuple[str, list[str]]:
                 or os.path.isfile(os.path.join(cur, ".github", "dependabot.yml"))
                 or os.path.isfile(os.path.join(cur, ".github", "dependabot.yaml"))
                 or os.path.isfile(os.path.join(cur, ".gitlab-ci.yml"))
+                or os.path.isfile(os.path.join(cur, ".gitlab-ci.yaml"))
+                or os.path.isfile(os.path.join(cur, ".gitlab", ".gitlab-ci.yml"))
+                or os.path.isfile(os.path.join(cur, ".gitlab", ".gitlab-ci.yaml"))
                 or os.path.isfile(os.path.join(cur, "Jenkinsfile"))
             ):
                 return (cur, [abs_path])
@@ -785,7 +788,7 @@ def _file_matches_platform(filepath: str, platform: Platform) -> bool:
             ("/.github/dependabot.yml", "/.github/dependabot.yaml")
         )
     if platform == Platform.GITLAB:
-        if name == ".gitlab-ci.yml":
+        if name in {".gitlab-ci.yml", ".gitlab-ci.yaml"}:
             return True
         norm = os.path.normpath(filepath).replace(os.sep, "/")
         return "/.gitlab/" in norm or "/ci/" in norm
@@ -803,6 +806,37 @@ def _file_matches_platform(filepath: str, platform: Platform) -> bool:
 _JENKINSFILE_DENIED_EXTS: frozenset[str] = frozenset(
     {"adoc", "md", "txt", "html", "rst", "asciidoc", "rtf", "pdf"}
 )
+_GITLAB_ENTRY_FILENAMES: tuple[str, ...] = (".gitlab-ci.yml", ".gitlab-ci.yaml")
+
+
+def _discover_gitlab_entry_files(repo_path: str) -> list[str]:
+    """Find GitLab CI entry files supported by GitLab and our corpus reader."""
+    files: list[str] = []
+    for name in _GITLAB_ENTRY_FILENAMES:
+        root_entry = os.path.join(repo_path, name)
+        if os.path.isfile(root_entry):
+            files.append(root_entry)
+        hidden_entry = os.path.join(repo_path, ".gitlab", name)
+        if os.path.isfile(hidden_entry):
+            files.append(hidden_entry)
+    return files
+
+
+def _discover_gitlab_files(repo_path: str) -> list[str]:
+    """Find GitLab CI entry files plus local include candidates."""
+    files = _discover_gitlab_entry_files(repo_path)
+    for pattern in [
+        "ci/*.yml",
+        "ci/**/*.yml",
+        "ci/*.yaml",
+        "ci/**/*.yaml",
+        ".gitlab/*.yml",
+        ".gitlab/**/*.yml",
+        ".gitlab/*.yaml",
+        ".gitlab/**/*.yaml",
+    ]:
+        files.extend(glob.glob(os.path.join(repo_path, pattern), recursive=True))
+    return files
 
 
 def _is_jenkinsfile_name(name: str) -> bool:
@@ -836,6 +870,30 @@ def _is_jenkinsfile_name(name: str) -> bool:
     return name.endswith(".jenkinsfile")
 
 
+def _discover_jenkins_files(repo_path: str) -> list[str]:
+    """Find Jenkins pipeline files using the platform-specific naming rules."""
+    files: list[str] = []
+    excluded_segments = {"node_modules", ".git", "vendor", "__pycache__"}
+    for root, dirs, names in os.walk(repo_path):
+        # Prune vendor/dep dirs in-place so os.walk doesn't descend.
+        # Hidden dirs (``.jenkins``, ``.ci``, etc.) stay in the list.
+        dirs[:] = [d for d in dirs if d not in excluded_segments]
+        rel_root = os.path.relpath(root, repo_path)
+        in_jenkins_dir = rel_root != "." and (
+            rel_root.split(os.sep)[0] == "jenkins"
+            or "jenkins" in rel_root.replace(os.sep, "/").split("/")
+        )
+        for name in names:
+            if _is_jenkinsfile_name(name):
+                files.append(os.path.join(root, name))
+            elif name.endswith(".groovy") and in_jenkins_dir:
+                # ``jenkins/**/*.groovy`` form - only inside a
+                # ``jenkins`` directory. Skip random ``*.groovy`` files
+                # elsewhere in the repo (usually build-tool scripts).
+                files.append(os.path.join(root, name))
+    return files
+
+
 def detect_platform(repo_path: str) -> Platform | None:
     """Auto-detect CI/CD platform from directory structure.
 
@@ -853,17 +911,12 @@ def detect_platform(repo_path: str) -> Platform | None:
     ``has_github and has_gitlab`` special case is generalised here.
     """
     gh_dir = os.path.join(repo_path, ".github", "workflows")
-    gl_file = os.path.join(repo_path, ".gitlab-ci.yml")
-    jk_file = os.path.join(repo_path, "Jenkinsfile")
-
     has_github = os.path.isdir(gh_dir) or any(
         os.path.isfile(os.path.join(repo_path, ".github", f"dependabot.{ext}"))
         for ext in ("yml", "yaml")
     )
-    has_gitlab = os.path.isfile(gl_file)
-    has_jenkins = os.path.isfile(jk_file) or bool(
-        glob.glob(os.path.join(repo_path, "Jenkinsfile.*"))
-    )
+    has_gitlab = bool(_discover_gitlab_entry_files(repo_path))
+    has_jenkins = bool(_discover_jenkins_files(repo_path))
 
     detected: list[Platform] = []
     if has_github:
@@ -898,12 +951,7 @@ def discover_files(repo_path: str, platform: Platform) -> list[str]:
                 files.append(dep)
 
     elif platform == Platform.GITLAB:
-        gl_file = os.path.join(repo_path, ".gitlab-ci.yml")
-        if os.path.isfile(gl_file):
-            files.append(gl_file)
-        # Also check for local includes
-        for pattern in ["ci/*.yml", "ci/**/*.yml", ".gitlab/*.yml", ".gitlab/**/*.yml"]:
-            files.extend(glob.glob(os.path.join(repo_path, pattern), recursive=True))
+        files.extend(_discover_gitlab_files(repo_path))
 
     elif platform == Platform.JENKINS:
         # ``glob.glob(recursive=True)`` SKIPS hidden directories by

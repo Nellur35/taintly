@@ -29,10 +29,10 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from taintly.engine import scan_file
-from taintly.models import Platform, Rule, Severity
-from taintly.rules.registry import load_all_rules
-from taintly.testing.mutations import (
+from taintly.engine import scan_file  # noqa: E402
+from taintly.models import Platform, Rule  # noqa: E402
+from taintly.rules.registry import load_all_rules  # noqa: E402
+from taintly.testing.mutations import (  # noqa: E402
     MUTATION_OPERATORS,
     SEMANTIC_MUTATION_OPERATORS,
 )
@@ -91,12 +91,12 @@ def _scan_sample(rule: Rule, sample: str, tmp_path: Path) -> set[str]:
     return {f.rule_id for f in findings if f.rule_id != "ENGINE-ERR"}
 
 
-def discover(rules: list[Rule], severity_filter: str | None) -> list[dict]:
+def discover(rules: list[Rule], severity_filter: str | None) -> list[dict[str, str]]:
     """Run every discovery operator against every rule's positive samples
     and return survivors."""
     import tempfile
 
-    survivors: list[dict] = []
+    survivors: list[dict[str, str]] = []
     sev_set = {severity_filter} if severity_filter else None
 
     with tempfile.TemporaryDirectory() as td:
@@ -130,7 +130,7 @@ def discover(rules: list[Rule], severity_filter: str | None) -> list[dict]:
     return survivors
 
 
-def render_markdown(survivors: list[dict]) -> str:
+def render_markdown(survivors: list[dict[str, str]]) -> str:
     out = ["# Adversarial evasion discovery", ""]
     out.append(f"Total survivors: **{len(survivors)}**")
     out.append("")
