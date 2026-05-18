@@ -54,10 +54,20 @@ class JenkinsClient:
         self._timeout = timeout
 
     def _request(self, path: str) -> Any | None:
-        """GET a Jenkins API endpoint (appends /api/json automatically)."""
-        url = f"{self._base_url}{path}"
-        if not url.endswith("/api/json"):
-            url = url.rstrip("/") + "/api/json"
+        """GET a Jenkins API endpoint (appends /api/json automatically).
+
+        ``path`` may include a query string (``/?depth=1``,
+        ``/job/foo?tree=…``); ``/api/json`` is inserted before the
+        ``?`` so the query is preserved as part of the URL rather
+        than smuggled into the path.
+        """
+        parsed = urllib.parse.urlsplit(path)
+        endpoint_path = parsed.path
+        if not endpoint_path.endswith("/api/json"):
+            endpoint_path = endpoint_path.rstrip("/") + "/api/json"
+        url = urllib.parse.urlunsplit(
+            ("", "", f"{self._base_url}{endpoint_path}", parsed.query, parsed.fragment)
+        )
 
         req = urllib.request.Request(
             url,
