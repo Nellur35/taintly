@@ -111,27 +111,83 @@ def _normalize_when_body(when_block: str) -> str:
 def _stage_blocks(content: str) -> list[tuple[int, int]]:
     """Find declarative-pipeline ``stage("name") { ... }`` blocks.
 
-    Skips regex matches whose start position lies inside a string-
-    literal or ``//`` comment span — those are phantom ``stage(...)``
-    text that the old regex wrongly admitted into
-    ``find_dead_jenkins_stage_ranges`` / ``is_jenkinsfile_whole_dead``.
-    Surfaced as a real bug by the tree-sitter-groovy lab oracle
-    (``tests/lab/test_jenkins_parser_oracle.py``).
+    Walks ``content`` directly, consulting the Groovy code/string mask
+    to skip ``stage`` tokens that appear inside string literals or
+    ``//`` / ``/* */`` comments.  Returns ``(start, end)`` byte ranges
+    covering each ``stage(...) {...}`` block (inclusive of the
+    ``stage`` keyword, exclusive of the byte after the closing
+    brace).
+
+    Done positionally rather than via ``re.finditer`` because a regex
+    with non-greedy ``.*?`` can extend a match across a commented-out
+    ``stage("Fake")`` and a later real ``stage("Real") {``.  The
+    in-comment match position is rejected, but ``finditer`` then
+    resumes past the (consumed) real stage — silently dropping it.
     """
+    n = len(content)
     code_mask = _groovy_code_mask(content)
     blocks: list[tuple[int, int]] = []
-    pattern = re.compile(r"\bstage\s*\(\s*(['\"]).*?\1\s*\)\s*\{", re.DOTALL)
-    for match in pattern.finditer(content):
-        # Phantom check: the ``stage`` token's first character must
-        # be in CODE (not inside a string-literal or comment).  The
-        # mask is a parallel array of booleans the size of content.
-        if not code_mask[match.start()]:
+    i = 0
+    while i < n:
+        idx = content.find("stage", i)
+        if idx == -1:
+            break
+        if not code_mask[idx]:
+            i = idx + 1
             continue
-        open_brace = match.end() - 1
-        close_brace = _find_matching_brace(content, open_brace)
-        if close_brace is not None:
-            blocks.append((match.start(), close_brace + 1))
+        if idx > 0 and (content[idx - 1].isalnum() or content[idx - 1] == "_"):
+            i = idx + 1
+            continue
+        end_kw = idx + len("stage")
+        if end_kw >= n or content[end_kw].isalnum() or content[end_kw] == "_":
+            i = idx + 1
+            continue
+        j = end_kw
+        while j < n and content[j] in " \t":
+            j += 1
+        if j >= n or content[j] != "(":
+            i = idx + 1
+            continue
+        close_paren = _find_matching_paren(content, j, code_mask)
+        if close_paren is None:
+            i = idx + 1
+            continue
+        k = close_paren + 1
+        while k < n and content[k] in " \t\r\n":
+            k += 1
+        if k >= n or content[k] != "{":
+            i = idx + 1
+            continue
+        close_brace = _find_matching_brace(content, k)
+        if close_brace is None:
+            i = idx + 1
+            continue
+        blocks.append((idx, close_brace + 1))
+        i = close_brace + 1
     return blocks
+
+
+def _find_matching_paren(content: str, open_paren: int, code_mask: list[bool]) -> int | None:
+    """Return the index of the ``)`` matching ``content[open_paren] == '('``.
+
+    Parentheses inside string-literal or comment positions (per
+    ``code_mask``) don't affect depth — that's how a ``stage("foo)bar")``
+    name remains parsable.
+    """
+    depth = 0
+    n = len(content)
+    idx = open_paren
+    while idx < n:
+        ch = content[idx]
+        if code_mask[idx]:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return idx
+        idx += 1
+    return None
 
 
 def _groovy_code_mask(content: str) -> list[bool]:

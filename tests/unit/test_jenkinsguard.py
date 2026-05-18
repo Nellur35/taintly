@@ -107,3 +107,59 @@ def test_jenkinsfile_whole_dead_no_stages():
     """A pipeline without an explicit stages block -> not whole-dead."""
     content = "pipeline { agent any }\n"
     assert is_jenkinsfile_whole_dead(content) is False
+
+
+def test_stage_blocks_ignores_stage_token_in_line_comment():
+    """A ``//`` comment that mentions ``stage("…")`` must not consume
+    a later real stage.  The previous regex-based implementation used
+    a non-greedy ``.*?`` that could extend across the comment and the
+    next real stage, then ``finditer`` would resume past the consumed
+    real stage — silently dropping it from the enumeration."""
+    content = dedent(
+        """
+        // Example doc: stage("Fake") in comment
+        pipeline {
+            stages {
+                stage("LiveOne") { steps { sh "echo live" } }
+                stage("DeadOne") {
+                    when { expression { return false } }
+                    steps { sh "echo dead" }
+                }
+            }
+        }
+        """
+    ).lstrip()
+
+    stages = find_dead_jenkins_stage_ranges(content)
+    # Only DeadOne is dead; LiveOne must NOT be in the dead-range list.
+    assert len(stages) == 1
+    dead_start, _ = stages[0]
+    assert "DeadOne" in content.splitlines()[dead_start - 1]
+
+    # And the whole file must not be classed as whole-dead — the
+    # earlier bug returned True here because LiveOne was swallowed
+    # by the regex match starting in the comment.
+    assert is_jenkinsfile_whole_dead(content) is False
+
+
+def test_stage_blocks_ignores_stage_token_in_block_comment():
+    """``/* … */`` block comments mentioning ``stage("…")`` must not
+    suppress a later real stage either."""
+    content = dedent(
+        """
+        /*
+         * Migration note: the old `stage("Legacy")` was removed
+         * in 2024 — see CHANGELOG for the replacement.
+         */
+        pipeline {
+            stages {
+                stage("Live") {
+                    steps { sh "echo live" }
+                }
+            }
+        }
+        """
+    ).lstrip()
+
+    assert is_jenkinsfile_whole_dead(content) is False
+    assert find_dead_jenkins_stage_ranges(content) == []
