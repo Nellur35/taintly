@@ -23,7 +23,6 @@ from taintly.fixes import (
     fix_unquote_groovy_gstring_with_params,
 )
 
-
 # ---------------------------------------------------------------------------
 # fix_npm_ignore_scripts
 # ---------------------------------------------------------------------------
@@ -488,7 +487,7 @@ def sec4_011():
 
 
 @pytest.mark.parametrize(
-    "body, should_fire",
+    ("body", "should_fire"),
     [
         # Newly covered by the shared anchor
         ("      - run: docker build -t app .", True),
