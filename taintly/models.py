@@ -880,6 +880,12 @@ class ContextPattern:
         self._anchor_step_exclude_re = (
             re.compile(self.anchor_step_exclude) if self.anchor_step_exclude else None
         )
+        # Platform of the owning rule.  Set by :meth:`Rule.__post_init__`
+        # so platform-specific gating (the Groovy comment-strip in
+        # :meth:`_check_file_scoped`) doesn't apply to GitHub / GitLab
+        # rules — their YAML can carry inline ``//`` JavaScript comments
+        # (``actions/github-script@v7`` blocks) that must not be blanked.
+        self._platform: Platform | None = None
 
     # CONTRACT: returns (line_num, snippet) where snippet is the
     # ``.strip()``'d anchor line — the line whose contents matched
@@ -897,14 +903,19 @@ class ContextPattern:
         # rule coverage to the ReDoS length cap.  See
         # ``_safe_search_chunked`` for the chunking semantics.
         #
-        # Groovy ``//`` and ``/* */`` comments are blanked out before
-        # the requires / requires_absent checks so a documentation
-        # comment that *mentions* a PR-context variable
-        # (``env.CHANGE_ID``) or a credential name doesn't satisfy
-        # the gate.  The per-line anchor pass below still sees the
-        # original ``lines`` — the existing ``exclude`` patterns
-        # cover leading-comment anchor matches.
-        gated_content = _strip_groovy_comments(content)
+        # On Jenkins rules, Groovy ``//`` and ``/* */`` comments are
+        # blanked out before the requires / requires_absent checks so
+        # a documentation comment that *mentions* a PR-context variable
+        # (``env.CHANGE_ID``) or a credential name doesn't satisfy the
+        # gate.  GitHub / GitLab rules skip the strip — their YAML can
+        # carry inline ``//`` JavaScript comments (notably inside
+        # ``actions/github-script@v7`` ``run:`` blocks) that must not
+        # be blanked.  The per-line anchor pass below still sees the
+        # original ``lines`` — the existing ``exclude`` patterns cover
+        # leading-comment anchor matches.
+        gated_content = (
+            _strip_groovy_comments(content) if self._platform is Platform.JENKINS else content
+        )
         if not _safe_search_chunked(self._requires_re, gated_content):
             return []
         if self._requires_absent_re and _safe_search_chunked(
@@ -1271,6 +1282,15 @@ class Rule:
     expanded scan adds cost and only matters for rules whose evidence
     can legitimately live behind a YAML anchor (e.g. SEC4-GH-005's
     ``persist-credentials: false`` lookahead)."""
+
+    def __post_init__(self):
+        # Propagate platform onto the pattern so platform-specific
+        # gating (the Groovy comment-strip in
+        # :meth:`ContextPattern._check_file_scoped`) doesn't apply to
+        # GitHub / GitLab rules.  Patterns that don't carry a
+        # ``_platform`` slot ignore this silently.
+        if hasattr(self.pattern, "_platform"):
+            self.pattern._platform = self.platform
 
 
 # =============================================================================

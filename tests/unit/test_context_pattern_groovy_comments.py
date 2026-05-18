@@ -156,3 +156,67 @@ def test_lotp_jk_001_does_not_fire_on_line_comment_pr_context():
     ).lstrip()
     rule = _jenkins_rule("LOTP-JK-001")
     assert rule.pattern.check(content, content.splitlines()) == []
+
+
+def test_context_pattern_binds_platform_from_rule():
+    """``Rule.__post_init__`` propagates the rule's platform onto the
+    pattern so the comment-strip can gate on it.  All ContextPattern
+    instances reachable through the rule registry must carry their
+    rule's platform."""
+    for platform in (Platform.JENKINS, Platform.GITHUB, Platform.GITLAB):
+        for rule in load_rules_for_platform(platform):
+            if hasattr(rule.pattern, "_platform"):
+                assert rule.pattern._platform is platform, (
+                    f"{rule.id}: pattern._platform={rule.pattern._platform!r} "
+                    f"but rule.platform={platform!r}"
+                )
+
+
+def test_strip_does_not_apply_to_github_rules():
+    """GitHub workflows can carry inline JavaScript (``actions/github-script``)
+    whose ``//`` comments must NOT be blanked by the Groovy-comment-strip.
+    The strip is gated on ``platform == Platform.JENKINS``.
+
+    Construct a ContextPattern instance directly with each platform and
+    confirm the requires-gate sees the original content (JS comments
+    intact) on non-Jenkins platforms.
+    """
+    from taintly.models import ContextPattern
+
+    # A pattern whose ``requires`` would match the JS-in-YAML comment
+    # text iff the comment is NOT stripped.
+    pat = ContextPattern(
+        anchor=r"console\.log",
+        requires=r"workflow_dispatch",
+    )
+
+    workflow_with_js = dedent(
+        """
+        name: ci
+        on: [pull_request]
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/github-script@v7
+                with:
+                  script: |
+                    // For workflow_dispatch, use the explicitly provided PR.
+                    console.log("ok");
+        """
+    ).lstrip()
+    lines = workflow_with_js.splitlines()
+
+    # Default: no platform bound -> no strip -> requires matches.
+    assert pat._platform is None
+    assert pat.check(workflow_with_js, lines), "default (unbound) should not strip"
+
+    # GitHub-bound: strip is gated off, requires still matches.
+    pat._platform = Platform.GITHUB
+    assert pat.check(workflow_with_js, lines), "GitHub-bound must not strip"
+
+    # Jenkins-bound: strip is on, comment blanked, requires no longer matches.
+    pat._platform = Platform.JENKINS
+    assert pat.check(workflow_with_js, lines) == [], (
+        "Jenkins-bound should strip the JS comment from the gating content"
+    )
