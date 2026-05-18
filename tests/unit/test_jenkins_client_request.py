@@ -72,3 +72,14 @@ def test_request_does_not_double_append_api_json():
 
 def test_request_handles_subpath_without_query():
     assert _capture_url("/pluginManager") == "https://jenkins.example.com/pluginManager/api/json"
+
+
+def test_request_rebases_absolute_url_onto_configured_base():
+    """Defensive: if a caller passes an absolute URL as ``path``,
+    the scheme/host are dropped and the path is anchored under the
+    configured ``base_url`` — the client cannot be steered to a
+    different host by a malformed path."""
+    assert (
+        _capture_url("https://other.example.com/admin")
+        == "https://jenkins.example.com/admin/api/json"
+    )
