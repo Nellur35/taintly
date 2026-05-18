@@ -23,7 +23,6 @@ from taintly.fixes import (
     fix_unquote_groovy_gstring_with_params,
 )
 
-
 # ---------------------------------------------------------------------------
 # fix_npm_ignore_scripts
 # ---------------------------------------------------------------------------
@@ -422,7 +421,7 @@ def test_groovy_gstring_skips_body_with_non_params_interpolation(tmp_path):
 def test_groovy_gstring_skips_body_with_apostrophe(tmp_path):
     # Groovy '...' has no \' escape; rewriting requires concatenation.
     p = tmp_path / "Jenkinsfile"
-    original = "sh \"echo don't touch ${params.X}\"\n"
+    original = 'sh "echo don\'t touch ${params.X}"\n'
     p.write_text(original, encoding="utf-8")
     assert fix_unquote_groovy_gstring_with_params(str(p), dry_run=False) == []
     assert p.read_text(encoding="utf-8") == original
@@ -488,7 +487,7 @@ def sec4_011():
 
 
 @pytest.mark.parametrize(
-    "body, should_fire",
+    ("body", "should_fire"),
     [
         # Newly covered by the shared anchor
         ("      - run: docker build -t app .", True),
@@ -544,9 +543,10 @@ def test_fix_dry_run_on_mixed_platform_repo_processes_both(tmp_path):
     )
 
     result = subprocess.run(
-        [sys.executable, "-m", "taintly", str(tmp_path),
-         "--fix-dry-run", "--no-color"],
-        capture_output=True, text=True, timeout=60,
+        [sys.executable, "-m", "taintly", str(tmp_path), "--fix-dry-run", "--no-color"],
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
     # Both platforms' files must show up in the fix-dry-run output.
@@ -771,9 +771,7 @@ def test_cap_add_hint_idempotent(tmp_path):
     """Second invocation must not re-inject the comment."""
     path = _write_jenkins(
         tmp_path,
-        "pipeline {\n"
-        "    agent { docker { image 'x' args '--privileged' } }\n"
-        "}\n",
+        "pipeline {\n    agent { docker { image 'x' args '--privileged' } }\n}\n",
     )
     fix_jenkins_cap_add_hint(path, dry_run=False)
     results = fix_jenkins_cap_add_hint(path, dry_run=False)
@@ -790,6 +788,22 @@ def test_cap_add_hint_skips_non_jenkinsfile(tmp_path):
     )
     results = fix_jenkins_cap_add_hint(str(p), dry_run=False)
     assert results == []
+
+
+def test_cap_add_hint_skips_jenkinsfile_doc_extensions(tmp_path):
+    """``Jenkinsfile.adoc`` / ``Jenkinsfile.md`` / ``Jenkinsfile.txt`` /
+    ``Jenkinsfile.pdf`` are documentation files, not Groovy.  The fix
+    must not inject ``// taintly hint`` comments into them — the file
+    discovery path already rejects these extensions; the fix path must
+    agree."""
+    for ext in ("adoc", "md", "txt", "pdf", "rst"):
+        p = tmp_path / f"Jenkinsfile.{ext}"
+        p.write_text(
+            "Example showing `docker run --privileged` antipattern.\n",
+            encoding="utf-8",
+        )
+        results = fix_jenkins_cap_add_hint(str(p), dry_run=False)
+        assert results == [], f"Jenkinsfile.{ext} should be rejected"
 
 
 # ---------------------------------------------------------------------------
@@ -877,16 +891,14 @@ def test_allowed_tools_scaffold_idempotent(tmp_path):
 def test_hoist_replaces_literal_with_var_reference(tmp_path):
     p = tmp_path / ".gitlab-ci.yml"
     p.write_text(
-        "variables:\n"
-        "  POSTGRES_PASSWORD: hunter2ispostgres\n"
-        "  POSTGRES_DB: myapp\n",
+        "variables:\n  POSTGRES_PASSWORD: hunter2ispostgres\n  POSTGRES_DB: myapp\n",
         encoding="utf-8",
     )
     results = fix_hoist_service_credentials(str(p), dry_run=False)
     assert len(results) == 1
     new_content = p.read_text()
     assert "POSTGRES_PASSWORD: $POSTGRES_PASSWORD" in new_content
-    assert "POSTGRES_DB: myapp" in new_content   # unrelated key survives
+    assert "POSTGRES_DB: myapp" in new_content  # unrelated key survives
     assert "hunter2ispostgres" not in new_content  # literal gone
 
 
@@ -895,9 +907,7 @@ def test_hoist_preserves_reference_shapes(tmp_path):
     must NOT be rewritten."""
     p = tmp_path / ".gitlab-ci.yml"
     p.write_text(
-        "variables:\n"
-        "  POSTGRES_PASSWORD: $POSTGRES_PASSWORD\n"
-        "  MYSQL_PASSWORD: ${DB_PASSWORD}\n",
+        "variables:\n  POSTGRES_PASSWORD: $POSTGRES_PASSWORD\n  MYSQL_PASSWORD: ${DB_PASSWORD}\n",
         encoding="utf-8",
     )
     results = fix_hoist_service_credentials(str(p), dry_run=False)
@@ -909,10 +919,7 @@ def test_hoist_skips_non_gitlab_file(tmp_path):
     contain a matching ``*_PASSWORD:`` line."""
     p = tmp_path / "docker-compose.yml"
     p.write_text(
-        "services:\n"
-        "  db:\n"
-        "    environment:\n"
-        "      POSTGRES_PASSWORD: hunter2ispostgres\n",
+        "services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: hunter2ispostgres\n",
         encoding="utf-8",
     )
     results = fix_hoist_service_credentials(str(p), dry_run=False)
@@ -928,7 +935,7 @@ def test_hoist_dry_run_does_not_write(tmp_path):
     results = fix_hoist_service_credentials(str(p), dry_run=True)
     assert len(results) == 1
     assert results[0].applied is False
-    assert "hunter2ispostgres" in p.read_text()   # file unchanged
+    assert "hunter2ispostgres" in p.read_text()  # file unchanged
 
 
 def test_all_opt_in_fixers_registered():

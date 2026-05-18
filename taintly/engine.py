@@ -1060,11 +1060,11 @@ def scan_repo(
                     report.gitlab_ctx_detected[field_name] = value
         else:
             gitlabctx = None
-        # Jenkins parameter_values has no consumer in the evaluator
-        # today (``evaluate_jenkins_when`` discards ctx).  Populating
-        # from the environment would be speculative without effect;
-        # leave the field empty until a context-aware evaluator
-        # lands.
+        # JenkinsContext is currently empty (reserved as a typed
+        # extension point); ``evaluate_jenkins_when`` discards ctx.
+        # We still instantiate one per-Jenkins-scan so downstream
+        # callers that take ``JenkinsContext | None`` see the same
+        # truthy-but-empty marker they did before.
         jenkinsctx = JenkinsContext() if plat == Platform.JENKINS else None
         for fpath in files:
             file_rules = _rules_for_file(fpath, platform_rules)

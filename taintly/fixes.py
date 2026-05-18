@@ -978,11 +978,15 @@ def fix_jenkins_cap_add_hint(filepath: str, dry_run: bool = False) -> list[FixRe
     reminder comments; users who rename privileged in CI review flows
     rarely want the comments back."""
     results: list[FixResult] = []
-    # Don't run on non-Jenkinsfile paths.  Accept any file whose basename
-    # starts with ``Jenkinsfile`` (covers ``Jenkinsfile``,
-    # ``Jenkinsfile.coverage``, etc.) or ends with ``.groovy`` under a
-    # ``jenkins/`` directory.
+    # Don't run on non-Jenkinsfile paths.  Reuse the engine's
+    # ``_is_jenkinsfile_name`` classifier so the fix path and the
+    # discovery path agree — a ``Jenkinsfile.adoc`` / ``Jenkinsfile.md``
+    # doc file is rejected here exactly as it would be by file
+    # discovery, so this fix never injects Groovy comments into
+    # AsciiDoc or Markdown.
     from os.path import basename, dirname
+
+    from .engine import _is_jenkinsfile_name
 
     name = basename(filepath)
     # Normalise to forward slashes BEFORE splitting; ``os.path.dirname``
@@ -991,7 +995,7 @@ def fix_jenkins_cap_add_hint(filepath: str, dry_run: bool = False) -> list[FixRe
     # — silently misclassifying every Jenkins ``.groovy`` file under a
     # ``jenkins\`` directory as non-Jenkins.  Same fix family as the
     # XF-GH-003 / XF-GH-004 endswith bugs.
-    is_jk = name.startswith("Jenkinsfile") or (
+    is_jk = _is_jenkinsfile_name(name) or (
         name.endswith(".groovy") and "jenkins" in dirname(filepath).replace("\\", "/").split("/")
     )
     if not is_jk:
