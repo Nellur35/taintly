@@ -134,7 +134,7 @@
   "jenkins/vulnerable/prod_deploy_no_input.Jenkinsfile": "051c2465b82fe387347a9367fc03f31e01e591da9a14af26ffd6f2a61d1f1427",
   "jenkins/vulnerable/remote_groovy_script.Jenkinsfile": "e56d84f1d981fc39567419600f1a60d2cc177b6dea0f29efdb3e531a2c0c1d35",
   "jenkins/vulnerable/scm_env_injection.Jenkinsfile": "bffd43c8651a7207ef49e8303acfc26e65f57b8ba02474d736a20c143637cf4d",
-  "jenkins/vulnerable/sec9_jk_004_curl_pipe_interpreter.Jenkinsfile": "300443884cfce76909a717bdaeea08181b5720f522a2368d6100085bf23cb73d",
+  "jenkins/vulnerable/sec9_jk_004_curl_pipe_interpreter.Jenkinsfile": "2c145b44a0b1bba1073606c26265fba8be930bb394970fe493011318fdaefc99",
   "jenkins/vulnerable/unpinned_shared_library.Jenkinsfile": "88d5f8f0c226fa7e6b9657b3b0c8077e475358ef24dcbedd0c767b5512b89c6c",
   "jenkins/vulnerable/wget_no_checksum.Jenkinsfile": "4accd6099bb1a194bc2011cb166c9dd9cc2203a168d7a9f5560c9efb2af0e9b0",
   "jenkins/vulnerable/writefile_private_key.Jenkinsfile": "9376e4f6740cbed993ab7b54a38e6bef894ef0257662a4b43a77525c5182c395"
