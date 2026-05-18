@@ -528,8 +528,14 @@ _JENKINSFILE_MARKERS = (
     re.compile(r"^#!\s*/?\S*\bgroovy\b"),
     re.compile(r"^#!\s*groovy\b"),
     re.compile(r"^\s*def\s+\w+\s*[=\(]"),
-    re.compile(r"^\s*//"),  # Groovy line comment — YAML uses ``#``
-    re.compile(r"^\s*/\*"),  # Groovy block comment opener
+    # ``//`` / ``/* */`` markers REQUIRE column 0 (no leading whitespace).
+    # GitHub Actions workflows often embed JavaScript via
+    # ``actions/github-script@v7`` ``script: |`` blocks whose ``//``
+    # comments are always indented; those must not trigger the
+    # Jenkinsfile heuristic.  Real Jenkinsfile top-level comments are at
+    # column 0 (license headers, vim modelines, shared-library notes).
+    re.compile(r"^//"),
+    re.compile(r"^/\*"),
 )
 
 
@@ -539,10 +545,14 @@ def _looks_like_jenkinsfile(lines: list[str]) -> bool:
     Looks for any of: a ``pipeline { ... }`` block opener, a ``node { ... }``
     or ``node('label') { ... }`` opener, a Groovy shebang
     (``#!/usr/bin/env groovy`` / ``#!groovy``), a top-level
-    ``def name(...)`` / ``def name = ...`` declaration, or a Groovy
+    ``def name(...)`` / ``def name = ...`` declaration, or a column-0
     ``//`` / ``/* ... */`` comment.  Any one match is enough — these
     constructs don't appear in well-formed GitHub Actions or GitLab CI
     YAML (which uses ``#`` for comments and has no block structure).
+
+    The ``//`` / ``/*`` markers require column 0 specifically so that
+    indented JavaScript inside ``actions/github-script@v7`` ``script: |``
+    blocks doesn't misclassify a GitHub workflow as a Jenkinsfile.
     """
     for line in lines:
         for marker in _JENKINSFILE_MARKERS:

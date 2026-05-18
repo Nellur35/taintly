@@ -161,6 +161,48 @@ def test_jenkinsfile_with_def_helper_is_single_segment():
     assert _split_into_job_segments(lines) == [(0, lines)]
 
 
+def test_github_actions_with_inline_javascript_still_segments():
+    """A GitHub Actions workflow that embeds JavaScript via
+    ``actions/github-script@v7`` ``script: |`` blocks must not be
+    misclassified as a Jenkinsfile.  Inline JS uses ``//`` line
+    comments which are always indented (nested under ``script: |``)
+    — the Jenkinsfile heuristic's ``//`` marker requires column 0
+    so indented JS comments don't trigger it.
+    """
+    lines = (
+        dedent(
+            """
+        name: ci
+        on:
+          workflow_dispatch:
+          pull_request:
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/github-script@v7
+                with:
+                  script: |
+                    // For workflow_dispatch, use the explicit PR number.
+                    // Otherwise, fall back to the head sha.
+                    const pr = Number(inputs.pr);
+          test:
+            runs-on: ubuntu-latest
+            steps:
+              - run: npm test
+        """
+        )
+        .lstrip()
+        .splitlines()
+    )
+    # Preamble + 2 jobs (build, test) — NOT a single segment.
+    segments = _split_into_job_segments(lines)
+    assert len(segments) == 3, (
+        f"expected 3 segments (preamble + 2 jobs), got {len(segments)}: "
+        f"JS-in-YAML may have triggered the Jenkinsfile heuristic"
+    )
+
+
 def test_yaml_with_http_url_value_still_segments():
     """``http://`` inside a YAML scalar value must not trigger the
     Jenkinsfile heuristic — the ``//`` marker requires line start."""
