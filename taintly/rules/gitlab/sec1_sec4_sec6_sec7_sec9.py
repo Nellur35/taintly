@@ -1099,7 +1099,7 @@ RULES: list[Rule] = [
             "(December 2024), ported from GitHub."
         ),
         pattern=ContextPattern(
-            anchor=r"\b(?:npm\s+(?:install|ci|i)|yarn(?:\s+install)?|pnpm\s+(?:install|i))\b",
+            anchor=r"\b(?:npm\s+(?:install|ci|i)|yarn\s+install|pnpm\s+(?:install|i))\b",
             requires=(
                 r"(?m:"
                 r"\$CI_PIPELINE_SOURCE\s*==\s*['\"]?merge_request_event"
@@ -1162,6 +1162,29 @@ RULES: list[Rule] = [
             ),
             # Comment
             "    # npm install",
+            # yarn <non-install subcommand> in MR pipeline — must not fire
+            (
+                "mr-test:\n"
+                "  rules:\n"
+                "    - if: '$CI_PIPELINE_SOURCE == \"merge_request_event\"'\n"
+                "  script:\n"
+                "    - yarn jest:integration"
+            ),
+            (
+                "mr-test:\n"
+                "  rules:\n"
+                "    - if: '$CI_PIPELINE_SOURCE == \"merge_request_event\"'\n"
+                "  script:\n"
+                "    - yarn run lint"
+            ),
+            # yarn.lock filename in MR-reachable job
+            (
+                "mr-test:\n"
+                "  rules:\n"
+                "    - if: '$CI_PIPELINE_SOURCE == \"merge_request_event\"'\n"
+                "  script:\n"
+                "    - cp yarn.lock dist/"
+            ),
         ],
         stride=["T", "E"],
         threat_narrative=(
