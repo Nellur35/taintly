@@ -23,7 +23,13 @@ JENKINS_SUPPLY_CHAIN_FAMILY = {
     "SEC9-JK-004",
 }
 
-GITHUB_CACHE_WRITE_FAMILY = {"SEC4-GH-026", "SEC9-GH-005", "XF-GH-001", "XF-GH-001A"}
+GITHUB_CACHE_WRITE_FAMILY = {
+    "SEC4-GH-026",
+    "SEC4-GH-026A",
+    "SEC9-GH-005",
+    "XF-GH-001",
+    "XF-GH-001A",
+}
 GITHUB_CREDENTIAL_FAMILY = {"SEC4-GH-005", "CHAIN-GH-101"}
 
 
@@ -85,7 +91,8 @@ def test_github_round2_prt_cache_save_attacker_key_still_fires(github_rules):
 
     fired = _ids(fixture, github_rules)
 
-    assert "SEC4-GH-026" in fired
+    assert "SEC4-GH-026A" in fired
+    assert "SEC4-GH-026" not in fired
     assert "SEC9-GH-005" in fired
 
 

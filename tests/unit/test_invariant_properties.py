@@ -8,6 +8,7 @@ Each property is a single claim that MUST hold regardless of input
 (within realistic bounds). Hypothesis generates the inputs; any
 counterexample is printed in shrunk-minimal form.
 """
+# ruff: noqa: I001
 
 from __future__ import annotations
 
@@ -221,7 +222,7 @@ def test_registry_rule_ids_follow_naming_convention() -> None:
     import re
 
     pattern = re.compile(
-        r"^(SEC\d{1,2}-(GH|GL|JK)-\d{3}"
+        r"^(SEC\d{1,2}-(GH|GL|JK)-\d{3}[A-Z]?"
         r"|SEC\d{1,2}-GH-T\d{2}"
         r"|PLAT-(GH|GL)-\d{3}"
         r"|TAINT-(GH|GL|JK)-\d{3}"
@@ -257,9 +258,8 @@ def test_registry_pattern_check_returns_list_of_tuples() -> None:
         result = rule.pattern.check("", [])
         assert isinstance(result, list)
         for item in result:
-            assert isinstance(item, tuple) and len(item) == 2, (
-                f"{rule.id}: pattern.check returned {item!r}"
-            )
+            assert isinstance(item, tuple), f"{rule.id}: pattern.check returned {item!r}"
+            assert len(item) == 2, f"{rule.id}: pattern.check returned {item!r}"
 
 
 # =============================================================================

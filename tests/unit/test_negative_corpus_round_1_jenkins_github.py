@@ -29,6 +29,7 @@ GITHUB_CACHE_CREDENTIAL_FAMILY = {
     "CHAIN-GH-101",
     "SEC4-GH-005",
     "SEC4-GH-026",
+    "SEC4-GH-026A",
     "SEC9-GH-005",
     "XF-GH-001",
 }
@@ -88,4 +89,5 @@ def test_github_negative_corpus_cache_poison_positive_anchor_still_fires(github_
 
     fired = _ids(fixture, github_rules)
 
-    assert {"SEC4-GH-026", "SEC9-GH-005"} <= fired
+    assert {"SEC4-GH-026A", "SEC9-GH-005"} <= fired
+    assert "SEC4-GH-026" not in fired

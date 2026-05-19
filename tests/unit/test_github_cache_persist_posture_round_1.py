@@ -8,7 +8,13 @@ from taintly.engine import scan_file
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "github" / "negative_corpus"
 
-CACHE_WRITE_FAMILY = {"SEC4-GH-026", "SEC9-GH-005", "XF-GH-001", "XF-GH-001A"}
+CACHE_WRITE_FAMILY = {
+    "SEC4-GH-026",
+    "SEC4-GH-026A",
+    "SEC9-GH-005",
+    "XF-GH-001",
+    "XF-GH-001A",
+}
 CREDENTIAL_FAMILY = {"SEC4-GH-005", "CHAIN-GH-101"}
 
 
@@ -39,7 +45,15 @@ def test_cache_restore_only_under_pr_does_not_fire_cache_write_family(github_rul
 def test_pull_request_target_cache_write_still_fires_sec4_gh_026(github_rules):
     fired = _ids("positive_prt_cache_hashfiles_write.yml", github_rules)
 
+    assert "SEC4-GH-026A" in fired
+    assert "SEC4-GH-026" not in fired
+
+
+def test_pull_request_cache_write_fires_sec4_gh_026_info_tier(github_rules):
+    fired = _ids("positive_pr_cache_hashfiles_write.yml", github_rules)
+
     assert "SEC4-GH-026" in fired
+    assert "SEC4-GH-026A" not in fired
 
 
 def test_missing_permissions_job_level_behavior_is_pinned(github_rules):
