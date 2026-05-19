@@ -15,7 +15,7 @@ CACHE_WRITE_FAMILY = {
     "XF-GH-001",
     "XF-GH-001A",
 }
-CREDENTIAL_FAMILY = {"SEC4-GH-005", "CHAIN-GH-101"}
+CREDENTIAL_FAMILY = {"SEC4-GH-005", "SEC4-GH-005B", "CHAIN-GH-101"}
 
 
 def _ids(name: str, rules) -> set[str]:
@@ -72,6 +72,27 @@ def test_persist_credentials_downstream_positive_anchor_still_fires(github_rules
     fired = _ids("positive_persist_credentials_downstream.yml", github_rules)
 
     assert "SEC4-GH-005" in fired
+    assert "SEC4-GH-005B" not in fired
+
+
+def test_sec4_gh_005b_fires_on_prt_checkout_without_consumer(github_rules):
+    fired = _ids("positive_prt_checkout_no_persist_no_consumer.yml", github_rules)
+
+    assert "SEC4-GH-005B" in fired
+    assert "SEC4-GH-005" not in fired
+
+
+def test_sec4_gh_005b_silent_when_persist_credentials_false(github_rules):
+    fired = _ids("safe_pr_checkout_persist_credentials_false.yml", github_rules)
+
+    assert "SEC4-GH-005" not in fired
+    assert "SEC4-GH-005B" not in fired
+
+
+def test_sec4_gh_005b_silent_on_push_only_checkout(github_rules):
+    fired = _ids("safe_push_checkout_no_persist_no_consumer.yml", github_rules)
+
+    assert "SEC4-GH-005B" not in fired
 
 
 def test_existing_safe_cache_checkout_stays_quiet_for_high_blast_family(github_rules):
