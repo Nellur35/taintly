@@ -1099,7 +1099,7 @@ RULES: list[Rule] = [
             "(December 2024), ported from GitHub."
         ),
         pattern=ContextPattern(
-            anchor=r"\b(?:npm\s+(?:install|ci|i)|yarn\s+install|pnpm\s+(?:install|i))\b",
+            anchor=r"\b(?:npm\s+(?:install|ci|i)|yarn\s+install|yarn(?=\s*(?:$|[;&|]))|pnpm\s+(?:install|i))\b",
             requires=(
                 r"(?m:"
                 r"\$CI_PIPELINE_SOURCE\s*==\s*['\"]?merge_request_event"
@@ -1142,6 +1142,23 @@ RULES: list[Rule] = [
             ("test:\n  only:\n    - merge_requests\n  script:\n    - npm ci\n    - npm test"),
             # pnpm install form
             ("check:\n  rules:\n    - if: $CI_MERGE_REQUEST_IID\n  script:\n    - pnpm install"),
+            # Bare ``yarn`` — Yarn 1.x / Berry treat this as shorthand for
+            # ``yarn install`` (runs lifecycle scripts).
+            (
+                "mr-test:\n"
+                "  rules:\n"
+                "    - if: '$CI_PIPELINE_SOURCE == \"merge_request_event\"'\n"
+                "  script:\n"
+                "    - yarn"
+            ),
+            # Bare ``yarn`` chained — still an install + lifecycle-script run.
+            (
+                "mr-test:\n"
+                "  rules:\n"
+                "    - if: '$CI_PIPELINE_SOURCE == \"merge_request_event\"'\n"
+                "  script:\n"
+                "    - yarn && yarn test"
+            ),
         ],
         test_negative=[
             # --ignore-scripts present → safe
