@@ -1,0 +1,53 @@
+# TanStack-style kill chain — fork-reachable validation workflow.
+#
+# This is the PR side of the chain.  It runs on every PR
+# (including from forks) with the parent repo's tokens and writes
+# multiple caches keyed on lockfile hashes.  No persist-credentials:
+# false on the checkout.  Job-level permissions only.
+#
+# What this fixture intentionally exercises:
+#   - SEC2-GH-002  : missing top-level permissions (job-level only)
+#   - SEC4-GH-005B : bare checkout under fork-reachable trigger
+#                    (no downstream consumer → posture sibling)
+#   - SEC4-GH-026A : cache write under pull_request_target
+#                    (NOT plain pull_request, so MEDIUM tier)
+#   - SEC9-GH-005  : cache key derived from github.head_ref
+#                    (attacker-controlled context)
+#
+# Cross-workflow rules fire via the release.yml sibling restoring
+# the same cache prefix:
+#   - XF-GH-001    : generic cache poisoning across triggers
+#   - XF-GH-001A   : executable-content variant (node_modules)
+
+on:
+  pull_request_target:
+    branches: [main]
+
+# Job-level permissions only - SEC2-GH-002 fires on missing top level.
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # SEC4-GH-026A: cache write under pull_request_target.
+      # SEC9-GH-005:  key includes github.head_ref (attacker controlled).
+      # The ``node_modules-`` prefix is an executable-content cache
+      # token (per _HIGH_BLAST_RADIUS_CACHE_TOKENS) — when release.yml
+      # restores under the same prefix it routes the cross-workflow
+      # rule to the HIGH XF-GH-001A variant.
+      - uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node_modules-${{ github.head_ref }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            node_modules-
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
