@@ -1,0 +1,22 @@
+# Negative corpus: Bash variable assignment.
+#
+# Source: gitlab-org/cli `.gitlab-ci.yml:148`, gitlab-org/gitlab-runner
+# `.gitlab/ci/qa.gitlab-ci.yml:228`.
+#
+# Per Bash manual §3.5.6, word splitting is NOT performed on the
+# right-hand side of a variable assignment.  ``BRANCH_NAME=$CI_COMMIT_BRANCH``
+# is exactly equivalent to ``BRANCH_NAME="$CI_COMMIT_BRANCH"`` — the
+# assignment binds the entire expanded value as a single string,
+# regardless of internal whitespace.  No injection surface.
+ref_name_assignment:
+  stage: release
+  script:
+    - |
+      BRANCH_NAME=$CI_COMMIT_BRANCH
+      DEFAULT=$CI_DEFAULT_BRANCH
+      TITLE_VAR=$CI_COMMIT_TITLE
+      MSG=$CI_COMMIT_MESSAGE
+      DESC_VAR=$CI_MERGE_REQUEST_DESCRIPTION
+      AUTHOR_VAR=$CI_COMMIT_AUTHOR
+      MR_TITLE=$CI_MERGE_REQUEST_TITLE
+      SRC_BRANCH=$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME

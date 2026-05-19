@@ -1,0 +1,11 @@
+// Sanitized from apache/cassandra .jenkins/Jenkinsfile.
+pipeline {
+  agent { label 'linux && docker' }
+  stages {
+    stage('jar') {
+      steps {
+        sh './gradlew jar'
+      }
+    }
+  }
+}

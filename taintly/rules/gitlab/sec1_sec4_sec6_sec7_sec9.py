@@ -147,6 +147,13 @@ RULES: list[Rule] = [
                 # Variable inside SINGLE quotes: `$VAR` is literal text
                 # in bash, no expansion happens — no injection surface.
                 r"'\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?'",
+                # Bash [[ ... ]] conditionals suppress word splitting
+                # and glob expansion, so these variables are not an
+                # unquoted shell-injection surface.
+                r"\[\[[^\n]*\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?[^\n]*\]\]",
+                # Bash assignment RHS is one word; word splitting is not
+                # applied to NAME=$CI_* assignments.
+                r"^\s*-?\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?\s*$",
             ],
             # Quoted-marker heredoc bodies (<<'EOF' / <<"EOF" / <<\EOF)
             # suppress $VAR expansion per Bash §3.6.6; skip those lines.
@@ -572,7 +579,7 @@ RULES: list[Rule] = [
         ),
         pattern=SequencePattern(
             pattern_a=r"^\s*artifacts:\s*$",
-            absent_within=r"access:\s*(developer|none|maintainer)",
+            absent_within=r"""access:\s*['\"]?(developer|none|maintainer)['\"]?\b""",
             lookahead_lines=12,
             exclude=[r"^\s*#"],
         ),

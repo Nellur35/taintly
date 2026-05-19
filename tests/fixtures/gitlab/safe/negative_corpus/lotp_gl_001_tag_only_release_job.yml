@@ -1,0 +1,23 @@
+# Negative corpus: LOTP-GL-001 must not fire on a tag-only release
+# job that runs build tools.
+#
+# Source: synthesised from common GitLab release-pipeline shape
+# (gitlab-org/cli release stage; goreleaser/maven-publish patterns).
+#
+# When ``rules: - if: $CI_COMMIT_TAG`` is the ONLY trigger, the job
+# runs on tag-push events — by definition not on a merge-request
+# pipeline.  ``CI_COMMIT_TAG`` is only set when the source ref is
+# a tag, which fork-MRs cannot create on the parent project
+# (forks have their own tags).
+#
+# The LOTP-GL-001 threat model is "fork-MR contributor can flip
+# package.json / Makefile / setup.py"; that requires an MR-event
+# pipeline.  A tag-only job is not MR-reachable.
+release:
+  stage: release
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - npm ci
+    - npm run build
+    - npm publish

@@ -1,0 +1,14 @@
+name: explicit top-level permissions
+
+on:
+  push:
+
+permissions: {}
+
+jobs:
+  read_only:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo ok

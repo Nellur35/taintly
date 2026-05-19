@@ -1,0 +1,3 @@
+= Jenkinsfile syntax
+
+This uppercase variant protects Windows/macOS case-insensitive discovery.

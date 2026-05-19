@@ -1,0 +1,11 @@
+// Sanitized Jenkins operator variant observed in production repos.
+pipeline {
+  agent { label 'linux' }
+  stages {
+    stage('Build') {
+      steps {
+        sh 'make test'
+      }
+    }
+  }
+}

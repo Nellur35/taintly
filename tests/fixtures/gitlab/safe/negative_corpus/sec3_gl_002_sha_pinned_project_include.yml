@@ -1,0 +1,20 @@
+# Negative corpus: SEC3-GL-002 SHA-pinned project include.
+#
+# Constructed canonical safe form harvested from the GitLab CI docs
+# recommendation (https://docs.gitlab.com/ci/yaml/includes/) and
+# real-world configs that follow it.  ``ref:`` is a full 40-char
+# commit SHA; the include is immutable.
+#
+# This fixture pins the rule's negative case: SHA-pinned project
+# includes must NOT fire SEC3-GL-002.  Mutable forms (tag/branch)
+# are the rule's positive coverage — see test_sec3_gl_002_unquoted_project.py.
+include:
+  - project: gitlab-com/gl-security/security-operations/infrastructure-security-public/oidc-modules
+    ref: a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2
+    file: templates/gcp_auth.yaml
+  - project: another-org/shared-ci
+    ref: 1234567890abcdef1234567890abcdef12345678
+    file: pipelines/build.yml
+build:
+  script:
+    - echo "build using SHA-pinned includes"
