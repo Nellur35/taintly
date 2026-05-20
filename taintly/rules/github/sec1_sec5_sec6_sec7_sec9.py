@@ -1115,7 +1115,12 @@ RULES: list[Rule] = [
             "This is the supply chain entry point pattern — verify every binary you execute."
         ),
         pattern=SequencePattern(
-            pattern_a=r"(curl|wget)\s+[^\n]*\.(sh|py|tar\.gz|tgz|zip|exe|bin|deb|rpm|appimage)\b",
+            # The archive extension must be part of an ``http(s)://`` URL
+            # token with no intervening pipe or quote — otherwise the old
+            # ``[^\n]*`` form matched ``.tar.gz`` inside a ``| jq`` filter
+            # string (e.g. ``select(endswith(".tar.gz"))``), a metadata
+            # query that downloads nothing.
+            pattern_a=r"""(curl|wget)\s+[^\n|]*?https?://[^\s'"|)]+\.(sh|py|tar\.gz|tgz|zip|exe|bin|deb|rpm|appimage)\b""",
             absent_within=r"(sha256sum|sha512sum|shasum|md5sum|cosign\s+verify|gpg\s+--verify)",
             lookahead_lines=5,
             exclude=[r"^\s*#", r"\|\s*(bash|sh|zsh|python|perl)"],
@@ -1134,6 +1139,9 @@ RULES: list[Rule] = [
         test_negative=[
             "        run: |\n          curl -fsSL -o tool.tar.gz https://example.com/tool.tar.gz\n          echo 'abc123  tool.tar.gz' | sha256sum -c -",
             "        run: curl -fsSL https://get.helm.sh/helm-v3.14.0-linux-amd64.tar.gz | sha256sum",
+            # Metadata query: the URL downloads JSON, and ``.tar.gz`` only
+            # appears inside the jq filter string — nothing is downloaded.
+            "        run: v=$(curl -s https://pypi.org/pypi/foo/json | jq -r '[.urls[].filename|select(endswith(\".tar.gz\"))]|last')",
         ],
         stride=["T"],
         threat_narrative=(

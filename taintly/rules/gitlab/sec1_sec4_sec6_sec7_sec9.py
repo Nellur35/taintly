@@ -623,7 +623,10 @@ RULES: list[Rule] = [
             "full access to CI/CD variables and deployment credentials."
         ),
         pattern=SequencePattern(
-            pattern_a=r"(curl|wget)\s+[^\n]*\.(sh|py|tar\.gz|tgz|zip|exe|bin|deb|rpm)\b",
+            # The archive extension must sit in an ``http(s)://`` URL token
+            # with no intervening pipe or quote, so ``.tar.gz`` inside a
+            # ``| jq`` filter string is not mistaken for a download.
+            pattern_a=r"""(curl|wget)\s+[^\n|]*?https?://[^\s'"|)]+\.(sh|py|tar\.gz|tgz|zip|exe|bin|deb|rpm)\b""",
             absent_within=r"(sha256sum|sha512sum|shasum|md5sum|cosign\s+verify|gpg\s+--verify)",
             lookahead_lines=5,
             exclude=[r"^\s*#", r"\|\s*(bash|sh|zsh|python|perl)"],
@@ -642,6 +645,9 @@ RULES: list[Rule] = [
         test_negative=[
             "    - curl -fsSL -o tool.tar.gz https://example.com/tool.tar.gz\n    - echo 'abc123  tool.tar.gz' | sha256sum -c -",
             "    - curl -o cosign https://github.com/sigstore/cosign/releases/download/v2.0.0/cosign-linux-amd64\n    - cosign verify-blob --signature cosign.sig artifact.tar.gz",
+            # Metadata query: ``.tar.gz`` only appears inside the jq filter
+            # string after the pipe — nothing is downloaded.
+            "    - v=$(curl -s https://pypi.org/pypi/foo/json | jq -r '[.urls[].filename|select(endswith(\".tar.gz\"))]|last')",
         ],
         stride=["T"],
         threat_narrative=(
