@@ -630,7 +630,7 @@ RULES: list[Rule] = [
             # "make" as an English verb inside a github-script log line —
             # the real CRITICAL false positive found scanning
             # tiangolo/fastapi (guard-dependencies.yml).
-            'on:\n  pull_request_target:\njobs:\n  guard:\n    steps:\n      - uses: actions/github-script@v7\n        with:\n          script: |\n            console.log(`Author is allowed to make dependency changes.`);\n',
+            "on:\n  pull_request_target:\njobs:\n  guard:\n    steps:\n      - uses: actions/github-script@v7\n        with:\n          script: |\n            console.log(`Author is allowed to make dependency changes.`);\n",
             # pip install of a named PyPI package does NOT read from repo — safe in LOTP context
             "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n      - run: pip install PyGithub\n",
             "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n      - run: pip install --upgrade pip\n",
