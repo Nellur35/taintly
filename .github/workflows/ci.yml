@@ -184,6 +184,14 @@ jobs:
         run: python -m taintly --self-test --no-color
         # Exit 10 if any rule self-test fails
 
+      - name: FP simulator (advisory)
+        # Benignises each rule's own positive samples and reports rules
+        # that still fire. Advisory in Phase 1 — the command exits 0
+        # regardless, so this step never blocks a merge; it surfaces
+        # FP-prone rules in the build log for triage. See the docstring
+        # on ``taintly.testing.fp_simulator``.
+        run: python -m taintly --self-test --fp-simulate --no-color
+
       - name: Mutation tests (100% kill rate modulo documented gaps)
         # ``100% kill rate`` is the wall-clock claim, but the
         # underlying harness counts entries in

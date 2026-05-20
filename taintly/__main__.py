@@ -165,6 +165,15 @@ def main():
     )
     parser.add_argument("--rule", help="Test specific rule ID (use with --self-test)")
     parser.add_argument(
+        "--fp-simulate",
+        action="store_true",
+        help=(
+            "Run the FP simulator (advisory): benignise each rule's own "
+            "positive samples and report rules that still fire. Pairs with "
+            "--self-test. Reports only — does not affect the exit code."
+        ),
+    )
+    parser.add_argument(
         "--self-test-json",
         action="store_true",
         help=(
@@ -597,6 +606,12 @@ def main():
             print(format_test_results_json(self_results, mutation_results))
         else:
             print(format_test_results(self_results, mutation_results))
+
+        # FP simulator — advisory, never affects the exit code.
+        if args.fp_simulate:
+            from .testing.fp_simulator import format_fp_results, run_fp_simulation
+
+            print(format_fp_results(run_fp_simulation(testable), testable))
 
         # Exit codes
         if not all(r.passed for r in self_results):
