@@ -1,0 +1,12 @@
+name: missing top-level permissions anchor
+
+on:
+  push:
+
+jobs:
+  read_only:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo ok

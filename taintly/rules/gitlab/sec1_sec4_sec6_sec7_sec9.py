@@ -147,6 +147,13 @@ RULES: list[Rule] = [
                 # Variable inside SINGLE quotes: `$VAR` is literal text
                 # in bash, no expansion happens — no injection surface.
                 r"'\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?'",
+                # Bash [[ ... ]] conditionals suppress word splitting
+                # and glob expansion, so these variables are not an
+                # unquoted shell-injection surface.
+                r"\[\[[^\n]*\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?[^\n]*\]\]",
+                # Bash assignment RHS is one word; word splitting is not
+                # applied to NAME=$CI_* assignments.
+                r"^\s*-?\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?\s*$",
             ],
             # Quoted-marker heredoc bodies (<<'EOF' / <<"EOF" / <<\EOF)
             # suppress $VAR expansion per Bash §3.6.6; skip those lines.
@@ -572,7 +579,7 @@ RULES: list[Rule] = [
         ),
         pattern=SequencePattern(
             pattern_a=r"^\s*artifacts:\s*$",
-            absent_within=r"access:\s*(developer|none|maintainer)",
+            absent_within=r"""access:\s*['\"]?(developer|none|maintainer)['\"]?\b""",
             lookahead_lines=12,
             exclude=[r"^\s*#"],
         ),
@@ -616,7 +623,10 @@ RULES: list[Rule] = [
             "full access to CI/CD variables and deployment credentials."
         ),
         pattern=SequencePattern(
-            pattern_a=r"(curl|wget)\s+[^\n]*\.(sh|py|tar\.gz|tgz|zip|exe|bin|deb|rpm)\b",
+            # The archive extension must sit in an ``http(s)://`` URL token
+            # with no intervening pipe or quote, so ``.tar.gz`` inside a
+            # ``| jq`` filter string is not mistaken for a download.
+            pattern_a=r"""(curl|wget)\s+[^\n|]*?https?://[^\s'"|)]+\.(sh|py|tar\.gz|tgz|zip|exe|bin|deb|rpm)\b""",
             absent_within=r"(sha256sum|sha512sum|shasum|md5sum|cosign\s+verify|gpg\s+--verify)",
             lookahead_lines=5,
             exclude=[r"^\s*#", r"\|\s*(bash|sh|zsh|python|perl)"],
@@ -635,6 +645,9 @@ RULES: list[Rule] = [
         test_negative=[
             "    - curl -fsSL -o tool.tar.gz https://example.com/tool.tar.gz\n    - echo 'abc123  tool.tar.gz' | sha256sum -c -",
             "    - curl -o cosign https://github.com/sigstore/cosign/releases/download/v2.0.0/cosign-linux-amd64\n    - cosign verify-blob --signature cosign.sig artifact.tar.gz",
+            # Metadata query: ``.tar.gz`` only appears inside the jq filter
+            # string after the pipe — nothing is downloaded.
+            "    - v=$(curl -s https://pypi.org/pypi/foo/json | jq -r '[.urls[].filename|select(endswith(\".tar.gz\"))]|last')",
         ],
         stride=["T"],
         threat_narrative=(

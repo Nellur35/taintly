@@ -1,0 +1,23 @@
+name: pr cache write tier anchor
+
+# Discriminates SEC4-GH-026 (INFO, this fixture) from SEC4-GH-026A
+# (MEDIUM under pull_request_target).  ``pull_request`` (no _target)
+# runs with default-read-only GITHUB_TOKEN since Feb-2023; the cache
+# write is a posture signal, not a primary attack surface.
+#
+# Anchored under github-tanstack-posture-design-v1 (2026-05-19).
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ hashFiles('package-lock.json') }}

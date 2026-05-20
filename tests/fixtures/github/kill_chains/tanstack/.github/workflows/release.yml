@@ -1,0 +1,67 @@
+# TanStack-style kill chain — release / deploy workflow.
+#
+# This is the privileged side of the chain.  Runs on push to main,
+# restores the cache prefix the PR workflow wrote to, then publishes
+# with the maintainer's tokens.
+#
+# What this workflow contributes to the kill chain:
+#   - Restores caches under the same `deps-` prefix that
+#     pr-validate.yml writes.  Combined with the cross-trigger
+#     mismatch (push privilege restoring a PR-written entry), this
+#     creates the XF-GH-001 / XF-GH-001A cross-workflow finding.
+#   - The cached path is ``node_modules`` — executable content,
+#     which routes XF-GH-001A to HIGH (vs the generic XF-GH-001
+#     MEDIUM).
+#
+# Plus per-file rules that fire because of this file's own shape:
+#   - SEC4-GH-005  : checkout + git push downstream → MEDIUM
+#                    (the credential consumer is `git tag` +
+#                    `git push --tags`)
+#   - CHAIN-GH-101 : SEC4-GH-005 + fork-reachable + write-token
+#                    → CRITICAL (composer composition)
+#                    Note: the fork-reachability comes from
+#                    pr-validate.yml's pull_request_target, NOT
+#                    this file's push.  The composer reads
+#                    fork-reachable from the workflow corpus, not
+#                    from the SEC4-GH-005 finding's own file.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        # No persist-credentials: false → the downstream git push
+        # consumes the persisted GITHUB_TOKEN → SEC4-GH-005 fires.
+
+      # Restore the cache prefix that pr-validate.yml writes to.
+      # Cross-trigger restoration of an executable-content cache
+      # (node_modules) → XF-GH-001A HIGH (not the generic XF-GH-001
+      # MEDIUM).
+      - uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node_modules-main-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            node_modules-
+
+      - run: npm ci --offline || npm ci
+      - run: npm run build
+      - run: npm publish
+
+      # Downstream credential consumer for SEC4-GH-005.
+      - run: |
+          git config user.email release-bot@example.com
+          git tag "v$(node -p 'require(\"./package.json\").version')"
+          git push --tags

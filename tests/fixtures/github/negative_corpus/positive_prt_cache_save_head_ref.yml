@@ -1,0 +1,16 @@
+name: prt cache save attacker key anchor
+
+on:
+  pull_request_target:
+
+permissions:
+  contents: write
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache/save@b2f3e3b0c0b8f8c6086b2f6ec8a2d7c79e4b1888
+        with:
+          path: node_modules
+          key: deps-${{ github.head_ref }}

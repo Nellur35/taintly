@@ -1,0 +1,6 @@
+// Sanitized lowercase-suffix Jenkinsfile variant.
+node('linux') {
+  stage('Build') {
+    sh 'make'
+  }
+}

@@ -724,6 +724,7 @@ RULES: list[Rule] = [
         pattern=RegexPattern(
             match=r'sh\s+[\'"\{]{1,3}[^\'"}]*(?:curl|wget)\s+\S[^\'"}]*\|\s*(?:ba)?sh',
             exclude=[r"^\s*//"],
+            groovy_comment_aware=True,
         ),
         remediation=(
             "Download the script separately, verify its checksum, then execute:\n\n"
@@ -2090,6 +2091,7 @@ RULES: list[Rule] = [
             absent_within=r"(sha256sum|sha512sum|shasum|md5sum|cosign|gpg\s+--verify)",
             lookahead_lines=5,
             exclude=[r"^\s*//"],
+            groovy_comment_aware=True,
         ),
         remediation=(
             "Verify the checksum before executing any downloaded file:\n\n"

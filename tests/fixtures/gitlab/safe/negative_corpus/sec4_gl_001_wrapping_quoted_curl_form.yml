@@ -1,0 +1,23 @@
+# Negative corpus: ``curl --form description="..."`` wrapping idiom.
+#
+# Source: GNOME/glib `.gitlab-ci.yml:1090` (Coverity Scan upload job).
+# This is the canonical multi-arg curl pattern used in scan-uploader /
+# release-notification / deployment-report jobs across the GitLab
+# ecosystem.
+#
+# Per Bash manual §3.5.7, parameter expansion of ``${VAR}`` inside a
+# double-quoted string does NOT undergo word splitting — the entire
+# expansion is one argument.  Wrapping multiple variables in a single
+# ``"..."`` is identical to wrapping each: ``"${A} / ${B}"`` is one
+# argument whose value is the literal text ``${A} / ${B}`` with
+# expansions, no splits.
+coverity_scan_upload:
+  stage: report
+  script:
+    - |
+      curl "https://scan.coverity.com/builds?project=${COVERITY_SCAN_PROJECT_NAME}" \
+        --form token="${COVERITY_SCAN_TOKEN}" \
+        --form email="${GITLAB_USER_EMAIL}" \
+        --form file=@cov-int.tar.gz \
+        --form version="${CI_COMMIT_SHA}" \
+        --form description="${CI_COMMIT_SHA} / ${CI_COMMIT_TITLE} / ${CI_COMMIT_REF_NAME}:${CI_PIPELINE_ID}"

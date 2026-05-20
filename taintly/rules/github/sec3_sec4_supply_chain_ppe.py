@@ -236,6 +236,48 @@ class _CheckoutDownstreamCredentialConsumerPattern:
         return results
 
 
+# ``on:`` fork-reachable trigger detector for SEC4-GH-005B.  The posture
+# sibling stays out of push-only release workflows where persisted credentials
+# are operator-controlled.
+_FORK_REACHABLE_TRIGGER_RE = re.compile(
+    r"(?ms)^on:\s*(?:\n\s+|\[?\s*|\{?\s*).*?"
+    r"(?:pull_request|pull_request_target|issue_comment|workflow_run)",
+)
+
+
+class _CheckoutNoPersistPostureSiblingPattern:
+    """Pattern for SEC4-GH-005B, the INFO posture sibling of SEC4-GH-005."""
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        from taintly.models import _split_into_job_segments
+
+        if not _FORK_REACHABLE_TRIGGER_RE.search(content):
+            return []
+
+        results: list[tuple[int, str]] = []
+        for seg_start, seg_lines in _split_into_job_segments(lines):
+            seg_text = _credential_consumer_surface(seg_lines)
+            seg_has_consumer = bool(_GIT_CREDENTIAL_OP_RE.search(seg_text)) or bool(
+                _GIT_PUSH_ACTION_RE.search(seg_text)
+            )
+            for j, line in enumerate(seg_lines):
+                if _LINE_COMMENT_RE.match(line):
+                    continue
+                if not _CHECKOUT_USES_RE.search(line):
+                    continue
+                window = "\n".join(seg_lines[j : j + 8])
+                if _PERSIST_FALSE_RE.search(window):
+                    continue
+                if seg_has_consumer:
+                    downstream = _credential_consumer_surface(seg_lines[j + 1 :])
+                    if _GIT_CREDENTIAL_OP_RE.search(downstream) or _GIT_PUSH_ACTION_RE.search(
+                        downstream
+                    ):
+                        continue
+                results.append((seg_start + j + 1, line.strip()))
+        return results
+
+
 def _has_dangerous_github_context(value: str, _value_kind: str, _path: tuple[object, ...]) -> bool:
     """Predicate for SEC4-GH-004 (script injection).
 
@@ -1163,6 +1205,82 @@ RULES: list[Rule] = [
             "actionable; lint / typecheck / unit-test / CodeQL / docker-build-only "
             "jobs do not fire."
         ),
+    ),
+    # =========================================================================
+    # SEC4-GH-005B: posture sibling of SEC4-GH-005.
+    # =========================================================================
+    Rule(
+        id="SEC4-GH-005B",
+        title="Checkout persists credentials under fork-reachable trigger (posture)",
+        severity=Severity.INFO,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "actions/checkout persists the GITHUB_TOKEN by default.  Under "
+            "a fork-reachable trigger, the persisted token is reachable by "
+            "subsequent steps in the same job, including third-party actions "
+            "whose runtime behavior is not fully audited at workflow-author "
+            "time.\n"
+            "\n"
+            "This rule is the INFO + review-needed posture sibling of "
+            "SEC4-GH-005.  It fires when a fork-reachable workflow uses "
+            "checkout without ``persist-credentials: false`` and no in-job "
+            "credential consumer was detected.  If a downstream consumer is "
+            "present, SEC4-GH-005 owns the finding at MEDIUM and this rule "
+            "stays silent."
+        ),
+        pattern=_CheckoutNoPersistPostureSiblingPattern(),
+        remediation=(
+            "Add ``persist-credentials: false`` to the checkout step, or "
+            "move token-consuming publish/push work into a separate job with "
+            "minimal permissions."
+        ),
+        reference="https://github.com/actions/checkout#usage",
+        test_positive=[
+            (
+                "on:\n  pull_request: {}\njobs:\n  test:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - run: pytest\n"
+            ),
+            (
+                "on:\n  pull_request_target: {}\njobs:\n  triage:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - run: echo hello\n"
+            ),
+        ],
+        test_negative=[
+            (
+                "on:\n  pull_request: {}\njobs:\n  test:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "        with:\n          persist-credentials: false\n"
+                "      - run: pytest\n"
+            ),
+            (
+                "on:\n  push:\n    branches: [main]\njobs:\n  release:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - run: make release\n"
+            ),
+            (
+                "on:\n  pull_request: {}\njobs:\n  publish:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/checkout@v4\n"
+                "      - run: git push origin gh-pages\n"
+            ),
+        ],
+        stride=["I"],
+        threat_narrative=(
+            "A fork-reachable workflow checks out repository code without "
+            "disabling credential persistence.  The job has no current "
+            "credential consumer, so SEC4-GH-005 stays silent.  Later a "
+            "third-party action is added and reads the token from the git "
+            "credential helper.  This INFO signal lets maintainers harden "
+            "the checkout before that future risk is introduced."
+        ),
+        review_needed=True,
     ),
     # =========================================================================
     # SEC3-GH-007: Docker image reference (services.<name>.image: or

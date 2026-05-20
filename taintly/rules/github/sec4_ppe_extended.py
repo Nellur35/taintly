@@ -627,6 +627,10 @@ RULES: list[Rule] = [
             'on:\n  pull_request_target:\njobs:\n  manage:\n    steps:\n      - uses: tiangolo/issue-manager@0.6.0\n        with:\n          config: \'{"message": "make sure to read the docs about contributing"}\'\n',
             # BUG-8b: "make sure" English phrase in pr-message block scalar
             "on:\n  pull_request_target:\njobs:\n  greet:\n    steps:\n      - run: echo hi\n        env:\n          MSG: make sure to check the docs\n",
+            # "make" as an English verb inside a github-script log line —
+            # the real CRITICAL false positive found scanning
+            # tiangolo/fastapi (guard-dependencies.yml).
+            "on:\n  pull_request_target:\njobs:\n  guard:\n    steps:\n      - uses: actions/github-script@v7\n        with:\n          script: |\n            console.log(`Author is allowed to make dependency changes.`);\n",
             # pip install of a named PyPI package does NOT read from repo — safe in LOTP context
             "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n      - run: pip install PyGithub\n",
             "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n      - run: pip install --upgrade pip\n",
@@ -1578,40 +1582,41 @@ RULES: list[Rule] = [
     # build output -> cache write captures it -> main-branch build
     # restores it -> privileged step executes poisoned artifact.
     #
-    # Single-file shape — gap surfaced by the 2026-05-17 comparison
+    # Single-file shape - gap surfaced by the 2026-05-17 comparison
     # study; zizmor's ``cache-poisoning`` catches this on the same
     # workflow; taintly's CHAIN-GH-001 requires cross-workflow
-    # evidence and misses the same-file form.  INFO + ``review_needed``
-    # because not every PR cache write is exploitable (some keys are
-    # PR-number-scoped and never matched by main restores).
+    # evidence and misses the same-file form.
+    #
+    # Trigger tier split (2026-05-19): pull_request and pull_request_target
+    # have different blast radii.  This rule keeps the plain pull_request
+    # posture signal at INFO + review_needed; SEC4-GH-026A handles the
+    # higher-risk pull_request_target form at MEDIUM.
     Rule(
         id="SEC4-GH-026",
-        title="Cache write under fork-reachable trigger - cache-poisoning surface",
+        title="Cache write under pull_request trigger - cache-poisoning surface",
         severity=Severity.INFO,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A workflow whose ``on:`` block includes a fork-reachable "
-            "trigger (``pull_request`` / ``pull_request_target``) writes "
-            "to the GitHub Actions cache - either via ``uses: actions/"
-            "cache@`` (the direct form) or via a ``setup-*`` action "
-            "with ``cache:`` enabled (the implicit form, where "
-            "``setup-node``/``setup-python``/``setup-go``/``setup-java`` "
-            "store dependency caches keyed by lockfile hash).\n"
+            "A workflow whose ``on:`` block includes a ``pull_request`` "
+            "trigger (not ``pull_request_target`` - see SEC4-GH-026A) "
+            "writes to the GitHub Actions cache, either via ``uses: "
+            "actions/cache@`` or via a ``setup-*`` action with "
+            "``cache:`` enabled.\n"
             "\n"
-            "The cache is partitioned per repo + branch ref + key, but "
-            "``restore-keys:`` and the default fallback rules let cache "
-            "entries written from a PR branch be looked up by later "
-            "main-branch runs.  When a subsequent privileged workflow "
-            "(release, deploy, OIDC mint) restores the poisoned entry, "
-            "attacker-controlled bytes execute with the privileged "
-            "run's token.\n"
+            "Under ``pull_request``, the workflow runs with a default-"
+            "read-only ``GITHUB_TOKEN`` on modern repositories.  The "
+            "cache write surface exists, but exploitation usually needs "
+            "a later privileged workflow to restore under the same key "
+            "prefix; that cross-trigger shape is XF-GH-001 / XF-GH-001A's "
+            "domain.  This rule is a review signal, not a confirmed "
+            "exploit.\n"
             "\n"
             "INFO + ``review_needed``: many cache keys are PR-number-"
             "scoped (``${{ github.run_id }}`` / ``${{ github.event."
             "number }}``) and never matched by main-branch restores, "
-            "so this rule's threat model only applies when the cache "
-            "key shape allows cross-branch restoration.  Operators who "
+            "so the threat model only applies when the cache key shape "
+            "allows cross-branch restoration.  Operators who "
             "want LOW enforcement can override via ``.taintly.yml``."
         ),
         pattern=ContextPattern(
@@ -1624,10 +1629,11 @@ RULES: list[Rule] = [
                 r"|cache:\s*(?:true|npm|yarn|pip|pipenv|poetry|gradle|maven|sbt|go|cargo)"
                 r")"
             ),
-            # Workflow must declare a fork-reachable trigger in its
-            # ``on:`` block.  Tolerant of both block form (``on:\n  "
-            # pull_request:``) and inline list/flow forms.
-            requires=r"(?ms)^on:\s*(?:\n\s+|\[?\s*).*?pull_request",
+            # Workflow must declare plain ``pull_request``.  The
+            # negative lookahead excludes pull_request_target and
+            # github.event.pull_request.* context references inside
+            # pull_request_target workflows.
+            requires=r"(?ms)^on:\s*(?:\n\s+|\[?\s*).*?pull_request(?!_target|\.)\b",
             exclude=[r"^\s*#"],
         ),
         remediation=(
@@ -1681,6 +1687,14 @@ RULES: list[Rule] = [
                 "      - uses: actions/cache/restore@v4\n        with:\n"
                 "          key: ${{ hashFiles('lockfile') }}\n"
             ),
+            # pull_request_target is SEC4-GH-026A's territory.
+            (
+                "on:\n  pull_request_target: {}\njobs:\n  test:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/cache@v4\n        with:\n"
+                "          path: ./node_modules\n"
+                "          key: ${{ hashFiles('package-lock.json') }}\n"
+            ),
             # Comment-only mention.
             "      # uses: actions/cache@v4",
         ],
@@ -1699,5 +1713,92 @@ RULES: list[Rule] = [
             "attacker's payload."
         ),
         review_needed=True,
+    ),
+    # =========================================================================
+    # SEC4-GH-026A: cache poisoning surface under pull_request_target.
+    # =========================================================================
+    Rule(
+        id="SEC4-GH-026A",
+        title="Cache write under pull_request_target - cache-poisoning attack surface",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A workflow whose ``on:`` block includes ``pull_request_target`` "
+            "writes to the GitHub Actions cache, either via ``uses: "
+            "actions/cache@`` or via a ``setup-*`` action with ``cache:`` "
+            "enabled.\n"
+            "\n"
+            "Unlike plain ``pull_request``, ``pull_request_target`` can run "
+            "fork-controlled code with the parent repository's token and "
+            "explicit ``permissions:`` grants.  The cache write is therefore "
+            "a primary attack surface: attacker-controlled bytes may be "
+            "persisted into a cache entry that downstream privileged "
+            "workflows later restore."
+        ),
+        pattern=ContextPattern(
+            anchor=(
+                r"(?:"
+                r"uses:\s+actions/cache(?:/save)?@"
+                r"|cache:\s*(?:true|npm|yarn|pip|pipenv|poetry|gradle|maven|sbt|go|cargo)"
+                r")"
+            ),
+            requires=r"(?ms)^on:\s*(?:\n\s+|\[?\s*).*?pull_request_target\b",
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Move cache writes out of ``pull_request_target`` workflows, "
+            "switch to restore-only cache usage, or scope cache keys so "
+            "they cannot be restored by later privileged runs."
+        ),
+        reference=(
+            "https://docs.github.com/en/actions/security-for-github-actions/"
+            "security-guides/security-hardening-for-github-actions"
+            "#using-the-pull_request_target-event"
+        ),
+        test_positive=[
+            (
+                "on:\n  pull_request_target:\n    branches: [main]\n"
+                "permissions:\n  contents: write\njobs:\n  build:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/cache@v4\n        with:\n"
+                "          path: ./node_modules\n"
+                "          key: ${{ hashFiles('package-lock.json') }}\n"
+            ),
+            (
+                "on:\n  pull_request_target: {}\njobs:\n  test:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/setup-node@v4\n        with:\n"
+                "          node-version: 20\n          cache: npm\n"
+            ),
+        ],
+        test_negative=[
+            (
+                "on:\n  pull_request:\n    branches: [main]\njobs:\n"
+                "  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/cache@v4\n        with:\n"
+                "          path: ./node_modules\n"
+                "          key: ${{ hashFiles('package-lock.json') }}\n"
+            ),
+            (
+                "on:\n  push:\n    branches: [main]\njobs:\n  build:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/cache@v4\n        with:\n"
+                "          key: ${{ hashFiles('lockfile') }}\n"
+            ),
+            (
+                "on:\n  pull_request_target: {}\njobs:\n  test:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/cache/restore@v4\n        with:\n"
+                "          key: ${{ hashFiles('lockfile') }}\n"
+            ),
+        ],
+        stride=["T", "E", "I"],
+        threat_narrative=(
+            "A pull_request_target workflow builds fork-controlled code, "
+            "saves dependency or build output caches under a key later "
+            "used by release jobs, and lets a privileged workflow restore "
+            "attacker-shaped bytes."
+        ),
     ),
 ]

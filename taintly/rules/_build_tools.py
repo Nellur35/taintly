@@ -19,6 +19,18 @@ Updates to the tool list belong here; all LOTP rules import
 
 from __future__ import annotations
 
+# A bare verb (``make``, ``go build``) only counts as a build-tool
+# invocation when it sits at a shell command boundary — start of line,
+# after a separator, after ``run:``, or inside a Jenkins ``sh '...'``.
+# Without this guard, ``make`` matches English prose ("allowed to make
+# changes", "make it production ready") and ``go build`` matches log
+# text. ``[-*]\s+`` admits a YAML ``- `` list marker; the ``NAME=val``
+# group admits inline env-var prefixes.
+_CMD_START = (
+    r"(?:^|[;&|(`]|\brun:\s*|\b(?:sh|bash|powershell)\s+['\"])"
+    r"\s*(?:[-*]\s+)?(?:[A-Za-z_]\w*=\S*\s+)*"
+)
+
 # Build tools and package managers that execute lifecycle scripts, build
 # hooks, or code-generator directives from checked-out source.
 BUILD_TOOL_FRAGMENTS: list[str] = [
@@ -57,10 +69,10 @@ BUILD_TOOL_FRAGMENTS: list[str] = [
     r"\bpoetry\s+(?:install|add|update|lock|sync)\b",
     r"\bpython\s+setup\.py\b",
     r"\bpython\s+-m\s+build\b",
-    # C / C++ — Makefile and CMakeLists.txt are arbitrary shell
-    # Negative lookbehind keeps \bmake\b from matching `/usr/bin/make` paths
-    # or identifiers like `make_release` where a word char precedes.
-    r"(?<![\w/])make(?:\s+\w+)*",
+    # C / C++ — Makefile and CMakeLists.txt are arbitrary shell.
+    # ``make`` must sit at a command boundary (see ``_CMD_START``) so the
+    # English verb doesn't match prose.
+    _CMD_START + r"make\b",
     r"\bcmake(?:\s+--build)?\b",
     # Rust — build.rs executes Rust at build time.
     # `cargo install <name>` downloads <name> from crates.io and runs
@@ -71,8 +83,10 @@ BUILD_TOOL_FRAGMENTS: list[str] = [
     # default and stay unconditional.
     r"\bcargo\s+(?:build|run|test)\b",
     r"\bcargo\s+install\s+--path\b",
-    # Go — //go:generate runs arbitrary commands
-    r"\bgo\s+(?:build|generate|install|run)\b",
+    # Go — //go:generate runs arbitrary commands.  Command-boundary
+    # guarded so "go run the suite" / "go build confidence" prose
+    # doesn't match.
+    _CMD_START + r"go\s+(?:build|generate|install|run)\b",
     # JVM
     r"(?:\bgradle\b|\./gradlew\b)",
     r"(?:\bmvn\b|\./mvnw\b)",
@@ -117,12 +131,14 @@ BUILD_TOOL_ANCHOR: str = (
     r"|argo\s+install\s+--path\b"
     r"|omposer\s+(?:install|update)\b"
     r")"
-    r"|\bg(?:o\s+(?:build|generate|install|run)\b|radle\b)"
+    r"|\bgradle\b"
     r"|\bmvn\b"
     r"|\bd(?:ocker\s+build\b)"
     # bundle arm — exec is excluded; see BUILD_TOOL_FRAGMENTS comment.
     r"|\bb(?:undle\s+install\b)"
-    r"|(?<![\w/])make(?:\s+\w+)*"
     r"|\./(?:gradlew|mvnw)\b"
+    # make / go arms — command-boundary guarded; see _CMD_START.
+    "|" + _CMD_START + r"make\b"
+    "|" + _CMD_START + r"go\s+(?:build|generate|install|run)\b"
     r")"
 )

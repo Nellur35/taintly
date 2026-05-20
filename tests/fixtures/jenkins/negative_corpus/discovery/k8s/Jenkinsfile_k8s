@@ -1,0 +1,11 @@
+// Sanitized from jenkinsci/jenkins.io Jenkinsfile_k8s.
+pipeline {
+  agent { label 'kubernetes' }
+  stages {
+    stage('Build') {
+      steps {
+        sh 'make'
+      }
+    }
+  }
+}

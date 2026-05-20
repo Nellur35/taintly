@@ -150,6 +150,11 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "broadening to ``\\s*`` which weakens precision across every "
         "rule that shares the anchor pattern."
     ),
+    ("SEC4-GH-026A", "whitespace_pad"): (
+        "Same ``uses:\\s+`` anchor family as SEC4-GH-026 and "
+        "AI-GH-019/020/021/022/035; broadening only this rule would "
+        "make the shared anchor family inconsistent."
+    ),
     ("AI-GH-035", "whitespace_pad"): (
         "Same family as AI-GH-019/020/021/022: anchor uses "
         "``AI_AGENT_USES_PATTERN`` whose ``uses:\\s+`` requires "

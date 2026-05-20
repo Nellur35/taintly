@@ -1,0 +1,24 @@
+# Negative corpus: SEC9-GL-001 artifact with explicit `access: developer`.
+#
+# Source: gitlab-org/cli `.gitlab-ci.yml` (test-coverage job).
+#
+# When ``artifacts:`` carries an explicit ``access:`` value
+# (``developer`` / ``none`` / ``maintainer``), the rule's
+# review-needed concern (anonymous public-project download) does
+# not apply — the access is bound at job definition time.
+#
+# Locks the rule's design intent: SEC9-GL-001 fires on missing
+# ``access:`` only.
+test_with_coverage:
+  stage: test
+  script:
+    - go test -coverprofile=coverage.out ./...
+  artifacts:
+    when: always
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+      junit: coverage.xml
+    access: "developer"
+    expire_in: 7 days

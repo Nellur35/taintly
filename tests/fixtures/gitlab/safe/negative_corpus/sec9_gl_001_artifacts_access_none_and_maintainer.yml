@@ -1,0 +1,28 @@
+# Negative corpus: SEC9-GL-001 with ``access: none`` and ``access: maintainer``.
+#
+# Source: GitLab CI docs (https://docs.gitlab.com/ci/yaml/#artifactsaccess).
+# Both ``none`` and ``maintainer`` are valid access values per GitLab
+# 17.x; the rule's exclude must cover all three documented values
+# (developer / none / maintainer), quoted or unquoted.
+internal_only:
+  stage: build
+  script: ["make build"]
+  artifacts:
+    paths: ["bin/*"]
+    access: none
+    expire_in: 1h
+
+maintainer_only:
+  stage: package
+  script: ["make package"]
+  artifacts:
+    paths: ["dist/*"]
+    access: "maintainer"
+    expire_in: 1d
+
+unquoted_developer:
+  stage: report
+  script: ["make report"]
+  artifacts:
+    paths: ["report.txt"]
+    access: developer

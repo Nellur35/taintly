@@ -17,8 +17,6 @@ Each test enforces a hard 10-second timeout (via the fixture) and a soft
 
 from __future__ import annotations
 
-import resource
-import signal
 import sys
 import threading
 from pathlib import Path
@@ -26,7 +24,12 @@ from pathlib import Path
 import pytest
 
 from taintly.engine import scan_file
-from taintly.models import Platform, RegexPattern, Rule, Severity
+from taintly.models import Platform
+
+try:
+    import resource
+except ModuleNotFoundError:  # pragma: no cover - Windows has no resource module
+    resource = None
 
 FIXTURES_EDGE = Path(__file__).parent.parent / "fixtures" / "github" / "edge_cases"
 
@@ -221,7 +224,9 @@ ADVERSARIAL_INPUTS = {
 }
 
 
-@pytest.mark.parametrize("name,content", list(ADVERSARIAL_INPUTS.items()), ids=list(ADVERSARIAL_INPUTS.keys()))
+@pytest.mark.parametrize(
+    ("name", "content"), list(ADVERSARIAL_INPUTS.items()), ids=list(ADVERSARIAL_INPUTS.keys())
+)
 def test_scanner_survives_adversarial_input(name, content, github_rules):
     """Scanner must not crash, hang, or raise on any adversarial input.
 
@@ -249,7 +254,9 @@ def test_scanner_survives_adversarial_input(name, content, github_rules):
     )
 
 
-@pytest.mark.parametrize("name,content", list(ADVERSARIAL_INPUTS.items()), ids=list(ADVERSARIAL_INPUTS.keys()))
+@pytest.mark.parametrize(
+    ("name", "content"), list(ADVERSARIAL_INPUTS.items()), ids=list(ADVERSARIAL_INPUTS.keys())
+)
 def test_scanner_output_is_serializable(name, content, github_rules):
     """All findings from adversarial inputs must be JSON-serializable.
 
@@ -333,8 +340,10 @@ _KNOWN_PLATFORM_FUZZ_HANGS: set[tuple[str, str]] = {
 }
 
 
-@pytest.mark.parametrize("platform,fname", _PLATFORM_PARAMS)
-@pytest.mark.parametrize("name,content", list(ADVERSARIAL_INPUTS.items()), ids=list(ADVERSARIAL_INPUTS.keys()))
+@pytest.mark.parametrize(("platform", "fname"), _PLATFORM_PARAMS)
+@pytest.mark.parametrize(
+    ("name", "content"), list(ADVERSARIAL_INPUTS.items()), ids=list(ADVERSARIAL_INPUTS.keys())
+)
 def test_scanner_survives_adversarial_input_per_platform(name, content, platform, fname):
     """All three platforms' rule packs must survive every adversarial
     input. A failure scoped to one platform localises the bug to its
@@ -501,7 +510,9 @@ _EQUIVALENT_INPUT_PAIRS = [
 
 
 @pytest.mark.parametrize(
-    "label,a,b", _EQUIVALENT_INPUT_PAIRS, ids=[p[0] for p in _EQUIVALENT_INPUT_PAIRS]
+    ("label", "a", "b"),
+    _EQUIVALENT_INPUT_PAIRS,
+    ids=[p[0] for p in _EQUIVALENT_INPUT_PAIRS],
 )
 def test_findings_invariant_under_yaml_equivalence(label, a, b, github_rules):
     """Two YAML inputs that mean the same thing must produce the same
@@ -526,7 +537,7 @@ def test_findings_invariant_under_yaml_equivalence(label, a, b, github_rules):
 
 
 @pytest.mark.skipif(
-    sys.platform != "linux",
+    sys.platform != "linux" or resource is None,
     reason="RLIMIT_AS is only reliably enforced on Linux"
 )
 def test_scanner_under_memory_cap(github_rules):

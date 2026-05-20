@@ -49,16 +49,15 @@ def _is_stub_rule(rule) -> bool:
         shared library still trips these rules; that's the intended
         behaviour.
     """
+    from taintly.gitlab_workflow_corpus import GitLabCorpusPattern
     from taintly.models import AbsencePattern, Severity
     from taintly.rules.github.sec3_sec4_supply_chain_ppe import (
         ArchivedActionPattern,
         ImposterCommitPattern,
     )
-    from taintly.rules.gitlab.sec3_sec6_supply_chain_creds import (
-        ArchivedIncludeProjectPattern,
-    )
-    from taintly.gitlab_workflow_corpus import GitLabCorpusPattern
+    from taintly.rules.gitlab.sec3_sec6_supply_chain_creds import ArchivedIncludeProjectPattern
     from taintly.workflow_corpus import CorpusPattern
+
     if isinstance(rule.pattern, CorpusPattern):
         return True
     # GitLabCorpusPattern is the GL parallel of CorpusPattern —
@@ -77,7 +76,7 @@ def _is_stub_rule(rule) -> bool:
         return True
     # SEC3-GH-010 (archived-uses) + SEC3-GL-008 (archived-includes) —
     # opt-in network-dependent rules with the same exemption rationale.
-    if isinstance(rule.pattern, (ArchivedActionPattern, ArchivedIncludeProjectPattern)):
+    if isinstance(rule.pattern, ArchivedActionPattern | ArchivedIncludeProjectPattern):
         return True
     if (
         getattr(rule, "review_needed", False)
@@ -185,11 +184,11 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         ("github/vulnerable/ppe_classic.yml", ["SEC3-GH-001"], [
             "LOTP-GH-001", "LOTP-GH-003", "PSE-GH-006", "SEC10-GH-001",
             "SEC2-GH-002", "SEC3-GH-003", "SEC3-GH-004", "SEC3-GH-006",
-            "SEC4-GH-001", "SEC4-GH-002", "SEC4-GH-005", "SEC4-GH-011",
+            "SEC4-GH-001", "SEC4-GH-002", "SEC4-GH-005", "SEC4-GH-005B", "SEC4-GH-011",
         ]),
         ("github/vulnerable/write_all_permissions.yml", ["SEC2-GH-001"], ["SEC1-GH-001", "SEC10-GH-001"]),
         ("github/vulnerable/injection_run_block.yml",   ["SEC4-GH-004"], ["SEC10-GH-001", "SEC4-GH-002", "SEC4-GH-006"]),
-        ("github/vulnerable/workflow_run_no_conclusion.yml", ["SEC4-GH-003"], ["SEC1-GH-001", "SEC10-GH-001", "SEC4-GH-004", "SEC4-GH-005", "TAINT-GH-008"]),
+        ("github/vulnerable/workflow_run_no_conclusion.yml", ["SEC4-GH-003"], ["SEC1-GH-001", "SEC10-GH-001", "SEC4-GH-004", "SEC4-GH-005", "SEC4-GH-005B", "TAINT-GH-008"]),
         ("github/vulnerable/secret_in_with_input.yml", ["SEC6-GH-010"], ["SEC1-GH-001", "SEC10-GH-001", "SEC3-GH-006"]),
         ("github/vulnerable/publish_job_no_environment.yml", ["SEC1-GH-001"], ["SEC10-GH-001"]),
         ("github/vulnerable/release_please_with_publish_step.yml", ["SEC1-GH-001"], ["SEC3-GH-006"]),
@@ -197,7 +196,7 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         # PSE-GH-006 expected co-fire: the fixture is the canonical
         # "imposter trigger" shape (pull_request_target + tainted
         # head.sha checkout + ./build.sh in the same job).
-        ("github/vulnerable/pull_request_target_head_sha_checkout.yml", ["SEC4-GH-001"], ["PSE-GH-006", "SEC10-GH-001", "SEC2-GH-002", "SEC4-GH-002", "SEC4-GH-005"]),
+        ("github/vulnerable/pull_request_target_head_sha_checkout.yml", ["SEC4-GH-001"], ["PSE-GH-006", "SEC10-GH-001", "SEC2-GH-002", "SEC4-GH-002", "SEC4-GH-005", "SEC4-GH-005B"]),
         ("github/vulnerable/ai_trust_remote_code.yml",  ["AI-GH-001"], ["SEC10-GH-001"]),
         ("github/vulnerable/ai_hf_no_revision.yml",     ["AI-GH-002"], ["AI-GH-004", "SEC10-GH-001"]),
         ("github/vulnerable/ai_torch_load_unsafe.yml",  ["AI-GH-003"], ["SEC10-GH-001"]),
@@ -415,7 +414,7 @@ _EDGE_CASE_CORRECTNESS = [
 
 
 @pytest.mark.parametrize(
-    "label,content,must_fire",
+    ("label", "content", "must_fire"),
     _EDGE_CASE_CORRECTNESS,
     ids=[c[0] for c in _EDGE_CASE_CORRECTNESS],
 )

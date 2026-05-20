@@ -141,6 +141,7 @@ _FAMILIES: tuple[FindingFamily, ...] = (
         members=frozenset(
             {
                 "SEC4-GH-005",  # checkout persists credentials — classic pivot surface
+                "SEC4-GH-005B",  # checkout persists credentials — posture sibling
                 "SEC6-GH-001",
                 "SEC6-GH-002",
                 "SEC6-GH-003",

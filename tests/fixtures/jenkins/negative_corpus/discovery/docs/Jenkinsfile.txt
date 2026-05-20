@@ -1,0 +1,3 @@
+Jenkinsfile syntax documentation.
+
+This is a text document, not a pipeline script.

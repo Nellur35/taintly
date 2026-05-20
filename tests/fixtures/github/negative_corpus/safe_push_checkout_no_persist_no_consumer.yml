@@ -1,0 +1,28 @@
+name: push-only checkout safe (no fork trigger)
+
+# push-only release workflow with bare actions/checkout (no
+# persist-credentials: false) and no downstream credential consumer.
+# Not fork-reachable → SEC4-GH-005B must NOT fire.  SEC4-GH-005
+# already stays silent (no consumer).
+#
+# Locks the fork-reachable-trigger gate on SEC4-GH-005B's posture
+# detection: bare checkout on push-only workflows is operator-
+# controlled and out of scope for the posture sibling.
+#
+# Anchored by github-tanstack-posture-design-v1 (2026-05-19).
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make build
+      - run: make test

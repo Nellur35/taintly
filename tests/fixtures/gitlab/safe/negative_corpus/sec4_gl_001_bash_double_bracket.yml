@@ -1,0 +1,18 @@
+# Negative corpus: Bash ``[[ ]]`` conditional.
+#
+# Source: gitlab-org/cli `.gitlab-ci.yml:147`, gitlab-org/gitlab-runner
+# `.gitlab/ci/qa.gitlab-ci.yml:227`.
+#
+# Per Bash manual §3.2.5.2, word splitting and pathname expansion are
+# NOT performed on words between ``[[`` and ``]]``.  Unquoted
+# ``$CI_COMMIT_BRANCH`` inside ``[[ ]]`` cannot inject — the same
+# exemption SEC4-GL-003 already encodes for ``CI_COMMIT_REF_NAME``.
+release_pipeline_dispatch:
+  stage: release
+  script:
+    - |
+      if [[ $CI_COMMIT_TAG ]]; then
+        BRANCH_NAME=main
+      elif [[ $CI_COMMIT_BRANCH =~ [0-9]+-[0-9]+-stable ]]; then
+        BRANCH_NAME=$CI_COMMIT_BRANCH
+      fi

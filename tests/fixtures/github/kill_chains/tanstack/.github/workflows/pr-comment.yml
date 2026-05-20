@@ -1,0 +1,46 @@
+# TanStack-style kill chain — fork-reachable workflow with a write
+# token AND a credential consumer in the same job.
+#
+# This is the workflow that triggers CHAIN-GH-101 (CRITICAL):
+#   SEC4-GH-005 (checkout + downstream git push) +
+#   fork-reachable trigger (issue_comment) +
+#   write-scope token (contents: write)
+#   = pwn-request composition
+#
+# The bot-style "/preview" command pattern is real: maintainers
+# enable issue_comment workflows so contributors can trigger a
+# preview deploy.  The workflow checks out the PR's code, runs
+# the build, and pushes the preview branch.  Without
+# persist-credentials: false the persisted GITHUB_TOKEN flows
+# directly into the git push.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  preview:
+    if: ${{ github.event.issue.pull_request && startsWith(github.event.comment.body, '/preview') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+
+      - run: npm ci
+      - run: npm run build:preview
+
+      # Downstream credential consumer → SEC4-GH-005 fires here.
+      # Composer reads fork-reachable + write-token from the workflow
+      # corpus and composes CHAIN-GH-101 CRITICAL.
+      - run: |
+          git config user.email preview-bot@example.com
+          git config user.name "Preview Bot"
+          git push origin HEAD:preview-${{ github.event.issue.number }}

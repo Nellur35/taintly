@@ -1,0 +1,22 @@
+name: prt checkout posture anchor (SEC4-GH-005B positive)
+
+# pull_request_target + actions/checkout without persist-credentials: false
+# and NO downstream credential consumer.  Posture sibling territory —
+# SEC4-GH-005 stays silent (no consumer), SEC4-GH-005B fires INFO.
+#
+# Anchored by github-tanstack-posture-design-v1 (2026-05-19).
+
+on:
+  pull_request_target:
+
+permissions:
+  contents: read
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          echo "PR #${{ github.event.number }} triaged"
+          ./scripts/triage.sh

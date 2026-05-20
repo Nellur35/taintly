@@ -346,6 +346,7 @@ class RegexPattern:
     exclude: list[str] = field(default_factory=list)
     heredoc_aware: bool = False
     gitlab_if_block_aware: bool = False
+    groovy_comment_aware: bool = False
 
     def __post_init__(self):
         self._compiled = re.compile(self.match)
@@ -359,14 +360,18 @@ class RegexPattern:
         skip = _quoted_heredoc_body_lines(lines) if self.heredoc_aware else set()
         if self.gitlab_if_block_aware:
             skip = skip | _gitlab_rules_if_body_lines(lines)
+        scan_lines = (
+            _strip_groovy_comments(content).splitlines() if self.groovy_comment_aware else lines
+        )
         results = []
-        for i, line in enumerate(lines):
+        for i, line in enumerate(scan_lines):
             if i in skip:
                 continue
             if any(ex.search(line) for ex in self._excludes):
                 continue
             if _safe_search(self._compiled, line):
-                results.append((i + 1, line.strip()))
+                snippet = lines[i].strip() if i < len(lines) else line.strip()
+                results.append((i + 1, snippet))
         return results
 
 
@@ -386,6 +391,10 @@ def _strip_groovy_comments(content: str) -> str:
     documentation comment that mentions a gating token
     (``env.CHANGE_ID``, ``NPM_TOKEN``) doesn't satisfy the
     ``requires`` / ``requires_absent`` gate on a Jenkinsfile.
+
+    Also used by regex/sequence Jenkins rules that opt in via
+    ``groovy_comment_aware`` so documentation comments don't satisfy
+    a line-level pattern.
 
     String literals (single, double, triple-single, triple-double) are
     preserved verbatim — a shell body that contains ``//`` or ``/*``
@@ -1012,6 +1021,7 @@ class SequencePattern:
     absent_within: str
     lookahead_lines: int = 10
     exclude: list[str] = field(default_factory=list)
+    groovy_comment_aware: bool = False
 
     def __post_init__(self):
         self._a_re = re.compile(self.pattern_a)
@@ -1023,14 +1033,18 @@ class SequencePattern:
     # that matched ``self.pattern_a``.  The absent_within window
     # extends beyond it but is not cited.
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        scan_lines = (
+            _strip_groovy_comments(content).splitlines() if self.groovy_comment_aware else lines
+        )
         results = []
-        for i, line in enumerate(lines):
+        for i, line in enumerate(scan_lines):
             if any(ex.search(line) for ex in self._excludes):
                 continue
             if _safe_search(self._a_re, line):
-                window = "\n".join(lines[i : i + self.lookahead_lines])
+                window = "\n".join(scan_lines[i : i + self.lookahead_lines])
                 if not _safe_search(self._b_re, window):
-                    results.append((i + 1, line.strip()))
+                    snippet = lines[i].strip() if i < len(lines) else line.strip()
+                    results.append((i + 1, snippet))
         return results
 
 

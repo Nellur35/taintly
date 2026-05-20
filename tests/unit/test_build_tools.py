@@ -102,6 +102,15 @@ _KNOWN_NEGATIVES = [
     # these need to fire, users can run with a custom rule or rely
     # on the broader SEC4-GH-* shell-injection rules instead.
     "    - run: /usr/bin/yarn install",
+    # English prose containing the verb "make" / "go ..." — must NOT
+    # match.  ``make`` and ``go build`` only count at a command
+    # boundary (see _CMD_START).  The console.log line is the real
+    # CRITICAL false positive found scanning tiangolo/fastapi.
+    "          console.log(`Author is allowed to make dependency changes.`);",
+    '        run: echo "make it production ready"',
+    "          TITLE: make a release happen",
+    '        run: echo "go run the full suite now"',
+    "    - name: Make the release notes",
 ]
 
 
