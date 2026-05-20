@@ -627,6 +627,10 @@ RULES: list[Rule] = [
             'on:\n  pull_request_target:\njobs:\n  manage:\n    steps:\n      - uses: tiangolo/issue-manager@0.6.0\n        with:\n          config: \'{"message": "make sure to read the docs about contributing"}\'\n',
             # BUG-8b: "make sure" English phrase in pr-message block scalar
             "on:\n  pull_request_target:\njobs:\n  greet:\n    steps:\n      - run: echo hi\n        env:\n          MSG: make sure to check the docs\n",
+            # "make" as an English verb inside a github-script log line —
+            # the real CRITICAL false positive found scanning
+            # tiangolo/fastapi (guard-dependencies.yml).
+            'on:\n  pull_request_target:\njobs:\n  guard:\n    steps:\n      - uses: actions/github-script@v7\n        with:\n          script: |\n            console.log(`Author is allowed to make dependency changes.`);\n',
             # pip install of a named PyPI package does NOT read from repo — safe in LOTP context
             "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n      - run: pip install PyGithub\n",
             "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n      - run: pip install --upgrade pip\n",
