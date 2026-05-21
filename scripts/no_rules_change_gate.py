@@ -79,18 +79,21 @@ def _scan_corpus() -> dict[str, str]:
                     out[rel] = f"ERROR: {type(e).__name__}: {e}"
                     continue
                 out[rel] = _findings_signature(findings)
-    # Also scan the special Jenkinsfile (no extension) directly.
-    for jf in (
-        (fixtures_root / "jenkins").rglob("Jenkinsfile*")
-        if (fixtures_root / "jenkins").exists()
-        else []
-    ):
-        if jf.is_file():
+    # Also scan Jenkinsfile-shaped fixtures without relying on the
+    # filesystem's glob case-sensitivity.  Windows/macOS match
+    # ``jenkinsfile.adoc`` with ``rglob("Jenkinsfile*")``; Linux does
+    # not.  Reuse the scanner classifier so this gate tracks the same
+    # Jenkinsfile shapes on every OS.
+    if (fixtures_root / "jenkins").exists():
+        from taintly.engine import _is_jenkinsfile_name
+        from taintly.engine import scan_file as _scan
+
+        for jf in sorted((fixtures_root / "jenkins").rglob("*")):
+            if not jf.is_file() or not _is_jenkinsfile_name(jf.name):
+                continue
             rel = jf.relative_to(fixtures_root).as_posix()
             if rel in out:
                 continue
-            from taintly.engine import scan_file as _scan
-
             findings = _scan(str(jf), rules)
             out[rel] = _findings_signature(findings)
     return out
