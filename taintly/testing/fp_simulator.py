@@ -5,10 +5,11 @@ checking the tests still kill it, this mutates a rule's own positive
 sample into a *benign* variant and checks the rule does NOT fire on it.
 A rule that still fires on the benignised input is false-positive-prone.
 
-Phase 1 ships one mutator — ``comment_embed`` — the only one shown to be
-artifact-free in proof-of-concept testing. It moves each line the rule
-matched into a comment; a rule that still fires is flagging inert,
-commented-out code (a rule lacking a ``^\\s*#`` exclude).
+The initial advisory release ships one mutator — ``comment_embed`` —
+the only one shown to be artifact-free in proof-of-concept testing. It
+moves each line the rule matched into a comment; a rule that still fires
+is flagging inert, commented-out code (a rule lacking a ``^\\s*#``
+exclude).
 
 The runner is delta-correct: a rule is flagged only when a finding lands
 on a line the mutator actually neutralised — not merely "some finding

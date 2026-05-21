@@ -186,7 +186,7 @@ jobs:
 
       - name: FP simulator (advisory)
         # Benignises each rule's own positive samples and reports rules
-        # that still fire. Advisory in Phase 1 — the command exits 0
+        # that still fire. This advisory release exits 0
         # regardless, so this step never blocks a merge; it surfaces
         # FP-prone rules in the build log for triage. See the docstring
         # on ``taintly.testing.fp_simulator``.
