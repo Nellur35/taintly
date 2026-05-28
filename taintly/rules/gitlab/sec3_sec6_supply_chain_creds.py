@@ -257,9 +257,9 @@ RULES: list[Rule] = [
             # so the tag-colon match starts after the image path.
             match=(
                 r"^\s*image:\s*['\"]?"
-                r"(?:[a-zA-Z0-9.-]+(?::[0-9]+)?/)?"   # optional REGISTRY[:PORT]/
-                r"[a-zA-Z0-9._/-]+"                   # IMAGE (may contain /)
-                r":[a-zA-Z0-9._-]+"                   # :TAG
+                r"(?:[a-zA-Z0-9.-]+(?::[0-9]+)?/)?"  # optional REGISTRY[:PORT]/
+                r"[a-zA-Z0-9._/-]+"  # IMAGE (may contain /)
+                r":[a-zA-Z0-9._-]+"  # :TAG
                 r"['\"]?(\s*(#.*)?)?\s*$"
             ),
             exclude=[r"^\s*#", r"@sha256:"],
