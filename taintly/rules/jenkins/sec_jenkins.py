@@ -379,7 +379,13 @@ RULES: list[Rule] = [
         ),
         pattern=RegexPattern(
             match=r"@Library\s*\(['\"][\w.-]+",
-            exclude=[r"^\s*//", r"@[a-f0-9]{40}\b"],
+            # SHA exclude is case-insensitive on the hex digits: `git
+            # rev-parse` emits lowercase by default, but `git log
+            # --pretty=format:%H` and `git ls-remote` can surface
+            # uppercase or mixed case in some setups, and pasting from
+            # a GitHub URL preserves whatever case the URL had.  A
+            # lowercase-only exclude would FP on any of those.
+            exclude=[r"^\s*//", r"@[a-fA-F0-9]{40}\b"],
         ),
         remediation=(
             "Pin shared libraries to a full commit SHA:\n"
@@ -398,6 +404,10 @@ RULES: list[Rule] = [
         ],
         test_negative=[
             "@Library('my-shared-lib@abc123def456abc123def456abc123def456abc1') _",
+            # Uppercase hex SHA — must also be treated as pinned.
+            "@Library('my-shared-lib@ABC123DEF456ABC123DEF456ABC123DEF456ABC1') _",
+            # Mixed case — same.
+            "@Library('my-shared-lib@AbC123dEf456AbC123dEf456AbC123dEf456AbC1') _",
             "// @Library('my-shared-lib') _",
         ],
         stride=["T"],
