@@ -1296,6 +1296,16 @@ class Rule:
     expanded scan adds cost and only matters for rules whose evidence
     can legitimately live behind a YAML anchor (e.g. SEC4-GH-005's
     ``persist-credentials: false`` lookahead)."""
+    supersedes: list[str] = field(default_factory=list)
+    """Rule IDs whose findings should be suppressed when *this* rule
+    also fires on the same ``(file, line)``.  Used to collapse the
+    common case where a specific high-severity rule and a generic
+    catch-all both detect the same underlying bug — reporting both is
+    noise.  Only declare a relationship when every shape the
+    superseded rule detects on a given line is also detected by this
+    rule (strict specificity superset).  The engine's
+    ``_dedupe_supersedes`` post-processor reads this field; no
+    runtime cost when the list is empty."""
 
     def __post_init__(self):
         # Propagate platform onto the pattern so platform-specific

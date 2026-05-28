@@ -283,6 +283,13 @@ RULES: list[Rule] = [
             'sh "git checkout ${ref}"',
             'sh "checkout ${ref_name}"',
         ],
+        # Same-line dedup: TAINT-JK-001's match is a strict
+        # superset of the SEC4-JK-{002,005,008} catch-alls — every
+        # shape they detect on a given line, TAINT-JK-001 also
+        # detects (and at the right severity).  Without this list
+        # the canonical case fires CRITICAL + HIGH + HIGH + MEDIUM
+        # on the same line, four findings for one bug.
+        supersedes=["SEC4-JK-002", "SEC4-JK-005", "SEC4-JK-008"],
         stride=["T", "E"],
         threat_narrative=(
             "Any attacker who can open a PR, push a branch, create a "

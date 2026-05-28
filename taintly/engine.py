@@ -94,6 +94,47 @@ def _dedupe_project_scope(findings: list[Finding]) -> list[Finding]:
     return deduped
 
 
+def _dedupe_supersedes(findings: list[Finding], rules: list[Rule]) -> list[Finding]:
+    """Drop findings whose rule_id is superseded by another rule that
+    also fires on the same ``(file, line)``.
+
+    Each rule may declare ``supersedes: list[str]`` naming rule IDs
+    whose findings should be suppressed when this rule also fires on
+    the same source location.  This collapses the canonical "one
+    underlying bug, multiple overlapping rules" noise — e.g. a
+    Jenkins ``sh "echo ${env.CHANGE_TITLE}"`` line that triggers
+    TAINT-JK-001 CRITICAL + SEC4-JK-002 HIGH + SEC4-JK-005 HIGH +
+    SEC4-JK-008 MEDIUM is reduced to just the CRITICAL.
+
+    No-op when no rule in the pack declares ``supersedes``.  The
+    relationship is strict: only declare it when every shape the
+    superseded rule detects is also detected by the superseding rule
+    — otherwise we silently drop real coverage.
+    """
+    # Build a lookup: superseded_id -> set of rule IDs that supersede it.
+    superseded_by: dict[str, set[str]] = {}
+    for rule in rules:
+        for child_id in rule.supersedes:
+            superseded_by.setdefault(child_id, set()).add(rule.id)
+
+    if not superseded_by:
+        return findings
+
+    # Index which rule IDs fire on each (file, line).
+    rules_at_loc: dict[tuple[str, int], set[str]] = {}
+    for f in findings:
+        rules_at_loc.setdefault((f.file, f.line), set()).add(f.rule_id)
+
+    kept: list[Finding] = []
+    for f in findings:
+        supersedors = superseded_by.get(f.rule_id)
+        if supersedors and supersedors & rules_at_loc[(f.file, f.line)]:
+            # A superseding rule fired on the same line — drop this finding.
+            continue
+        kept.append(f)
+    return kept
+
+
 def _is_suppressed(line: str, rule_id: str) -> bool:
     """Return True if the line carries a taintly suppression comment for rule_id.
 
@@ -1167,6 +1208,11 @@ def scan_repo(
             # Mirrors the GH _run_corpus_rules shape; per-file rules
             # are unaffected because GitLabCorpusPattern.check stubs to [].
             all_findings.extend(_run_gitlab_corpus_rules(repo_path, platform_rules))
+        # Order matters: drop superseded same-line duplicates first so
+        # the project-scope dedup sees the post-supersedes finding set
+        # (otherwise a superseded finding could "win" the project-scope
+        # first-seen slot and silently mask the canonical finding).
+        all_findings = _dedupe_supersedes(all_findings, platform_rules)
         for f in _dedupe_project_scope(all_findings):
             report.add(f)
 

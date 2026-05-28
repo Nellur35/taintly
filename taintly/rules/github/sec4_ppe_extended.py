@@ -218,6 +218,14 @@ RULES: list[Rule] = [
             '        run: echo "TITLE=$SAFE_TITLE" >> $GITHUB_ENV',
             '        # run: echo "TITLE=${{ github.event.pull_request.title }}" >> $GITHUB_ENV',
         ],
+        # Same-line dedup: a line like
+        # ``run: echo "X=${{ github.event.pull_request.title }}" >> $GITHUB_ENV``
+        # matches both SEC4-GH-006 (this rule, CRITICAL — specific
+        # GITHUB_ENV write) and SEC4-GH-004 (HIGH — broad
+        # "tainted ${{ }} in run:" catch-all).  This rule is strictly
+        # more specific and more severe, so SEC4-GH-004's finding on
+        # the same line is suppressed.
+        supersedes=["SEC4-GH-004"],
         stride=["E", "T"],
         threat_narrative=(
             "Writing attacker-controlled values to $GITHUB_ENV sets environment variables inherited "
@@ -266,6 +274,14 @@ RULES: list[Rule] = [
             '        run: echo "sha=${{ github.sha }}" >> $GITHUB_OUTPUT',
             '        # run: echo "title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT',
         ],
+        # Same-line dedup: a line like
+        # ``run: echo "x=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT``
+        # matches both SEC4-GH-007 (this rule, HIGH — specific
+        # GITHUB_OUTPUT write) and SEC4-GH-004 (HIGH — broad
+        # "tainted ${{ }} in run:" catch-all).  This rule is strictly
+        # more specific (same severity, narrower shape), so the
+        # SEC4-GH-004 finding on the same line is suppressed.
+        supersedes=["SEC4-GH-004"],
         stride=["T", "E"],
         threat_narrative=(
             "Step outputs from attacker-controlled context values propagate to downstream steps "
