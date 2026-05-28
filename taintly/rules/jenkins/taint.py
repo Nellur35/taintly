@@ -80,19 +80,24 @@ _TAINTED_NAMES = (
     r"|params\.\w+"
 )
 
-# Generic Webhook Trigger plugin bindings — recognised ONLY in the
-# ``${name}`` interpolated form, NOT bare.  GWT names like ``title``,
-# ``body``, ``ref`` collide with common Groovy local-variable names
-# that legitimate Jenkinsfiles use freely (``def title = ...``).  The
-# ``${...}`` wrapper is what disambiguates "this came from a webhook
-# binding" from "this is a Groovy local" — bare ``title`` in code
-# would FP, but ``${title}`` interpolated into a sh-step is a real
-# webhook taint flow.  Custom GWT JSONPath extractors with
-# non-default names are not detected; users with custom extractors
-# should treat their bindings as ``params.*`` for taintly's purposes.
+# Generic Webhook Trigger plugin bindings — recognised in the
+# ``${name}`` interpolated form.  Earlier versions also included the
+# bare names ``title``, ``body``, ``ref``, ``ref_name`` on the theory
+# that the ``${...}`` wrapper disambiguates "GWT binding" from
+# "Groovy local".  That theory is wrong about Groovy semantics:
+# inside a double-quoted Groovy string, ``${title}`` is exactly how
+# you interpolate a local variable, so every legitimate
+# ``def title = ...`` / ``def body = ...`` / ``def ref = ...``
+# followed by ``sh "echo ${title}"`` (a universal Groovy idiom)
+# fired CRITICAL.  Those four bare names are now excluded — users
+# of custom GWT extractors that bind exactly to ``title`` / ``body``
+# / ``ref`` / ``ref_name`` should either rename the extractor or
+# accept the gap (the alternative is a CRITICAL FP per ``def``).
+# Well-namespaced GWT bindings (``pull_request_title``,
+# ``head_commit_message``, ``pusher_email``, ``repository_*``)
+# don't collide with Groovy locals and stay in scope.
 _GWT_NAMES = (
-    r"title|body|ref|ref_name"
-    r"|pusher_name|pusher_email|sender_login"
+    r"pusher_name|pusher_email|sender_login"
     r"|pull_request_(?:title|body|user_login|head_ref|head_sha"
     r"|html_url|user_url)"
     r"|head_commit_(?:message|author_name|author_email|committer_name)"
@@ -210,15 +215,16 @@ RULES: list[Rule] = [
             'sh "log ${env.GERRIT_CHANGE_SUBJECT} >> audit.log"',
             # powershell
             'powershell "Write-Host ${params.MESSAGE}"',
-            # Generic Webhook Trigger plugin — bare ${title} as in the
-            # cicd-goat reportcov example.
-            'sh "echo Pull Request ${title} created in repo"',
-            # GWT body / pull_request_title / head_commit_message
+            # Well-namespaced GWT bindings — names that don't collide
+            # with common Groovy locals.  Bare ``${title}`` /
+            # ``${body}`` / ``${ref}`` / ``${ref_name}`` are NOT in
+            # test_positive: they were dropped because the ``${...}``
+            # wrap doesn't disambiguate GWT binding from Groovy local
+            # interpolation (Groovy uses ``${...}`` for both).
             'sh "deploy ${pull_request_title}"',
             'sh "log ${head_commit_message} >> audit.log"',
             'sh "notify ${pusher_email}"',
             'sh "annotate ${repository_full_name}"',
-            'sh "checkout ${ref_name}"',
         ],
         test_negative=[
             # Single-quoted Groovy — Groovy doesn't interpolate; the
@@ -247,6 +253,16 @@ RULES: list[Rule] = [
             # word-boundary anchors should keep this clean.
             'sh "echo ${entitled_users}"',
             'sh "echo ${body_size}"',
+            # Bare GWT names dropped from the source list because
+            # they collide with universal Groovy local-variable
+            # names — these used to fire CRITICAL FPs on every
+            # ``def title = ...`` / ``def body = ...`` / ``def
+            # ref = ...`` in legitimate Jenkinsfiles.  Locked in
+            # as negatives so they can never regress.
+            'sh "echo ${title}"',
+            'sh "echo ${body} >> /tmp/log"',
+            'sh "git checkout ${ref}"',
+            'sh "checkout ${ref_name}"',
         ],
         stride=["T", "E"],
         threat_narrative=(
