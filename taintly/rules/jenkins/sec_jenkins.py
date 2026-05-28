@@ -2050,7 +2050,17 @@ RULES: list[Rule] = [
             "dependencies, or replace downloaded scripts without any visible error."
         ),
         pattern=RegexPattern(
-            match=r"(?:url\s*:\s*['\"]http://|git\s+clone\s+http://)(?!localhost|127\.0\.0\.1)",
+            # Both ``http://`` and ``git://`` are unencrypted; ``git://``
+            # is arguably worse (no authentication, never used legitimately
+            # at modern hosts).  The rule's ``threat_narrative`` already
+            # names both schemes — the regex was missing the ``git://``
+            # leg.  ``ssh://`` and ``git@`` (SCP-shorthand SSH) are
+            # encrypted+authenticated and NOT in scope.
+            match=(
+                r"(?:url\s*:\s*['\"](?:http|git)://"
+                r"|git\s+clone\s+(?:http|git)://)"
+                r"(?!localhost|127\.0\.0\.1)"
+            ),
             exclude=[r"^\s*//"],
         ),
         remediation=(
@@ -2064,11 +2074,21 @@ RULES: list[Rule] = [
         test_positive=[
             "checkout([$class: 'GitSCM', userRemoteConfigs: [[url: 'http://github.com/org/repo.git']]])",
             "sh 'git clone http://gitlab.example.com/group/project.git'",
+            # git:// — plain unencrypted git protocol.  Used to be
+            # silently missed; the rule's threat_narrative names it
+            # explicitly so detection has to match.
+            "checkout([$class: 'GitSCM', userRemoteConfigs: [[url: 'git://github.com/org/repo.git']]])",
+            "sh 'git clone git://example.com/group/project.git'",
         ],
         test_negative=[
             "checkout([$class: 'GitSCM', userRemoteConfigs: [[url: 'https://github.com/org/repo.git']]])",
             "checkout scm",
             "// url: 'http://github.com/org/repo.git'",
+            # SSH variants are encrypted+authenticated — out of scope.
+            "checkout([$class: 'GitSCM', userRemoteConfigs: [[url: 'ssh://git@github.com/org/repo.git']]])",
+            "sh 'git clone git@github.com:org/repo.git'",
+            # localhost loopback exception preserved.
+            "sh 'git clone http://localhost:8080/test.git'",
         ],
         stride=["T", "I"],
         threat_narrative=(
