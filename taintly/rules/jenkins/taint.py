@@ -77,6 +77,19 @@ _TAINTED_NAMES = (
     r"|(?:env\.)?ghprb(?:PullTitle|PullAuthorEmail|PullAuthorLogin"
     r"|PullAuthorLoginMention|SourceBranch|TargetBranch"
     r"|ActualCommitAuthor)"
+    # Commit metadata populated by the Jenkins Git Plugin from the
+    # actual commit being built.  Author name and email are set by
+    # the contributor in their local git config and propagate
+    # through ``git commit`` unchanged — no character constraint, no
+    # validation.  An attacker who can push a commit can put any
+    # shell metacharacter in their ``user.name`` / ``user.email`` and
+    # ride that into the build's shell context.  Same exposure
+    # class as ``CHANGE_AUTHOR`` / ``CHANGE_AUTHOR_EMAIL`` (which we
+    # already classify CRITICAL) — these are the lower-level
+    # equivalents from the git plugin path rather than the
+    # multibranch SCM source.
+    r"|(?:env\.)?GIT_AUTHOR_(?:NAME|EMAIL)"
+    r"|(?:env\.)?GIT_COMMITTER_(?:NAME|EMAIL)"
     r"|params\.\w+"
 )
 
@@ -215,6 +228,12 @@ RULES: list[Rule] = [
             'sh "log ${env.GERRIT_CHANGE_SUBJECT} >> audit.log"',
             # powershell
             'powershell "Write-Host ${params.MESSAGE}"',
+            # Git Plugin commit-author metadata — author name/email
+            # are unconstrained attacker input (git config).
+            'sh "echo Committed by ${env.GIT_AUTHOR_NAME}"',
+            'sh "notify ${env.GIT_AUTHOR_EMAIL}"',
+            'sh "echo Committer: ${env.GIT_COMMITTER_NAME}"',
+            'sh "audit ${env.GIT_COMMITTER_EMAIL}"',
             # Well-namespaced GWT bindings — names that don't collide
             # with common Groovy locals.  Bare ``${title}`` /
             # ``${body}`` / ``${ref}`` / ``${ref_name}`` are NOT in
