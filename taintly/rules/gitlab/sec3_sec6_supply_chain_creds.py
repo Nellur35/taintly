@@ -245,7 +245,23 @@ RULES: list[Rule] = [
             "Image tags are mutable and can be overwritten on the registry."
         ),
         pattern=RegexPattern(
-            match=r"^\s*image:\s*['\"]?[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+['\"]?(\s*(#.*)?)?\s*$",
+            # Docker image reference grammar:
+            #   [REGISTRY[:PORT]/]IMAGE[:TAG | @sha256:DIGEST]
+            # The optional registry prefix is the tricky bit — without
+            # it, an image like ``registry.example.com:5000/app:latest``
+            # is misread as image=``registry.example.com``, tag=``5000``
+            # (the port colon is mistaken for the tag separator) and
+            # the trailing ``/app:latest`` then fails the whole match,
+            # silently dropping the finding.  The optional non-capturing
+            # group ``(?:HOST(?::PORT)?/)?`` anchors on the first ``/``
+            # so the tag-colon match starts after the image path.
+            match=(
+                r"^\s*image:\s*['\"]?"
+                r"(?:[a-zA-Z0-9.-]+(?::[0-9]+)?/)?"  # optional REGISTRY[:PORT]/
+                r"[a-zA-Z0-9._/-]+"  # IMAGE (may contain /)
+                r":[a-zA-Z0-9._-]+"  # :TAG
+                r"['\"]?(\s*(#.*)?)?\s*$"
+            ),
             exclude=[r"^\s*#", r"@sha256:"],
         ),
         remediation="Pin to digest: image: alpine@sha256:abcdef...",
@@ -254,10 +270,17 @@ RULES: list[Rule] = [
             "  image: alpine:3.18",
             "  image: node:20-slim",
             "  image: 'registry.example.com/app:latest'",
+            # Private registry with explicit port — used to silently
+            # drop because the regex confused ``:5000`` for the tag.
+            "  image: registry.example.com:5000/app:latest",
+            "  image: 'harbor.example.com:5000/myapp:v2.1.0'",
+            "  image: docker.io:443/library/alpine:3.18",
         ],
         test_negative=[
             "  image: alpine@sha256:abcdef1234567890",
             "  # image: alpine:3.18",
+            # Digest-pinned with private registry + port — must stay silent.
+            "  image: registry.example.com:5000/app@sha256:abcdef1234567890",
         ],
         stride=["T"],
         threat_narrative=(
