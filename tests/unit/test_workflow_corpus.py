@@ -80,6 +80,33 @@ def test_extract_raw_events_does_not_match_run_block_with_on_text():
     assert _extract_raw_events(content) == set()
 
 
+def test_extract_raw_events_flow_mapping_single_event():
+    """YAML flow-style ``on:`` mapping — GitHub accepts inline trigger
+    syntax and the event name sits mid-line after a brace. A purely
+    line-anchored walk read ``{`` as the event name; this asserts the
+    actual event is recovered (regression for the flow-style trigger
+    detection gap)."""
+    assert _extract_raw_events("on: { pull_request_target: { types: [opened] } }\n") == {
+        "pull_request_target"
+    }
+
+
+def test_extract_raw_events_flow_mapping_multiple_events():
+    content = "on: { push: , pull_request_target: { types: [opened] } }\njobs: {}\n"
+    assert _extract_raw_events(content) == {"push", "pull_request_target"}
+
+
+def test_extract_raw_events_flow_mapping_null_values():
+    # ``{push, pull_request}`` is a flow mapping with null values.
+    assert _extract_raw_events("on: {push, pull_request}\n") == {"push", "pull_request"}
+
+
+def test_extract_raw_events_flow_mapping_brace_on_following_line():
+    # The opening brace may legally start on the line below ``on:``.
+    content = "on:\n  { pull_request_target: { types: [opened] },\n    push: }\njobs: {}\n"
+    assert _extract_raw_events(content) == {"pull_request_target", "push"}
+
+
 def test_classify_triggers_pull_request_is_fork_reachable():
     out = _classify_triggers({"pull_request"})
     assert TriggerFamily.FORK_REACHABLE in out

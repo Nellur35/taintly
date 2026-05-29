@@ -32,6 +32,14 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref; never cancel on main — see
+# ci.yml for the rationale. Doubly useful here: the canary jobs clone
+# live external repositories, so serialising same-ref runs also removes
+# the chance of two overlapping runs racing on the same clone path.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   canary-github:
     name: E2E canary (GitHub Actions — astral-sh/uv)
@@ -44,6 +52,15 @@ jobs:
       CANARY_SHA: e5d20c6e3a67900b499de4cee45513182d55d686
       CANARY_NAME: astral-sh/uv
     steps:
+      # Audited egress boundary (audit mode → block + allow-list after
+      # baseline). See ci.yml's lint job for the full rationale. NOTE: a
+      # future block allow-list for the canary jobs must also include the
+      # canary clone hosts (github.com:443, codeload.github.com:443,
+      # gitlab.com:443) since these jobs git-clone external repos.
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -100,6 +117,12 @@ jobs:
       CANARY_SHA: b22b1035770a5f13e648b3d2bc3fedb1f3a59b1c
       CANARY_NAME: gitlab-org/gitlab-runner
     steps:
+      # Audited egress boundary (audit mode → block after baseline).
+      # See ci.yml's lint job for the full rationale. First step.
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -152,6 +175,12 @@ jobs:
       CANARY_SHA: 28b6ac3f9b1c5fd7b0bf8095d41a7e5c408c8ccd
       CANARY_NAME: jenkinsci/plugin-installation-manager-tool
     steps:
+      # Audited egress boundary (audit mode → block after baseline).
+      # See ci.yml's lint job for the full rationale. First step.
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false

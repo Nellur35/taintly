@@ -886,6 +886,79 @@ def test_xf_gh_004_dedup_per_uses_line(tmp_path: Path) -> None:
     assert len(findings) == 2
 
 
+def test_xf_gh_004_fires_on_flow_style_pull_request_target(tmp_path: Path) -> None:
+    """The caller declares its trigger in YAML flow style
+    (``on: { pull_request_target: { types: [opened] } }``) — legal
+    syntax GitHub accepts and that appears in real repositories. The
+    event-name extractor read the brace as the event name, so the
+    pwn-request shape silently stopped firing. Regression: the highest-
+    value cross-workflow rule must still fire on inline trigger syntax.
+    """
+    _write_workflow(
+        tmp_path,
+        "reusable.yml",
+        "on:\n  workflow_call:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    )
+    caller = _write_workflow(
+        tmp_path,
+        "pr-target.yml",
+        "on: { pull_request_target: { types: [opened] } }\n"
+        "jobs:\n  call:\n"
+        "    uses: ./.github/workflows/reusable.yml\n"
+        "    secrets: inherit\n",
+    )
+    findings = _xf_findings(tmp_path, "XF-GH-004")
+    assert len(findings) == 1
+    assert findings[0].file == str(caller)
+    assert "pull_request_target" in findings[0].snippet
+
+
+def test_xf_gh_004_title_names_issue_comment_event(tmp_path: Path) -> None:
+    """The finding TITLE must name the event that actually fired, not a
+    hardcoded ``pull_request_target``. An issue_comment-triggered caller
+    whose title still said ``pull_request_target`` would send the analyst
+    looking for a trigger that isn't there. Regression: keep the event
+    templated into the title."""
+    _write_workflow(
+        tmp_path,
+        "reusable.yml",
+        "on:\n  workflow_call:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    )
+    _write_workflow(
+        tmp_path,
+        "comment.yml",
+        "on: issue_comment\n"
+        "jobs:\n  call:\n"
+        "    uses: ./.github/workflows/reusable.yml\n"
+        "    secrets: inherit\n",
+    )
+    findings = _xf_findings(tmp_path, "XF-GH-004")
+    assert len(findings) == 1
+    assert "issue_comment" in findings[0].title
+    assert "pull_request_target" not in findings[0].title
+
+
+def test_xf_gh_004_title_names_workflow_run_event(tmp_path: Path) -> None:
+    """Same as above for a workflow_run-triggered caller."""
+    _write_workflow(
+        tmp_path,
+        "reusable.yml",
+        "on:\n  workflow_call:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps: []\n",
+    )
+    _write_workflow(
+        tmp_path,
+        "wf-run.yml",
+        "on:\n  workflow_run:\n    workflows: [CI]\n    types: [completed]\n"
+        "jobs:\n  call:\n"
+        "    uses: ./.github/workflows/reusable.yml\n"
+        "    secrets: inherit\n",
+    )
+    findings = _xf_findings(tmp_path, "XF-GH-004")
+    assert len(findings) == 1
+    assert "workflow_run" in findings[0].title
+    assert "pull_request_target" not in findings[0].title
+
+
 # ---------------------------------------------------------------------------
 # Windows path-separator regression tests
 # ---------------------------------------------------------------------------

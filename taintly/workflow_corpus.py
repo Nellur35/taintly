@@ -375,14 +375,92 @@ def _summarize_workflow(filepath: str, content: str) -> WorkflowSummary:
 # a corpus in tests.
 
 
+def _parse_flow_mapping_events(text: str) -> set[str]:
+    """Extract the top-level keys of a YAML flow-style mapping.
+
+    ``text`` must begin at (or before) the opening ``{`` of a flow
+    mapping such as ``{ pull_request_target: { types: [opened] } }``.
+    Returns the set of keys at the OUTER mapping level — for the
+    example above, ``{"pull_request_target"}``.  Nested mappings
+    (``{ types: ... }``) and flow sequences (``[opened]``) are skipped;
+    only the event-name tier is collected.
+
+    Brace- and bracket-depth aware, quote aware.  Stops at the ``}``
+    that closes the outer mapping, so a flow mapping spanning several
+    lines (``text`` may run to end-of-file) is handled correctly.
+    """
+    events: set[str] = set()
+    start = text.find("{")
+    if start < 0:
+        return events
+
+    brace = 0
+    bracket = 0
+    in_quote: str | None = None
+    key_buf: list[str] = []
+    collecting_key = False  # True while reading a key at the outer level
+
+    for ch in text[start:]:
+        if in_quote is not None:
+            if ch == in_quote:
+                in_quote = None
+            elif collecting_key:
+                key_buf.append(ch)
+            continue
+        if ch in ("'", '"'):
+            in_quote = ch
+            continue
+        if ch == "{":
+            brace += 1
+            if brace == 1:
+                collecting_key = True
+                key_buf = []
+            continue
+        if ch == "}":
+            if brace == 1 and bracket == 0:
+                key = "".join(key_buf).strip()
+                if key:
+                    events.add(key)
+                collecting_key = False
+            brace -= 1
+            if brace == 0:
+                break
+            continue
+        if ch == "[":
+            bracket += 1
+            continue
+        if ch == "]":
+            bracket -= 1
+            continue
+        at_outer = brace == 1 and bracket == 0
+        if ch == "," and at_outer:
+            key = "".join(key_buf).strip()
+            if key:
+                events.add(key)
+            key_buf = []
+            collecting_key = True
+            continue
+        if ch == ":" and at_outer and collecting_key:
+            key = "".join(key_buf).strip()
+            if key:
+                events.add(key)
+            key_buf = []
+            collecting_key = False
+            continue
+        if at_outer and collecting_key:
+            key_buf.append(ch)
+    return events
+
+
 def _extract_raw_events(content: str) -> set[str]:
     """Return the set of event names from the ``on:`` block.
 
-    Three valid YAML shapes are supported:
+    Four valid YAML shapes are supported:
 
       1. Single string:    ``on: push``
-      2. List:             ``on: [push, pull_request]``
-      3. Mapping block:    ``on:\\n  push:\\n    branches: [main]``
+      2. Flow list:        ``on: [push, pull_request]``
+      3. Flow mapping:     ``on: { pull_request_target: { types: [x] } }``
+      4. Mapping block:    ``on:\\n  push:\\n    branches: [main]``
 
     Anchors via the ``^on:`` start-of-line token (case-sensitive per
     the GitHub Actions spec) so a ``run:`` step containing the literal
@@ -396,6 +474,15 @@ def _extract_raw_events(content: str) -> set[str]:
     if not m:
         return events
     rest = m.group(1).strip()
+
+    # Shape 3 — flow mapping. GitHub accepts inline trigger syntax such
+    # as ``on: { pull_request_target: { types: [opened] } }``; the keys
+    # sit mid-line after a brace, so the block-mapping walk below (which
+    # only reads start-of-line keys) misses them entirely. Parse the
+    # flow mapping from the captured tail to end-of-content so a mapping
+    # that spans multiple lines is still handled.
+    if rest.startswith("{"):
+        return _parse_flow_mapping_events(content[m.start(1) :])
 
     # Shape 1 — single bare event name on the same line.
     if rest and not rest.startswith("[") and not rest.startswith("#"):
@@ -422,7 +509,14 @@ def _extract_raw_events(content: str) -> set[str]:
     for i in range(on_line_idx + 1, len(lines)):
         line = lines[i]
         stripped = line.lstrip()
-        if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+        if not stripped or stripped.startswith("#"):
+            continue
+        # Flow mapping whose opening brace starts on a line BELOW ``on:``
+        # (valid YAML, rare). Parse from here as a flow mapping rather
+        # than mis-reading ``{ event`` as a block-mapping key.
+        if stripped.startswith("{"):
+            return _parse_flow_mapping_events("\n".join(lines[i:]))
+        if stripped.startswith("-"):
             continue
         indent = len(line) - len(stripped)
         if indent == 0:
@@ -1099,7 +1193,14 @@ def _job_segments(lines: list[str]) -> list[tuple[int, list[str]]]:
 # triples — same as the per-file PatternProtocol but with the file
 # attribution carried explicitly because cross-file findings can cite
 # any workflow in the corpus.
-CorpusFindings = list[tuple[str, int, str]]
+#
+# A callback MAY emit a 4-tuple ``(filepath, line, snippet, title)`` to
+# override the static rule title on a per-finding basis — used when the
+# accurate title depends on the matched evidence (e.g. XF-GH-004 names
+# the specific pwn-request event that actually fired rather than a
+# hardcoded ``pull_request_target``). When the 4th element is omitted
+# the engine falls back to ``rule.title``.
+CorpusFindings = list[tuple[str, int, str] | tuple[str, int, str, str]]
 
 
 @dataclass
