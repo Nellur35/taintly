@@ -82,9 +82,16 @@ from typing import Any
 # whitespace / quoting / YAML flow-style keys don't miss matches.
 # ---------------------------------------------------------------------------
 
-_RE_PR_TARGET = re.compile(r"^\s*pull_request_target\s*:", re.MULTILINE)
+# The leading ``(?:^|[{,])`` lets the event name be matched either at
+# the start of a line (block style — ``on:\n  pull_request_target:``)
+# OR immediately after a ``{`` / ``,`` (flow style —
+# ``on: { pull_request_target: { types: [opened] } }``). GitHub accepts
+# inline trigger syntax, and a purely line-anchored regex silently
+# missed it, collapsing the exploitability context for every finding in
+# such a file. See tests/unit/test_workflow_context.py flow-style cases.
+_RE_PR_TARGET = re.compile(r"(?:^|[{,])\s*pull_request_target\s*:", re.MULTILINE)
 _RE_FORK_TRIGGER = re.compile(
-    r"^\s*(pull_request|pull_request_target|issue_comment|workflow_run)\s*:",
+    r"(?:^|[{,])\s*(pull_request|pull_request_target|issue_comment|workflow_run)\s*:",
     re.MULTILINE,
 )
 # GitLab / Jenkins fork-trigger equivalents: MR pipeline rules and

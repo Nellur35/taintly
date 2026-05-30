@@ -932,14 +932,25 @@ def _xf_gh_004_callback(corpus: WorkflowCorpus) -> CorpusFindings:
                 f"An attacker-triggered PR / comment reaches the reusable workflow "
                 f"with the caller's privileged context."
             )
-            findings.append((caller.filepath, ref.line, snippet))
+            # Title names the event(s) that ACTUALLY fired rather than a
+            # hardcoded ``pull_request_target`` — an issue_comment- or
+            # workflow_run-triggered caller would otherwise be mislabelled
+            # in the report, sending the analyst looking for a
+            # pull_request_target trigger that isn't there.
+            title = f"PWN-request shape: {event_str} caller invokes write-context reusable"
+            findings.append((caller.filepath, ref.line, snippet, title))
     return findings
 
 
 RULES.append(
     Rule(
         id="XF-GH-004",
-        title="PWN-request shape: pull_request_target caller invokes write-context reusable",
+        # Static fallback title — event-agnostic so it never misreports
+        # the trigger. The callback emits a per-finding title naming the
+        # specific event(s) that fired (pull_request_target / issue_comment
+        # / workflow_run / …); this constant is only used if that override
+        # is ever dropped.
+        title="PWN-request shape: write-context caller invokes write-context reusable",
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",

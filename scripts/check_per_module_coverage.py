@@ -30,11 +30,15 @@ import sys
 import xml.etree.ElementTree as ET
 
 
-# Per-module floors. Keyed by the source filename (Coverage's <class
-# filename="..."> attribute). Values are minimum acceptable line-rate
-# percents, rounded down from current measured coverage. Lower the
-# value only when intentionally relaxing the gate; raise it when
-# new tests land for the module.
+# Per-module floors. Keys are repo-relative POSIX paths for readability
+# (``taintly/fixes.py``). NOTE: coverage.py writes its <class filename>
+# RELATIVE TO ``[tool.coverage.run] source`` (= "taintly"), so the XML
+# carries package-relative names (``fixes.py``) with no ``taintly/``
+# prefix. Matching normalises both sides (see ``_norm``) so the keys
+# stay readable while still matching what coverage emits. Values are
+# minimum acceptable line-rate percents, rounded down from current
+# measured coverage. Lower the value only when intentionally relaxing
+# the gate; raise it when new tests land for the module.
 #
 # Why these four: pyproject.toml documents these as the modules that
 # drag the overall total below 85. The global gate alone can't catch
@@ -48,12 +52,31 @@ _FLOORS: dict[str, int] = {
 }
 
 
+def _norm(path: str) -> str:
+    """Normalise a coverage path for comparison: forward slashes, with a
+    single leading ``taintly/`` stripped.
+
+    coverage.py writes ``filename`` relative to ``[tool.coverage.run]
+    source`` (= "taintly"), so it emits bare ``fixes.py`` while the
+    ``_FLOORS`` keys carry a ``taintly/`` prefix for readability.
+    Stripping the prefix from both sides makes the two forms compare
+    equal regardless of which convention coverage emits (bare when
+    ``source=["taintly"]``, prefixed when run from the repo root or
+    against an installed package). An earlier version compared the
+    prefixed key against the bare filename verbatim, so nothing matched
+    and every module fell through to the non-fatal WARN branch — the
+    gate was a silent no-op.
+    """
+    return path.replace("\\", "/").removeprefix("taintly/")
+
+
 def _percent_for(root: ET.Element, filename: str) -> int | None:
     """Find <class filename="..."> and return its line-rate as an
     integer percent, or None if the file isn't in the report."""
+    target = _norm(filename)
     for cls in root.iter("class"):
         # Coverage uses POSIX paths even on Windows runners.
-        if cls.get("filename") == filename:
+        if _norm(cls.get("filename", "")) == target:
             line_rate = float(cls.get("line-rate", "0") or "0")
             return int(line_rate * 100)
     return None
