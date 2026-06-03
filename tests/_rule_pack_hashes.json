@@ -116,7 +116,7 @@
   "gitlab/vulnerable/registry_override.yml": "77f4bf294ea22147518afe0fcc43d95a91d7e6cce4825a2ac390a5eb44e3db08",
   "gitlab/vulnerable/security_gate_allow_failure.yml": "75d7ecdd27126b5a69f7330affec6976eefc618cf66c09e2453d2540eca3ad56",
   "gitlab/vulnerable/service_latest.yml": "2518f43d87c5c15b0617ebe40a25cb53ef99cbf2a7f219b1ca84351bea129169",
-  "gitlab/vulnerable/trigger_with_job_token.yml": "b413f77d2d90d71a67bc591a077f988d7ddc08a60c9fa51dd282fedadb6299eb",
+  "gitlab/vulnerable/trigger_with_job_token.yml": "7895d2ce786147a35cbc54687c7a8c0ed76edd64b7ffe5bba32aab830656c71d",
   "gitlab/vulnerable/unquoted_commit_message.yml": "6ee3bae10bc5a7aeb3876f172c06817b622ea2c51aa7502522916546132a6837",
   "gitlab/vulnerable/unquoted_ref_name.yml": "3bf0d503dc41d4a6a590bf057d0842694d227c8aa5f7ae05d0c585dc203aa4db",
   "gitlab/vulnerable/wget_pipe_bash.yml": "301713979f2ef57e5e68a3b01bdf9ee1afc848fbbac3a02aa856087327eed71c",
