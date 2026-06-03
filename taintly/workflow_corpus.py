@@ -153,6 +153,11 @@ class CacheRef:
         ``role in ("read", "both")`` for read-side candidates.
     :attr line: 1-based line number of the ``with: key:`` line for
         finding attribution.
+    :attr step_if: Raw value of the step's ``if:`` guard ("" when the
+        step declares none).  Lets cross-file rules tell that a
+        ``cache/save`` gated to a privileged ref / push event cannot be
+        a fork-write candidate even when the workflow's ``on:`` set
+        includes a fork-reachable trigger.
     """
 
     key: str
@@ -160,6 +165,7 @@ class CacheRef:
     prefix: str
     role: str
     line: int
+    step_if: str = ""
 
 
 @dataclass(frozen=True)
@@ -216,6 +222,10 @@ class ReusableRef:
         ``secrets: inherit`` at the calling-job level.  The
         reusable-fanout hub rule unions exposure across N callers
         carrying ``inherit``.
+    :attr with_args: the ``with:`` inputs the caller passes to the
+        reusable workflow — a tuple of ``(input_name, raw_value)``
+        pairs.  Cross-file taint analysis joins these against the
+        callee's ``inputs.*`` flows.
     :attr line: 1-based line of the ``uses:`` line.
     """
 
@@ -226,6 +236,7 @@ class ReusableRef:
     ref: str  # "" for local, otherwise the @ref suffix
     secrets_inherit: bool
     line: int
+    with_args: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -375,14 +386,94 @@ def _summarize_workflow(filepath: str, content: str) -> WorkflowSummary:
 # a corpus in tests.
 
 
+def _parse_flow_mapping_events(text: str) -> set[str]:
+    """Extract the top-level keys of a YAML flow-style mapping.
+
+    ``text`` must begin at (or before) the opening ``{`` of a flow
+    mapping such as ``{ pull_request_target: { types: [opened] } }``.
+    Returns the set of keys at the OUTER mapping level — for the
+    example above, ``{"pull_request_target"}``.  Nested mappings
+    (``{ types: ... }``) and flow sequences (``[opened]``) are skipped;
+    only the event-name tier is collected.
+
+    Brace- and bracket-depth aware, quote aware.  Stops at the ``}``
+    that closes the outer mapping, so a flow mapping spanning several
+    lines (``text`` may run to end-of-file) is handled correctly.
+    """
+    events: set[str] = set()
+    start = text.find("{")
+    if start < 0:
+        return events
+
+    brace = 0
+    bracket = 0
+    in_quote: str | None = None
+    key_buf: list[str] = []
+    collecting_key = False  # True while reading a key at the outer level
+
+    for ch in text[start:]:
+        if in_quote is not None:
+            if ch == in_quote:
+                in_quote = None
+            elif collecting_key:
+                key_buf.append(ch)
+            continue
+        if ch in ("'", '"'):
+            in_quote = ch
+            continue
+        if ch == "{":
+            brace += 1
+            if brace == 1:
+                collecting_key = True
+                key_buf = []
+            continue
+        if ch == "}":
+            if brace == 1 and bracket == 0:
+                key = "".join(key_buf).strip()
+                if key:
+                    events.add(key)
+                collecting_key = False
+            brace -= 1
+            if brace == 0:
+                break
+            continue
+        if ch == "[":
+            bracket += 1
+            continue
+        if ch == "]":
+            bracket -= 1
+            continue
+        at_outer = brace == 1 and bracket == 0
+        if ch == "," and at_outer:
+            key = "".join(key_buf).strip()
+            if key:
+                events.add(key)
+            key_buf = []
+            collecting_key = True
+            continue
+        if ch == ":" and at_outer and collecting_key:
+            key = "".join(key_buf).strip()
+            if key:
+                events.add(key)
+            key_buf = []
+            collecting_key = False
+            continue
+        if at_outer and collecting_key:
+            key_buf.append(ch)
+    return events
+
+
+
+
 def _extract_raw_events(content: str) -> set[str]:
     """Return the set of event names from the ``on:`` block.
 
-    Three valid YAML shapes are supported:
+    Four valid YAML shapes are supported:
 
       1. Single string:    ``on: push``
-      2. List:             ``on: [push, pull_request]``
-      3. Mapping block:    ``on:\\n  push:\\n    branches: [main]``
+      2. Flow list:        ``on: [push, pull_request]``
+      3. Flow mapping:     ``on: { pull_request_target: { types: [x] } }``
+      4. Mapping block:    ``on:\\n  push:\\n    branches: [main]``
 
     Anchors via the ``^on:`` start-of-line token (case-sensitive per
     the GitHub Actions spec) so a ``run:`` step containing the literal
@@ -396,6 +487,15 @@ def _extract_raw_events(content: str) -> set[str]:
     if not m:
         return events
     rest = m.group(1).strip()
+
+    # Shape 3 — flow mapping. GitHub accepts inline trigger syntax such
+    # as ``on: { pull_request_target: { types: [opened] } }``; the keys
+    # sit mid-line after a brace, so the block-mapping walk below (which
+    # only reads start-of-line keys) misses them entirely. Parse the
+    # flow mapping from the captured tail to end-of-content so a mapping
+    # that spans multiple lines is still handled.
+    if rest.startswith("{"):
+        return _parse_flow_mapping_events(content[m.start(1) :])
 
     # Shape 1 — single bare event name on the same line.
     if rest and not rest.startswith("[") and not rest.startswith("#"):
@@ -422,7 +522,14 @@ def _extract_raw_events(content: str) -> set[str]:
     for i in range(on_line_idx + 1, len(lines)):
         line = lines[i]
         stripped = line.lstrip()
-        if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+        if not stripped or stripped.startswith("#"):
+            continue
+        # Flow mapping whose opening brace starts on a line BELOW ``on:``
+        # (valid YAML, rare). Parse from here as a flow mapping rather
+        # than mis-reading ``{ event`` as a block-mapping key.
+        if stripped.startswith("{"):
+            return _parse_flow_mapping_events("\n".join(lines[i:]))
+        if stripped.startswith("-"):
             continue
         indent = len(line) - len(stripped)
         if indent == 0:
@@ -436,6 +543,8 @@ def _extract_raw_events(content: str) -> set[str]:
             if key:
                 events.add(key)
     return events
+
+
 
 
 def _classify_triggers(events: set[str]) -> frozenset[TriggerFamily]:
@@ -512,6 +621,42 @@ def _extract_cache_refs(lines: list[str]) -> list[CacheRef]:
             role = "both"
         step_indent = len(m.group("indent"))
 
+        # Capture the step's ``if:`` guard. A ``- uses:`` (dash-form)
+        # cache step STARTS at this line, so it has no sibling keys
+        # above ``uses:`` — any ``if:`` sits after it and is found by
+        # the forward scan below. Scanning backward from a dash-form
+        # step would cross into the PREVIOUS step and wrongly attribute
+        # its ``if:`` here. Only a bare ``uses:`` cache step (preceded
+        # within the same step by ``- name:`` / ``- id:`` / ``- if:``)
+        # needs a backward scan, and it is bounded by that ``- `` start.
+        step_if = ""
+        uses_col = line.index("uses")
+        if not line.lstrip().startswith("-"):
+            b = i - 1
+            while b >= 0:
+                braw = lines[b]
+                bs = braw.lstrip()
+                if not bs or bs.startswith("#"):
+                    b -= 1
+                    continue
+                bind = len(braw) - len(bs)
+                if bind == uses_col:
+                    mbi = re.match(r"^if\s*:\s*(.*)$", bs)
+                    if mbi:
+                        step_if = mbi.group(1).strip()
+                        break
+                    # A non-``if:`` sibling key (``name:`` / ``id:``) —
+                    # keep scanning up within this step.
+                    b -= 1
+                    continue
+                # First line shallower than the sibling indent — the
+                # step's ``- `` start; it may itself carry ``- if:``.
+                if bind < uses_col:
+                    mds = re.match(r"^-\s+if\s*:\s*(.*)$", bs)
+                    if mds:
+                        step_if = mds.group(1).strip()
+                break
+
         # Look ahead for the step's `with:` block.  The step ends when a
         # line at indent < step_indent appears (the dash of the next
         # step or a sibling key of the parent `steps:` block) — the
@@ -536,6 +681,11 @@ def _extract_cache_refs(lines: list[str]) -> list[CacheRef]:
             # ``- uses:`` and ``- name:`` shapes equally.
             if indent == step_indent and stripped.startswith("- "):
                 break
+            # Step-level ``if:`` appearing after ``uses:``.
+            if not in_with and not step_if:
+                mfi = re.match(r"^\s*if\s*:\s*(.*)$", nxt)
+                if mfi:
+                    step_if = mfi.group(1).strip()
             # Detect the `with:` key inside this step.
             if not in_with and re.match(r"^\s*with\s*:\s*$", nxt):
                 in_with = True
@@ -594,6 +744,7 @@ def _extract_cache_refs(lines: list[str]) -> list[CacheRef]:
                 prefix=prefix,
                 role=role,
                 line=key_line,
+                step_if=step_if,
             )
         )
         i = max(j, i + 1)
@@ -889,18 +1040,42 @@ def _extract_reusable_refs(lines: list[str]) -> list[ReusableRef]:
         # ``indent < uses_indent``, so siblings are scanned but
         # parent-level keys terminate the search.
         secrets_inherit = False
+        with_args: list[tuple[str, str]] = []
         uses_indent = len(m.group("indent"))
-        for j in range(i + 1, n):
+        j = i + 1
+        while j < n:
             nxt = lines[j]
             stripped = nxt.lstrip()
             if not stripped or stripped.startswith("#"):
+                j += 1
                 continue
             sub_indent = len(nxt) - len(stripped)
             if sub_indent < uses_indent:
                 break
             if sub_indent == uses_indent and re.match(r"^\s*secrets\s*:\s*inherit\s*$", nxt):
                 secrets_inherit = True
-                break
+            elif sub_indent == uses_indent and re.match(r"^\s*with\s*:\s*$", nxt):
+                # Walk the ``with:`` block's children — the inputs the
+                # caller passes to the reusable workflow.
+                k = j + 1
+                while k < n:
+                    child = lines[k]
+                    cs = child.lstrip()
+                    if not cs or cs.startswith("#"):
+                        k += 1
+                        continue
+                    cind = len(child) - len(cs)
+                    if cind <= uses_indent:
+                        break
+                    am = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.+?)\s*$", child)
+                    if am:
+                        with_args.append(
+                            (am.group(1), am.group(2).strip().strip("'\""))
+                        )
+                    k += 1
+                j = k
+                continue
+            j += 1
 
         out.append(
             ReusableRef(
@@ -911,6 +1086,7 @@ def _extract_reusable_refs(lines: list[str]) -> list[ReusableRef]:
                 ref=ref,
                 secrets_inherit=secrets_inherit,
                 line=i + 1,
+                with_args=tuple(with_args),
             )
         )
     return out

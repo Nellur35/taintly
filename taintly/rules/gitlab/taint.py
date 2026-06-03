@@ -98,6 +98,12 @@ class TaintPattern:
     exclude: list[str] = field(default_factory=list)
     kind_filter: str | None = None
     sink_quote_filter: str | None = None
+    # Which sink class(es) to surface.  Defaults to ``"script"`` — a
+    # ``script:`` shell line — so every existing rule keeps its exact
+    # behaviour.  Non-script sink classes (``"image"``,
+    # ``"service_image"``, ``"tags"``) are opt-in.  Accepts a single
+    # kind or a tuple of kinds.
+    sink_kind_filter: str | tuple[str, ...] = "script"
 
     # CONTRACT: returns (line_num, snippet) where line_num is the
     # taint sink's source line, and snippet is the rendered provenance
@@ -105,7 +111,14 @@ class TaintPattern:
     # taintly._pattern_contract.
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         out: list[tuple[int, str]] = []
+        allowed_sinks = (
+            (self.sink_kind_filter,)
+            if isinstance(self.sink_kind_filter, str)
+            else self.sink_kind_filter
+        )
         for path in taint_analyze(content, lines):
+            if path.sink_kind not in allowed_sinks:
+                continue
             if self.kind_filter is not None and path.kind != self.kind_filter:
                 continue
             if self.sink_quote_filter is not None:
@@ -859,6 +872,194 @@ RULES = [
             "CI/CD variables.  Same injection shape as TAINT-GL-001 "
             "but the taint source crosses a component boundary and "
             "so no single-file rule catches it."
+        ),
+        incidents=[],
+    ),
+    # =========================================================================
+    # TAINT-GL-005 — attacker-controlled value reaches a job / service image
+    # =========================================================================
+    Rule(
+        id="TAINT-GL-005",
+        title=(
+            "Attacker-controlled CI variable flows into a job image: "
+            "or services.* image (attacker-controlled image pull)"
+        ),
+        severity=Severity.CRITICAL,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A job's ``image:`` (or a ``services.*`` image) is "
+            "expanded from a CI variable that carries "
+            "attacker-controlled data — a ``$CI_COMMIT_TITLE`` / "
+            "``$CI_MERGE_REQUEST_*`` / ``$GITLAB_USER_*`` value, "
+            "directly or laundered through a project ``variables:`` "
+            "chain, or inherited across jobs via a ``dotenv`` "
+            "artefact.\n"
+            "\n"
+            "The runner pulls and runs that image as the job's "
+            "execution environment: every ``script:`` line runs "
+            "inside it, with the job's masked / protected CI/CD "
+            "variables and runner credentials available.  When the "
+            "attacker controls the image reference they choose the "
+            "code that runs — a direct remote-code-execution sink, "
+            "the GitLab analog of TAINT-GH-015.  Service containers "
+            "are the same: they run alongside the job and routinely "
+            "receive credentials."
+        ),
+        pattern=TaintPattern(
+            sink_kind_filter=("image", "service_image"),
+        ),
+        remediation=(
+            "Pin job and service images to a trusted, static "
+            "reference — ideally by digest:\n"
+            "\n"
+            "    # BAD — an MR author can influence $IMG\n"
+            "    image: $IMG\n"
+            "\n"
+            "    # GOOD — pinned\n"
+            "    image: registry.example.com/ci/base@sha256:<digest>\n"
+            "\n"
+            "If the image must vary, derive it only from trusted, "
+            "validated inputs — never from ``$CI_COMMIT_*`` / "
+            "``$CI_MERGE_REQUEST_*`` / ``$GITLAB_USER_*`` data, and "
+            "allow-list the registry / repository."
+        ),
+        reference="https://docs.gitlab.com/ci/yaml/#image",
+        test_positive=[
+            # Tainted project variable expanded into image:.
+            (
+                "variables:\n"
+                "  IMG: $CI_COMMIT_TITLE\n"
+                "build:\n"
+                "  image: $IMG\n"
+                "  script:\n"
+                "    - echo hi\n"
+            ),
+            # Tainted variable expanded into a services.* image.
+            (
+                "variables:\n"
+                "  SVC: $CI_MERGE_REQUEST_TITLE\n"
+                "test:\n"
+                "  services:\n"
+                "    - name: $SVC\n"
+                "  script:\n"
+                "    - echo hi\n"
+            ),
+        ],
+        test_negative=[
+            # Pinned, static image.
+            "build:\n  image: ruby:3.0\n  script:\n    - echo hi\n",
+            # image: expands a variable, but the variable is a static
+            # literal — no attacker bytes flow.
+            (
+                "variables:\n"
+                "  IMG: registry.example.com/ci/base:1.2.3\n"
+                "build:\n"
+                "  image: $IMG\n"
+                "  script:\n"
+                "    - echo hi\n"
+            ),
+            # Static service image.
+            (
+                "test:\n"
+                "  services:\n"
+                "    - name: postgres:15\n"
+                "  script:\n"
+                "    - echo hi\n"
+            ),
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "An attacker opens a merge request whose title encodes "
+            "an image reference they publish.  The pipeline forwards "
+            "``CI_MERGE_REQUEST_TITLE`` through a project variable "
+            "into a job's ``image:``.  Every ``script:`` line of "
+            "that job then runs inside the attacker's image, with "
+            "the job's masked CI/CD variables and runner credentials "
+            "— full remote code execution with no shell command in "
+            "the pipeline file."
+        ),
+        incidents=[],
+    ),
+    # =========================================================================
+    # TAINT-GL-006 — attacker-controlled value reaches a runner tags: selector
+    # =========================================================================
+    Rule(
+        id="TAINT-GL-006",
+        title=(
+            "Attacker-controlled CI variable flows into a job "
+            "tags: selector (runner hijack)"
+        ),
+        severity=Severity.HIGH,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A job's ``tags:`` list is expanded from a CI variable "
+            "carrying attacker-controlled data (a ``$CI_COMMIT_*`` / "
+            "``$CI_MERGE_REQUEST_*`` / ``$GITLAB_USER_*`` value, "
+            "directly or laundered through a ``variables:`` chain or "
+            "a ``dotenv`` artefact).\n"
+            "\n"
+            "``tags:`` selects which runner picks up the job.  When "
+            "the attacker controls a tag they can steer the job onto "
+            "a runner they registered against a loosely-scoped tag — "
+            "the job then executes with its masked / protected CI/CD "
+            "variables and the runner credentials on infrastructure "
+            "the attacker chose.  The GitLab analog of TAINT-GH-014."
+        ),
+        pattern=TaintPattern(sink_kind_filter="tags"),
+        remediation=(
+            "Never derive ``tags:`` from attacker-controlled CI "
+            "variables.  Pin the tag list to static, trusted "
+            "values:\n"
+            "\n"
+            "    # BAD — an MR author can influence $RUNNER\n"
+            "    tags:\n"
+            "      - $RUNNER\n"
+            "\n"
+            "    # GOOD — static\n"
+            "    tags:\n"
+            "      - docker\n"
+            "\n"
+            "Also scope self-managed runner tags tightly: a runner "
+            "should never answer to a tag an MR-triggered job can "
+            "name."
+        ),
+        reference="https://docs.gitlab.com/ci/yaml/#tags",
+        test_positive=[
+            # Tainted project variable expanded into tags:.
+            (
+                "variables:\n"
+                "  RUNNER: $CI_COMMIT_REF_NAME\n"
+                "build:\n"
+                "  tags:\n"
+                "    - $RUNNER\n"
+                "  script:\n"
+                "    - echo hi\n"
+            ),
+        ],
+        test_negative=[
+            # Static tag list.
+            "build:\n  tags:\n    - docker\n  script:\n    - echo hi\n",
+            # tags: expands a variable, but it is a static literal.
+            (
+                "variables:\n"
+                "  RUNNER: docker\n"
+                "build:\n"
+                "  tags:\n"
+                "    - $RUNNER\n"
+                "  script:\n"
+                "    - echo hi\n"
+            ),
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "An attacker opens a merge request whose source branch "
+            "name is a runner tag they control.  The pipeline "
+            "forwards ``CI_COMMIT_REF_NAME`` through a project "
+            "variable into a job's ``tags:``.  The job is dispatched "
+            "to a runner the attacker registered, handing them the "
+            "job's masked CI/CD variables and runner credentials."
         ),
         incidents=[],
     ),

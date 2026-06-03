@@ -404,9 +404,11 @@ class _Walker:
         # DASH token at the same indent as an open sequence means
         # the sequence's last element has ended and the new token is
         # a sibling of the sequence's *parent* (not an element of the
-        # sequence).  Pop the sequence frame.  Without this pop,
-        # ``needs:`` (list value) silently swallows subsequent sibling
-        # keys like ``runs-on:``, ``permissions:``, ``steps:``.
+        # sequence).  Pop the element-mapping frame (one level up) and
+        # the sequence frame itself.  Without this pop, ``needs:``
+        # (list value) silently swallows subsequent sibling keys like
+        # ``runs-on:``, ``permissions:``, ``steps:`` — corpus oracle
+        # quantified this at ~270 events across 16 files.
         while len(self._stack) > 1:
             top = self._stack[-1]
             if top.indent > indent:
@@ -420,6 +422,12 @@ class _Walker:
             ):
                 self._stack.pop()
                 continue
+            # Element mapping frame above a same-indent sequence
+            # whose siblings we're about to address.  The element
+            # frame's indent is dash+1 (one more than the sequence's),
+            # so it's already caught by the ``top.indent > indent``
+            # branch above; this comment exists for the reader who
+            # asks "what about the element mapping?".
             break
         # Stop capturing under an anchor when we've returned to an
         # indent at or shallower than the anchor's defining line.
@@ -476,6 +484,15 @@ class _Walker:
         # this indent.
         top = self._stack[-1]
         if not (top.container == "sequence" and top.indent == indent):
+            # Standard YAML allows the dash to share indent with the
+            # parent key (``steps:\n- foo\n- bar``) as well as sit
+            # deeper (``steps:\n  - foo``).  Both shapes mean ``steps:
+            # [foo, bar]``; both need the parent key recorded as the
+            # sequence frame's ``key`` so events resolve at the
+            # ``steps.[*]`` path rather than dropping the ``steps``
+            # component.  Surfaced by tests/lab/test_yaml_parser_oracle.py
+            # — 139 corpus files (12%) exhibited the dropped-parent-key
+            # shape, all of them using the same-indent dash style.
             if self._open_key is not None and indent >= self._open_key.indent:
                 self._stack.append(
                     _Frame(
