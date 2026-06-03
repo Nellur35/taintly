@@ -1295,7 +1295,16 @@ def _run_corpus_rules(
                     )
                 )
                 continue
-            for filepath, line_num, snippet in hits:
+            for hit in hits:
+                # A corpus callback may emit a 4-tuple to override the
+                # static rule title per-finding (e.g. XF-GH-004 names the
+                # specific pwn-request event that fired). mypy narrows the
+                # tuple union by length.
+                if len(hit) == 4:
+                    filepath, line_num, snippet, title = hit
+                else:
+                    filepath, line_num, snippet = hit
+                    title = rule.title
                 family = rule.finding_family or classify_rule(rule.id, rule.owasp_cicd)
                 confidence = rule.confidence or default_confidence(rule.id)
                 review_needed = rule.review_needed or default_review_needed(rule.id)
@@ -1307,7 +1316,7 @@ def _run_corpus_rules(
                     Finding(
                         rule_id=rule.id,
                         severity=rule.severity,
-                        title=rule.title,
+                        title=title,
                         description=rule.description,
                         file=filepath,
                         line=line_num,

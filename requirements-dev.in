@@ -1,0 +1,30 @@
+# Top-level development / CI toolchain for taintly.
+#
+# taintly ships ZERO runtime dependencies; everything here is dev/build
+# tooling used only in CI. This file lists the DIRECT pins; the fully
+# resolved, hash-pinned lock lives in requirements-dev.lock and is what
+# CI installs under `pip install --require-hashes`.
+#
+# Regenerate the lock after any change here:
+#
+#   uv pip compile --universal --generate-hashes \
+#     --python-version 3.10 -o requirements-dev.lock requirements-dev.in
+#
+# `--universal` resolves across platforms and Python versions; the
+# explicit `--python-version 3.10` sets the lower bound to the oldest
+# interpreter CI runs so the single lock carries marker-gated transitive
+# deps (tomli, exceptiongroup for <3.11; colorama for win32) for the
+# whole 3.10 / 3.11 / 3.12 matrix. Omitting it would default the floor
+# to the host interpreter and silently drop the 3.10-only entries,
+# breaking `pip install --require-hashes` on the 3.10 matrix leg. Keep
+# the direct pins below in lockstep with the versions cited in
+# .github/workflows/ comments.
+
+ruff==0.9.0
+mypy==1.14.1
+hypothesis==6.152.1
+bandit==1.8.3
+pip-audit==2.9.0
+pytest
+pytest-timeout
+pytest-cov

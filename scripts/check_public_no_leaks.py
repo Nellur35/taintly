@@ -42,6 +42,8 @@ ALLOWED_FILES: dict[str, str] = {
     "SECURITY.md": "security policy",
     "action.yml": "GitHub Action manifest",
     "pyproject.toml": "Python project metadata",
+    "requirements-dev.in": "dev/CI toolchain direct pins (source for the hashed lock)",
+    "requirements-dev.lock": "hash-pinned dev/CI toolchain lock (uv-generated)",
     # User-facing docs (explicit allow-list — docs/ is NOT a free directory)
     "docs/AI_TRIAGE.md": "user-facing AI-triage guide",
     "docs/CO_FIRES.md": "user-facing co-fire matrix",

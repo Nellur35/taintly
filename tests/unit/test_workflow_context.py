@@ -24,6 +24,23 @@ def test_detects_pull_request_target_trigger():
     assert ctx.has_fork_triggered is True
 
 
+def test_detects_flow_style_pull_request_target_trigger():
+    """YAML flow-style triggers (``on: { pull_request_target: ... }``)
+    are legal and appear in real repos. A line-anchored regex missed
+    them, collapsing the exploitability context for every finding in
+    the file. Regression for the flow-style trigger detection gap."""
+    ctx = analyze("on: { pull_request_target: { types: [opened] } }\n")
+    assert ctx.has_pr_target is True
+    assert ctx.has_fork_triggered is True
+
+
+def test_detects_flow_style_fork_trigger_issue_comment():
+    ctx = analyze("on: { issue_comment: { types: [created] } }\n")
+    assert ctx.has_fork_triggered is True
+    # issue_comment is fork-reachable but not pull_request_target.
+    assert ctx.has_pr_target is False
+
+
 def test_detects_explicit_checkout():
     ctx = analyze("      - uses: actions/checkout@v4\n")
     assert ctx.has_checkout is True

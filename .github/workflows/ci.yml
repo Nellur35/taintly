@@ -9,6 +9,16 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref so a new push to an open PR
+# doesn't run a full duplicate matrix (lint, mypy x3, unit, rule x3,
+# fuzz, Windows, self-audit) against stale code. cancel-in-progress is
+# gated on the ref: on main we never cancel — a release-relevant run
+# must not be killed mid-flight — while on PR / branch refs we drop the
+# obsolete run the moment a newer commit arrives.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   # ---------------------------------------------------------------------------
   # Lint — ruff check + format enforcement
@@ -22,6 +32,26 @@ jobs:
     permissions:
       contents: read
     steps:
+      # step-security/harden-runner establishes an AUDITED EGRESS
+      # BOUNDARY on the runner — the one runtime control this CI didn't
+      # yet model, on-brand for a tool whose thesis is that pipelines
+      # can't be turned against their owners. Started in `audit` mode to
+      # learn the legitimate outbound set; once the run summaries confirm
+      # it (expected: pypi.org:443, files.pythonhosted.org:443,
+      # github.com:443, codeload.github.com:443) flip to:
+      #     egress-policy: block
+      #     allowed-endpoints: >
+      #       pypi.org:443
+      #       files.pythonhosted.org:443
+      #       github.com:443
+      #       codeload.github.com:443
+      # MUST be the first step so it can monitor every later step's
+      # egress. Linux-only — deliberately NOT added to the windows-test
+      # job (harden-runner supports Ubuntu runners only).
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -30,8 +60,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install ruff
-        run: pip install ruff==0.9.0
+      - name: Install dev toolchain (hash-pinned)
+        # `--require-hashes` fails closed if PyPI (or a mirror / MITM)
+        # serves a wheel whose hash differs from requirements-dev.lock —
+        # the same immutable-digest discipline SEC3 enforces on Actions,
+        # now applied to our own PyPI deps. The lock is the universal,
+        # fully-resolved superset; every Linux job installs all of it so
+        # there is a single file to maintain. Regenerate with the uv
+        # command documented in requirements-dev.in after any bump.
+        run: pip install --require-hashes -r requirements-dev.lock
 
       - name: Check lint
         run: ruff check taintly/
@@ -86,6 +123,12 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
+      # Audited egress boundary (audit mode → block + allow-list after
+      # baseline). See the lint job for the full rationale. First step.
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -94,8 +137,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install mypy
-        run: pip install mypy==1.14.1
+      - name: Install dev toolchain (hash-pinned)
+        # Hash-pinned install — see the lint job for the rationale.
+        run: pip install --require-hashes -r requirements-dev.lock
 
       - name: Run mypy
         run: mypy --python-version ${{ matrix.python-version }}
@@ -113,6 +157,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Audited egress boundary (audit mode → block + allow-list after
+      # baseline). See the lint job for the full rationale. First step.
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -121,10 +171,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install deps
-        # hypothesis pulls in property-based tests
-        # (tests/unit/test_pattern_properties.py — PSE Domain 3.4).
-        run: pip install pytest pytest-timeout pytest-cov hypothesis==6.152.1
+      - name: Install dev toolchain (hash-pinned)
+        # Hash-pinned install — see the lint job for the rationale. The
+        # lock carries pytest / pytest-cov and hypothesis (which pulls in
+        # the property-based tests in tests/unit/test_pattern_properties.py
+        # — PSE Domain 3.4) at the pins recorded in requirements-dev.in.
+        run: pip install --require-hashes -r requirements-dev.lock
 
       - name: Unit + integration + evasion + playground tests
         # Branch coverage enabled here too (not just via pyproject) so
@@ -172,6 +224,12 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
+      # Audited egress boundary (audit mode → block + allow-list after
+      # baseline). See the lint job for the full rationale. First step.
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -236,6 +294,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Audited egress boundary (audit mode → block + allow-list after
+      # baseline). See the lint job for the full rationale. First step.
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -244,8 +308,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install deps
-        run: pip install pytest pytest-timeout
+      - name: Install dev toolchain (hash-pinned)
+        # Hash-pinned install — see the lint job for the rationale.
+        run: pip install --require-hashes -r requirements-dev.lock
 
       - name: Fuzz tests
         run: pytest tests/fuzz/ --tb=short -q
@@ -263,6 +328,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Audited egress boundary (audit mode → block + allow-list after
+      # baseline). See the lint job for the full rationale. First step.
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -317,6 +388,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      # NOTE: no step-security/harden-runner here by design —
+      # harden-runner supports Ubuntu runners only, not windows-latest.
+      # The egress-boundary control is applied to every Linux job; this
+      # Windows slice exists purely for path-separator / OS-portability
+      # coverage and runs the same read-only test suite.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false

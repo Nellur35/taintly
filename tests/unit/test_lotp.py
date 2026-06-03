@@ -50,6 +50,43 @@ def test_gh_lotp_silent_without_pr_head_checkout():
     assert not _fires("LOTP-GH-001", yaml)
 
 
+def test_gh_lotp_flow_style_trigger_does_not_downgrade_exploitability():
+    """A flow-style ``on:`` block must NOT collapse the exploitability
+    context of the finding it gates.
+
+    LOTP-GH-001 fires off the PR-head checkout + build tool, so it
+    surfaces regardless of how the trigger is written — but the
+    per-file context analyzer derives exploitability from the trigger,
+    and a line-anchored regex used to miss flow-style triggers,
+    silently downgrading a CRITICAL finding's exploitability from
+    ``medium`` to ``low`` and pushing it down the report. Lock the fix:
+    the flow-style fixture must produce the SAME exploitability as the
+    block-style equivalent.
+    """
+    from taintly.engine import scan_file
+    from taintly.models import Platform
+    from taintly.rules.registry import load_rules_for_platform
+
+    rules = load_rules_for_platform(Platform.GITHUB)
+    ref = "${{ github.event.pull_request.head.sha }}"
+    body = (
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n          ref: " + ref + "\n"
+        "      - run: pip install .\n"
+    )
+    block = "on:\n  pull_request_target:\n    types: [opened]\n" + body
+    flow = "on: { pull_request_target: { types: [opened] } }\n" + body
+
+    def _lotp(content: str):
+        findings = scan_file("wf.yml", rules, _content=content)
+        hits = [f for f in findings if f.rule_id == "LOTP-GH-001"]
+        assert hits, "LOTP-GH-001 must fire on PR-head checkout + build tool"
+        return hits[0]
+
+    assert _lotp(flow).exploitability == _lotp(block).exploitability
+
+
 # ---------------------------------------------------------------------------
 # GitLab (LOTP-GL-001)
 # ---------------------------------------------------------------------------

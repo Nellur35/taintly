@@ -1275,7 +1275,14 @@ def _job_segments(lines: list[str]) -> list[tuple[int, list[str]]]:
 # triples — same as the per-file PatternProtocol but with the file
 # attribution carried explicitly because cross-file findings can cite
 # any workflow in the corpus.
-CorpusFindings = list[tuple[str, int, str]]
+#
+# A callback MAY emit a 4-tuple ``(filepath, line, snippet, title)`` to
+# override the static rule title on a per-finding basis — used when the
+# accurate title depends on the matched evidence (e.g. XF-GH-004 names
+# the specific pwn-request event that actually fired rather than a
+# hardcoded ``pull_request_target``). When the 4th element is omitted
+# the engine falls back to ``rule.title``.
+CorpusFindings = list[tuple[str, int, str] | tuple[str, int, str, str]]
 
 
 @dataclass
