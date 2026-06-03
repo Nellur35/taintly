@@ -536,6 +536,7 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
 
     def _src_strip(line_no: int, fallback: str) -> str:
         return lines[line_no - 1].strip() if 1 <= line_no <= n_lines else fallback
+
     job_order: list[str] = []
     var_assigns: list[_VarAssign] = []
     # job -> list of (line, text)
@@ -596,9 +597,7 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
                     # indentation; the line backend's
                     # ``_iter_script_lines`` strips it, so match that.
                     for src_line, body in ev.block_lines:
-                        script_lines[job].append(
-                            (src_line, _src_strip(src_line, body.strip()))
-                        )
+                        script_lines[job].append((src_line, _src_strip(src_line, body.strip())))
                 else:
                     script_lines[job].append((ev.line, ev.value or ""))
             continue
@@ -632,9 +631,7 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
         if rest == ("image",) or rest == ("image", "name"):
             _note_job(job)
             val = ev.value or ""
-            sink_sites.append(
-                _SinkSite(job, "image", ev.line, val, _src_strip(ev.line, val))
-            )
+            sink_sites.append(_SinkSite(job, "image", ev.line, val, _src_strip(ev.line, val)))
             continue
         if (
             len(rest) >= 2
@@ -648,14 +645,14 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
                 _SinkSite(job, "service_image", ev.line, val, _src_strip(ev.line, val))
             )
             continue
-        if rest and rest[0] == "tags" and (
-            len(rest) == 1 or (len(rest) == 2 and isinstance(rest[1], int))
+        if (
+            rest
+            and rest[0] == "tags"
+            and (len(rest) == 1 or (len(rest) == 2 and isinstance(rest[1], int)))
         ):
             _note_job(job)
             val = ev.value or ""
-            sink_sites.append(
-                _SinkSite(job, "tags", ev.line, val, _src_strip(ev.line, val))
-            )
+            sink_sites.append(_SinkSite(job, "tags", ev.line, val, _src_strip(ev.line, val)))
             continue
 
     # Build the EDB.
@@ -726,19 +723,22 @@ def _gitlab_rules(jobs: list[_Job]):
             m = _TAINTED_REF_RE.search(va.raw)
             if m is not None:
                 source = m.group(1)
-                yield _R_TAINTED_VAR, _TaintedVar(
-                    va.scope,
-                    va.name,
-                    source,
-                    va.line,
-                    [
-                        TaintHop(
-                            kind="var_static",
-                            line=va.line,
-                            name=va.name,
-                            detail=f"variables.{va.name} := ${source}",
-                        )
-                    ],
+                yield (
+                    _R_TAINTED_VAR,
+                    _TaintedVar(
+                        va.scope,
+                        va.name,
+                        source,
+                        va.line,
+                        [
+                            TaintHop(
+                                kind="var_static",
+                                line=va.line,
+                                name=va.name,
+                                detail=f"variables.{va.name} := ${source}",
+                            )
+                        ],
+                    ),
                 )
                 continue
             # (b) multi-hop: pure ``$OTHER`` reference.
@@ -750,20 +750,23 @@ def _gitlab_rules(jobs: list[_Job]):
             else:  # ("job", name)
                 parent = db.get(_R_VISIBLE_VAR, (va.scope[1], other))
             if parent is not None:
-                yield _R_TAINTED_VAR, _TaintedVar(
-                    va.scope,
-                    va.name,
-                    parent.source_var,
-                    parent.source_line,
-                    parent.hops
-                    + [
-                        TaintHop(
-                            kind="var_indirect",
-                            line=va.line,
-                            name=va.name,
-                            detail=f"variables.{va.name} := ${other}",
-                        )
-                    ],
+                yield (
+                    _R_TAINTED_VAR,
+                    _TaintedVar(
+                        va.scope,
+                        va.name,
+                        parent.source_var,
+                        parent.source_line,
+                        parent.hops
+                        + [
+                            TaintHop(
+                                kind="var_indirect",
+                                line=va.line,
+                                name=va.name,
+                                detail=f"variables.{va.name} := ${other}",
+                            )
+                        ],
+                    ),
                 )
 
     def rule_visible_var(db: Database):
@@ -774,22 +777,20 @@ def _gitlab_rules(jobs: list[_Job]):
         # job-level tainted re-declaration is carried by the
         # job-scope ``tainted_var`` branch instead).  Not suppressing
         # this is the clean-override false positive.
-        job_redecl = {
-            (va.scope[1], va.name)
-            for va in db.all(_R_VAR_ASSIGN)
-            if va.scope != "top"
-        }
+        job_redecl = {(va.scope[1], va.name) for va in db.all(_R_VAR_ASSIGN) if va.scope != "top"}
         for tv in db.all(_R_TAINTED_VAR):
             if tv.scope == "top":
                 for jn in job_names:
                     if (jn, tv.name) in job_redecl:
                         continue  # the job's own variables: governs this name
-                    yield _R_VISIBLE_VAR, _VisibleVar(
-                        jn, tv.name, 1, tv.source_var, tv.source_line, tv.hops
+                    yield (
+                        _R_VISIBLE_VAR,
+                        _VisibleVar(jn, tv.name, 1, tv.source_var, tv.source_line, tv.hops),
                     )
             else:  # ("job", name)
-                yield _R_VISIBLE_VAR, _VisibleVar(
-                    tv.scope[1], tv.name, 0, tv.source_var, tv.source_line, tv.hops
+                yield (
+                    _R_VISIBLE_VAR,
+                    _VisibleVar(tv.scope[1], tv.name, 0, tv.source_var, tv.source_line, tv.hops),
                 )
 
     def rule_tainted_dotenv(db: Database):
@@ -798,23 +799,23 @@ def _gitlab_rules(jobs: list[_Job]):
             m = _TAINTED_REF_RE.search(dw.value)
             if m is not None:
                 source = m.group(1)
-                yield _R_TAINTED_DOTENV, _TaintedDotenv(
-                    dw.job,
-                    dw.name,
-                    dw.seq,
-                    source,
-                    dw.line,
-                    [
-                        TaintHop(
-                            kind="dotenv",
-                            line=dw.line,
-                            name=f"{dw.job}.{dw.name}",
-                            detail=(
-                                f"dotenv artefact of {dw.job} sets "
-                                f"{dw.name} := ${source}"
-                            ),
-                        )
-                    ],
+                yield (
+                    _R_TAINTED_DOTENV,
+                    _TaintedDotenv(
+                        dw.job,
+                        dw.name,
+                        dw.seq,
+                        source,
+                        dw.line,
+                        [
+                            TaintHop(
+                                kind="dotenv",
+                                line=dw.line,
+                                name=f"{dw.job}.{dw.name}",
+                                detail=(f"dotenv artefact of {dw.job} sets {dw.name} := ${source}"),
+                            )
+                        ],
+                    ),
                 )
                 continue
             # (b) indirect: shell ref to an already-tainted visible var.
@@ -822,24 +823,26 @@ def _gitlab_rules(jobs: list[_Job]):
                 continue
             for vv in db.all(_R_VISIBLE_VAR):
                 if vv.job == dw.job and _references_var(dw.value, vv.name):
-                    yield _R_TAINTED_DOTENV, _TaintedDotenv(
-                        dw.job,
-                        dw.name,
-                        dw.seq,
-                        vv.source_var,
-                        vv.source_line,
-                        vv.hops
-                        + [
-                            TaintHop(
-                                kind="dotenv",
-                                line=dw.line,
-                                name=f"{dw.job}.{dw.name}",
-                                detail=(
-                                    f"dotenv artefact of {dw.job} sets "
-                                    f"{dw.name} := ${vv.name}"
-                                ),
-                            )
-                        ],
+                    yield (
+                        _R_TAINTED_DOTENV,
+                        _TaintedDotenv(
+                            dw.job,
+                            dw.name,
+                            dw.seq,
+                            vv.source_var,
+                            vv.source_line,
+                            vv.hops
+                            + [
+                                TaintHop(
+                                    kind="dotenv",
+                                    line=dw.line,
+                                    name=f"{dw.job}.{dw.name}",
+                                    detail=(
+                                        f"dotenv artefact of {dw.job} sets {dw.name} := ${vv.name}"
+                                    ),
+                                )
+                            ],
+                        ),
                     )
                     break
 
@@ -849,8 +852,9 @@ def _gitlab_rules(jobs: list[_Job]):
                 continue
             for td in db.all(_R_TAINTED_DOTENV):
                 if td.producer == ne.producer:
-                    yield _R_INHERITED_VAR, _InheritedVar(
-                        ne.job, td.name, td.source_var, td.source_line, td.hops
+                    yield (
+                        _R_INHERITED_VAR,
+                        _InheritedVar(ne.job, td.name, td.source_var, td.source_line, td.hops),
                     )
 
     return [
@@ -932,11 +936,7 @@ def analyze(content: str, lines: list[str]) -> list[TaintPath]:
         for site in sites:
             for var, tinfo in visible.items():
                 if _references_var(site.value, var):
-                    out.append(
-                        _make_path(
-                            tinfo, var, site.line, site.snippet, sink_kind=site.kind
-                        )
-                    )
+                    out.append(_make_path(tinfo, var, site.line, site.snippet, sink_kind=site.kind))
     return out
 
 
@@ -1380,4 +1380,3 @@ def _is_dotenv_write_line(sink_snippet: str, dotenv_file: str) -> bool:
         if m.group("file") == dotenv_file:
             return True
     return False
-

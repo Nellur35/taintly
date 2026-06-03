@@ -2633,9 +2633,7 @@ RULES = [
             "``env:`` / credentials.  The reference is server-side "
             "substituted at workflow-parse time."
         ),
-        pattern=TaintPattern(
-            sink_kind_filter=("container_image", "service_image")
-        ),
+        pattern=TaintPattern(sink_kind_filter=("container_image", "service_image")),
         remediation=(
             "Pin container and service images to a trusted, static "
             "reference — ideally by digest:\n"
@@ -2869,8 +2867,7 @@ RULES = [
     Rule(
         id="TAINT-GH-017",
         title=(
-            "Reusable-workflow input propagates through env / step "
-            "outputs into a shell run: block"
+            "Reusable-workflow input propagates through env / step outputs into a shell run: block"
         ),
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
@@ -3030,7 +3027,7 @@ RULES = [
             "A ``run:`` step writes an attacker-controlled value — a "
             "``github.event.*`` field, ``github.head_ref``, an "
             "env var laundered from one — into a file "
-            "(``echo \"$VAR\" > script.sh``), and a later line (in "
+            '(``echo "$VAR" > script.sh``), and a later line (in '
             "the same step or a subsequent one) *executes* that file "
             "with ``source`` / ``.`` / ``bash`` / ``sh`` / ``zsh``.\n"
             "\n"
@@ -3181,15 +3178,14 @@ RULES = [
             "      env:\n"
             "        BRANCH: ${{ inputs.branch }}\n"
             "\n"
-            "and have ``/init.sh`` quote ``\"$BRANCH\"``."
+            'and have ``/init.sh`` quote ``"$BRANCH"``.'
         ),
         reference=(
             "https://docs.github.com/en/actions/creating-actions/"
             "metadata-syntax-for-github-actions#runspre"
         ),
         test_positive=[
-            "runs:\n  using: docker\n  image: Dockerfile\n"
-            "  pre: setup.sh ${{ inputs.branch }}\n",
+            "runs:\n  using: docker\n  image: Dockerfile\n  pre: setup.sh ${{ inputs.branch }}\n",
             "  post-entrypoint: /cleanup.sh ${{ inputs.artifact_path }}\n",
             "  post: /tmp/teardown ${{ inputs.target }}\n",
         ],

@@ -1258,15 +1258,11 @@ def _run_corpus_rules(
     """
     corpus_rules = [r for r in rules if isinstance(r.pattern, CorpusPattern)]
     if composer_only:
-        corpus_rules = [
-            r for r in corpus_rules if r.finding_family == "chain-composition"
-        ]
+        corpus_rules = [r for r in corpus_rules if r.finding_family == "chain-composition"]
     else:
         # Non-composer pass: exclude composer rules so they only fire
         # in the dedicated post-pass with the seeded findings list.
-        corpus_rules = [
-            r for r in corpus_rules if r.finding_family != "chain-composition"
-        ]
+        corpus_rules = [r for r in corpus_rules if r.finding_family != "chain-composition"]
     if not corpus_rules:
         return []
 

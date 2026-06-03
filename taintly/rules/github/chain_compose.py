@@ -443,11 +443,7 @@ def _make_chain_callback(chain_id: str):
         from taintly.composer import run_composer
 
         composites = run_composer(corpus, prior, COMPOSER_RULES)
-        return [
-            (c.file, c.anchor_line, c.snippet)
-            for c in composites
-            if c.chain_id == chain_id
-        ]
+        return [(c.file, c.anchor_line, c.snippet) for c in composites if c.chain_id == chain_id]
 
     return callback
 
@@ -628,7 +624,7 @@ RULES: list[Rule] = [
         pattern=CorpusPattern(callback=_make_chain_callback("CHAIN-GH-103")),
         remediation=(
             "Sanitise the tainted input — bind to an env var, then use "
-            "`\"$VAR\"` inside the run block; never expand "
+            '`"$VAR"` inside the run block; never expand '
             "`${{ ... }}` directly into shell. The fork-reachable "
             "trigger is workflow intent; sanitising the taint flow "
             "removes the injection leg."

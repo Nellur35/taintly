@@ -173,7 +173,6 @@ def _is_dispatch_input_in_shell_sink(
     return False
 
 
-
 class GithubScriptDangerousContextPattern:
     """SEC4-GH-025: attacker-controlled GitHub context interpolated
     into an ``actions/github-script`` step's ``script:`` body.
@@ -381,6 +380,7 @@ class ReusableWorkflowSecretsInheritPattern:
             if m:
                 return m.group(1).strip().strip("'\"")
         return ""
+
 
 _PRT_TRIGGER_RE = (
     r"(?m)("

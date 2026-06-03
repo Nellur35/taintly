@@ -960,13 +960,7 @@ RULES = [
                 "    - echo hi\n"
             ),
             # Static service image.
-            (
-                "test:\n"
-                "  services:\n"
-                "    - name: postgres:15\n"
-                "  script:\n"
-                "    - echo hi\n"
-            ),
+            ("test:\n  services:\n    - name: postgres:15\n  script:\n    - echo hi\n"),
         ],
         stride=["T", "E"],
         threat_narrative=(
@@ -986,10 +980,7 @@ RULES = [
     # =========================================================================
     Rule(
         id="TAINT-GL-006",
-        title=(
-            "Attacker-controlled CI variable flows into a job "
-            "tags: selector (runner hijack)"
-        ),
+        title=("Attacker-controlled CI variable flows into a job tags: selector (runner hijack)"),
         severity=Severity.HIGH,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-4",

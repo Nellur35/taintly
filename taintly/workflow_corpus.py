@@ -463,8 +463,6 @@ def _parse_flow_mapping_events(text: str) -> set[str]:
     return events
 
 
-
-
 def _extract_raw_events(content: str) -> set[str]:
     """Return the set of event names from the ``on:`` block.
 
@@ -543,8 +541,6 @@ def _extract_raw_events(content: str) -> set[str]:
             if key:
                 events.add(key)
     return events
-
-
 
 
 def _classify_triggers(events: set[str]) -> frozenset[TriggerFamily]:
@@ -1069,9 +1065,7 @@ def _extract_reusable_refs(lines: list[str]) -> list[ReusableRef]:
                         break
                     am = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.+?)\s*$", child)
                     if am:
-                        with_args.append(
-                            (am.group(1), am.group(2).strip().strip("'\""))
-                        )
+                        with_args.append((am.group(1), am.group(2).strip().strip("'\"")))
                     k += 1
                 j = k
                 continue

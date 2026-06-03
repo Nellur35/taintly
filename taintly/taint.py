@@ -902,9 +902,7 @@ def _build_facts(lines: list[str]) -> tuple[Database, list[_Job]]:
                     for name, value, qs in _iter_output_writes(text):
                         db.add(
                             _R_OUTPUT_WRITE,
-                            _OutputWrite(
-                                job_key, idx, step_id, name, value, lineno, qs, _seq
-                            ),
+                            _OutputWrite(job_key, idx, step_id, name, value, lineno, qs, _seq),
                         )
                         _seq += 1
                 for fpath, value, qs in _iter_file_writes(text):
@@ -942,9 +940,7 @@ def _build_facts(lines: list[str]) -> tuple[Database, list[_Job]]:
 # the literal ``uses: <value>`` line; the structural parser hands us
 # just the value, so we match the ``<owner>/<repo>@<rev>`` shape
 # directly.
-_AGENT_USES_VALUE_RE = re.compile(
-    rf"^([^@\s/]+/[^@\s]*(?:{AI_AGENT_KEYWORDS})[^@\s]*)@"
-)
+_AGENT_USES_VALUE_RE = re.compile(rf"^([^@\s/]+/[^@\s]*(?:{AI_AGENT_KEYWORDS})[^@\s]*)@")
 
 
 def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, list[_Job]]:
@@ -1007,9 +1003,7 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
         # ``on: workflow_call`` in any of its three shapes — scalar
         # ``("on",)``, list ``("on", <i>)``, or block-mapping
         # ``("on", "workflow_call", ...)``.
-        if path and path[0] == "on" and (
-            "workflow_call" in path or ev.value == "workflow_call"
-        ):
+        if path and path[0] == "on" and ("workflow_call" in path or ev.value == "workflow_call"):
             is_reusable = True
         if len(path) < 2 or path[0] != "jobs":
             continue
@@ -1034,8 +1028,10 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
         #   jobs.<job>.container          (scalar `node:14` form)
         #   jobs.<job>.container.image
         #   jobs.<job>.services.<name>.image
-        if rest and rest[0] == "runs-on" and (
-            len(rest) == 1 or (len(rest) == 2 and isinstance(rest[1], int))
+        if (
+            rest
+            and rest[0] == "runs-on"
+            and (len(rest) == 1 or (len(rest) == 2 and isinstance(rest[1], int)))
         ):
             _note_job(job)
             val = ev.value or ""
@@ -1044,9 +1040,7 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
         if rest == ("container",) or rest == ("container", "image"):
             _note_job(job)
             val = ev.value or ""
-            sink_sites.append(
-                _SinkSite(job, "container_image", ev.line, val, _src(ev.line, val))
-            )
+            sink_sites.append(_SinkSite(job, "container_image", ev.line, val, _src(ev.line, val)))
             continue
         if (
             len(rest) == 3
@@ -1056,9 +1050,7 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
         ):
             _note_job(job)
             val = ev.value or ""
-            sink_sites.append(
-                _SinkSite(job, "service_image", ev.line, val, _src(ev.line, val))
-            )
+            sink_sites.append(_SinkSite(job, "service_image", ev.line, val, _src(ev.line, val)))
             continue
         # jobs.<job>.if — a job-level gate condition.  Server-side
         # evaluated before the job runs; a cross-job tainted output in
@@ -1076,9 +1068,7 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
             _note_step(job, idx)
             tail = rest[2:]
             if len(tail) == 2 and tail[0] == "env" and isinstance(tail[1], str):
-                env_assigns.append(
-                    _EnvAssign(("step", job, idx), tail[1], ev.value or "", ev.line)
-                )
+                env_assigns.append(_EnvAssign(("step", job, idx), tail[1], ev.value or "", ev.line))
             elif tail == ("id",):
                 job_step_id[(job, idx)] = ev.value
             elif tail == ("uses",):
@@ -1107,8 +1097,7 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
     jobs: list[_Job] = []
     for job in job_order:
         steps = [
-            _Step(idx, -1, [], job_step_id.get((job, idx)))
-            for idx in sorted(job_step_idx[job])
+            _Step(idx, -1, [], job_step_id.get((job, idx))) for idx in sorted(job_step_idx[job])
         ]
         jobs.append(_Job(job, -1, [], steps))
 
@@ -1197,19 +1186,22 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
             # (a) direct.
             src = _extract_tainted_source(ea.raw, is_reusable)
             if src is not None:
-                yield _R_TAINTED_ENV, _TaintedEnv(
-                    ea.scope,
-                    ea.name,
-                    src,
-                    ea.line,
-                    [
-                        TaintHop(
-                            kind="env_static",
-                            line=ea.line,
-                            name=ea.name,
-                            detail=f"env {ea.name} := ${{{{ {src} }}}}",
-                        )
-                    ],
+                yield (
+                    _R_TAINTED_ENV,
+                    _TaintedEnv(
+                        ea.scope,
+                        ea.name,
+                        src,
+                        ea.line,
+                        [
+                            TaintHop(
+                                kind="env_static",
+                                line=ea.line,
+                                name=ea.name,
+                                detail=f"env {ea.name} := ${{{{ {src} }}}}",
+                            )
+                        ],
+                    ),
                 )
                 continue
             # (b) multi-hop ${{ env.OTHER }}.
@@ -1221,43 +1213,49 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                 else:  # ("step", job, idx)
                     parent = db.get(_R_VISIBLE_ENV, (ea.scope[1], ea.scope[2], other))
                 if parent is not None:
-                    yield _R_TAINTED_ENV, _TaintedEnv(
-                        ea.scope,
-                        ea.name,
-                        parent.source_expr,
-                        parent.source_line,
-                        parent.hops
-                        + [
-                            TaintHop(
-                                kind="env_indirect",
-                                line=ea.line,
-                                name=ea.name,
-                                detail=f"env {ea.name} := ${{{{ env.{other} }}}}",
-                            )
-                        ],
+                    yield (
+                        _R_TAINTED_ENV,
+                        _TaintedEnv(
+                            ea.scope,
+                            ea.name,
+                            parent.source_expr,
+                            parent.source_line,
+                            parent.hops
+                            + [
+                                TaintHop(
+                                    kind="env_indirect",
+                                    line=ea.line,
+                                    name=ea.name,
+                                    detail=f"env {ea.name} := ${{{{ env.{other} }}}}",
+                                )
+                            ],
+                        ),
                     )
                     continue
             # (c) cross-job ${{ needs.X.outputs.Y }}.
             for nm in _NEEDS_OUTPUT_REF_RE.finditer(ea.raw):
                 up = db.get(_R_TAINTED_JOB_OUTPUT, (nm.group(1), nm.group(2)))
                 if up is not None:
-                    yield _R_TAINTED_ENV, _TaintedEnv(
-                        ea.scope,
-                        ea.name,
-                        up.source_expr,
-                        up.source_line,
-                        up.hops
-                        + [
-                            TaintHop(
-                                kind="needs_ref",
-                                line=ea.line,
-                                name=ea.name,
-                                detail=(
-                                    f"env {ea.name} := "
-                                    f"${{{{ needs.{nm.group(1)}.outputs.{nm.group(2)} }}}}"
-                                ),
-                            )
-                        ],
+                    yield (
+                        _R_TAINTED_ENV,
+                        _TaintedEnv(
+                            ea.scope,
+                            ea.name,
+                            up.source_expr,
+                            up.source_line,
+                            up.hops
+                            + [
+                                TaintHop(
+                                    kind="needs_ref",
+                                    line=ea.line,
+                                    name=ea.name,
+                                    detail=(
+                                        f"env {ea.name} := "
+                                        f"${{{{ needs.{nm.group(1)}.outputs.{nm.group(2)} }}}}"
+                                    ),
+                                )
+                            ],
+                        ),
                     )
                     break
 
@@ -1284,26 +1282,33 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                 for idx in job_step_idxs.get(job, []):
                     if (job, idx, te.name) in step_redecl:
                         continue  # step's own env: governs this name
-                    yield _R_VISIBLE_ENV, _VisibleEnv(
-                        job, idx, te.name, 1, -1, te.source_expr, te.source_line, te.hops
+                    yield (
+                        _R_VISIBLE_ENV,
+                        _VisibleEnv(
+                            job, idx, te.name, 1, -1, te.source_expr, te.source_line, te.hops
+                        ),
                     )
             else:  # step scope
                 _, job, idx = te.scope
-                yield _R_VISIBLE_ENV, _VisibleEnv(
-                    job, idx, te.name, 2, -1, te.source_expr, te.source_line, te.hops
+                yield (
+                    _R_VISIBLE_ENV,
+                    _VisibleEnv(job, idx, te.name, 2, -1, te.source_expr, te.source_line, te.hops),
                 )
         for tde in db.all(_R_TAINTED_DYN_ENV):
             for idx in job_step_idxs.get(tde.job, []):
                 if idx > tde.writer_idx and (tde.job, idx, tde.name) not in step_redecl:
-                    yield _R_VISIBLE_ENV, _VisibleEnv(
-                        tde.job,
-                        idx,
-                        tde.name,
-                        0,
-                        tde.writer_idx,
-                        tde.source_expr,
-                        tde.source_line,
-                        tde.hops,
+                    yield (
+                        _R_VISIBLE_ENV,
+                        _VisibleEnv(
+                            tde.job,
+                            idx,
+                            tde.name,
+                            0,
+                            tde.writer_idx,
+                            tde.source_expr,
+                            tde.source_line,
+                            tde.hops,
+                        ),
                     )
 
     def rule_tainted_dyn_env(db: Database):
@@ -1311,21 +1316,24 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
             # (a) direct attacker context embedded in the echo body.
             src = _extract_tainted_source(ew.value, is_reusable)
             if src is not None:
-                yield _R_TAINTED_DYN_ENV, _TaintedDynEnv(
-                    ew.job,
-                    ew.idx,
-                    ew.name,
-                    ew.seq,
-                    src,
-                    ew.line,
-                    [
-                        TaintHop(
-                            kind="github_env",
-                            line=ew.line,
-                            name=ew.name,
-                            detail=f"$GITHUB_ENV {ew.name} := ${{{{ {src} }}}}",
-                        )
-                    ],
+                yield (
+                    _R_TAINTED_DYN_ENV,
+                    _TaintedDynEnv(
+                        ew.job,
+                        ew.idx,
+                        ew.name,
+                        ew.seq,
+                        src,
+                        ew.line,
+                        [
+                            TaintHop(
+                                kind="github_env",
+                                line=ew.line,
+                                name=ew.name,
+                                detail=f"$GITHUB_ENV {ew.name} := ${{{{ {src} }}}}",
+                            )
+                        ],
+                    ),
                 )
                 continue
             # (b) indirect: shell ref to an already-tainted visible var.
@@ -1333,22 +1341,25 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                 continue
             for ve in db.all(_R_VISIBLE_ENV):
                 if ve.job == ew.job and ve.idx == ew.idx and _references_var(ew.value, ve.name):
-                    yield _R_TAINTED_DYN_ENV, _TaintedDynEnv(
-                        ew.job,
-                        ew.idx,
-                        ew.name,
-                        ew.seq,
-                        ve.source_expr,
-                        ve.source_line,
-                        ve.hops
-                        + [
-                            TaintHop(
-                                kind="github_env",
-                                line=ew.line,
-                                name=ew.name,
-                                detail=f"$GITHUB_ENV {ew.name} := ${ve.name}",
-                            )
-                        ],
+                    yield (
+                        _R_TAINTED_DYN_ENV,
+                        _TaintedDynEnv(
+                            ew.job,
+                            ew.idx,
+                            ew.name,
+                            ew.seq,
+                            ve.source_expr,
+                            ve.source_line,
+                            ve.hops
+                            + [
+                                TaintHop(
+                                    kind="github_env",
+                                    line=ew.line,
+                                    name=ew.name,
+                                    detail=f"$GITHUB_ENV {ew.name} := ${ve.name}",
+                                )
+                            ],
+                        ),
                     )
                     break
 
@@ -1360,47 +1371,51 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
         for fw in db.all(_R_FILE_WRITE):
             src = _extract_tainted_source(fw.value, is_reusable)
             if src is not None:
-                yield _R_TAINTED_FILE, _TaintedFile(
-                    fw.job,
-                    fw.path,
-                    fw.idx,
-                    fw.line,
-                    fw.seq,
-                    src,
-                    fw.line,
-                    [
-                        TaintHop(
-                            kind="file_write",
-                            line=fw.line,
-                            name=fw.path,
-                            detail=f"file {fw.path} := ${{{{ {src} }}}}",
-                        )
-                    ],
-                )
-                continue
-            if fw.quoted_single:
-                continue
-            for ve in db.all(_R_VISIBLE_ENV):
-                if ve.job == fw.job and ve.idx == fw.idx and _references_var(
-                    fw.value, ve.name
-                ):
-                    yield _R_TAINTED_FILE, _TaintedFile(
+                yield (
+                    _R_TAINTED_FILE,
+                    _TaintedFile(
                         fw.job,
                         fw.path,
                         fw.idx,
                         fw.line,
                         fw.seq,
-                        ve.source_expr,
-                        ve.source_line,
-                        ve.hops
-                        + [
+                        src,
+                        fw.line,
+                        [
                             TaintHop(
                                 kind="file_write",
                                 line=fw.line,
                                 name=fw.path,
-                                detail=f"file {fw.path} := ${ve.name}",
+                                detail=f"file {fw.path} := ${{{{ {src} }}}}",
                             )
                         ],
+                    ),
+                )
+                continue
+            if fw.quoted_single:
+                continue
+            for ve in db.all(_R_VISIBLE_ENV):
+                if ve.job == fw.job and ve.idx == fw.idx and _references_var(fw.value, ve.name):
+                    yield (
+                        _R_TAINTED_FILE,
+                        _TaintedFile(
+                            fw.job,
+                            fw.path,
+                            fw.idx,
+                            fw.line,
+                            fw.seq,
+                            ve.source_expr,
+                            ve.source_line,
+                            ve.hops
+                            + [
+                                TaintHop(
+                                    kind="file_write",
+                                    line=fw.line,
+                                    name=fw.path,
+                                    detail=f"file {fw.path} := ${ve.name}",
+                                )
+                            ],
+                        ),
                     )
                     break
 
@@ -1408,47 +1423,51 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
         for ow in db.all(_R_OUTPUT_WRITE):
             src = _extract_tainted_source(ow.value, is_reusable)
             if src is not None:
-                yield _R_TAINTED_OUTPUT, _TaintedOutput(
-                    ow.step_id,
-                    ow.name,
-                    ow.idx,
-                    ow.seq,
-                    src,
-                    ow.line,
-                    [
-                        TaintHop(
-                            kind="step_output",
-                            line=ow.line,
-                            name=f"{ow.step_id}.{ow.name}",
-                            detail=(
-                                f"steps.{ow.step_id}.outputs.{ow.name} := ${{{{ {src} }}}}"
-                            ),
-                        )
-                    ],
+                yield (
+                    _R_TAINTED_OUTPUT,
+                    _TaintedOutput(
+                        ow.step_id,
+                        ow.name,
+                        ow.idx,
+                        ow.seq,
+                        src,
+                        ow.line,
+                        [
+                            TaintHop(
+                                kind="step_output",
+                                line=ow.line,
+                                name=f"{ow.step_id}.{ow.name}",
+                                detail=(
+                                    f"steps.{ow.step_id}.outputs.{ow.name} := ${{{{ {src} }}}}"
+                                ),
+                            )
+                        ],
+                    ),
                 )
                 continue
             if ow.quoted_single:
                 continue
             for ve in db.all(_R_VISIBLE_ENV):
                 if ve.job == ow.job and ve.idx == ow.idx and _references_var(ow.value, ve.name):
-                    yield _R_TAINTED_OUTPUT, _TaintedOutput(
-                        ow.step_id,
-                        ow.name,
-                        ow.idx,
-                        ow.seq,
-                        ve.source_expr,
-                        ve.source_line,
-                        ve.hops
-                        + [
-                            TaintHop(
-                                kind="step_output",
-                                line=ow.line,
-                                name=f"{ow.step_id}.{ow.name}",
-                                detail=(
-                                    f"steps.{ow.step_id}.outputs.{ow.name} := ${ve.name}"
-                                ),
-                            )
-                        ],
+                    yield (
+                        _R_TAINTED_OUTPUT,
+                        _TaintedOutput(
+                            ow.step_id,
+                            ow.name,
+                            ow.idx,
+                            ow.seq,
+                            ve.source_expr,
+                            ve.source_line,
+                            ve.hops
+                            + [
+                                TaintHop(
+                                    kind="step_output",
+                                    line=ow.line,
+                                    name=f"{ow.step_id}.{ow.name}",
+                                    detail=(f"steps.{ow.step_id}.outputs.{ow.name} := ${ve.name}"),
+                                )
+                            ],
+                        ),
                     )
                     break
 
@@ -1460,45 +1479,50 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
         for od in db.all(_R_OUTPUT_DECL):
             src = _extract_tainted_source(od.raw, is_reusable)
             if src is not None:
-                yield _R_TAINTED_JOB_OUTPUT, _TaintedJobOutput(
-                    od.job,
-                    od.name,
-                    src,
-                    od.line,
-                    [
-                        TaintHop(
-                            kind="job_output",
-                            line=od.line,
-                            name=f"{od.job}.{od.name}",
-                            detail=(
-                                f"job {od.job} declared output {od.name} "
-                                f":= ${{{{ {src} }}}}"
-                            ),
-                        )
-                    ],
+                yield (
+                    _R_TAINTED_JOB_OUTPUT,
+                    _TaintedJobOutput(
+                        od.job,
+                        od.name,
+                        src,
+                        od.line,
+                        [
+                            TaintHop(
+                                kind="job_output",
+                                line=od.line,
+                                name=f"{od.job}.{od.name}",
+                                detail=(
+                                    f"job {od.job} declared output {od.name} := ${{{{ {src} }}}}"
+                                ),
+                            )
+                        ],
+                    ),
                 )
                 continue
             sm = _STEP_OUTPUT_REF_RE.search(od.raw)
             if sm is not None:
                 up = db.get(_R_TAINTED_OUTPUT, (sm.group(1), sm.group(2)))
                 if up is not None:
-                    yield _R_TAINTED_JOB_OUTPUT, _TaintedJobOutput(
-                        od.job,
-                        od.name,
-                        up.source_expr,
-                        up.source_line,
-                        up.hops
-                        + [
-                            TaintHop(
-                                kind="job_output",
-                                line=od.line,
-                                name=f"{od.job}.{od.name}",
-                                detail=(
-                                    f"job {od.job} declared output {od.name} "
-                                    f":= ${{{{ steps.{sm.group(1)}.{sm.group(2)} }}}}"
-                                ),
-                            )
-                        ],
+                    yield (
+                        _R_TAINTED_JOB_OUTPUT,
+                        _TaintedJobOutput(
+                            od.job,
+                            od.name,
+                            up.source_expr,
+                            up.source_line,
+                            up.hops
+                            + [
+                                TaintHop(
+                                    kind="job_output",
+                                    line=od.line,
+                                    name=f"{od.job}.{od.name}",
+                                    detail=(
+                                        f"job {od.job} declared output {od.name} "
+                                        f":= ${{{{ steps.{sm.group(1)}.{sm.group(2)} }}}}"
+                                    ),
+                                )
+                            ],
+                        ),
                     )
                     continue
             em = _ENV_REF_RE.search(od.raw)
@@ -1513,46 +1537,52 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                                 best = tde
                     up = best
                 if up is not None:
-                    yield _R_TAINTED_JOB_OUTPUT, _TaintedJobOutput(
-                        od.job,
-                        od.name,
-                        up.source_expr,
-                        up.source_line,
-                        up.hops
-                        + [
-                            TaintHop(
-                                kind="job_output",
-                                line=od.line,
-                                name=f"{od.job}.{od.name}",
-                                detail=(
-                                    f"job {od.job} declared output {od.name} "
-                                    f":= ${{{{ env.{em.group(1)} }}}}"
-                                ),
-                            )
-                        ],
+                    yield (
+                        _R_TAINTED_JOB_OUTPUT,
+                        _TaintedJobOutput(
+                            od.job,
+                            od.name,
+                            up.source_expr,
+                            up.source_line,
+                            up.hops
+                            + [
+                                TaintHop(
+                                    kind="job_output",
+                                    line=od.line,
+                                    name=f"{od.job}.{od.name}",
+                                    detail=(
+                                        f"job {od.job} declared output {od.name} "
+                                        f":= ${{{{ env.{em.group(1)} }}}}"
+                                    ),
+                                )
+                            ],
+                        ),
                     )
                     continue
             nm = _NEEDS_OUTPUT_REF_RE.search(od.raw)
             if nm is not None:
                 up = db.get(_R_TAINTED_JOB_OUTPUT, (nm.group(1), nm.group(2)))
                 if up is not None:
-                    yield _R_TAINTED_JOB_OUTPUT, _TaintedJobOutput(
-                        od.job,
-                        od.name,
-                        up.source_expr,
-                        up.source_line,
-                        up.hops
-                        + [
-                            TaintHop(
-                                kind="job_output",
-                                line=od.line,
-                                name=f"{od.job}.{od.name}",
-                                detail=(
-                                    f"job {od.job} declared output {od.name} "
-                                    f":= ${{{{ needs.{nm.group(1)}.outputs.{nm.group(2)} }}}}"
-                                ),
-                            )
-                        ],
+                    yield (
+                        _R_TAINTED_JOB_OUTPUT,
+                        _TaintedJobOutput(
+                            od.job,
+                            od.name,
+                            up.source_expr,
+                            up.source_line,
+                            up.hops
+                            + [
+                                TaintHop(
+                                    kind="job_output",
+                                    line=od.line,
+                                    name=f"{od.job}.{od.name}",
+                                    detail=(
+                                        f"job {od.job} declared output {od.name} "
+                                        f":= ${{{{ needs.{nm.group(1)}.outputs.{nm.group(2)} }}}}"
+                                    ),
+                                )
+                            ],
+                        ),
                     )
 
     return [
@@ -1608,9 +1638,7 @@ def analyze(content: str, lines: list[str]) -> list[TaintPath]:
         job_key = job.job_id if job.job_id is not None else f"<seg@{job.seg_start}>"
         for step in job.steps:
             run_lines = [
-                rl
-                for rl in db.all(_R_RUN_LINE)
-                if rl.job == job_key and rl.idx == step.idx
+                rl for rl in db.all(_R_RUN_LINE) if rl.job == job_key and rl.idx == step.idx
             ]
             run_lines.sort(key=lambda rl: rl.line)
             for rl in run_lines:
@@ -1661,10 +1689,7 @@ def analyze(content: str, lines: list[str]) -> list[TaintPath]:
                                             kind="agent_output",
                                             line=rl.line,
                                             name=f"{ref_id}.{ref_name}",
-                                            detail=(
-                                                f"agent {agent.action} step "
-                                                f"output {ref_name}"
-                                            ),
+                                            detail=(f"agent {agent.action} step output {ref_name}"),
                                         )
                                     ],
                                 )
@@ -1700,9 +1725,7 @@ def analyze(content: str, lines: list[str]) -> list[TaintPath]:
                     ):
                         finfo = _TaintInfo(tf.source_expr, tf.source_line, tf.hops)
                         out.append(
-                            _make_path(
-                                finfo, tf.path, rl.line, snippet, sink_kind="file_exec"
-                            )
+                            _make_path(finfo, tf.path, rl.line, snippet, sink_kind="file_exec")
                         )
 
         # Non-run: sink sites (runs-on:, container.image:,
@@ -1724,9 +1747,7 @@ def analyze(content: str, lines: list[str]) -> list[TaintPath]:
             # almost always inside a comparison — so it needs the
             # relaxed matcher.  The other sinks interpolate the bare
             # value, so the strict whole-body form is correct there.
-            needs_re = (
-                _NEEDS_OUTPUT_IN_EXPR_RE if site.kind == "if" else _NEEDS_OUTPUT_REF_RE
-            )
+            needs_re = _NEEDS_OUTPUT_IN_EXPR_RE if site.kind == "if" else _NEEDS_OUTPUT_REF_RE
             for ref in needs_re.finditer(site.value):
                 up = db.get(_R_TAINTED_JOB_OUTPUT, (ref.group(1), ref.group(2)))
                 if up is not None:
@@ -2537,4 +2558,3 @@ def _get_step_id(step_lines: list[str]) -> str | None:
         if m:
             return m.group(1)
     return None
-
