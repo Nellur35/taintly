@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def _compose_chain_gh_101(db: "Database") -> Iterable[tuple[str, "Fact"]]:
+def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
     """SEC4-GH-005 + fork-reachable + write-token → CRITICAL.
 
     The pwn-request shape, derived from existing finding output rather
@@ -105,7 +105,7 @@ def _compose_chain_gh_101(db: "Database") -> Iterable[tuple[str, "Fact"]]:
         )
 
 
-def _compose_chain_gh_102(db: "Database") -> Iterable[tuple[str, "Fact"]]:
+def _compose_chain_gh_102(db: Database) -> Iterable[tuple[str, Fact]]:
     """SEC3-GH-001 (unpinned third-party action) + fork-reachable +
     high-blast-radius action → HIGH.
 
@@ -176,7 +176,7 @@ _HIGH_BLAST_RADIUS_NAME_TOKENS: tuple[str, ...] = (
 )
 
 
-def _is_high_blast_radius_action(db: "Database", file: str, line: int) -> bool:
+def _is_high_blast_radius_action(db: Database, file: str, line: int) -> bool:  # noqa: ARG001
     """Inspect the step at ``file:line`` and decide whether the action
     is high-blast-radius. Three criteria, any of which qualifies:
 
@@ -220,12 +220,12 @@ def _is_high_blast_radius_action(db: "Database", file: str, line: int) -> bool:
     # lines past the uses: line — bigger than typical with: blocks but
     # small enough to stay step-local.
     window = "".join(lines[line - 1 : line + 12])
-    if "${{ secrets." in window or "${{secrets." in window:
+    if "${{ secrets." in window or "${{secrets." in window:  # noqa: SIM103
         return True
     return False
 
 
-def _compose_chain_gh_103(db: "Database") -> Iterable[tuple[str, "Fact"]]:
+def _compose_chain_gh_103(db: Database) -> Iterable[tuple[str, Fact]]:
     """TAINT-GH-001 (tainted run) + fork-reachable → HIGH.
 
     TAINT-GH-001 normally flags "this `${{ github.event.X }}` reaches a
@@ -261,7 +261,7 @@ def _compose_chain_gh_103(db: "Database") -> Iterable[tuple[str, "Fact"]]:
         )
 
 
-def _compose_chain_gh_104(db: "Database") -> Iterable[tuple[str, "Fact"]]:
+def _compose_chain_gh_104(db: Database) -> Iterable[tuple[str, Fact]]:
     """SEC6-GH-010 (secret to action input without masking) +
     fork-reachable + unpinned action → HIGH.
 

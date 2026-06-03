@@ -32,10 +32,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from taintly.taint_facts.closure import solve
-from taintly.taint_facts.relations import Database, Fact
+from taintly.taint_facts.relations import Database
 
 if TYPE_CHECKING:
-    from taintly.models import Finding, Severity
+    from taintly.models import Finding
     from taintly.workflow_corpus import WorkflowCorpus
 
 # ---------------------------------------------------------------------------
@@ -172,7 +172,7 @@ def _job_has_trusted_bot_gate(job_if: str | None) -> bool:
 
 def _seed_findings(
     db: Database,
-    prior_findings: Iterable["Finding"],
+    prior_findings: Iterable[Finding],
 ) -> None:
     """Push each prior finding into the database as a FindingFact.
 
@@ -200,7 +200,7 @@ def _seed_findings(
         )
 
 
-def _seed_job_contexts(db: Database, corpus: "WorkflowCorpus") -> None:
+def _seed_job_contexts(db: Database, corpus: WorkflowCorpus) -> None:
     """Walk the corpus and assert one JobContextFact per (file, job).
 
     Workflow-level permissions and triggers cascade to every job in
@@ -321,8 +321,8 @@ def _permission_block_has_write(perm) -> bool:
 
 
 def run_composer(
-    corpus: "WorkflowCorpus",
-    prior_findings: Iterable["Finding"],
+    corpus: WorkflowCorpus,
+    prior_findings: Iterable[Finding],
     composer_rules: list,
 ) -> list[CompositeFact]:
     """Build the composer database, run rules to fixed point, return
