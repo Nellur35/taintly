@@ -318,7 +318,7 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "Same TaintPattern separator-fragility family as TAINT-GH-001."
     ),
     ("SEC4-GH-008", "whitespace_pad"): (
-        "github-script pattern anchors on ``uses:\s+actions/github-script`` "
+        r"github-script pattern anchors on ``uses:\s+actions/github-script`` "
         "and ``with:`` keys; whitespace_pad strips the required space after the "
         "colon, producing a shape the anchor can't match (real workflows keep it)."
     ),
