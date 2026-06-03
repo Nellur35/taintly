@@ -173,6 +173,235 @@ def _is_dispatch_input_in_shell_sink(
     return False
 
 
+class GithubScriptDangerousContextPattern:
+    """SEC4-GH-025: attacker-controlled GitHub context interpolated
+    into an ``actions/github-script`` step's ``script:`` body.
+
+    ``actions/github-script`` evaluates its ``script:`` parameter
+    as JavaScript via an eval-style mechanism.  When ``${{ ... }}``
+    is interpolated into a JS string literal inside that script,
+    attacker bytes containing ``'``, ``\\n``, or ``${...}`` can
+    break out of the string and execute arbitrary JavaScript in
+    the runner — with whatever permissions the workflow has bound
+    (often write).
+
+    Sibling of SEC4-GH-004 (``run:`` direct interpolation).  Same
+    dangerous-context source set, different sink: github-script's
+    ``script:`` parameter rather than a shell ``run:`` block.
+
+    Walker locates ``uses: actions/github-script@...`` steps,
+    finds the ``script:`` key inside the same step's ``with:``,
+    and matches dangerous-context regexes inside the script
+    body (block-scalar or inline form).
+
+    The dangerous-context regex is kept in sync with SEC4-GH-004's
+    ``_DANGEROUS_GITHUB_CONTEXT_RE`` — anything that's attacker-
+    controllable in a ``run:`` context is also attacker-
+    controllable in a github-script context.
+    """
+
+    _USES_RE = re.compile(r"^\s*-?\s*uses\s*:\s*actions/github-script[@/]")
+    _WITH_LINE_RE = re.compile(r"^\s*with\s*:\s*(?:#.*)?$")
+    _SCRIPT_LINE_RE = re.compile(r"^\s*script\s*:\s*(.*)$")
+    _DANGEROUS_RE = re.compile(
+        r"\$\{\{\s*github\.("
+        r"event\.("
+        r"issue\.(title|body)|"
+        r"pull_request\.(title|body|head\.(ref|label)|user\.login)|"
+        r"comment\.body|"
+        r"review\.body|"
+        r"head_commit\.(message|author\.(email|name))|"
+        r"commits|"
+        r"pages|"
+        r"workflow_run\.head_branch|"
+        r"base_ref|"
+        r"inputs\.[A-Za-z0-9_-]+"
+        r")|"
+        r"head_ref"
+        r")"
+    )
+    # ``inputs.*`` (workflow_call / dispatch) at top-level — round-2
+    # v1 occasion #20 (backport-base) confirms this transit.
+    _INPUTS_RE = re.compile(r"\$\{\{\s*inputs\.[A-Za-z0-9_-]+\s*\}\}")
+
+    def _is_dangerous(self, line: str) -> bool:
+        return bool(self._DANGEROUS_RE.search(line) or self._INPUTS_RE.search(line))
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        """Walk lines looking for github-script steps; for each,
+        find the script: body and match dangerous-context regexes.
+        """
+        results: list[tuple[int, str]] = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            if not self._USES_RE.match(line):
+                i += 1
+                continue
+            # Found a github-script step.  Determine the step's
+            # body indent (the column of `uses:`).  Sibling keys
+            # of the step (``name:``, ``with:``, ``env:``, ``id:``,
+            # ``if:``) appear at the SAME indent as ``uses:`` — they
+            # don't mark the step boundary.  A new sibling step
+            # under ``steps:`` starts with ``- `` at a SHALLOWER
+            # indent (the list-item indent), and a key at strictly
+            # shallower indent means we've left the step entirely.
+            step_indent = len(line) - len(line.lstrip(" \t"))
+            j = i + 1
+            in_with_block = False
+            with_indent = 0
+            while j < n:
+                jline = lines[j]
+                jstripped = jline.lstrip(" \t")
+                if not jstripped or jstripped.startswith("#"):
+                    j += 1
+                    continue
+                jindent = len(jline) - len(jstripped)
+                # Strictly shallower indent than the step body = left the step.
+                if jindent < step_indent:
+                    break
+                # New sibling step under ``steps:`` — same or shallower
+                # indent AND starts with ``- ``.  Equal-indent sibling
+                # keys (``with:``, ``env:``, etc.) start with a letter,
+                # not ``- ``.
+                if jstripped.startswith("- ") and jindent <= step_indent:
+                    break
+                if in_with_block and jindent <= with_indent:
+                    in_with_block = False
+                if self._WITH_LINE_RE.match(jline):
+                    in_with_block = True
+                    with_indent = jindent
+                    j += 1
+                    continue
+                if not in_with_block:
+                    j += 1
+                    continue
+                m = self._SCRIPT_LINE_RE.match(jline)
+                if m:
+                    inline_value = m.group(1).strip()
+                    if inline_value in {"|", "|-", "|+", ">", ">-", ">+"}:
+                        # Block-scalar script body — walk until indent
+                        # drops back to script_indent or shallower.
+                        script_indent = jindent
+                        k = j + 1
+                        while k < n:
+                            kline = lines[k]
+                            kstripped = kline.lstrip(" \t")
+                            if not kstripped:
+                                k += 1
+                                continue
+                            kindent = len(kline) - len(kstripped)
+                            if kindent <= script_indent:
+                                break
+                            # NB: do NOT skip ``#``/``//``-prefixed lines
+                            # here.  ``${{ }}`` is interpolated by the
+                            # Actions runner into the script source
+                            # *before* the JS engine runs, so a JS
+                            # comment cannot neutralise it — a
+                            # newline-bearing attacker source breaks out
+                            # onto a fresh, uncommented line.  The FP
+                            # simulator's ``comment_embed`` hit on this
+                            # pattern is an artifact; it is skipped in
+                            # ``fp_simulator._SKIP_PATTERN_TYPES`` instead.
+                            if self._is_dangerous(kline):
+                                results.append((k + 1, kline.strip()))
+                            k += 1
+                        j = k
+                        continue
+                    # Inline form: `script: <expr>` on one line.
+                    if inline_value and self._is_dangerous(inline_value):
+                        results.append((j + 1, jline.strip()))
+                j += 1
+            i = j
+        return results
+
+
+class ReusableWorkflowSecretsInheritPattern:
+    """Classify ``secrets: inherit`` by the reusable workflow callee.
+
+    Same-repository reusable workflows (``uses: ./.github/workflows/...``)
+    are still broad secret propagation, but the caller and callee are
+    controlled by the same repository. Cross-repository reusable workflow
+    calls hand every caller secret to another repository and retain the
+    original high-severity SEC4-GH-012 signal.
+    """
+
+    _SECRETS_INHERIT_RE = re.compile(r"^\s*secrets:\s*inherit\s*(#.*)?$")
+    _USES_RE = re.compile(r"^\s*uses\s*:\s*(.+?)\s*(#.*)?$")
+
+    def __init__(self, *, local: bool) -> None:
+        self.local = local
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            stripped = line.lstrip(" \t")
+            if stripped.startswith("#") or not self._SECRETS_INHERIT_RE.match(line):
+                continue
+            callee = self._find_sibling_uses(lines, i)
+            is_local = callee.startswith("./")
+            if is_local == self.local:
+                results.append((i + 1, line.strip()))
+        return results
+
+    def _find_sibling_uses(self, lines: list[str], secrets_idx: int) -> str:
+        secrets_line = lines[secrets_idx]
+        secrets_indent = len(secrets_line) - len(secrets_line.lstrip(" \t"))
+        job_start = 0
+        job_end = len(lines)
+        for j in range(secrets_idx - 1, -1, -1):
+            candidate = lines[j]
+            stripped = candidate.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(candidate) - len(stripped)
+            if indent < secrets_indent:
+                job_start = j + 1
+                break
+        for j in range(secrets_idx + 1, len(lines)):
+            candidate = lines[j]
+            stripped = candidate.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(candidate) - len(stripped)
+            if indent < secrets_indent:
+                job_end = j
+                break
+        for j in range(job_start, job_end):
+            candidate = lines[j]
+            stripped = candidate.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(candidate) - len(stripped)
+            if indent != secrets_indent:
+                continue
+            m = self._USES_RE.match(candidate)
+            if m:
+                return m.group(1).strip().strip("'\"")
+        return ""
+
+
+_PRT_TRIGGER_RE = (
+    r"(?m)("
+    r"^\s*pull_request_target\s*:"
+    r"|^\s*-\s*pull_request_target\s*$"
+    r"|^on\s*:\s*pull_request_target\s*$"
+    r"|^on\s*:\s*\[[^\]]*\bpull_request_target\b[^\]]*\]"
+    r")"
+)
+
+
+_IGNORE_SCRIPTS_INSTALL_LINE_RE = (
+    r"^\s*(?:-\s*)?(?:run:\s*)?"
+    r"[\"']?"
+    r"(?:npm\s+(?:install|ci|i)|pnpm\s+(?:install|i)|yarn(?:\s+install)?)\b"
+    r"(?=[^#&;|`]*--ignore-scripts(?:\s|[\"']|$))"
+    r"(?![^#&;|`]*--ignore-scripts(?:=|\s+)false\b)"
+    r"(?!.*(?:&&|&|;|\|\||\||`))"
+)
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # SEC4-GH-006: GITHUB_ENV injection — CRITICAL
@@ -1816,5 +2045,182 @@ RULES: list[Rule] = [
             "used by release jobs, and lets a privileged workflow restore "
             "attacker-shaped bytes."
         ),
+    ),
+    Rule(
+        id="SEC4-GH-011A",
+        title="Package install in pull_request_target uses --ignore-scripts but still resolves PR dependencies",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "Workflow uses pull_request_target and runs a JavaScript package-manager install "
+            "with --ignore-scripts. The flag disables npm/yarn/pnpm lifecycle-hook execution, "
+            "but the job still resolves attacker-controlled dependency metadata from the PR "
+            "branch in a privileged context."
+        ),
+        pattern=ContextPattern(
+            anchor=_IGNORE_SCRIPTS_INSTALL_LINE_RE,
+            requires=_PRT_TRIGGER_RE,
+            exclude=[r"^\s*#"],
+            anchor_job_exclude=(
+                r"if:.*github\.event_name\s*==\s*['\"]"
+                r"(?:push|schedule|workflow_dispatch|workflow_call|merge_group"
+                r"|release|deployment|pull_request)['\"]"
+                r"|if:.*github\.event_name\s*!=\s*['\"]pull_request_target['\"]"
+            ),
+        ),
+        remediation=(
+            "`--ignore-scripts` reduces lifecycle-hook RCE risk, but do not run package "
+            "installation against PR-controlled manifests in `pull_request_target`. Use a "
+            "non-privileged `pull_request` workflow for install/build/test, then hand only "
+            "reviewed artifacts to privileged follow-up jobs."
+        ),
+        reference="https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/",
+        test_positive=[
+            "on:\n  pull_request_target:\njobs:\n  test:\n    steps:\n      - run: npm install --ignore-scripts",
+            "on:\n  pull_request_target:\njobs:\n  test:\n    steps:\n      - run: pnpm i --ignore-scripts --frozen-lockfile",
+            "on:\n  pull_request_target:\njobs:\n  test:\n    steps:\n      - run: yarn install --ignore-scripts",
+        ],
+        test_negative=[
+            "on:\n  pull_request:\njobs:\n  test:\n    steps:\n      - run: npm install --ignore-scripts",
+            "on:\n  pull_request_target:\njobs:\n  test:\n    steps:\n      - run: npm install && npm test",
+            "on:\n  pull_request_target:\njobs:\n  test:\n    steps:\n      - run: npm install --ignore-scripts && npm test",
+        ],
+        stride=["E", "T"],
+        threat_narrative=(
+            "The `--ignore-scripts` flag removes the highest-confidence lifecycle-hook RCE "
+            "path, but dependency resolution still consumes attacker-controlled package "
+            "metadata in a privileged `pull_request_target` run. Treat this as a reduced but "
+            "still meaningful poisoned-pipeline surface."
+        ),
+    ),
+    Rule(
+        id="SEC4-GH-012A",
+        title="Local reusable workflow receives all caller secrets",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "secrets: inherit passes all caller secrets to a same-repository reusable workflow. "
+            "The caller and callee are controlled together, so this is lower risk than a "
+            "cross-repository callee, but it still broadens the blast radius of any compromised "
+            "action or command inside the local reusable workflow."
+        ),
+        pattern=ReusableWorkflowSecretsInheritPattern(local=True),
+        remediation=(
+            "Prefer listing only the secrets the local reusable workflow needs:\n"
+            "  secrets:\n    DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n"
+            "Reserve `secrets: inherit` for small, audited local callees where the broad "
+            "secret boundary is intentional."
+        ),
+        reference="https://docs.github.com/en/actions/sharing-automations/reusing-workflows#passing-inputs-and-secrets-to-a-reusable-workflow",
+        test_positive=[
+            "jobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    secrets: inherit",
+            "jobs:\n  call:\n    uses: './.github/workflows/reusable.yml'\n    secrets: inherit",
+        ],
+        test_negative=[
+            "jobs:\n  call:\n    uses: owner/repo/.github/workflows/reusable.yml@v1\n    secrets: inherit",
+            "jobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    secrets:\n      TOKEN: ${{ secrets.TOKEN }}",
+        ],
+        stride=["I", "E"],
+        threat_narrative=(
+            "A local reusable workflow that receives every caller secret expands the credential "
+            "blast radius to every action and command in that callee. The repository controls both "
+            "sides, so the risk is lower than a third-party callee, but compromise of the callee's "
+            "transitive dependencies still exposes the caller's complete secret set."
+        ),
+    ),
+    Rule(
+        id="SEC4-GH-025",
+        title="actions/github-script script: body interpolates attacker-controlled context",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "An ``actions/github-script`` step's ``script:`` "
+            "parameter interpolates ``${{ ... }}`` of an attacker-"
+            "controllable context (PR title, issue body, head ref, "
+            "comment body, workflow_dispatch input, or a transit-"
+            "tainted step output) into the JavaScript body.  "
+            "github-script evaluates the body as JS via an eval-"
+            "style mechanism; bytes containing ``'``, ``\\n``, or "
+            "``${...}`` break out of the JS string literal and "
+            "execute arbitrary JavaScript in the runner — with "
+            "whatever permissions the workflow has bound (often "
+            "write access to code or issues).  This is the JS-"
+            "context sibling of SEC4-GH-004 (shell sink) and "
+            "SEC4-GH-021 (step-output transit into shell)."
+        ),
+        pattern=GithubScriptDangerousContextPattern(),
+        remediation=(
+            "Never interpolate attacker-controllable ``${{ ... }}`` "
+            "directly into a github-script ``script:`` body.  "
+            "Route through the step's ``env:`` mapping and read "
+            "via ``process.env``:\n"
+            "  - uses: actions/github-script@v7\n"
+            "    env:\n      PR_TITLE: ${{ github.event.pull_request.title }}\n"
+            "    with:\n      script: |\n        const title = process.env.PR_TITLE;\n"
+            "        github.rest.issues.createComment({ body: title });\n"
+            "``process.env.X`` returns a plain string with no JS "
+            "evaluation, so attacker bytes are treated as data.  "
+            "If the value must round-trip through a shell command, "
+            "use ``await exec.exec('cmd', [process.env.X])`` rather "
+            "than string concatenation."
+        ),
+        reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable",
+        test_positive=[
+            # Block-scalar script body with PR-title splice.
+            (
+                "      - uses: actions/github-script@v7\n"
+                "        with:\n"
+                "          script: |\n"
+                "            const t = '${{ github.event.pull_request.title }}';\n"
+            ),
+            # Same shape with a pinned SHA — must still be recognised.
+            (
+                "      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3\n"
+                "        with:\n"
+                "          script: |\n"
+                "            const t = '${{ github.head_ref }}';\n"
+            ),
+        ],
+        test_negative=[
+            # Safe env-routing pattern.
+            (
+                "      - uses: actions/github-script@v7\n"
+                "        env:\n          PR_TITLE: ${{ github.event.pull_request.title }}\n"
+                "        with:\n          script: |\n"
+                "            const t = process.env.PR_TITLE;\n"
+            ),
+            # Non-attacker context (server-minted).
+            (
+                "      - uses: actions/github-script@v7\n"
+                "        with:\n          script: |\n"
+                "            const repo = '${{ github.repository }}';\n"
+            ),
+            # Different action with a script: parameter — not github-script.
+            (
+                "      - uses: example/some-other@v1\n"
+                "        with:\n          script: echo ${{ github.event.pull_request.title }}\n"
+            ),
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "github-script is a popular action for embedding JS "
+            "logic inline in workflows — paths-filter, PR comment "
+            "automations, branch sync, label updates, etc.  When "
+            "the JS body is built from attacker-controllable "
+            "GitHub context via ``${{ }}`` interpolation, the "
+            "string-literal escape is trivial (a single quote or "
+            "newline in a PR title is sufficient).  An attacker "
+            "who controls the splice runs JS as the workflow, "
+            "which means access to the GITHUB_TOKEN, the bound "
+            "secrets, and any further actions the workflow has "
+            "wired up.  The remediation (env: + process.env) is "
+            "the same shape as SEC4-GH-004's (env: + shell var) "
+            "and SEC4-GH-021's (env: + shell var) — same defence-"
+            "in-depth principle applied to a different sink."
+        ),
+        incidents=[],
     ),
 ]

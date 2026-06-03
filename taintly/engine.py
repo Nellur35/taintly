@@ -1201,6 +1201,19 @@ def scan_repo(
             # ContextPattern / …) are unaffected because their
             # CorpusPattern siblings stub `check()` to return [].
             all_findings.extend(_run_corpus_rules(repo_path, platform_rules))
+            # B3 composer pass: re-invoke corpus rules whose
+            # finding_family is "chain-composition", this time with
+            # the full per-file + corpus findings list seeded as EDB.
+            # These rules read prior findings via composer.run_composer
+            # and emit composite (CHAIN-GH-1xx) findings.
+            all_findings.extend(
+                _run_corpus_rules(
+                    repo_path,
+                    platform_rules,
+                    prior_findings=list(all_findings),
+                    composer_only=True,
+                )
+            )
         if plat == Platform.GITLAB:
             # GitLab CHAIN composer pass: build the GitLabWorkflowCorpus
             # (entry file + resolved local includes) once per scan and
@@ -1222,19 +1235,41 @@ def scan_repo(
     return reports
 
 
-def _run_corpus_rules(repo_path: str, rules: list[Rule]) -> list[Finding]:
+def _run_corpus_rules(
+    repo_path: str,
+    rules: list[Rule],
+    *,
+    prior_findings: list[Finding] | None = None,
+    composer_only: bool = False,
+) -> list[Finding]:
     """Build a WorkflowCorpus and run every CorpusPattern rule against it.
 
     Returns the findings list (already wrapped in :class:`Finding` with
     the rule's metadata).  No-op when no CorpusPattern rules are loaded;
     the corpus build is then skipped entirely so non-cross-file users
     don't pay the walk cost.
+
+    Composer pass: when ``composer_only=True`` we ONLY run rules whose
+    ``finding_family == "chain-composition"`` (the CHAIN-GH-1xx
+    composer family).  Their callbacks read ``corpus._prior_findings``
+    to compose new findings from existing ones; we smuggle the prior
+    list onto the corpus object so the regular CorpusPattern contract
+    stays unchanged.
     """
     corpus_rules = [r for r in rules if isinstance(r.pattern, CorpusPattern)]
+    if composer_only:
+        corpus_rules = [r for r in corpus_rules if r.finding_family == "chain-composition"]
+    else:
+        # Non-composer pass: exclude composer rules so they only fire
+        # in the dedicated post-pass with the seeded findings list.
+        corpus_rules = [r for r in corpus_rules if r.finding_family != "chain-composition"]
     if not corpus_rules:
         return []
 
     corpus = build_corpus(repo_path)
+    if prior_findings is not None:
+        # Smuggled onto the corpus object for composer rules to read.
+        corpus._prior_findings = prior_findings  # type: ignore[attr-defined]
     findings: list[Finding] = []
     with scan_session():
         for rule in corpus_rules:

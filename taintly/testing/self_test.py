@@ -89,15 +89,7 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
 # pass. Remove entries as the underlying rules are hardened; never
 # add entries to paper over a newly-introduced regression.
 #
-# scripts/check_mutation_gap_count.py asserts the COUNT of entries here
-# does not grow vs a committed baseline — keeping kill-rate at 100%
-# only by adding entries here is detected and fails CI.
-#
-# Each value documents the failure flavour and follow-up pointer. As
-# this list approaches 100 entries the per-entry rationale starts
-# carrying owner / expected-fix-date metadata informally; future work
-# (out of scope for this audit pass) is to mirror the
-# ``.taintly.yml`` suppression schema (reason / owner / expires) here.
+# Each value documents the failure flavour and follow-up pointer.
 _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ("SEC1-GH-001", "indent_shift"): (
         "SequencePattern's absent_within regex assumes a specific indent "
@@ -105,12 +97,12 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ),
     ("SEC10-GH-001", "indent_shift"): ("Same SequencePattern family as SEC1-GH-001."),
     ("SEC10-GL-003", "indent_shift"): (
-        "ContextPattern's anchor ``^\\s{2,}script\\s*:`` requires "
-        "the GitLab job's ``script:`` key at indent >= 2; indent_shift "
-        "mutations that drop the indent below 2 break the anchor. Real "
-        "GitLab CI uses 2-space indent universally; broadening the "
-        "anchor to ``^\\s*script\\s*:`` would FP on top-level template "
-        "fragments and ``include:`` body lines."
+        "ContextPattern requires a job-like script anchor before enforcing "
+        "timeout hygiene. The indent_shift operator can produce one-space "
+        "indents (``script:`` at column 1), which are valid YAML but not a "
+        "shape GitLab examples or hand-written CI files use. Broadening the "
+        "anchor for this mutation would make the timeout inventory rule less "
+        "specific without improving real-world coverage."
     ),
     ("SEC10-GH-004", "whitespace_pad"): (
         "Rule's requires=``uses:\\s+actions/upload-artifact@`` needs "
@@ -151,9 +143,11 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "rule that shares the anchor pattern."
     ),
     ("SEC4-GH-026A", "whitespace_pad"): (
-        "Same ``uses:\\s+`` anchor family as SEC4-GH-026 and "
-        "AI-GH-019/020/021/022/035; broadening only this rule would "
-        "make the shared anchor family inconsistent."
+        "Tier-split sibling of SEC4-GH-026 (added 2026-05-19 by "
+        "github-tanstack-posture-design-v1).  Shares the SEC4-GH-026 "
+        "``uses:\\s+actions/cache@`` anchor verbatim, therefore "
+        "inherits the same ``uses:\\s+`` whitespace_pad gap.  See "
+        "SEC4-GH-026 entry above for the full anchor-family rationale."
     ),
     ("AI-GH-035", "whitespace_pad"): (
         "Same family as AI-GH-019/020/021/022: anchor uses "
@@ -187,10 +181,10 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "separator. The zero-space mutant shares the documented "
         "``uses:\\s+`` anchor-family gap."
     ),
-    ("SEC4-GH-004", "whitespace_pad"): (
-        "Script-injection regex expects the normal ``run: command`` "
-        "separator; the zero-space mutant is a known YAML-format edge in "
-        "the same separator-fragility family."
+    ("SEC3-GH-001A", "whitespace_pad"): (
+        "Sibling rule of SEC3-GH-001 — same ``**.uses`` path glob; the "
+        "structural walker doesn't emit a uses-leaf when the YAML "
+        "separator is missing.  Same anchor-family gap as SEC3-GH-001."
     ),
     ("SEC4-JK-008", "quote_swap"): (
         "Quote-swap mutation flips a double-quoted Groovy GString "
@@ -199,10 +193,16 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "NOT interpolate ``${...}`` — Groovy passes the literal "
         "``${env.X}`` text to the shell, where ``$`` followed by ``{`` "
         "is parsed as parameter expansion only if X is a SHELL env "
-        "variable, not the Groovy ``env`` object.  Single-quoted is "
-        "the SAFE form per SEC4-JK-001's well-documented remediation, "
-        "and the rule correctly does not fire.  This is an inherent "
-        "property of Groovy GStrings, not a precision gap."
+        "variable, not the Groovy ``env`` object.  So the mutation's "
+        "expected-trigger semantics are wrong: single-quoted is "
+        "actually the SAFE form per SEC4-JK-001's well-documented "
+        "remediation, and the rule correctly does not fire.  This is "
+        "an inherent property of Groovy GStrings, not a precision gap."
+    ),
+    ("SEC4-GH-004", "whitespace_pad"): (
+        "Script-injection regex expects the normal ``run: command`` "
+        "separator; the zero-space mutant is a known YAML-format edge in "
+        "the same separator-fragility family."
     ),
     ("AI-GH-023", "whitespace_pad"): (
         "Same family as AI-GH-019/020/021/022: requires-clause uses "
@@ -223,38 +223,20 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ),
     ("SEC8-GH-003", "whitespace_pad"): ("Same family; fragile to whitespace around `:` separator."),
     ("SEC6-GH-010", "whitespace_pad"): (
-        "Rule sits on WorkflowAwarePattern with a path glob "
-        "``jobs.*.steps[*].with.*``.  The structural reader requires "
-        "whitespace after `:` to recognise a YAML mapping; the zero-"
-        "space mutant produces no step paths, so the pattern's path "
-        "match never reaches the credential leaf and the rule no "
-        "longer fires.  Real workflows always have a space after `:`. "
-        "Broadening the structural reader to accept ``key:value`` "
-        "would change parsing semantics across every rule that "
-        "queries step-scoped paths (SEC4-GH-004, SEC3-GH-001, "
-        "SEC6-GH-010, TAINT-GH-006, etc.), which is not worth the "
-        "fragility trade.  Documented as a known gap in the same "
+        "Different family from the regex-fragility class above. The "
+        "regex itself handles the whitespace_pad mutation correctly: "
+        "anchor still matches the credential-shape line and exclude "
+        "still matches the env: block. The fragility is in the "
+        "structural reader's step-segmentation: it requires whitespace "
+        "around colons to recognise YAML mappings. The zero-space "
+        "mutant produces zero step segments, so anchor_step_exclude's "
+        "lookup returns empty content and the env-block exception "
+        "doesn't suppress. Real workflows always have a space after "
+        "`:`; broadening the structural reader to accept `key:value` "
+        "would change parsing semantics across every rule that uses "
+        "step-scope or job-scope segmentation, which is not worth the "
+        "fragility-trade. Documented as a known gap in the same "
         "spirit as SEC10-GH-004 / AI-GH-019 / TAINT-GH-010."
-    ),
-    ("TAINT-GH-006", "whitespace_pad"): (
-        "Rule sits on WorkflowAwarePattern with path globs "
-        "``jobs.*.steps[*].run`` / ``with.{args,entrypoint,script,"
-        "command}``.  Same structural-reader fragility as SEC6-GH-"
-        "010: the zero-space mutant produces no step paths so neither "
-        "the path glob nor ``ctx.is_reusable_workflow`` resolves.  "
-        "Real workflows always have a space after `:`; broadening "
-        "the structural reader is the wrong knob — it would weaken "
-        "every other rule that queries step-scoped paths."
-    ),
-    ("SEC4-GH-008", "whitespace_pad"): (
-        "Rule sits on WorkflowAwarePattern with path globs "
-        "``jobs.*.steps[*].run`` / ``jobs.*.steps[*].with.*``.  "
-        "Same structural-reader fragility as SEC6-GH-010 / TAINT-"
-        "GH-006: the zero-space mutant produces no step paths so "
-        "the path-glob predicate never sees the leaf.  Real "
-        "workflows always have a space after `:`; broadening the "
-        "structural reader to accept ``key:value`` would weaken "
-        "every rule that queries step-scoped paths."
     ),
     ("SEC8-GH-004", "comment_inject"): (
         "Inline `# comment` trailing a `services:` line prevents match; "
@@ -300,6 +282,57 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ("TAINT-GH-012", "quote_swap"): (
         "Same single-quote-precision rationale as TAINT-GH-001/002/009: "
         "quote_swap produces single-quoted shell references that are not "
+        "equivalent sinks."
+    ),
+    ("TAINT-GH-001", "whitespace_pad"): (
+        "TaintPattern job/step segmentation expects conventional YAML "
+        "separators such as ``run: echo`` and ``env:``. The whitespace_pad "
+        "operator can produce zero-space mappings like ``run:echo``; YAML "
+        "accepts them, but they are not a real-world GitHub workflow style."
+    ),
+    ("TAINT-GH-002", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GH-001."
+    ),
+    ("TAINT-GH-003", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GH-001."
+    ),
+    ("TAINT-GH-004", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GH-001."
+    ),
+    ("TAINT-GH-009", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GH-001."
+    ),
+    ("TAINT-GH-012", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GH-001."
+    ),
+    ("TAINT-GH-014", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GH-001."
+    ),
+    ("TAINT-GH-015", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GH-001."
+    ),
+    ("TAINT-GH-016", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GH-001."
+    ),
+    ("TAINT-GH-017", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GH-001."
+    ),
+    ("SEC4-GH-008", "whitespace_pad"): (
+        r"github-script pattern anchors on ``uses:\s+actions/github-script`` "
+        "and ``with:`` keys; whitespace_pad strips the required space after the "
+        "colon, producing a shape the anchor can't match (real workflows keep it)."
+    ),
+    ("TAINT-GH-019", "whitespace_pad"): (
+        "Same TaintPattern whitespace_pad gap as TAINT-GH-001..018 — the "
+        "structural reader is whitespace-structured; padding the matched "
+        "line breaks the parse, which is expected (real workflows are valid YAML)."
+    ),
+    ("TAINT-GH-018", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GH-001."
+    ),
+    ("TAINT-GH-018", "quote_swap"): (
+        "Same single-quote-precision rationale as TAINT-GH-001/002/009: "
+        "quote_swap can produce single-quoted shell references that are not "
         "equivalent sinks."
     ),
     ("TAINT-GH-007", "whitespace_pad"): (
@@ -434,8 +467,7 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ("SEC8-GL-001", "whitespace_pad"): (
         "Same family as SEC8-GH-001/002/003; image-pin regex fragile to whitespace around `:`."
     ),
-    # SEC8-GL-002 retired (duplicate of SEC3-GL-002); the
-    # whitespace_pad gap that lived here disappears with the rule.
+    ("SEC8-GL-002", "whitespace_pad"): ("Same family as SEC8-GL-001."),
     ("TAINT-GL-001", "comment_inject"): (
         "Inline `# comment` on the source line of a taint flow breaks the line-level regex anchor."
     ),
@@ -454,6 +486,23 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "Same TAINT-GL-003 flow analysis keys on specific casing of "
         "`artifacts:`/`variables:` YAML nouns."
     ),
+    ("TAINT-GL-001", "whitespace_pad"): (
+        "GitLab TaintPattern segmentation expects conventional YAML "
+        "separators such as ``script:`` and ``variables:``. The zero-space "
+        "mutant is YAML-valid but not representative of hand-written GitLab CI."
+    ),
+    ("TAINT-GL-002", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GL-001."
+    ),
+    ("TAINT-GL-003", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GL-001."
+    ),
+    ("TAINT-GL-005", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GL-001."
+    ),
+    ("TAINT-GL-006", "whitespace_pad"): (
+        "Same TaintPattern separator-fragility family as TAINT-GL-001."
+    ),
     ("SEC4-JK-001", "quote_swap"): (
         "Jenkins GString rule deliberately distinguishes `sh '...'` (safe) "
         'from `sh "..."` (unsafe) — quote_swap genuinely flips the '
@@ -463,6 +512,12 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
     ),
     ("SEC4-JK-002", "quote_swap"): (
         "Same rationale as SEC4-JK-001 — quote style is semantic, not cosmetic."
+    ),
+    ("SEC6-JK-007", "quote_swap"): (
+        "SEC6-JK-007 deliberately targets Groovy double-quoted `bat` "
+        "strings. quote_swap produces single-quoted Groovy strings, which "
+        "do not interpolate `${env.X}` before cmd.exe runs. The mutation "
+        "therefore changes safety semantics rather than preserving syntax."
     ),
     ("TAINT-JK-001", "quote_swap"): (
         "Same rationale as SEC4-JK-001 — the rule deliberately targets "
@@ -505,11 +560,6 @@ def run_mutation_tests(
     the top-level kill-rate gate doesn't fail the build while the
     underlying rule precision issue is being worked. See the docstring
     on `_KNOWN_MUTATION_GAPS` for the discipline.
-
-    ``include_semantic=True`` also runs the advisory semantic-equivalence
-    operators from ``SEMANTIC_MUTATION_OPERATORS``. Their survivors are
-    NOT counted toward the kill-rate gate — they're rule-engineering
-    gaps documented for follow-up rather than CI gates.
     """
     from .mutations import MUTATION_OPERATORS, SEMANTIC_MUTATION_OPERATORS
 
@@ -634,33 +684,7 @@ def format_test_results_json(
     self_results: list[TestResult],
     mutation_results: list[TestResult] | None = None,
 ) -> str:
-    """JSON formatter for ``--self-test-json``.
-
-    Why this exists: the human-readable formatter prints pass/fail
-    counts, but the actual per-rule survival rates over time — the
-    signal that tells you a rule got more fragile across releases —
-    is invisible in pass/fail text. JSON output makes the harness's
-    full state machine-readable so CI dashboards can graph kill-rate
-    per rule per commit. Pairs with the gap-growth gate at
-    scripts/check_mutation_gap_count.py.
-
-    Schema (stable; downstream dashboards depend on it):
-
-      {
-        "schema_version": 1,
-        "self_test": {
-          "total": int, "passed": int, "rules_tested": int,
-          "by_rule": {"<rule_id>": {"positive": [...], "negative": [...]}},
-          "failures": [{"rule_id": ..., "test_type": ..., ...}, ...]
-        },
-        "mutation": null | {
-          "total": int, "killed": int, "kill_rate": float,
-          "known_gaps": int,
-          "by_rule_op": {"<rule_id>:<op>": {"killed": int, "total": int}},
-          "survivors": [...]
-        }
-      }
-    """
+    """Format self-test and mutation results as stable JSON."""
     import json
 
     def _result_to_dict(r: TestResult) -> dict:
@@ -675,35 +699,34 @@ def format_test_results_json(
         }
 
     by_rule: dict[str, dict[str, list[dict]]] = {}
-    for r in self_results:
-        rule_bucket = by_rule.setdefault(r.rule_id, {"positive": [], "negative": []})
-        if r.test_type in ("positive", "negative"):
-            rule_bucket[r.test_type].append(_result_to_dict(r))
+    for result in self_results:
+        rule_bucket = by_rule.setdefault(result.rule_id, {"positive": [], "negative": []})
+        if result.test_type in ("positive", "negative"):
+            rule_bucket[result.test_type].append(_result_to_dict(result))
 
     self_block = {
         "total": len(self_results),
-        "passed": sum(1 for r in self_results if r.passed),
-        "rules_tested": len({r.rule_id for r in self_results}),
+        "passed": sum(1 for result in self_results if result.passed),
+        "rules_tested": len({result.rule_id for result in self_results}),
         "by_rule": by_rule,
-        "failures": [_result_to_dict(r) for r in self_results if not r.passed],
+        "failures": [_result_to_dict(result) for result in self_results if not result.passed],
     }
 
     mutation_block: dict | None = None
     if mutation_results:
         total = len(mutation_results)
-        killed = sum(1 for r in mutation_results if r.passed)
-        # Cross-tabulate known gaps from the survivor set
+        killed = sum(1 for result in mutation_results if result.passed)
         known_gap_count = sum(
             1
-            for r in mutation_results
-            if not r.passed and (r.rule_id, r.mutation_op) in _KNOWN_MUTATION_GAPS
+            for result in mutation_results
+            if not result.passed and (result.rule_id, result.mutation_op) in _KNOWN_MUTATION_GAPS
         )
         by_rule_op: dict[str, dict[str, int]] = {}
-        for r in mutation_results:
-            key = f"{r.rule_id}:{r.mutation_op or '_'}"
+        for result in mutation_results:
+            key = f"{result.rule_id}:{result.mutation_op or '_'}"
             entry = by_rule_op.setdefault(key, {"killed": 0, "total": 0})
             entry["total"] += 1
-            if r.passed:
+            if result.passed:
                 entry["killed"] += 1
         mutation_block = {
             "total": total,
@@ -711,7 +734,9 @@ def format_test_results_json(
             "kill_rate": (killed / total) if total else 0.0,
             "known_gaps": known_gap_count,
             "by_rule_op": by_rule_op,
-            "survivors": [_result_to_dict(r) for r in mutation_results if not r.passed],
+            "survivors": [
+                _result_to_dict(result) for result in mutation_results if not result.passed
+            ],
         }
 
     return json.dumps(

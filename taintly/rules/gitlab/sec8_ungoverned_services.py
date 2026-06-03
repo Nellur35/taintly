@@ -10,7 +10,7 @@ artefacts, and the GitLab token. This makes image pinning more critical
 in GitLab than in GitHub Actions (where job containers are optional).
 """
 
-from taintly.models import Platform, RegexPattern, Rule, Severity
+from taintly.models import Platform, RegexPattern, Rule, SequencePattern, Severity
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -107,4 +107,59 @@ RULES: list[Rule] = [
     # findings on the same workflow line.  Removed after a 1:1 line
     # overlap with SEC3-GL-002 was confirmed.  Use SEC3-GL-002.
     # =========================================================================
+    Rule(
+        id="SEC8-GL-002",
+        title="External CI configuration included from project without pinned ref",
+        severity=Severity.HIGH,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-8",
+        description=(
+            "A GitLab CI `include: project:` directive pulls CI configuration from an "
+            "external project without specifying a commit SHA as the `ref:`. "
+            "Without a pinned ref, GitLab resolves the include against the default branch "
+            "at pipeline creation time â€” any push to that branch immediately affects all "
+            "pipelines that include it. "
+            "A branch name or tag ref is mutable: the branch can be force-pushed, the tag "
+            "can be recreated to point at different content. "
+            "Pin to a full 40-character commit SHA so the included configuration is "
+            "immutable and auditable."
+        ),
+        pattern=SequencePattern(
+            # Fires when `project:` appears in an include block but is NOT followed
+            # by a `ref:` containing a full 40-char commit SHA within the next 4 lines.
+            pattern_a=r"^\s+-?\s*project:\s+['\"]?[a-zA-Z0-9]",
+            absent_within=r"ref:\s+['\"]?[a-f0-9]{40}['\"]?",
+            lookahead_lines=4,
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Pin the included configuration to a commit SHA:\n\n"
+            "include:\n"
+            "  - project: my-group/shared-ci\n"
+            "    ref: abc123def456abc123def456abc123def456abc1   # was: main\n"
+            "    file: /templates/default.yml\n\n"
+            "Find the current SHA:\n"
+            "  git ls-remote https://gitlab.com/my-group/shared-ci refs/heads/main"
+        ),
+        reference="https://docs.gitlab.com/ee/ci/yaml/includes.html",
+        test_positive=[
+            "include:\n  - project: my-group/shared-ci\n    file: /templates/ci.yml",
+            "include:\n  - project: org/ci-templates\n    ref: main\n    file: /ci.yml",
+            "include:\n  - project: org/ci-templates\n    ref: v1.2.3\n    file: /ci.yml",
+        ],
+        test_negative=[
+            "include:\n  - project: org/ci-templates\n"
+            "    ref: abc123def456abc123def456abc123def456abc1\n    file: /ci.yml",
+            "include:\n  - remote: https://example.com/ci.yml",
+            "include:\n  - local: /templates/ci.yml",
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "An external CI configuration file included from another project without a "
+            "pinned commit ref changes with every push to that project, meaning any "
+            "contributor to the included configuration can silently modify what your "
+            "pipeline executes. A compromised or malicious configuration file has full "
+            "access to your project's runner tokens and protected CI/CD variables."
+        ),
+    ),
 ]

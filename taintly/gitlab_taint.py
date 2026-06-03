@@ -82,10 +82,13 @@ the engine; job boundaries come from ``_split_into_job_segments`` in
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
 from .models import _split_into_job_segments
+from .parsers.structural import EventKind, walk_workflow
+from .taint_facts import Database, solve
 
 # ---------------------------------------------------------------------------
 # Source definitions
@@ -248,15 +251,618 @@ class TaintHop:
 @dataclass
 class TaintPath:
     """A detected end-to-end taint flow from a tainted GitLab CI
-    variable into a script line."""
+    variable into a pipeline sink.
+
+    ``sink_kind`` says *where the value landed* — ``"script"`` (a
+    ``script:`` / ``before_script:`` / ``after_script:`` shell line —
+    the default and by far the most common), ``"image"`` (a job
+    ``image:`` value), ``"service_image"`` (a ``services.*`` image),
+    or ``"tags"`` (a runner ``tags:`` selector).  It defaults to
+    ``"script"`` so every existing call site and rule keeps its
+    behaviour.
+    """
 
     source_var: str  # e.g. "CI_COMMIT_TITLE"
     source_line: int  # 1-indexed line of the variables: assignment
     laundered_var: str  # the user-named variable that carries the taint
-    sink_line: int  # 1-indexed line of the script: content
-    sink_snippet: str  # literal text of that script line, stripped
+    sink_line: int  # 1-indexed line of the sink
+    sink_snippet: str  # literal text of that sink line, stripped
     kind: str = "shallow"
     hops: list[TaintHop] = field(default_factory=list)
+    sink_kind: str = "script"
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Facts model
+#
+# Mirror of the GitHub facts engine in :mod:`taintly.taint`.  GitLab is
+# simpler: the only hand-rolled convergence loop was
+# ``_resolve_var_taints`` (multi-hop ``variables:`` chains); the dotenv
+# bridge was a forward two-pass.  Both collapse into ONE relational
+# fixed point.  Phase A extracts the EDB by reusing the existing
+# line-walkers; Phase B swaps in the structural parser.
+# ---------------------------------------------------------------------------
+
+_R_VAR_ASSIGN = "var_assign"  # EDB
+_R_SCRIPT_LINE = "script_line"  # EDB
+_R_DOTENV_WRITE = "dotenv_write"  # EDB
+_R_NEEDS_EDGE = "needs_edge"  # EDB
+_R_SINK_SITE = "sink_site"  # EDB  (non-script: sinks — image:, services:, tags:)
+_R_TAINTED_VAR = "tainted_var"  # IDB
+_R_VISIBLE_VAR = "visible_var"  # IDB
+_R_TAINTED_DOTENV = "tainted_dotenv"  # IDB
+_R_INHERITED_VAR = "inherited_var"  # IDB
+
+
+@dataclass
+class _VarAssign:
+    """EDB: a ``variables:`` assignment at ``scope`` — ``"top"`` or
+    ``("job", job_name)``."""
+
+    scope: object
+    name: str
+    raw: str
+    line: int
+
+    def fact_key(self):
+        return (self.scope, self.name, self.line)
+
+    def fact_rank(self):
+        return ()
+
+
+@dataclass
+class _ScriptLine:
+    """EDB: one line of a ``script:`` / ``before_script:`` /
+    ``after_script:`` body."""
+
+    job: str
+    line: int
+    text: str
+
+    def fact_key(self):
+        return (self.job, self.line)
+
+    def fact_rank(self):
+        return ()
+
+
+@dataclass
+class _SinkSite:
+    """EDB: a non-``script:`` job key whose value the runner expands
+    and which is therefore a taint sink in its own right.
+
+    ``kind`` — ``"image"`` (the job's container image), ``"service_image"``
+    (a ``services.*`` image), or ``"tags"`` (a runner tag selector).
+    ``value`` is the parsed scalar (drives ``$VAR`` detection);
+    ``snippet`` is the raw source line (the displayed
+    ``sink_snippet``).
+    """
+
+    job: str
+    kind: str
+    line: int
+    value: str
+    snippet: str
+
+    def fact_key(self):
+        return (self.job, self.kind, self.line, self.value)
+
+    def fact_rank(self):
+        return ()
+
+
+@dataclass
+class _DotenvWrite:
+    """EDB: an ``echo "NAME=VALUE" > <dotenv_file>`` write whose
+    redirect target is the job's declared dotenv artefact."""
+
+    job: str
+    name: str
+    value: str
+    line: int
+    quoted_single: bool
+    seq: int
+
+    def fact_key(self):
+        return (self.job, self.name, self.seq)
+
+    def fact_rank(self):
+        return ()
+
+
+@dataclass
+class _NeedsEdge:
+    """EDB: ``job`` declares ``needs: producer``; ``artifacts`` is the
+    effective ``artifacts:`` inheritance flag for that entry."""
+
+    job: str
+    producer: str
+    artifacts: bool
+
+    def fact_key(self):
+        return (self.job, self.producer)
+
+    def fact_rank(self):
+        return ()
+
+
+@dataclass
+class _TaintedVar:
+    """IDB: a ``variables:`` entry at ``scope`` carries attacker bytes."""
+
+    scope: object
+    name: str
+    source_var: str
+    source_line: int
+    hops: list[TaintHop]
+
+    def fact_key(self):
+        return (self.scope, self.name)
+
+    def fact_rank(self):
+        return (len(self.hops), self.source_line)
+
+
+@dataclass
+class _VisibleVar:
+    """IDB: variable ``name`` carries attacker bytes in ``job``'s
+    environment.  ``cls`` carries scope precedence — ``0`` job-level
+    ``variables:`` overrides ``1`` the top-level cascade."""
+
+    job: str
+    name: str
+    cls: int
+    source_var: str
+    source_line: int
+    hops: list[TaintHop]
+
+    def fact_key(self):
+        return (self.job, self.name)
+
+    def fact_rank(self):
+        return (self.cls, len(self.hops), self.source_line)
+
+
+@dataclass
+class _TaintedDotenv:
+    """IDB: ``producer`` writes attacker bytes into ``name`` in its
+    declared dotenv artefact."""
+
+    producer: str
+    name: str
+    seq: int
+    source_var: str
+    source_line: int
+    hops: list[TaintHop]
+
+    def fact_key(self):
+        return (self.producer, self.name)
+
+    def fact_rank(self):
+        return (-self.seq, len(self.hops))
+
+
+@dataclass
+class _InheritedVar:
+    """IDB: ``job`` inherits a tainted ``name`` as a real environment
+    variable via a ``needs:`` edge to a dotenv-producing job."""
+
+    job: str
+    name: str
+    source_var: str
+    source_line: int
+    hops: list[TaintHop]
+
+    def fact_key(self):
+        return (self.job, self.name)
+
+    def fact_rank(self):
+        return (len(self.hops), self.source_line)
+
+
+@dataclass
+class _Job:
+    """The per-job spine the projection walks."""
+
+    name: str
+    seg_start: int
+    seg_lines: list[str]
+    dotenv_file: str | None
+
+
+def _build_facts(lines: list[str]) -> tuple[Database, list[_Job]]:
+    """Extract the EDB for ``lines``, run the closure, and return the
+    saturated :class:`Database` plus the job spine."""
+    db = Database()
+    jobs: list[_Job] = []
+    _seq = 0
+
+    # Top-level variables: cascade to every job.
+    for name, raw, line in _collect_top_level_var_assignments(lines):
+        db.add(_R_VAR_ASSIGN, _VarAssign("top", name, raw, line))
+
+    for seg_start, seg_lines in _split_into_job_segments(lines):
+        name = _extract_job_name(seg_lines)
+        if name is None:
+            continue
+        for vname, raw, line in _collect_var_assignments_in_segment(seg_lines, seg_start):
+            db.add(_R_VAR_ASSIGN, _VarAssign(("job", name), vname, raw, line))
+
+        dotenv_file = _extract_dotenv_filename(seg_lines)
+        for sink_line, sink_snippet in _iter_script_lines(seg_lines, seg_start):
+            db.add(_R_SCRIPT_LINE, _ScriptLine(name, sink_line, sink_snippet))
+            if dotenv_file is not None:
+                for m in _ECHO_ASSIGN_TO_FILE_RE.finditer(sink_snippet):
+                    if m.group("file") != dotenv_file:
+                        continue
+                    for wname, value, qs in _echo_body_name_value(m):
+                        db.add(
+                            _R_DOTENV_WRITE,
+                            _DotenvWrite(name, wname, value, sink_line, qs, _seq),
+                        )
+                        _seq += 1
+
+        for producer, artifacts in _extract_needs(seg_lines):
+            db.add(_R_NEEDS_EDGE, _NeedsEdge(name, producer, artifacts))
+
+        jobs.append(_Job(name, seg_start, seg_lines, dotenv_file))
+
+    solve(db, _gitlab_rules(jobs))
+    return db, jobs
+
+
+# --- EDB extraction: Phase B (structural parser) ---------------------------
+
+_SCRIPT_KEYS = ("script", "before_script", "after_script")
+
+
+def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, list[_Job]]:
+    """Phase B EDB extractor for GitLab: source the extensional facts
+    from the structural parser instead of the line-walkers.
+
+    Produces the same relation shapes as :func:`_build_facts`, so the
+    closure rule set and the projection are shared unchanged.  Script
+    lines are normalised to the stripped source line (matching the
+    line backend's ``_iter_script_lines``) so the displayed
+    ``sink_snippet`` stays byte-identical.
+    """
+    n_lines = len(lines)
+
+    def _src_strip(line_no: int, fallback: str) -> str:
+        return lines[line_no - 1].strip() if 1 <= line_no <= n_lines else fallback
+
+    job_order: list[str] = []
+    var_assigns: list[_VarAssign] = []
+    # job -> list of (line, text)
+    script_lines: dict[str, list[tuple[int, str]]] = {}
+    # job -> dotenv filename
+    dotenv_files: dict[str, str] = {}
+    # (job, i) -> [producer, artifacts]
+    needs_raw: dict[tuple[str, int], list] = {}
+    sink_sites: list[_SinkSite] = []
+
+    def _note_job(job: str) -> None:
+        if job not in script_lines:
+            script_lines[job] = []
+            job_order.append(job)
+
+    def _is_job(name: object) -> bool:
+        return (
+            isinstance(name, str)
+            and name not in _RESERVED_GITLAB_TOP_KEYS
+            and not name.startswith(".")
+        )
+
+    for ev in walk_workflow(".gitlab-ci.yml", content=content):
+        if ev.kind is EventKind.CUTOFF:
+            break
+        if ev.kind is not EventKind.LEAF_SCALAR:
+            continue
+        path = ev.path
+        if not path:
+            continue
+        # ('variables', <name>) — top-level cascade.
+        if len(path) == 2 and path[0] == "variables" and isinstance(path[1], str):
+            var_assigns.append(_VarAssign("top", path[1], ev.value or "", ev.line))
+            continue
+        head = path[0]
+        if not _is_job(head):
+            continue
+        job = head
+        rest = path[1:]
+        # <job>.variables.<name>
+        if len(rest) == 2 and rest[0] == "variables" and isinstance(rest[1], str):
+            _note_job(job)
+            var_assigns.append(_VarAssign(("job", job), rest[1], ev.value or "", ev.line))
+            continue
+        # <job>.{script,before_script,after_script}[i]  /  inline <job>.script
+        if rest and rest[0] in _SCRIPT_KEYS:
+            _note_job(job)
+            tail = rest[1:]
+            # Inline ``script: echo hi`` (no index) or list item
+            # ``script:`` -> ``- echo hi`` (integer index).  Anything
+            # deeper is the structural tokenizer mis-splitting a
+            # ``: ``-containing command into a spurious key — those
+            # lines are simply not recovered (a documented Phase B
+            # divergence, see the decision record).
+            if not tail or (len(tail) == 1 and isinstance(tail[0], int)):
+                if ev.block_lines:
+                    # Block-scalar body lines keep their internal
+                    # indentation; the line backend's
+                    # ``_iter_script_lines`` strips it, so match that.
+                    for src_line, body in ev.block_lines:
+                        script_lines[job].append((src_line, _src_strip(src_line, body.strip())))
+                else:
+                    script_lines[job].append((ev.line, ev.value or ""))
+            continue
+        # <job>.artifacts.reports.dotenv  (plain or list form)
+        if (
+            len(rest) >= 3
+            and rest[0] == "artifacts"
+            and rest[1] == "reports"
+            and rest[2] == "dotenv"
+        ):
+            _note_job(job)
+            if job not in dotenv_files and ev.value:
+                dotenv_files[job] = ev.value
+            continue
+        # <job>.needs[i]            -> bare producer string
+        # <job>.needs[i].job        -> mapping-form producer
+        # <job>.needs[i].artifacts  -> inheritance flag
+        if len(rest) >= 2 and rest[0] == "needs" and isinstance(rest[1], int):
+            _note_job(job)
+            slot = needs_raw.setdefault((job, rest[1]), [None, True])
+            sub = rest[2:]
+            if not sub or sub == ("job",):
+                slot[0] = ev.value
+            elif sub == ("artifacts",):
+                slot[1] = (ev.value or "").strip() == "true"
+            continue
+        # Non-script: sink sites — the runner expands ``$VAR`` in each.
+        #   <job>.image / <job>.image.name      -> the job's container
+        #   <job>.services[i] / [i].name        -> a service container
+        #   <job>.tags / <job>.tags[i]          -> runner tag selector
+        if rest == ("image",) or rest == ("image", "name"):
+            _note_job(job)
+            val = ev.value or ""
+            sink_sites.append(_SinkSite(job, "image", ev.line, val, _src_strip(ev.line, val)))
+            continue
+        if (
+            len(rest) >= 2
+            and rest[0] == "services"
+            and isinstance(rest[1], int)
+            and (len(rest) == 2 or rest[2:] == ("name",))
+        ):
+            _note_job(job)
+            val = ev.value or ""
+            sink_sites.append(
+                _SinkSite(job, "service_image", ev.line, val, _src_strip(ev.line, val))
+            )
+            continue
+        if (
+            rest
+            and rest[0] == "tags"
+            and (len(rest) == 1 or (len(rest) == 2 and isinstance(rest[1], int)))
+        ):
+            _note_job(job)
+            val = ev.value or ""
+            sink_sites.append(_SinkSite(job, "tags", ev.line, val, _src_strip(ev.line, val)))
+            continue
+
+    # Build the EDB.
+    db = Database()
+    for va in var_assigns:
+        db.add(_R_VAR_ASSIGN, va)
+    for ss in sink_sites:
+        db.add(_R_SINK_SITE, ss)
+    jobs: list[_Job] = []
+    _seq = 0
+    for job in job_order:
+        dotenv_file = dotenv_files.get(job)
+        for line, text in script_lines[job]:
+            db.add(_R_SCRIPT_LINE, _ScriptLine(job, line, text))
+            if dotenv_file is not None:
+                for m in _ECHO_ASSIGN_TO_FILE_RE.finditer(text):
+                    if m.group("file") != dotenv_file:
+                        continue
+                    for wname, value, qs in _echo_body_name_value(m):
+                        db.add(
+                            _R_DOTENV_WRITE,
+                            _DotenvWrite(job, wname, value, line, qs, _seq),
+                        )
+                        _seq += 1
+        jobs.append(_Job(job, -1, [], dotenv_file))
+    for (job, _i), (producer, artifacts) in needs_raw.items():
+        if producer:
+            db.add(_R_NEEDS_EDGE, _NeedsEdge(job, producer, artifacts))
+
+    solve(db, _gitlab_rules(jobs))
+    return db, jobs
+
+
+def _taint_backend() -> str:
+    """Which EDB extractor :func:`analyze` uses — ``"structural"``
+    (Phase B, default) or ``"line"`` (Phase A, the comparison
+    baseline / escape hatch).  Selected via the
+    ``TAINTLY_TAINT_BACKEND`` environment variable."""
+    return os.environ.get("TAINTLY_TAINT_BACKEND", "structural")
+
+
+def _echo_body_name_value(m):
+    """Pull ``(name, value, quoted_single)`` out of a matched
+    ``_ECHO_ASSIGN_TO_FILE_RE`` echo body."""
+    dq, sq, bare = m.group("dq"), m.group("sq"), m.group("bare")
+    if dq is not None:
+        body = re.sub(r"\\(.)", r"\1", dq)
+        quoted_single = False
+    elif sq is not None:
+        body = sq
+        quoted_single = True
+    else:
+        body = bare or ""
+        quoted_single = False
+    am = _NAME_VALUE_RE.match(body)
+    if am:
+        yield (am.group(1), am.group(2), quoted_single)
+
+
+def _gitlab_rules(jobs: list[_Job]):
+    """Build the GitLab rule set.  ``jobs`` is captured so the
+    visibility rule can fan the top-level cascade across every job."""
+    job_names = [j.name for j in jobs]
+
+    def rule_tainted_var(db: Database):
+        for va in db.all(_R_VAR_ASSIGN):
+            # (a) direct $CI_<tainted> reference.
+            m = _TAINTED_REF_RE.search(va.raw)
+            if m is not None:
+                source = m.group(1)
+                yield (
+                    _R_TAINTED_VAR,
+                    _TaintedVar(
+                        va.scope,
+                        va.name,
+                        source,
+                        va.line,
+                        [
+                            TaintHop(
+                                kind="var_static",
+                                line=va.line,
+                                name=va.name,
+                                detail=f"variables.{va.name} := ${source}",
+                            )
+                        ],
+                    ),
+                )
+                continue
+            # (b) multi-hop: pure ``$OTHER`` reference.
+            other = _extract_var_ref(va.raw)
+            if not other:
+                continue
+            if va.scope == "top":
+                parent = db.get(_R_TAINTED_VAR, ("top", other))
+            else:  # ("job", name)
+                parent = db.get(_R_VISIBLE_VAR, (va.scope[1], other))
+            if parent is not None:
+                yield (
+                    _R_TAINTED_VAR,
+                    _TaintedVar(
+                        va.scope,
+                        va.name,
+                        parent.source_var,
+                        parent.source_line,
+                        parent.hops
+                        + [
+                            TaintHop(
+                                kind="var_indirect",
+                                line=va.line,
+                                name=va.name,
+                                detail=f"variables.{va.name} := ${other}",
+                            )
+                        ],
+                    ),
+                )
+
+    def rule_visible_var(db: Database):
+        # A job that re-declares a variable in its own ``variables:``
+        # block SHADOWS the top-level cascade for that name — so a
+        # job-level ``variables: VAR: <clean literal>`` over a
+        # top-tainted ``VAR`` un-taints ``VAR`` in that job (a
+        # job-level tainted re-declaration is carried by the
+        # job-scope ``tainted_var`` branch instead).  Not suppressing
+        # this is the clean-override false positive.
+        job_redecl = {(va.scope[1], va.name) for va in db.all(_R_VAR_ASSIGN) if va.scope != "top"}
+        for tv in db.all(_R_TAINTED_VAR):
+            if tv.scope == "top":
+                for jn in job_names:
+                    if (jn, tv.name) in job_redecl:
+                        continue  # the job's own variables: governs this name
+                    yield (
+                        _R_VISIBLE_VAR,
+                        _VisibleVar(jn, tv.name, 1, tv.source_var, tv.source_line, tv.hops),
+                    )
+            else:  # ("job", name)
+                yield (
+                    _R_VISIBLE_VAR,
+                    _VisibleVar(tv.scope[1], tv.name, 0, tv.source_var, tv.source_line, tv.hops),
+                )
+
+    def rule_tainted_dotenv(db: Database):
+        for dw in db.all(_R_DOTENV_WRITE):
+            # (a) direct $CI_<tainted> reference in the echo body.
+            m = _TAINTED_REF_RE.search(dw.value)
+            if m is not None:
+                source = m.group(1)
+                yield (
+                    _R_TAINTED_DOTENV,
+                    _TaintedDotenv(
+                        dw.job,
+                        dw.name,
+                        dw.seq,
+                        source,
+                        dw.line,
+                        [
+                            TaintHop(
+                                kind="dotenv",
+                                line=dw.line,
+                                name=f"{dw.job}.{dw.name}",
+                                detail=(f"dotenv artefact of {dw.job} sets {dw.name} := ${source}"),
+                            )
+                        ],
+                    ),
+                )
+                continue
+            # (b) indirect: shell ref to an already-tainted visible var.
+            if dw.quoted_single:
+                continue
+            for vv in db.all(_R_VISIBLE_VAR):
+                if vv.job == dw.job and _references_var(dw.value, vv.name):
+                    yield (
+                        _R_TAINTED_DOTENV,
+                        _TaintedDotenv(
+                            dw.job,
+                            dw.name,
+                            dw.seq,
+                            vv.source_var,
+                            vv.source_line,
+                            vv.hops
+                            + [
+                                TaintHop(
+                                    kind="dotenv",
+                                    line=dw.line,
+                                    name=f"{dw.job}.{dw.name}",
+                                    detail=(
+                                        f"dotenv artefact of {dw.job} sets {dw.name} := ${vv.name}"
+                                    ),
+                                )
+                            ],
+                        ),
+                    )
+                    break
+
+    def rule_inherited_var(db: Database):
+        for ne in db.all(_R_NEEDS_EDGE):
+            if not ne.artifacts:
+                continue
+            for td in db.all(_R_TAINTED_DOTENV):
+                if td.producer == ne.producer:
+                    yield (
+                        _R_INHERITED_VAR,
+                        _InheritedVar(ne.job, td.name, td.source_var, td.source_line, td.hops),
+                    )
+
+    return [
+        rule_tainted_var,
+        rule_visible_var,
+        rule_tainted_dotenv,
+        rule_inherited_var,
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -280,97 +886,58 @@ def analyze(content: str, lines: list[str]) -> list[TaintPath]:
     Rules filter on ``kind`` to attribute each finding to the right
     TAINT-GL-XXX rule.
 
-    Two-pass because the dotenv bridge is cross-job: we first walk
-    every job to collect what it would contribute to its consumers
-    (both the ``visible`` env that reaches its own scripts AND any
-    ``NAME`` it writes into its declared dotenv artefact).  Then we
-    walk the jobs again, this time as consumers, merging inherited
-    dotenv taints from every writer referenced by ``needs:`` and
-    scanning each job's scripts for sinks.
+    Implementation: the dataflow is a single relational fixed point
+    (see :func:`_build_facts`); this function projects the saturated
+    relations onto each job's script lines in file order.
     """
+    if _taint_backend() == "structural":
+        db, jobs = _build_facts_structural(content, lines)
+    else:
+        db, jobs = _build_facts(lines)
     out: list[TaintPath] = []
-
-    # Top-level variables: cascade to every job.  Resolve them once.
-    top_level = _collect_top_level_var_assignments(lines)
-    top_taints = _resolve_var_taints(top_level)
-
-    # Pass 1 — per-job metadata + dotenv writes produced by each job.
-    #
-    # ``job_infos`` is a list (not a dict) so we preserve file order,
-    # and we key dotenv-write lookups by job name in a separate dict
-    # (``dotenv_produced``).  Pre-job segments (stages:, variables:,
-    # etc.) have no name and are skipped.
-    job_infos: list[_JobInfo] = []
-    dotenv_produced: dict[str, dict[str, _TaintInfo]] = {}
-
-    for seg_start, seg_lines in _split_into_job_segments(lines):
-        name = _extract_job_name(seg_lines)
-        if name is None:
-            continue
-        job_assignments = _collect_var_assignments_in_segment(seg_lines, seg_start)
-        job_taints = _resolve_var_taints(job_assignments, base=top_taints)
-        visible = {**top_taints, **job_taints}
-
-        dotenv_file = _extract_dotenv_filename(seg_lines)
-        dotenv_writes: dict[str, _TaintInfo] = {}
-        if dotenv_file is not None:
-            dotenv_writes = _detect_dotenv_writes(seg_lines, seg_start, visible, dotenv_file, name)
-            dotenv_produced[name] = dotenv_writes
-
-        job_infos.append(
-            _JobInfo(
-                name=name,
-                seg_start=seg_start,
-                seg_lines=seg_lines,
-                visible=visible,
-                dotenv_file=dotenv_file,
-                dotenv_writes=dotenv_writes,
-                needs=_extract_needs(seg_lines),
-            )
-        )
-
-    # Pass 2 — scan each job's scripts for sinks.
-    for info in job_infos:
-        # Merge in dotenv taints inherited via ``needs:`` (skip entries
-        # that opt out with ``artifacts: false``).
-        inherited: dict[str, _TaintInfo] = {}
-        for producer_name, artifacts_inherited in info.needs:
-            if not artifacts_inherited:
-                continue
-            inherited.update(dotenv_produced.get(producer_name, {}))
-        visible = {**info.visible, **inherited}
+    for job in jobs:
+        # Effective taint set for this job: the top-level cascade and
+        # job-level ``variables:`` (already merged with precedence in
+        # ``visible_var``), then dotenv taints inherited via ``needs:``
+        # overlaid on top.
+        visible: dict[str, _TaintInfo] = {}
+        for vv in db.all(_R_VISIBLE_VAR):
+            if vv.job == job.name:
+                visible[vv.name] = _TaintInfo(vv.source_var, vv.source_line, vv.hops)
+        for iv in db.all(_R_INHERITED_VAR):
+            if iv.job == job.name:
+                visible[iv.name] = _TaintInfo(iv.source_var, iv.source_line, iv.hops)
         if not visible:
             continue
 
-        for sink_line, sink_snippet in _iter_script_lines(info.seg_lines, info.seg_start):
+        script_lines = [sl for sl in db.all(_R_SCRIPT_LINE) if sl.job == job.name]
+        script_lines.sort(key=lambda sl: sl.line)
+        for sl in script_lines:
             # The writer's own ``echo NAME=... > dotenv_file`` lines are
-            # NOT traditional sinks — the double-quoted shell expansion
-            # inside an echo-to-file is safe; the bytes are written
-            # verbatim.  The real sink is the downstream consumer, which
-            # this two-pass model catches.  Skipping here prevents
-            # double-firing TAINT-GL-001/002 on the write line on top
-            # of TAINT-GL-003 on the read line.
-            if info.dotenv_file and _is_dotenv_write_line(sink_snippet, info.dotenv_file):
+            # not traditional sinks — the bytes are written verbatim and
+            # the downstream consumer is the real sink (caught via the
+            # dotenv bridge).  Skipping prevents double-firing.
+            if job.dotenv_file and _is_dotenv_write_line(sl.text, job.dotenv_file):
                 continue
             for var, tinfo in visible.items():
-                if _references_var(sink_snippet, var):
-                    out.append(_make_path(tinfo, var, sink_line, sink_snippet))
+                if _references_var(sl.text, var):
+                    out.append(_make_path(tinfo, var, sl.line, sl.text))
+
+        # Non-script: sink sites — a tainted variable expanded into a
+        # job's ``image:`` / ``services.*`` image / runner ``tags:`` is
+        # a taint flow in its own right (attacker-controlled image
+        # pull, runner selection).  These carry ``sink_kind != "script"``
+        # so the existing TAINT-GL-* rules are unaffected; new rules
+        # opt in.  Emitted in source-line order.
+        sites = sorted(
+            (s for s in db.all(_R_SINK_SITE) if s.job == job.name),
+            key=lambda s: (s.line, s.kind),
+        )
+        for site in sites:
+            for var, tinfo in visible.items():
+                if _references_var(site.value, var):
+                    out.append(_make_path(tinfo, var, site.line, site.snippet, sink_kind=site.kind))
     return out
-
-
-@dataclass
-class _JobInfo:
-    """Internal: per-job state collected in pass 1 and consumed in
-    pass 2 of :func:`analyze`.
-    """
-
-    name: str
-    seg_start: int
-    seg_lines: list[str]
-    visible: dict[str, _TaintInfo]
-    dotenv_file: str | None
-    dotenv_writes: dict[str, _TaintInfo]
-    needs: list[tuple[str, bool]]
 
 
 # ---------------------------------------------------------------------------
@@ -494,83 +1061,6 @@ def _extract_var_ref(value: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _resolve_var_taints(
-    assignments: list[tuple[str, str, int]],
-    base: dict[str, _TaintInfo] | None = None,
-) -> dict[str, _TaintInfo]:
-    """Resolve which user-named variables carry attacker-controlled data.
-
-    Handles two cases, via fixed-point iteration so declaration order
-    inside the ``variables:`` block does not matter:
-
-    * **Direct** — value contains a ``$CI_<tainted>`` reference.  The
-      user-named var inherits that taint with a ``"var_static"`` hop.
-    * **Indirect (multi-hop)** — value is ``$OTHER`` (or
-      ``${OTHER}``) where ``OTHER`` has already been resolved as
-      tainted.  The user-named var inherits the *existing* provenance
-      chain, extended by a ``"var_indirect"`` hop so the reviewer can
-      see every launderer in the chain.
-
-    ``base`` seeds the resolver with already-known taints from an
-    *outer* scope (e.g. top-level cascade for a job-level resolve) so
-    job-level ``variables:`` can multi-hop against top-level ones.
-    The returned dict merges ``base`` with the newly-resolved entries;
-    when a var is assigned in both scopes, the inner-scope chain wins
-    (standard YAML override semantics for ``variables:``).
-    """
-    base = dict(base or {})
-    resolved: dict[str, _TaintInfo] = {}
-    changed = True
-    while changed:
-        changed = False
-        for var, value, line in assignments:
-            if var in resolved:
-                continue
-            # (a) Direct tainted CI variable.
-            m = _TAINTED_REF_RE.search(value)
-            if m is not None:
-                source = m.group(1)
-                resolved[var] = _TaintInfo(
-                    source_var=source,
-                    source_line=line,
-                    hops=[
-                        TaintHop(
-                            kind="var_static",
-                            line=line,
-                            name=var,
-                            detail=f"variables.{var} := ${source}",
-                        )
-                    ],
-                )
-                changed = True
-                continue
-            # (b) Multi-hop: pure ``$OTHER`` reference where OTHER is
-            #     already tainted (either seeded from base or resolved
-            #     on an earlier iteration of this loop).
-            other = _extract_var_ref(value)
-            if not other:
-                continue
-            parent = resolved.get(other) or base.get(other)
-            if parent is None:
-                continue
-            resolved[var] = _TaintInfo(
-                source_var=parent.source_var,
-                source_line=parent.source_line,
-                hops=parent.hops
-                + [
-                    TaintHop(
-                        kind="var_indirect",
-                        line=line,
-                        name=var,
-                        detail=f"variables.{var} := ${other}",
-                    )
-                ],
-            )
-            changed = True
-    # Inner-scope wins: start from base, then overlay our resolutions.
-    return {**base, **resolved}
-
-
 def _iter_script_lines(seg_lines: list[str], seg_start: int) -> list[tuple[int, str]]:
     """Yield ``(1-indexed_line, stripped_text)`` for every line whose
     text participates in a ``script:`` / ``before_script:`` /
@@ -656,17 +1146,28 @@ def _classify_kind(hops: list[TaintHop]) -> str:
     return "shallow"
 
 
+# Human-readable label per sink kind, used in the terminal hop detail.
+_SINK_LABEL = {
+    "script": "script:",
+    "image": "image:",
+    "service_image": "services.*.image:",
+    "tags": "tags:",
+}
+
+
 def _make_path(
     info: _TaintInfo,
     laundered: str,
     sink_line: int,
     sink_snippet: str,
+    sink_kind: str = "script",
 ) -> TaintPath:
+    label = _SINK_LABEL.get(sink_kind, "script:")
     sink_hop = TaintHop(
         kind="sink",
         line=sink_line,
         name=laundered,
-        detail=f"script: references ${laundered}",
+        detail=f"{label} references ${laundered}",
     )
     return TaintPath(
         source_var=info.source_var,
@@ -676,6 +1177,7 @@ def _make_path(
         sink_snippet=sink_snippet,
         kind=_classify_kind(info.hops),
         hops=info.hops + [sink_hop],
+        sink_kind=sink_kind,
     )
 
 
@@ -878,122 +1380,3 @@ def _is_dotenv_write_line(sink_snippet: str, dotenv_file: str) -> bool:
         if m.group("file") == dotenv_file:
             return True
     return False
-
-
-def _detect_dotenv_writes(
-    seg_lines: list[str],
-    seg_start: int,
-    visible_env: dict[str, _TaintInfo],
-    dotenv_file: str,
-    producer_job: str,
-) -> dict[str, _TaintInfo]:
-    """Find ``echo "NAME=VALUE" > <dotenv_file>`` writes in the
-    writer's script.
-
-    Returns ``{NAME: _TaintInfo}`` for every write whose ``VALUE``
-    carries attacker-controlled data — either a direct
-    ``$CI_<tainted>`` reference embedded in the echo string, or a
-    shell reference to an already-tainted variable in
-    ``visible_env``.
-
-    Only echo lines whose redirect target equals ``dotenv_file`` are
-    treated as dotenv writes.  Writes into arbitrary unrelated files
-    (``echo log=hi > /tmp/log``) are ignored here.
-
-    Symmetrical to the GitHub ``_detect_github_env_writes`` helper —
-    same quoting rules (single-quoted shell refs don't propagate
-    through ``'$RAW'``; direct ``$CI_<tainted>`` references inside
-    single quotes still do because GitLab's runner doesn't re-expand
-    once the shell has written the line).  Both quote styles are
-    treated the same at the NAME=VALUE level.
-    """
-    out: dict[str, _TaintInfo] = {}
-    for sink_line, sink_snippet in _iter_script_lines(seg_lines, seg_start):
-        for m in _ECHO_ASSIGN_TO_FILE_RE.finditer(sink_snippet):
-            if m.group("file") != dotenv_file:
-                continue
-            dq, sq, bare = m.group("dq"), m.group("sq"), m.group("bare")
-            if dq is not None:
-                body = re.sub(r"\\(.)", r"\1", dq)
-                quoted_single = False
-            elif sq is not None:
-                body = sq
-                quoted_single = True
-            else:
-                body = bare or ""
-                quoted_single = False
-
-            am = _NAME_VALUE_RE.match(body)
-            if not am:
-                continue
-            name, value = am.group(1), am.group(2)
-
-            info = _build_dotenv_taint(
-                name,
-                value,
-                visible_env,
-                sink_line,
-                producer_job,
-                quoted_single,
-            )
-            if info is not None:
-                out[name] = info
-    return out
-
-
-def _build_dotenv_taint(
-    name: str,
-    value: str,
-    visible_env: dict[str, _TaintInfo],
-    lineno: int,
-    producer_job: str,
-    quoted_single: bool,
-) -> _TaintInfo | None:
-    """Classify the taint that flows into a dotenv-written variable,
-    if any.  Returns ``None`` when the value carries no
-    attacker-controlled data.
-
-    A successful match extends the existing provenance chain (either
-    a direct ``$CI_<tainted>`` source or the chain of the referenced
-    ``visible_env`` entry) with a ``"dotenv"`` hop tagged with the
-    producer job name so the downstream sink renderer can show the
-    full bridge.
-    """
-    # (a) Direct tainted CI variable embedded in the echo body.
-    m = _TAINTED_REF_RE.search(value)
-    if m is not None:
-        source = m.group(1)
-        return _TaintInfo(
-            source_var=source,
-            source_line=lineno,
-            hops=[
-                TaintHop(
-                    kind="dotenv",
-                    line=lineno,
-                    name=f"{producer_job}.{name}",
-                    detail=(f"dotenv artefact of {producer_job} sets {name} := ${source}"),
-                )
-            ],
-        )
-
-    # (b) Indirect: shell reference to an already-tainted visible
-    # variable.  Skip if single-quoted — bash doesn't expand ``$RAW``
-    # inside single quotes, so the attacker's bytes don't propagate.
-    if quoted_single:
-        return None
-    for var, info in visible_env.items():
-        if _references_var(value, var):
-            return _TaintInfo(
-                source_var=info.source_var,
-                source_line=info.source_line,
-                hops=info.hops
-                + [
-                    TaintHop(
-                        kind="dotenv",
-                        line=lineno,
-                        name=f"{producer_job}.{name}",
-                        detail=(f"dotenv artefact of {producer_job} sets {name} := ${var}"),
-                    )
-                ],
-            )
-    return None

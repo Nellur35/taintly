@@ -155,6 +155,12 @@ class _Tokenizer:
         self._in_block_scalar = False
         self._block_scalar_indent = 0
         self._block_scalar_min_indent_seen = -1
+        # True once a mapping KEY has been emitted on the current line
+        # (block context) or since the last flow delimiter: everything
+        # after a ``key:`` is the *value*, so a ``: `` inside it (e.g.
+        # ``run: echo "Status: ok"``) must NOT be re-read as a nested
+        # key.  Reset at line start, on ``- ``, and on flow ``[]{},``.
+        self._value_position = False
 
     def run(self) -> Iterator[Token]:
         while self._line_idx < len(self._lines):
@@ -193,12 +199,13 @@ class _Tokenizer:
 
             # Comment-only lines (``# foo`` after optional indent)
             # carry no structural content.  Emitting their INDENT
-            # token drives the walker's frame-management to pop back
-            # to the comment's indent — which closes any open parent
-            # mapping (e.g. ``jobs:`` at indent 0) when a commented-
-            # out fragment sits between two real children.  Skip the
-            # line entirely; inline comments (``foo: bar # note``)
-            # still emit COMMENT tokens via ``_tokenize_line``.
+            # token would drive the walker's frame-management to pop
+            # back to the comment's indent — which closes any open
+            # parent mapping (e.g. ``jobs:`` at indent 0) when a
+            # commented-out fragment sits between two real children.
+            # Surfaced on tokio-rs/tokio ci.yml where ~400+ events
+            # mis-pathed because two commented-out lines popped the
+            # ``jobs:`` frame mid-file.  Skip the line entirely.
             if stripped_full.startswith("#"):
                 self._line_idx += 1
                 continue
@@ -206,9 +213,9 @@ class _Tokenizer:
             line_tokens = list(self._tokenize_line(raw, line_no))
             self._line_idx += 1
 
-            # Multi-line plain scalar folding — inline-value form.
-            # When a line is ``<key>: <plain scalar>`` (KEY immediately
-            # followed by trailing SCALAR_PLAIN), any following lines
+            # Multi-line plain scalar folding.  When a line is
+            # ``<key>: <plain scalar>`` (a KEY immediately followed by
+            # a trailing SCALAR_PLAIN value), any following lines
             # indented strictly MORE than the *key's column* are a
             # continuation of that scalar — a key that already has an
             # inline scalar value cannot also have child
@@ -243,15 +250,15 @@ class _Tokenizer:
                     # Stop folding if the next line LOOKS like YAML
                     # structure (sibling key, sequence item, flow
                     # open, anchor/alias/tag, merge key, block-scalar
-                    # header).  The key-column threshold above is
-                    # the primary stop, but in compact-dash notation
-                    # combined with 2x-scaled indents (e.g. mutation
-                    # testing), a sibling key like ``with:`` can sit
-                    # at a column deeper than the parent ``uses:`` key
-                    # — the column threshold then wrongly allows it
-                    # to fold and the entire child mapping disappears
-                    # into the scalar value.  Same exclusion set as
-                    # the bare-key fold below.
+                    # header).  The key-column threshold above is the
+                    # primary stop, but in compact-dash notation under
+                    # 2x-scaled indents (e.g. mutation testing), a
+                    # sibling key like ``with:`` can sit at a column
+                    # deeper than the parent ``uses:`` key — the
+                    # column threshold then wrongly allows it to fold
+                    # and the entire child mapping disappears into the
+                    # scalar value.  Same exclusion set as the
+                    # bare-key fold below.
                     # ``'`` and ``"`` are EXCLUDED via the precise
                     # _QUOTED_KEY_RE check (quoted-key shape with
                     # trailing colon) rather than the broad prefix
@@ -288,25 +295,26 @@ class _Tokenizer:
             #       --DetectorArgs ...
             #
             # YAML treats this as ``run: dotnet run scan ... ...``
-            # (single folded plain scalar).  Without this fold, the
+            # (single folded scalar).  Without this fold, the in-house
             # walker tokenises each continuation line as structure and
             # emits LEAF_SCALAR events with an EMPTY PATH TUPLE, which
-            # makes downstream path-glob filters
-            # (``jobs.*.steps[*].run``) miss the events entirely —
-            # silent under-reporting on every TAINT/SEC rule that
-            # filters on ``run:`` slots.
+            # makes downstream path-glob filters (``jobs.*.steps[*].run``)
+            # miss the events entirely — silent under-reporting on
+            # every TAINT/SEC rule that filters on ``run:`` slots.
             #
             # Distinguishing value-continuation from child structure
             # at the first following non-empty line:
-            #   ``- ``                  → sequence item
-            #   ``[``, ``{``            → multi-line flow open
-            #   ``'``, ``"``            → quoted child key / scalar
-            #   ``&``, ``*``, ``!``     → anchor / alias / tag
-            #   ``<<``                  → merge key
-            #   ``?``                   → complex-key marker
-            #   ``|``, ``>``            → block-scalar header
-            #   ``<word>:``             → regex-detected child key
-            # Anything else at deeper indent is a value continuation.
+            #   - sequence (``- foo``)            → NOT a continuation
+            #   - child mapping (``KEY: value``)  → NOT a continuation
+            #   - block-scalar indicator (``|``)  → NOT a continuation
+            #     (block scalars are handled elsewhere and start on the
+            #     header line, not the line after)
+            #   - anything else (no colon-key shape, no dash, no `|`/`>`)
+            #     at deeper indent → a value continuation.
+            #
+            # If the first following line qualifies, synthesise a
+            # SCALAR_PLAIN value for the key and consume all continuation
+            # lines (same indent envelope as the inline-value fold above).
             elif (
                 len(line_tokens) >= 1
                 and line_tokens[-1].kind == TokenKind.KEY
@@ -316,6 +324,9 @@ class _Tokenizer:
             ):
                 key = line_tokens[-1]
                 key_col = key.column - 1
+                # Peek at the next non-empty/non-comment line to decide
+                # whether what follows is a value continuation or real
+                # nested structure.
                 peek_idx = self._line_idx
                 while peek_idx < len(self._lines):
                     cand = self._lines[peek_idx]
@@ -327,6 +338,21 @@ class _Tokenizer:
                     cand = ""
                     cand_s = ""
                 cand_indent = len(cand) - len(cand.lstrip()) if cand else 0
+                # Anything looking like YAML structure on the next
+                # line is NOT a value continuation:
+                #   ``'key':`` / ``"key":``  → quoted child key
+                #   ``"..."`` / ``'...'``    → quoted scalar value
+                #     (real but rare as multi-line plain; treat as
+                #     structural to stay conservative)
+                #   ``[``, ``{``             → multi-line flow open
+                #   ``&``, ``*``, ``!``      → anchor / alias / tag
+                #   ``<<:``                  → merge key (the canonical
+                #     defaults-and-jobs pattern in CI YAML)
+                #   ``?``                    → complex-key marker
+                #   ``|``, ``>``             → block-scalar header
+                #     (block scalars start on the same line as the
+                #     key in legal YAML, so a bare ``|`` here is
+                #     malformed; either way, not a plain-scalar fold)
                 is_continuation = (
                     bool(cand_s)
                     and cand_indent > key_col
@@ -358,6 +384,69 @@ class _Tokenizer:
                                 indent=key.indent,
                             )
                         )
+
+            # Multi-line plain scalar folding — sequence-item form.
+            # ``- <plain scalar>`` followed by deeper-indented
+            # continuation lines is a multi-line plain scalar value of
+            # the list element.  Canonical CI shape: a multi-line
+            # shell command as a list item under ``script:`` /
+            # ``run:``:
+            #
+            #     - git grep -I -l "" -- . | while IFS= read -r i; do
+            #           if [ -n "$(tail -c 1 "$i")" ]; then
+            #               echo "No newline at end of $i";
+            #               exit 1;
+            #           fi;
+            #       done
+            #
+            # ruamel parses this as ONE folded plain scalar value at
+            # ``parent.<idx>``.  Without this fold, the in-house walker
+            # emits each continuation line as its own LEAF_SCALAR
+            # event at the same path — N events at ``('script', 7)``
+            # instead of 1 — silently inflating leaf counts and giving
+            # downstream rules a multi-event view of what should be a
+            # single shell command.  Surfaced by the GitLab corpus
+            # oracle on memorysafety/rav1d/.gitlab-ci.yml (delta=110
+            # leaves across ~20 script items).
+            #
+            # The dash's column is the indent threshold; same
+            # structure-detection break as the other two forms.
+            if (
+                len(line_tokens) >= 2
+                and line_tokens[-1].kind == TokenKind.SCALAR_PLAIN
+                and line_tokens[-2].kind == TokenKind.SEQUENCE_DASH
+                and self._flow_depth == 0
+                and not self._in_block_scalar
+            ):
+                dash = line_tokens[-2]
+                dash_col = dash.column - 1
+                folded3: list[str] = []
+                while self._line_idx < len(self._lines):
+                    nxt = self._lines[self._line_idx]
+                    s = nxt.strip()
+                    if not s or s.startswith("#"):
+                        self._line_idx += 1
+                        continue
+                    if (len(nxt) - len(nxt.lstrip())) <= dash_col:
+                        break
+                    if (
+                        s.startswith(("- ", "[", "{", "&", "*", "!", "<<", "?", "|", ">"))
+                        or s == "-"
+                        or _CHILD_KEY_RE.match(s)
+                        or _QUOTED_KEY_RE.match(s)
+                    ):
+                        break
+                    folded3.append(s)
+                    self._line_idx += 1
+                if folded3:
+                    last = line_tokens[-1]
+                    line_tokens[-1] = Token(
+                        last.kind,
+                        last.line,
+                        last.column,
+                        last.value + " " + " ".join(folded3),
+                        last.indent,
+                    )
 
             yield from line_tokens
 
@@ -415,6 +504,8 @@ class _Tokenizer:
         yield Token(TokenKind.INDENT, line_no, column=1, value=" " * indent, indent=indent)
         pos = indent
         n = len(raw)
+        # A new line starts in key position (block context).
+        self._value_position = False
 
         while pos < n:
             ch = raw[pos]
@@ -448,32 +539,41 @@ class _Tokenizer:
                     value="-",
                     indent=indent,
                 )
+                # A ``- `` opens a fresh element: the next plain run
+                # is a key (``- key: val``) or a bare scalar.
+                self._value_position = False
                 pos += 1
                 continue
 
-            # Flow open / close.
+            # Flow open / close.  Each delimiter returns the scanner to
+            # key position for the next flow entry.
             if ch == "[":
                 self._flow_depth += 1
                 yield Token(TokenKind.FLOW_OPEN_SEQ, line_no, pos + 1, "[", indent)
+                self._value_position = False
                 pos += 1
                 continue
             if ch == "{":
                 self._flow_depth += 1
                 yield Token(TokenKind.FLOW_OPEN_MAP, line_no, pos + 1, "{", indent)
+                self._value_position = False
                 pos += 1
                 continue
             if ch == "]":
                 self._flow_depth = max(0, self._flow_depth - 1)
                 yield Token(TokenKind.FLOW_CLOSE_SEQ, line_no, pos + 1, "]", indent)
+                self._value_position = False
                 pos += 1
                 continue
             if ch == "}":
                 self._flow_depth = max(0, self._flow_depth - 1)
                 yield Token(TokenKind.FLOW_CLOSE_MAP, line_no, pos + 1, "}", indent)
+                self._value_position = False
                 pos += 1
                 continue
             if ch == ",":
                 yield Token(TokenKind.FLOW_COMMA, line_no, pos + 1, ",", indent)
+                self._value_position = False
                 pos += 1
                 continue
 
@@ -586,7 +686,8 @@ class _Tokenizer:
                 while trailing < n and raw[trailing] == " ":
                     trailing += 1
                 if (
-                    trailing < n
+                    not self._value_position
+                    and trailing < n
                     and raw[trailing] == ":"
                     and (trailing + 1 == n or raw[trailing + 1] in (" ", "\t"))
                 ):
@@ -597,6 +698,7 @@ class _Tokenizer:
                         value=value,
                         indent=indent,
                     )
+                    self._value_position = True
                     pos = trailing + 1
                     continue
                 yield Token(
@@ -693,6 +795,12 @@ class _Tokenizer:
         run (including any ``:`` characters inside it) is a plain
         scalar — that's the colon-in-value case (``foo:bar:baz``).
 
+        Key detection is suppressed in *value position*
+        (``self._value_position`` — set once a ``key:`` has been
+        consumed on this line).  Everything after ``run:`` is the
+        value, so a ``: `` inside it (``run: echo "Status: ok"``) is
+        part of the scalar, not a nested key.
+
         Returns the position immediately after the consumed run.
         """
         n = len(raw)
@@ -710,7 +818,11 @@ class _Tokenizer:
                 break
             if ch == "#" and pos > 0 and raw[pos - 1] == " ":
                 break
-            if ch == ":" and (pos + 1 == n or raw[pos + 1] in (" ", "\t")):
+            if (
+                not self._value_position
+                and ch == ":"
+                and (pos + 1 == n or raw[pos + 1] in (" ", "\t"))
+            ):
                 # Key-marker colon found.
                 key_end = pos
                 key_value = raw[start:key_end].rstrip()
@@ -721,6 +833,7 @@ class _Tokenizer:
                     value=key_value,
                     indent=indent,
                 )
+                self._value_position = True
                 # Skip the colon and any following whitespace.
                 pos += 1
                 while pos < n and raw[pos] in (" ", "\t"):
