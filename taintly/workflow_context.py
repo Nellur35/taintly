@@ -162,6 +162,35 @@ _RE_FORK_IDENTITY_GUARD = re.compile(
 )
 
 
+# step-security/harden-runner with ``egress-policy: block`` is a mitigating
+# control: it pins the runner's outbound network to an allowlist and blocks
+# (not just audits) everything else, plus monitors file/process tampering.
+# That neutralises the primary exfil / outbound-C2 path of a swapped unpinned
+# action or an ungoverned third-party service.
+#
+# All three regexes are LINE-ANCHORED (re.MULTILINE ``^\s*``) so a mention of
+# the key inside a COMMENT doesn't count — e.g. ossf/scorecard's
+# ``egress-policy: audit # TODO: change to 'egress-policy: block'`` must read
+# as audit, not block. ``audit`` / ``disabled`` only log, so they are NOT a
+# control; a file that MIXES block with audit/disabled is treated as not-fully-
+# hardened (we can't tell at file scope which job a finding is in, so we
+# conservatively decline to credit rather than over-credit an unprotected job).
+_RE_HARDEN_RUNNER = re.compile(
+    r"^\s*(?:-\s*)?uses\s*:\s*['\"]?step-security/harden-runner", re.IGNORECASE | re.MULTILINE
+)
+_RE_EGRESS_BLOCK = re.compile(r"^\s*egress-policy\s*:\s*['\"]?block\b", re.MULTILINE)
+_RE_EGRESS_NONBLOCK = re.compile(
+    r"^\s*egress-policy\s*:\s*['\"]?(?:audit|disabled)\b", re.MULTILINE
+)
+
+# Families whose exploitability ``compute_exploitability`` tempers one tier
+# when Harden-Runner egress-block is present (the engine uses this to annotate
+# the finding so the temper is auditable).
+HARDEN_RUNNER_TEMPERED_FAMILIES: frozenset[str] = frozenset(
+    {"supply_chain_immutability", "ungoverned_services"}
+)
+
+
 @dataclass
 class WorkflowContext:
     """File-level signals used for exploitability scoring.
@@ -183,6 +212,7 @@ class WorkflowContext:
     is_release_workflow: bool = False
     runs_self_hosted: bool = False
     has_fork_identity_guard: bool = False
+    has_harden_runner_egress_block: bool = False
 
     @property
     def is_privileged(self) -> bool:
@@ -214,6 +244,7 @@ class WorkflowContext:
             "is_release_workflow": self.is_release_workflow,
             "runs_self_hosted": self.runs_self_hosted,
             "has_fork_identity_guard": self.has_fork_identity_guard,
+            "has_harden_runner_egress_block": self.has_harden_runner_egress_block,
             "is_privileged": self.is_privileged,
         }
 
@@ -246,6 +277,11 @@ def analyze(content: str, file: str = "") -> WorkflowContext:
             _RE_SELF_HOSTED.search(content) or _RE_SELF_HOSTED_GROUP.search(content)
         ),
         has_fork_identity_guard=bool(_RE_FORK_IDENTITY_GUARD.search(content)),
+        has_harden_runner_egress_block=bool(
+            _RE_HARDEN_RUNNER.search(content)
+            and _RE_EGRESS_BLOCK.search(content)
+            and not _RE_EGRESS_NONBLOCK.search(content)
+        ),
     )
 
 
@@ -304,6 +340,13 @@ def compute_exploitability(family_id: str, ctx: WorkflowContext) -> str:
     # the dependency executes with privileges.  In a fully read-only,
     # no-secrets workflow the risk is lower (but not zero).
     if family_id == "supply_chain_immutability":
+        if ctx.has_harden_runner_egress_block:
+            # Harden-Runner egress-policy: block neutralises the primary
+            # exfil / outbound-C2 path that makes an unpinned (tag/branch)
+            # action dangerous — a swapped action can't phone home. Temper
+            # one tier so a hardened workflow scores better than its
+            # unhardened twin (the finding still fires; only weight drops).
+            return _MEDIUM if ctx.is_privileged else _LOW
         if ctx.is_privileged:
             return _HIGH
         return _MEDIUM
@@ -336,6 +379,10 @@ def compute_exploitability(family_id: str, ctx: WorkflowContext) -> str:
     # Ungoverned services — self-hosted runner exposure is a real
     # escalation; otherwise default to medium.
     if family_id == "ungoverned_services":
+        if ctx.has_harden_runner_egress_block:
+            # Egress-block confines an ungoverned third-party service to the
+            # allowlisted destinations, so it can't reach an attacker host.
+            return _MEDIUM if (ctx.runs_self_hosted or ctx.has_pr_target) else _LOW
         if ctx.runs_self_hosted or ctx.has_pr_target:
             return _HIGH
         return _MEDIUM

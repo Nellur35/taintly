@@ -240,3 +240,65 @@ def test_ai_family_low_on_push_only_with_no_secrets():
     )
     ctx = analyze(content)
     assert compute_exploitability("ai_ml_model_risk", ctx) == "low"
+
+
+# ---------------------------------------------------------------------------
+# Harden-Runner egress-block — mitigating-control detection + temper
+# ---------------------------------------------------------------------------
+
+_HARDEN = (
+    "      - uses: step-security/harden-runner@v2\n"
+    "        with:\n          egress-policy: block\n"
+)
+
+
+def test_detects_harden_runner_egress_block():
+    content = (
+        "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n" + _HARDEN
+    )
+    assert analyze(content).has_harden_runner_egress_block is True
+
+
+def test_harden_runner_audit_mode_is_not_a_control():
+    content = (
+        "steps:\n      - uses: step-security/harden-runner@v2\n"
+        "        with:\n          egress-policy: audit\n"
+    )
+    assert analyze(content).has_harden_runner_egress_block is False
+
+
+def test_egress_block_in_comment_is_not_a_control():
+    content = (
+        "steps:\n      - uses: step-security/harden-runner@v2\n"
+        "        with:\n"
+        "          egress-policy: audit # TODO: change to 'egress-policy: block' later\n"
+    )
+    assert analyze(content).has_harden_runner_egress_block is False
+
+
+def test_mixed_block_and_audit_is_not_credited():
+    content = (
+        "jobs:\n  a:\n    steps:\n      - uses: step-security/harden-runner@v2\n"
+        "        with:\n          egress-policy: block\n"
+        "  b:\n    steps:\n      - uses: step-security/harden-runner@v2\n"
+        "        with:\n          egress-policy: audit\n"
+    )
+    assert analyze(content).has_harden_runner_egress_block is False
+
+
+def test_supply_chain_privileged_tempered_high_to_medium():
+    base = "on: push\njobs:\n  b:\n    steps:\n      - run: echo ${{ secrets.TOKEN }}\n"
+    assert compute_exploitability("supply_chain_immutability", analyze(base)) == "high"
+    assert compute_exploitability("supply_chain_immutability", analyze(base + _HARDEN)) == "medium"
+
+
+def test_supply_chain_non_privileged_tempered_medium_to_low():
+    base = "on: push\njobs:\n  b:\n    steps:\n      - run: echo hi\n"
+    assert compute_exploitability("supply_chain_immutability", analyze(base)) == "medium"
+    assert compute_exploitability("supply_chain_immutability", analyze(base + _HARDEN)) == "low"
+
+
+def test_ungoverned_services_tempered_by_harden_runner():
+    base = "on:\n  pull_request_target:\njobs:\n  b:\n    steps:\n      - run: echo hi\n"
+    assert compute_exploitability("ungoverned_services", analyze(base)) == "high"
+    assert compute_exploitability("ungoverned_services", analyze(base + _HARDEN)) == "medium"

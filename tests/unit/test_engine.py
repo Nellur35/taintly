@@ -452,6 +452,39 @@ def test_discover_files_jenkins_node_modules_prefix_not_excluded(tmp_path):
     assert os.path.join("node_modules_archive", "Jenkinsfile") in rel_names
 
 
+def test_harden_runner_tempers_unpinned_action_but_keeps_recall(tmp_path):
+    """SEC3-GH-001 still fires on an unpinned third-party action when
+    Harden-Runner egress-block is present (no recall loss), but its
+    exploitability is tempered (high -> medium) and the finding is tagged."""
+    from taintly.rules.registry import load_rules_for_platform
+
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    base = (
+        "on:\n  push:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: echo ${{ secrets.T }}\n"
+    )
+    unpinned = "      - uses: aquasecurity/trivy-action@v0.20.0\n"
+    harden = (
+        "      - uses: step-security/harden-runner@v2\n"
+        "        with:\n          egress-policy: block\n"
+    )
+    (wf / "hardened.yml").write_text(base + harden + unpinned)
+    (wf / "plain.yml").write_text(base + unpinned)
+    rules = load_rules_for_platform(Platform.GITHUB)
+
+    def sec3(name):
+        return [f for f in scan_file(str(wf / name), rules) if f.rule_id == "SEC3-GH-001"]
+
+    hardened, plain = sec3("hardened.yml"), sec3("plain.yml")
+    assert hardened, "SEC3-GH-001 must still fire when hardened (no recall loss)"
+    assert plain, "SEC3-GH-001 must fire when unhardened"
+    assert hardened[0].exploitability == "medium"
+    assert plain[0].exploitability == "high"
+    assert "harden-runner-egress-block" in hardened[0].context_tags
+    assert "harden-runner-egress-block" not in plain[0].context_tags
+
+
 # =============================================================================
 # Fixture file smoke tests
 # =============================================================================

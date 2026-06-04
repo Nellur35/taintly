@@ -38,8 +38,8 @@ from .staticguard import (
     find_dead_line_ranges,
     is_workflow_whole_dead,
 )
+from .workflow_context import HARDEN_RUNNER_TEMPERED_FAMILIES, compute_exploitability
 from .workflow_context import analyze as analyze_workflow
-from .workflow_context import compute_exploitability
 from .workflow_corpus import CorpusPattern, build_corpus
 
 # ---------------------------------------------------------------------------
@@ -360,6 +360,18 @@ def scan_file(
                     confidence = rule.confidence or default_confidence(rule.id)
                     review_needed = rule.review_needed or default_review_needed(rule.id)
                     exploitability = compute_exploitability(family, wf_ctx)
+                    ctx_notes: list[str] = []
+                    ctx_tags: list[str] = []
+                    if (
+                        wf_ctx.has_harden_runner_egress_block
+                        and family in HARDEN_RUNNER_TEMPERED_FAMILIES
+                    ):
+                        ctx_notes.append(
+                            "Harden-Runner egress-policy: block is present in this "
+                            "workflow — exploitability tempered one tier (the "
+                            "outbound exfil / C2 path is blocked)."
+                        )
+                        ctx_tags.append("harden-runner-egress-block")
                     findings.append(
                         Finding(
                             rule_id=rule.id,
@@ -379,6 +391,8 @@ def scan_file(
                             confidence=confidence,
                             exploitability=exploitability,
                             review_needed=review_needed,
+                            context_notes=ctx_notes,
+                            context_tags=ctx_tags,
                         )
                     )
             except Exception as e:
