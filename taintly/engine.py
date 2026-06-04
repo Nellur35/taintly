@@ -849,6 +849,71 @@ _JENKINSFILE_DENIED_EXTS: frozenset[str] = frozenset(
 )
 _GITLAB_ENTRY_FILENAMES: tuple[str, ...] = (".gitlab-ci.yml", ".gitlab-ci.yaml")
 
+# Content-verification gate for weak-heuristic discovery pickups.
+#
+# Some files are admitted by path shape alone — a loose ``*.groovy`` under a
+# ``jenkins`` path segment, or any YAML under ``.gitlab/``.  But ``jenkins``
+# is also a Groovy/Java *package* namespace (jenkinsci/jenkins ships UI views
+# and plain classes under ``.../jenkins/model/...``), and ``.gitlab/`` also
+# carries non-CI tool configs (GitLab Duo, issue templates).  Whether a file
+# is a pipeline is decidable from its bytes, so gate these weak pickups on a
+# cheap content sniff.  Strong signals (``Jenkinsfile*``, ``.gitlab-ci.yml``,
+# explicit ``ci/`` includes) are NEVER routed through the gate, so a real
+# pipeline that merely lacks a marker can never be dropped.
+_JENKINS_PIPELINE_MARKERS: tuple[str, ...] = (
+    "pipeline {",
+    "pipeline{",
+    "node {",
+    "node{",
+    "node(",
+    "stage(",
+)
+_GITLAB_CI_STRONG_KEYS: tuple[str, ...] = (
+    "stages:",
+    "include:",
+    "before_script:",
+    "after_script:",
+)
+
+
+def _read_text_head(path: str, limit: int = 65536) -> str:
+    """Read up to ``limit`` bytes of ``path`` as text, or "" on any OSError.
+
+    Conservative on read errors: a file we cannot read is treated as NOT a
+    pipeline by the callers below (dropped from the weak pickup).  It can
+    still be scanned if it has a strong-signal name, which never routes
+    through this gate.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read(limit)
+    except OSError:
+        return ""
+
+
+def _groovy_looks_like_pipeline(path: str) -> bool:
+    """True when a loose ``.groovy`` file carries a Jenkins pipeline marker."""
+    head = _read_text_head(path)
+    return bool(head) and any(m in head for m in _JENKINS_PIPELINE_MARKERS)
+
+
+def _gitlab_yaml_looks_like_ci(path: str) -> bool:
+    """True when a ``.gitlab/`` YAML carries a CI-defining key or job shape.
+
+    A bare ``image:`` is deliberately NOT sufficient — that is exactly what
+    Duo/tool YAMLs carry.  A CI-defining top-level key (``stages:``,
+    ``include:``, ``before_script:``, ``after_script:``) or a job-shaped
+    indented ``script:`` line is required.
+    """
+    head = _read_text_head(path)
+    if not head:
+        return False
+    for line in head.splitlines():
+        s = line.strip()
+        if any(s.startswith(k) for k in _GITLAB_CI_STRONG_KEYS):
+            return True
+    return bool(re.search(r"(?m)^\s+script\s*:", head))  # job-shaped block
+
 
 def _discover_gitlab_entry_files(repo_path: str) -> list[str]:
     """Find GitLab CI entry files supported by GitLab and our corpus reader."""
@@ -864,19 +929,35 @@ def _discover_gitlab_entry_files(repo_path: str) -> list[str]:
 
 
 def _discover_gitlab_files(repo_path: str) -> list[str]:
-    """Find GitLab CI entry files plus local include candidates."""
-    files = _discover_gitlab_entry_files(repo_path)
-    for pattern in [
-        "ci/*.yml",
-        "ci/**/*.yml",
-        "ci/*.yaml",
-        "ci/**/*.yaml",
+    """Find GitLab CI entry files plus local include candidates.
+
+    Entry files and explicit ``ci/`` includes are strong signals, admitted
+    unconditionally.  ``.gitlab/`` YAML is a weak signal — the directory also
+    holds non-CI tool configs (GitLab Duo, issue templates), so those pickups
+    are content-gated via :func:`_gitlab_yaml_looks_like_ci`.  Entry files are
+    never gated, so an ``include:``-only fragment can never be dropped.
+    """
+    entry_files = _discover_gitlab_entry_files(repo_path)
+    files = list(entry_files)
+    entry_set = {os.path.normpath(p) for p in entry_files}
+
+    # Strong signal: an explicit ``ci/`` include directory — admit all.
+    for pattern in ("ci/*.yml", "ci/**/*.yml", "ci/*.yaml", "ci/**/*.yaml"):
+        files.extend(glob.glob(os.path.join(repo_path, pattern), recursive=True))
+
+    # Weak signal: ``.gitlab/`` also carries non-CI tool configs, so gate on
+    # content (e.g. ``.gitlab/duo/agent-config.yml`` must not parse as CI).
+    for pattern in (
         ".gitlab/*.yml",
         ".gitlab/**/*.yml",
         ".gitlab/*.yaml",
         ".gitlab/**/*.yaml",
-    ]:
-        files.extend(glob.glob(os.path.join(repo_path, pattern), recursive=True))
+    ):
+        for cand in glob.glob(os.path.join(repo_path, pattern), recursive=True):
+            if os.path.normpath(cand) in entry_set:
+                continue
+            if _gitlab_yaml_looks_like_ci(cand):
+                files.append(cand)
     return files
 
 
@@ -931,7 +1012,11 @@ def _discover_jenkins_files(repo_path: str) -> list[str]:
                 # ``jenkins/**/*.groovy`` form - only inside a
                 # ``jenkins`` directory. Skip random ``*.groovy`` files
                 # elsewhere in the repo (usually build-tool scripts).
-                files.append(os.path.join(root, name))
+                # ``jenkins`` is also a Groovy package namespace, so
+                # content-gate: keep only files with a pipeline marker.
+                cand = os.path.join(root, name)
+                if _groovy_looks_like_pipeline(cand):
+                    files.append(cand)
     return files
 
 
@@ -1023,7 +1108,12 @@ def discover_files(repo_path: str, platform: Platform) -> list[str]:
                     # ``jenkins`` directory.  Skip random ``*.groovy``
                     # files elsewhere in the repo (these are usually
                     # build-tool scripts, not pipeline definitions).
-                    files.append(os.path.join(root, name))
+                    # ``jenkins`` is also a Groovy package namespace
+                    # (jenkinsci/jenkins ships UI views / plain classes
+                    # under it), so content-gate on a pipeline marker.
+                    cand = os.path.join(root, name)
+                    if _groovy_looks_like_pipeline(cand):
+                        files.append(cand)
 
     # Normalise separators before deduping.  Windows paths returned by
     # ``os.path.join`` use ``\`` while ``glob`` recursion can produce
