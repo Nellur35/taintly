@@ -787,7 +787,7 @@ RULES: list[Rule] = [
             # double-quote and triple-double-quote forms only. Supports
             # dot form and bracket form for parameter names with dashes.
             match=(
-                r'(?:sh|bat|powershell)\s+"{1,3}.*\$\{\s*params\s*'
+                r'(?:sh|bat|powershell|pwsh)\s+"{1,3}.*\$\{\s*params\s*'
                 r"(?:\.[A-Za-z_][A-Za-z0-9_-]*|\[['\"][^'\"]+['\"]\])\s*\}"
             ),
             exclude=[r"^\s*//"],
@@ -822,6 +822,7 @@ RULES: list[Rule] = [
             'sh "git checkout ${params.BRANCH_NAME}"',
             'bat "build ${params.TARGET}"',
             'powershell "Deploy ${params.VERSION}"',
+            'pwsh "Deploy ${params.VERSION}"',
             "sh \"deploy ${params['ENV-NAME']}\"",
             'sh "docker build -t ${params.IMAGE_TAG} ."',
             'sh "./deploy.sh ${params.ENVIRONMENT}"',
@@ -869,7 +870,7 @@ RULES: list[Rule] = [
             # strings (both are GStrings and interpolate ${env.X});
             # single quotes suppress interpolation.
             match=(
-                r'sh\s+"{1,3}.*\$\{?env\.'
+                r'(?:sh|bat|powershell|pwsh)\s+"{1,3}.*\$\{?env\.'
                 r"(?:GIT_BRANCH|BRANCH_NAME|CHANGE_BRANCH|CHANGE_TITLE"
                 r"|CHANGE_AUTHOR|TAG_NAME|ghprb\w+)"
             ),
@@ -902,6 +903,9 @@ RULES: list[Rule] = [
             'sh "git checkout ${env.GIT_BRANCH}"',
             'sh "docker build -t myapp:${env.BRANCH_NAME} ."',
             "sh \"./notify.sh '${env.CHANGE_AUTHOR}'\"",
+            # Non-sh shells interpolate GStrings identically (bat / pwsh).
+            'bat "checkout ${env.CHANGE_BRANCH}"',
+            'pwsh "Deploy ${env.TAG_NAME}"',
         ],
         test_negative=[
             'sh "echo Build number: ${env.BUILD_NUMBER}"',
