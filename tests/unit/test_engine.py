@@ -485,6 +485,127 @@ def test_harden_runner_tempers_unpinned_action_but_keeps_recall(tmp_path):
     assert "harden-runner-egress-block" not in plain[0].context_tags
 
 
+def test_discover_gitlab_follows_local_include_outside_glob_roots(tmp_path):
+    """Include-graph closure: a fragment referenced via ``include: local:``
+    that lives OUTSIDE ci/ and .gitlab/ (so no glob would find it) must be
+    discovered. An explicit include is authoritative CI."""
+    (tmp_path / ".gitlab-ci.yml").write_text(
+        "include:\n  - local: 'pipelines/build.yml'\nstages: [build]\n"
+    )
+    frag = tmp_path / "pipelines"
+    frag.mkdir()
+    (frag / "build.yml").write_text("build:\n  script:\n    - make\n")
+
+    rel = [os.path.relpath(f, str(tmp_path)) for f in discover_files(str(tmp_path), Platform.GITLAB)]
+    assert os.path.join("pipelines", "build.yml") in rel
+
+
+def test_discover_gitlab_include_graph_is_transitive(tmp_path):
+    """A includes B, B includes C — all three must be discovered."""
+    (tmp_path / ".gitlab-ci.yml").write_text("include:\n  - local: '/a.yml'\n")
+    (tmp_path / "a.yml").write_text("include:\n  - local: '/b.yml'\na:\n  script: [echo a]\n")
+    (tmp_path / "b.yml").write_text("b:\n  script:\n    - echo b\n")
+
+    rel = [os.path.relpath(f, str(tmp_path)) for f in discover_files(str(tmp_path), Platform.GITLAB)]
+    assert "a.yml" in rel
+    assert "b.yml" in rel
+
+
+def test_discover_gitlab_include_glob_is_expanded(tmp_path):
+    """``include: local: 'templates/*.yml'`` expands the glob (the 5->50 case)."""
+    (tmp_path / ".gitlab-ci.yml").write_text("include:\n  - local: 'templates/*.yml'\n")
+    t = tmp_path / "templates"
+    t.mkdir()
+    (t / "one.yml").write_text("one:\n  script: [echo 1]\n")
+    (t / "two.yml").write_text("two:\n  script: [echo 2]\n")
+
+    rel = [os.path.relpath(f, str(tmp_path)) for f in discover_files(str(tmp_path), Platform.GITLAB)]
+    assert os.path.join("templates", "one.yml") in rel
+    assert os.path.join("templates", "two.yml") in rel
+
+
+def test_discover_gitlab_dynamic_include_does_not_crash_or_overreach(tmp_path):
+    """A runtime-interpolated include target (``$[[ inputs.x ]]``) is
+    unresolvable — discovery must not crash and must not invent a file."""
+    (tmp_path / ".gitlab-ci.yml").write_text(
+        "include:\n  - local: 'pipelines/$[[ inputs.kind ]].yml'\nstages: [build]\n"
+    )
+    (tmp_path / "pipelines").mkdir()
+    (tmp_path / "pipelines" / "build.yml").write_text("build:\n  script: [make]\n")
+
+    rel = [os.path.relpath(f, str(tmp_path)) for f in discover_files(str(tmp_path), Platform.GITLAB)]
+    assert os.path.join("pipelines", "build.yml") not in rel
+    assert ".gitlab-ci.yml" in rel
+
+
+def test_discovery_confidence_gitlab_tiers(tmp_path):
+    """Entry files + include-reached fragments are authoritative ("high");
+    a .gitlab/** glob pickup is weak ("low")."""
+    from taintly.engine import _discovery_confidence
+
+    (tmp_path / ".gitlab-ci.yml").write_text(
+        "include:\n  - local: 'pipelines/inc.yml'\nstages: [build]\n"
+    )
+    (tmp_path / "pipelines").mkdir()
+    (tmp_path / "pipelines" / "inc.yml").write_text("a:\n  script:\n    - echo a\n")
+    gl = tmp_path / ".gitlab" / "ci"
+    gl.mkdir(parents=True)
+    (gl / "weak.yml").write_text("b:\n  script:\n    - echo b\n")
+
+    files = discover_files(str(tmp_path), Platform.GITLAB)
+    conf = _discovery_confidence(str(tmp_path), Platform.GITLAB, files)
+
+    def tier(*parts):
+        return conf[os.path.normpath(os.path.join(str(tmp_path), *parts))]
+
+    assert tier(".gitlab-ci.yml") == "high"
+    assert tier("pipelines", "inc.yml") == "high"  # include-reached
+    assert tier(".gitlab", "ci", "weak.yml") == "low"  # weak glob pickup
+
+
+def test_discovery_confidence_gitlab_ci_named_file_is_high(tmp_path):
+    """A file NAMED *.gitlab-ci.yml under .gitlab/ci/ (a child-pipeline config,
+    triggered not root-included) is authoritative by filename -> high."""
+    from taintly.engine import _discovery_confidence
+
+    (tmp_path / ".gitlab-ci.yml").write_text("stages: [build]\n")
+    child = tmp_path / ".gitlab" / "ci" / "cng"
+    child.mkdir(parents=True)
+    (child / "main.gitlab-ci.yml").write_text("job:\n  script:\n    - make\n")
+    (child / "random.yml").write_text("other:\n  script:\n    - echo hi\n")
+
+    files = discover_files(str(tmp_path), Platform.GITLAB)
+    conf = _discovery_confidence(str(tmp_path), Platform.GITLAB, files)
+
+    def tier(*parts):
+        return conf[os.path.normpath(os.path.join(str(tmp_path), *parts))]
+
+    assert tier(".gitlab", "ci", "cng", "main.gitlab-ci.yml") == "high"
+    assert tier(".gitlab", "ci", "cng", "random.yml") == "low"
+
+
+def test_scan_repo_caps_low_confidence_findings_at_review(tmp_path):
+    """A finding on a weakly-discovered file is tagged discovery_confidence
+    "low" and forced to review-needed."""
+    from taintly.rules.registry import load_rules_for_platform
+
+    (tmp_path / ".gitlab-ci.yml").write_text("stages: [build]\n")  # entry, no finding
+    gl = tmp_path / ".gitlab" / "ci"
+    gl.mkdir(parents=True)
+    (gl / "x.yml").write_text("job:\n  image: alpine:3.19\n  script:\n    - make\n")
+
+    reports = scan_repo(str(tmp_path), load_rules_for_platform(Platform.GITLAB))
+    weak = [
+        f
+        for r in reports
+        for f in r.findings
+        if f.rule_id == "SEC3-GL-005" and "x.yml" in f.file
+    ]
+    assert weak, "expected SEC3-GL-005 on the weak .gitlab/ci/x.yml pickup"
+    assert all(f.discovery_confidence == "low" for f in weak)
+    assert all(f.review_needed for f in weak)
+
+
 # =============================================================================
 # Fixture file smoke tests
 # =============================================================================
