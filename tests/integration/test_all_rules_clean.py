@@ -273,7 +273,7 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         ("jenkins/vulnerable/docker_latest.Jenkinsfile",            ["SEC8-JK-001"], ["SEC1-JK-002", "SEC10-JK-001"]),
         ("jenkins/vulnerable/curl_pipe_bash.Jenkinsfile",           ["SEC9-JK-001"], ["SEC1-JK-002", "SEC10-JK-001"]),
         ("jenkins/vulnerable/params_injection.Jenkinsfile",         ["SEC4-JK-001"], ["SEC1-JK-002", "SEC10-JK-001", "SEC5-JK-001", "TAINT-JK-001"]),
-        ("jenkins/vulnerable/scm_env_injection.Jenkinsfile",        ["SEC4-JK-002"], ["SEC1-JK-002", "SEC10-JK-001"]),
+        ("jenkins/vulnerable/scm_env_injection.Jenkinsfile",        ["SEC4-JK-002"], ["SEC1-JK-002", "SEC10-JK-001", "TAINT-JK-001"]),
         ("jenkins/vulnerable/dynamic_groovy_eval.Jenkinsfile",      ["SEC4-JK-003"], ["SEC1-JK-002", "SEC10-JK-001", "SEC5-JK-001"]),
         ("jenkins/vulnerable/println_credential.Jenkinsfile",       ["SEC6-JK-003"], ["SEC1-JK-002", "SEC10-JK-001", "SEC5-JK-001"]),
         ("jenkins/vulnerable/remote_groovy_script.Jenkinsfile",     ["SEC8-JK-002"], ["SEC1-JK-002", "SEC10-JK-001", "SEC4-JK-003"]),

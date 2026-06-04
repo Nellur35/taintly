@@ -74,8 +74,8 @@ _TAINTED_NAMES = (
     r"|AUTHOR|TARGET|URL|FORK|ID)"
     r"|(?:env\.)?GERRIT_(?:CHANGE_SUBJECT|CHANGE_COMMIT_MESSAGE"
     r"|CHANGE_OWNER|PATCHSET_UPLOADER|EVENT_TYPE|TOPIC)"
-    r"|(?:env\.)?ghprb(?:PullTitle|PullAuthorEmail|PullAuthorLogin"
-    r"|PullAuthorLoginMention|SourceBranch|TargetBranch"
+    r"|(?:env\.)?ghprb(?:PullTitle|PullDescription|PullLink|PullAuthorEmail"
+    r"|PullAuthorLogin|PullAuthorLoginMention|SourceBranch|TargetBranch"
     r"|ActualCommitAuthor)"
     # Commit metadata populated by the Jenkins Git Plugin from the
     # actual commit being built.  Author name and email are set by
@@ -90,6 +90,19 @@ _TAINTED_NAMES = (
     # multibranch SCM source.
     r"|(?:env\.)?GIT_AUTHOR_(?:NAME|EMAIL)"
     r"|(?:env\.)?GIT_COMMITTER_(?:NAME|EMAIL)"
+    # SCM-populated branch / tag identifiers. The Git and Multibranch
+    # plugins set these from the triggering ref; on a fork- or branch-PR
+    # the value is attacker-chosen and can carry shell metacharacters.
+    # SEC4-JK-002 covers the ``sh "...${env.X}"`` shape; listing them here
+    # extends coverage to bat/powershell/pwsh sinks, the ``${NAME}`` form
+    # with no ``env.`` prefix, and the downstream-build ``value:`` slot.
+    r"|(?:env\.)?(?:GIT_BRANCH|BRANCH_NAME|TAG_NAME)"
+    # GitLab Branch Source / gitlab-plugin bindings — merge-request title
+    # and description, source/target branch, and triggerer identity are
+    # all attacker-supplied on a self-serve GitLab instance.
+    r"|(?:env\.)?gitlab(?:SourceBranch|TargetBranch|Branch"
+    r"|MergeRequestTitle|MergeRequestDescription"
+    r"|UserName|UserEmail|SourceRepoName)"
     r"|params\.\w+"
 )
 
@@ -132,7 +145,7 @@ RULES: list[Rule] = [
         id="TAINT-JK-001",
         title=(
             "Attacker-controlled pipeline context interpolated into "
-            "double-quoted sh/bat/powershell step"
+            "double-quoted sh/bat/powershell/pwsh step"
         ),
         severity=Severity.CRITICAL,
         platform=Platform.JENKINS,
@@ -159,7 +172,7 @@ RULES: list[Rule] = [
             # inside the same double-quoted string.  Non-greedy
             # ``[^"\n]*?`` keeps the match to a single line so we
             # don't bridge across unrelated strings.
-            match=(r'\b(?:sh|bat|powershell)\s*\(?\s*"[^"\n]*?' + _TAINTED_REF),
+            match=(r'\b(?:sh|bat|powershell|pwsh)\s*\(?\s*"[^"\n]*?' + _TAINTED_REF),
             exclude=[
                 # Single-line Groovy / Java comment
                 r"^\s*//",
@@ -173,6 +186,7 @@ RULES: list[Rule] = [
                 r'\bsh\s*"""',
                 r'\bbat\s*"""',
                 r'\bpowershell\s*"""',
+                r'\bpwsh\s*"""',
             ],
         ),
         remediation=(
@@ -228,6 +242,19 @@ RULES: list[Rule] = [
             'sh "log ${env.GERRIT_CHANGE_SUBJECT} >> audit.log"',
             # powershell
             'powershell "Write-Host ${params.MESSAGE}"',
+            # pwsh — cross-platform PowerShell Core sink (same GString
+            # interpolation as `powershell`).
+            'pwsh "Write-Host ${env.CHANGE_TITLE}"',
+            # SCM branch / tag identifiers (Git + Multibranch plugins).
+            # Distinct command text from SEC4-JK-002's GIT_BRANCH sample.
+            'sh "fetch origin ${env.GIT_BRANCH}"',
+            'bat "build ${BRANCH_NAME}"',
+            'pwsh "Publish ${env.TAG_NAME}"',
+            # ghprb description / link (legacy GitHub PR Builder plugin).
+            'sh "echo ${env.ghprbPullDescription}"',
+            # GitLab Branch Source / gitlab-plugin bindings.
+            'sh "echo MR: ${env.gitlabMergeRequestTitle}"',
+            'sh "deploy ${gitlabSourceBranch}"',
             # Git Plugin commit-author metadata — author name/email
             # are unconstrained attacker input (git config).
             'sh "echo Committed by ${env.GIT_AUTHOR_NAME}"',
