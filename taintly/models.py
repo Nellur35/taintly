@@ -1364,6 +1364,15 @@ class Finding:
     review_needed: bool = False
     """True if this pattern deserves human review before strong conclusion
     (separates review-needed items from confirmed risks in the reporter)."""
+    discovery_confidence: str = "high"
+    """How confidently the FILE was identified as CI: "high" when admitted by
+    an authoritative signal (canonical location, Jenkinsfile name, GitLab
+    entry / ``*.gitlab-ci.yml`` filename, or an explicit ``include:``
+    reference); "low" when admitted only by a weak path heuristic that the
+    content gate let through (a ``.gitlab/**`` glob pickup, or a loose
+    ``.groovy`` in a jenkins-named dir). Low-confidence findings are capped at
+    review-needed — a file we only weakly believe is CI shouldn't drive a
+    confident score."""
     context_notes: list[str] = field(default_factory=list)
     """Deployment-context interpretation notes. These do not change severity."""
     context_tags: list[str] = field(default_factory=list)
