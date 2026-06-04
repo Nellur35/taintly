@@ -915,6 +915,74 @@ def _gitlab_yaml_looks_like_ci(path: str) -> bool:
     return bool(re.search(r"(?m)^\s+script\s*:", head))  # job-shaped block
 
 
+# A GitLab ``include: local:`` path that interpolates a CI/CD variable or a
+# spec ``inputs:`` value (``$VAR`` / ``${VAR}`` / ``$[[ inputs.x ]]``) only
+# resolves at pipeline-run time — its target is unknowable from static bytes.
+# We count these so discovery can report "there is CI here we could not reach"
+# instead of silently pretending the pipeline is fully covered.
+_GITLAB_DYNAMIC_INCLUDE_RE = re.compile(r"\$\{|\$\[|\$[A-Za-z_]")
+
+# Bound the include-graph closure so a pathological / cyclic repo can't make
+# discovery walk forever.  Real pipelines are far below this.
+_INCLUDE_GRAPH_MAX_FILES = 200
+
+
+def _resolve_local_include(repo_path: str, ref: str) -> list[str]:
+    """Resolve one GitLab ``include: local:`` ref to existing repo files.
+
+    GitLab resolves ``local:`` paths from the REPO ROOT — a leading ``/`` is
+    repo-root-absolute, not filesystem-absolute.  Globs (``*``/``**``/``?``)
+    are expanded the way GitLab expands them.  Returns matching existing files
+    (absolute paths); empty when the ref is a URL or matches nothing.
+    """
+    ref = ref.strip().strip("'\"")
+    if not ref or "://" in ref:
+        return []
+    rel = ref.lstrip("/")
+    base = os.path.join(repo_path, *rel.split("/"))
+    if any(ch in rel for ch in "*?["):
+        return [p for p in glob.glob(base, recursive=True) if os.path.isfile(p)]
+    return [base] if os.path.isfile(base) else []
+
+
+def _discover_gitlab_include_graph(
+    repo_path: str, seed_files: list[str], seen: set[str]
+) -> tuple[list[str], int]:
+    """Follow ``include: local:`` refs transitively from ``seed_files`` to CI
+    fragments that live OUTSIDE the ``ci/`` and ``.gitlab/`` glob roots (e.g.
+    ``templates/build.yml``).
+
+    An explicit ``include:`` reference is an AUTHORITATIVE CI signal — the
+    pipeline author declared the file is part of the pipeline — so these files
+    are admitted WITHOUT the content-shape gate that weak path pickups must
+    pass.  ``seen`` (normalised paths) is shared with the caller and mutated.
+
+    Returns ``(new_files, n_dynamic)`` where ``n_dynamic`` counts include refs
+    that interpolate a runtime variable and so could not be resolved statically.
+    """
+    from taintly.gitlab_workflow_corpus import _extract_local_include_paths
+
+    new_files: list[str] = []
+    n_dynamic = 0
+    queue = list(seed_files)
+    while queue and len(new_files) < _INCLUDE_GRAPH_MAX_FILES:
+        content = _read_text_head(queue.pop())
+        if not content:
+            continue
+        for ref in _extract_local_include_paths(content):
+            if _GITLAB_DYNAMIC_INCLUDE_RE.search(ref):
+                n_dynamic += 1
+                continue
+            for hit in _resolve_local_include(repo_path, ref):
+                norm = os.path.normpath(hit)
+                if norm in seen:
+                    continue
+                seen.add(norm)
+                new_files.append(hit)
+                queue.append(hit)  # transitive: follow ITS includes too
+    return new_files, n_dynamic
+
+
 def _discover_gitlab_entry_files(repo_path: str) -> list[str]:
     """Find GitLab CI entry files supported by GitLab and our corpus reader."""
     files: list[str] = []
@@ -958,7 +1026,76 @@ def _discover_gitlab_files(repo_path: str) -> list[str]:
                 continue
             if _gitlab_yaml_looks_like_ci(cand):
                 files.append(cand)
+    # Include-graph closure: follow ``include: local:`` refs transitively so
+    # fragments OUTSIDE ci/ and .gitlab/ (e.g. ``templates/build.yml``) are
+    # scanned too. An explicit include is authoritative CI, so these skip the
+    # content-shape gate.
+    seen = {os.path.normpath(p) for p in files}
+    include_files, _n_dynamic = _discover_gitlab_include_graph(repo_path, list(files), seen)
+    files.extend(include_files)
     return files
+
+
+def _discovery_confidence(
+    repo_path: str, platform: Platform, files: list[str]
+) -> dict[str, str]:
+    """Classify each discovered file's discovery confidence (normpath -> tier).
+
+    "high" — admitted by an AUTHORITATIVE signal: a canonical GitHub location
+             (``.github/workflows/`` + dependabot), a Jenkinsfile-named file, a
+             GitLab entry file, a ``*.gitlab-ci.yml``-named file, or a file
+             reached by an explicit ``include: local:`` reference.
+    "low"  — admitted only by a WEAK path heuristic the content gate let
+             through: a ``.gitlab/**`` glob pickup, or a loose ``.groovy``
+             inside a jenkins-named dir.
+
+    See :func:`_apply_discovery_confidence` for how the tier is consumed.
+    """
+    if platform == Platform.GITHUB:
+        # .github/workflows/ and dependabot.yml are location-authoritative.
+        return {os.path.normpath(f): "high" for f in files}
+    if platform == Platform.JENKINS:
+        return {
+            os.path.normpath(f): ("high" if _is_jenkinsfile_name(os.path.basename(f)) else "low")
+            for f in files
+        }
+    # GitLab: authoritative = entry files, anything reached by include, OR any
+    # file whose NAME is the canonical CI filename (``*.gitlab-ci.yml``). The
+    # last clause matters for monorepos (gitlab-org/gitlab) whose child-pipeline
+    # configs are named ``main.gitlab-ci.yml`` and are TRIGGERED (not root-
+    # included), so the include-graph never reaches them — but the filename is
+    # itself authoritative. The remaining ci/ & .gitlab/ glob pickups are weak.
+    authoritative = {os.path.normpath(f) for f in _discover_gitlab_entry_files(repo_path)}
+    reached, _n = _discover_gitlab_include_graph(repo_path, list(authoritative), set(authoritative))
+    authoritative.update(os.path.normpath(f) for f in reached)
+
+    def _is_ci_named(p: str) -> bool:
+        return os.path.basename(p).endswith((".gitlab-ci.yml", ".gitlab-ci.yaml"))
+
+    return {
+        os.path.normpath(f): (
+            "high" if (os.path.normpath(f) in authoritative or _is_ci_named(f)) else "low"
+        )
+        for f in files
+    }
+
+
+def _apply_discovery_confidence(findings: list[Finding], conf_map: dict[str, str]) -> None:
+    """Tag each finding with the discovery confidence of its file and cap
+    low-confidence findings at review-needed.
+
+    A file admitted only by a weak path heuristic (a ``.gitlab/**`` glob
+    pickup, a loose ``.groovy``) shouldn't drive a confident, score-affecting
+    finding — even after the content gate, the path signal was weak and the
+    file may be a fragment scanned out of context. Mutates in place. Findings
+    whose file isn't in the map (e.g. cross-file corpus findings) default to
+    "high" so nothing is silently downgraded.
+    """
+    for f in findings:
+        c = conf_map.get(os.path.normpath(f.file), "high")
+        f.discovery_confidence = c
+        if c == "low":
+            f.review_needed = True
 
 
 def _is_jenkinsfile_name(name: str) -> bool:
@@ -1196,6 +1333,9 @@ def scan_repo(
             files = discover_files(repo_path, plat)
         report.files_scanned = len(files)
         report.rules_loaded = len(platform_rules)
+        # Discovery-confidence map: findings on weakly-discovered files get
+        # capped at review-needed by _apply_discovery_confidence below.
+        discovery_conf = _discovery_confidence(repo_path, plat, files)
 
         all_findings: list[Finding] = []
         if plat == Platform.GITHUB:
@@ -1315,6 +1455,7 @@ def scan_repo(
         # the project-scope dedup sees the post-supersedes finding set
         # (otherwise a superseded finding could "win" the project-scope
         # first-seen slot and silently mask the canonical finding).
+        _apply_discovery_confidence(all_findings, discovery_conf)
         all_findings = _dedupe_supersedes(all_findings, platform_rules)
         for f in _dedupe_project_scope(all_findings):
             report.add(f)
