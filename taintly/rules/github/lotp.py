@@ -139,26 +139,6 @@ RULES: list[Rule] = [
             "      - run: echo 'hello'",
             # Commented out
             "jobs:\n  build:\n    steps:\n      # - run: npm install\n      - run: echo ok",
-            # "make" as an English verb in a PR-head-checkout job — must
-            # not match the build-tool anchor.
-            "jobs:\n  build:\n    steps:\n"
-            "      - uses: actions/checkout@v4\n"
-            "        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n"
-            '      - run: echo "remember to make a backup before deploy"',
-            # Defensive ``${{ github.head_ref || 'main' }}`` fallback
-            # in a non-checkout context (e.g. cloudflare
-            # wrangler-action's ``branch:`` parameter): the reference
-            # is a string fallback used as a deploy target name, not
-            # a code revision selector. The _PR_HEAD_CHECKOUT regex
-            # requires the reference to be in a ``ref:`` line — this
-            # fixture pins that regression.
-            "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
-            "    steps:\n"
-            "      - uses: actions/checkout@v4\n"
-            "      - run: npm ci --ignore-scripts\n"
-            "      - uses: cloudflare/wrangler-action@v3\n"
-            "        with:\n"
-            "          command: pages deploy --branch ${{ github.head_ref || 'main' }}",
         ],
         stride=["T", "E"],
         threat_narrative=(

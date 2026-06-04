@@ -14,6 +14,10 @@ Security scanner for CI/CD pipelines. Reads GitHub Actions, GitLab CI, and Jenki
 
 - Multi-stage taint analysis with provenance — traces attacker-controlled values through `env`, `$GITHUB_ENV`, `$GITHUB_OUTPUT`, and AI-agent step outputs across steps, with full source-to-sink chains.
 
+- Cross-artifact & cross-workflow taint — follows attacker-controlled inputs across composite `action.yml` boundaries and reusable-workflow calls, not just within a single file.
+
+- Kill-chain composition — correlates findings that are individually lower-severity (e.g. a persisted checkout credential + a fork-reachable trigger + a write-scoped token) into a single CRITICAL composite when together they form an exploitable chain.
+
 - Contextual exploitability — same rule, different verdict depending on whether the job has secrets, write permissions, or a fork-reachable trigger.
 
 - AI / ML category — pickle deserialization, `trust_remote_code=True`, agent-output taint, MCP server hygiene.

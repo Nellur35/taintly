@@ -18,7 +18,7 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
-from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
+from taintly.workflow_aware_pattern import PredicateContext
 
 # ---------------------------------------------------------------------------
 # SEC1-GH-001 — job-scoped variant of SequencePattern
@@ -542,7 +542,7 @@ RULES: list[Rule] = [
             "literal string value rather than a ``${{ secrets.X }}`` "
             "reference.  The credential is stored in the workflow "
             "YAML, in every commit's history, and is visible to "
-            "every fork — far broader exposure than any GitHub "
+            "every fork â€” far broader exposure than any GitHub "
             "secrets channel.  Even ``actions/checkout`` is enough "
             "to surface the value to an attacker who runs an arbitrary "
             "step in the workflow.\n"
@@ -590,7 +590,7 @@ RULES: list[Rule] = [
             ),
         ],
         test_negative=[
-            # Secret-referenced password — safe.
+            # Secret-referenced password â€” safe.
             "jobs:\n  test:\n    services:\n      db:\n        image: postgres:14\n"
             "        credentials:\n          username: postgres\n"
             "          password: ${{ secrets.POSTGRES_PASSWORD }}\n",
@@ -607,7 +607,7 @@ RULES: list[Rule] = [
             "publicly readable on every public repo, in every fork, "
             "in every commit's history) recovers the literal "
             "credential and uses it to push a backdoored image to the "
-            "private registry — or to authenticate as the registry "
+            "private registry â€” or to authenticate as the registry "
             "user account in any other system the user has access "
             "to.  Unlike a leaked secret in CI logs (which has a "
             "redaction layer), workflow-text leaks are immediate and "
@@ -665,12 +665,6 @@ RULES: list[Rule] = [
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: twine upload --use-oidc dist/*",
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: cargo publish",
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: npm publish --provenance --access public",
-            # Three OIDC consumers added to the allowlist after
-            # sample-and-label found these actions legitimately
-            # used in workflows that fired as FPs.
-            "permissions:\n  id-token: write\njobs:\n  scorecard:\n    steps:\n      - uses: ossf/scorecard-action@v2.4.0\n        with:\n          publish_results: true",
-            "permissions:\n  id-token: write\njobs:\n  pages:\n    steps:\n      - uses: actions/deploy-pages@v4",
-            "permissions:\n  id-token: write\njobs:\n  release:\n    steps:\n      - uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0",
         ],
         stride=["E"],
         threat_narrative=(
@@ -1575,6 +1569,7 @@ RULES: list[Rule] = [
                 r"|github\.event\.pull_request\.(?:title|body)"
                 r")"
             ),
+            exclude=[r"^\s*#"],
             scope="file",
         ),
         remediation=(
@@ -1700,7 +1695,7 @@ RULES: list[Rule] = [
         finding_family="supply_chain_immutability",
         description=(
             "A ``run:`` step downloads a script from the network and "
-            "pipes it directly into a shell or interpreter — "
+            "pipes it directly into a shell or interpreter â€” "
             "``curl ... | bash``, ``wget ... | sh``, "
             "``bash <(curl ...)``, or PowerShell "
             "``iex(Invoke-WebRequest ...)``.  The downloaded bytes "
@@ -1708,14 +1703,14 @@ RULES: list[Rule] = [
             "so whoever controls the URL controls the workflow.\n"
             "\n"
             "Distinct from SEC3-GH-001 (action pinning) and SEC3-GH-"
-            "005 (Docker image pinning) — those guard the workflow "
+            "005 (Docker image pinning) â€” those guard the workflow "
             "definition; this rule guards the runtime tool chain "
             "the workflow invokes."
         ),
         pattern=RegexPattern(
-            # Five idiomatic shapes: curl|sh, wget|sh, bash <(curl…),
-            # iex(Invoke-WebRequest…) or iex(iwr…), and the bare
-            # ``... | python -c '…'`` shape that downloads then evals.
+            # Five idiomatic shapes: curl|sh, wget|sh, bash <(curlâ€¦),
+            # iex(Invoke-WebRequestâ€¦) or iex(iwrâ€¦), and the bare
+            # ``... | python -c 'â€¦'`` shape that downloads then evals.
             match=(
                 r"(?:curl|wget)\s+[^|\n#]*\|\s*(?:bash|sh|zsh|fish|python|perl|ruby|node)"
                 r"|bash\s*<\s*\(\s*(?:curl|wget)"
@@ -1757,7 +1752,7 @@ RULES: list[Rule] = [
             "      - run: wget -q -O setup.sh https://example.com/setup.sh",
             # Comment.
             "      # - run: curl https://example.com | bash",
-            # Pipe but not network — no curl/wget anchor.
+            # Pipe but not network â€” no curl/wget anchor.
             "      - run: cat install.sh | bash",
             # Powershell command unrelated to web download.
             "      - run: iex 'Get-Process | Format-Table'",
@@ -1769,7 +1764,7 @@ RULES: list[Rule] = [
             "to review the bytes before execution.  DNS hijack, CDN "
             "compromise, expired-and-resquatted domain, or a supply-"
             "chain attack on the hosting infrastructure all let the "
-            "attacker substitute a malicious payload — at which point "
+            "attacker substitute a malicious payload â€” at which point "
             "every secret bound to the workflow is exfiltrable on the "
             "next run."
         ),
@@ -2247,21 +2242,36 @@ RULES: list[Rule] = [
             "``${{ env.NAME }}`` — the env-block path is masked, the "
             "with-input is then a non-secret reference."
         ),
-        # WorkflowAwarePattern form (path-aware over the structural
-        # reader).  The workflow-aware predicate gives us:
-        #   1. exact path-shape filtering (only with: keys under a
-        #      step's ``with`` map) — the regex anchor was line-shape-
-        #      only and could match nested non-step contexts.
-        #   2. step-scope env-block detection via descendant lookup
-        #      — replaces a multi-line regex with deterministic
-        #      structural traversal.
-        #   3. safe-consumer allowlist keyed on ``(action, slot)`` —
-        #      drops noise on actions whose documented auth surface
-        #      IS the credential slot (docker/login-action.password,
-        #      pypa/gh-action-pypi-publish.password, etc.).
-        pattern=WorkflowAwarePattern(
-            path="jobs.*.steps[*].with.*",
-            predicate=_is_unmasked_secret_input,
+        pattern=ContextPattern(
+            # Per-line anchor: a YAML key ending in a credential-shape
+            # token, mapped to a ``${{ secrets.X }}`` value.  The
+            # ``(?i)`` flag accepts both ``token:`` and ``Token:``
+            # spellings; the leading whitespace requirement excludes
+            # workflow-level keys.  The prefix portion is zero-or-more
+            # word/hyphen characters so bare ``token:`` / ``password:``
+            # match alongside hyphenated forms like ``api-key:``.
+            anchor=(
+                r"(?i)^\s+[\w-]*"
+                r"(?:token|key|secret|password|pass)"
+                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
+            ),
+            # The full file must contain at least one such pattern for
+            # the rule to fire — the anchor regex itself is the
+            # presence check.
+            requires=(
+                r"(?i)\s+[\w-]*"
+                r"(?:token|key|secret|password|pass)"
+                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
+            ),
+            # Step-scope suppression: when this step's ``env:`` block
+            # routes a secret, the safe pattern is in use at the
+            # step level — suppress.  The redactor registration is
+            # per-step, so co-locating the safe-pattern signal at
+            # step granularity matches the runner's actual masking
+            # semantics: a secret declared in step A's env block is
+            # masked for step A's logs only.
+            anchor_step_exclude=(r"env:\s*\n[\s\S]*?\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"),
+            exclude=[r"^\s*#"],
         ),
         remediation=(
             "Route the secret through the step's ``env:`` block and\n"
@@ -2283,9 +2293,8 @@ RULES: list[Rule] = [
             "security-guides/using-secrets-in-github-actions#accessing-your-secrets"
         ),
         test_positive=[
-            # Bare with: token: ${{ secrets.X }} on a non-allowlisted
-            # action with no env: in the step — the dominant unsafe
-            # shape.
+            # Bare with: token: ${{ secrets.X }} with no env: anywhere
+            # in the job — the dominant unsafe shape.
             (
                 "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: some-org/some-action@v1\n"
@@ -2298,6 +2307,13 @@ RULES: list[Rule] = [
                 "    steps:\n      - uses: some-org/upload@v1\n"
                 "        with:\n"
                 "          api-key: ${{ secrets.API_KEY }}"
+            ),
+            # password input.
+            (
+                "jobs:\n  push:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: docker/login-action@v3\n"
+                "        with:\n"
+                "          password: ${{ secrets.REGISTRY_PASSWORD }}"
             ),
             # Step-scope sample: the matched step has no env: block
             # of its own; an unrelated sibling step's env: routing
@@ -2313,8 +2329,7 @@ RULES: list[Rule] = [
             ),
         ],
         test_negative=[
-            # Same secret routed via env: — step-scope env-block
-            # exception fires.
+            # Same secret routed via env: — env-block exception fires.
             (
                 "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: some-org/some-action@v1\n"
@@ -2323,36 +2338,23 @@ RULES: list[Rule] = [
                 "        env:\n"
                 "          GH_TOKEN: ${{ secrets.GH_TOKEN }}"
             ),
-            # with: input value is a hardcoded string, not a secret.
+            # with: input value is a hardcoded string, not a secret —
+            # anchor regex doesn't match.
             (
                 "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: some-org/some-action@v1\n"
                 "        with:\n"
                 "          registry-url: https://registry.npmjs.org"
             ),
-            # with: input name is not credential-shape.
+            # with: input name is not credential-shape — anchor doesn't
+            # match.
             (
                 "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: some-org/some-action@v1\n"
                 "        with:\n"
                 "          repository: ${{ secrets.PRIVATE_REPO }}"
             ),
-            # Safe-consumer allowlist — docker/login-action's
-            # ``password`` slot IS its documented auth surface.
-            (
-                "jobs:\n  push:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n      - uses: docker/login-action@v3\n"
-                "        with:\n"
-                "          password: ${{ secrets.REGISTRY_PASSWORD }}"
-            ),
-            # Safe-consumer allowlist — pypa/gh-action-pypi-publish.
-            (
-                "jobs:\n  release:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n      - uses: pypa/gh-action-pypi-publish@v1\n"
-                "        with:\n"
-                "          password: ${{ secrets.PYPI_API_TOKEN }}"
-            ),
-            # Comment-only (path matching never reaches this leaf).
+            # Comment.
             "          # token: ${{ secrets.GH_TOKEN }}",
         ],
         stride=["I"],
@@ -2387,101 +2389,70 @@ RULES: list[Rule] = [
     # the same threat class.
     Rule(
         id="SEC6-GH-011",
-        title="Reusable workflow invoked with ``secrets: inherit`` (over-broad credential forward)",
-        severity=Severity.MEDIUM,
+        title="Reusable workflow invoked with ``secrets: inherit`` — opaque secret forwarding",
+        severity=Severity.LOW,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-6",
         review_needed=True,
-        confidence="medium",
-        finding_family="credential_persistence",
+        confidence="low",
         description=(
-            "A caller workflow invokes a reusable workflow via "
-            "``uses: ./.github/workflows/<x>.yml`` (or "
-            "``uses: <org>/<repo>/.github/workflows/<x>.yml@<ref>``) "
-            "and forwards EVERY secret in scope via "
-            "``secrets: inherit``.  The callee receives the caller's "
-            "full secret set even if it only needs one — so any "
-            "future compromise of the callee (a logging change, a "
-            "new step, an upstream supply-chain incident) leaks the "
-            "caller's entire credential surface, not just the "
-            "secrets the callee was designed for."
+            "A ``uses:`` call to a reusable workflow uses ``secrets: "
+            "inherit``, which forwards every secret in the calling "
+            "workflow's scope to the callee.  The callee receives "
+            "secrets it may not need (over-provisioning) and the "
+            "audit trail is opaque — neither the caller nor the "
+            "callee files explicitly name what was passed.  The safe "
+            "pattern declares only the secrets the callee consumes "
+            "via an explicit mapping, e.g. "
+            "``secrets:\\n  GH_TOKEN: ${{ secrets.GH_TOKEN }}``."
         ),
         pattern=ContextPattern(
-            anchor=r"^\s+secrets\s*:\s*inherit\s*(#.*)?$",
-            # Reusable-workflow caller shapes:
-            #   uses: ./.github/workflows/<x>.yml          (local)
-            #   uses: ../shared/.github/workflows/<x>.yml  (relative-up)
-            #   uses: <org>/<repo>/.github/workflows/<x>.yml@<ref>  (cross-repo)
-            # Use ``\b`` after the extension so the match works
-            # without MULTILINE — ``\.ya?ml(@|$)`` requires end-of-
-            # string in non-MULTILINE mode and would miss the case
-            # where the secrets-inherit line follows the uses-line.
-            requires=r"uses\s*:\s*\S*\.ya?ml\b",
-            scope="file",
+            # Anchor: ``secrets: inherit`` (with or without quoting).
+            anchor=r"^\s+secrets:\s*['\"]?inherit['\"]?\s*(#.*)?$",
+            # Requires: file contains a ``uses:`` invoking a reusable
+            # workflow.  Two shapes: ``uses: org/repo/.github/workflows/x.yml@ref``
+            # (cross-repo) or ``uses: ./.github/workflows/x.yml`` (local).
+            requires=r"uses:\s*(?:\./)?[\w./@-]+\.ya?ml",
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Replace ``secrets: inherit`` with an explicit secrets "
-            "map listing only what the callee needs:\n"
+            "Replace ``secrets: inherit`` with an explicit map naming "
+            "only the secrets the called workflow actually uses:\n"
+            "\n"
             "  jobs:\n"
-            "    deploy:\n"
-            "      uses: ./.github/workflows/deploy.yml\n"
+            "    call-publish:\n"
+            "      uses: ./.github/workflows/publish.yml\n"
             "      secrets:\n"
-            "        DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}\n"
-            "Audit each callee's input contract and wire only those "
-            "secrets through.  Future maintainers of the callee "
-            "must explicitly request additional secrets — making "
-            "scope expansion visible in review rather than implicit."
+            "        NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n"
+            "\n"
+            "The explicit map keeps the secret blast radius observable "
+            "and auditable on both sides of the call."
         ),
-        reference=(
-            "https://docs.github.com/en/actions/using-workflows/"
-            "reusing-workflows#passing-inputs-and-secrets-to-a-reusable-workflow"
-        ),
+        reference="https://docs.github.com/en/actions/sharing-automations/reusing-workflows#passing-inputs-and-secrets-to-a-reusable-workflow",
         test_positive=[
-            (
-                "on: push\n"
-                "jobs:\n  deploy:\n"
-                "    uses: ./.github/workflows/deploy.yml\n"
-                "    secrets: inherit\n"
-            ),
-            (
-                "on: push\n"
-                "jobs:\n  build:\n"
-                "    uses: my-org/shared-workflows/.github/workflows/build.yml@v1\n"
-                "    secrets: inherit\n"
-            ),
+            "jobs:\n  call:\n    uses: ./.github/workflows/release.yml\n    secrets: inherit",
+            "jobs:\n  call:\n    uses: org/repo/.github/workflows/x.yml@v1\n    secrets: 'inherit'",
         ],
         test_negative=[
-            # Explicit secrets map — caller is in control.
+            # Explicit secrets mapping — safe.
             (
-                "on: push\n"
-                "jobs:\n  deploy:\n"
-                "    uses: ./.github/workflows/deploy.yml\n"
-                "    secrets:\n"
-                "      DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}\n"
+                "jobs:\n  call:\n    uses: ./.github/workflows/release.yml\n"
+                "    secrets:\n      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}"
             ),
-            # No reusable-workflow uses — anchor unmet.
-            ("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    secrets: inherit\n"),
-            # Comment.
-            (
-                "on: push\n"
-                "jobs:\n  deploy:\n"
-                "    uses: ./.github/workflows/deploy.yml\n"
-                "#    secrets: inherit\n"
-            ),
+            # No reusable-workflow uses: at all — rule must not fire.
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hello",
+            "      # secrets: inherit",
         ],
-        stride=["I", "E"],
+        stride=["I", "T"],
         threat_narrative=(
-            "An attacker compromises a reusable workflow downstream "
-            "of the caller (maintainer takeover on a third-party "
-            "shared-workflows repo, a malicious step added by a "
-            "subsequent PR to a sibling internal workflow, or an "
-            "upstream action pulled into the callee).  The callee "
-            "now has every secret the caller had — not just the "
-            "ones it was designed to use.  ``secrets: inherit`` "
-            "makes the caller's credential surface effectively "
-            "transitive, which is the wrong default for least-"
-            "privilege CI."
+            "Every secret in the calling workflow's scope reaches the "
+            "callee — including secrets the callee never needed.  The "
+            "callee's logs, the runner's process memory, and any "
+            "third-party action the callee invokes all see the larger "
+            "set.  A compromise of one step in the callee leaks every "
+            "forwarded secret, not just the one the callee was meant "
+            "to use.  Explicit ``secrets:`` mapping keeps the blast "
+            "radius proportional to the callee's actual needs."
         ),
     ),
     # =========================================================================

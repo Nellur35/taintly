@@ -147,13 +147,26 @@ RULES: list[Rule] = [
                 # Variable inside SINGLE quotes: `$VAR` is literal text
                 # in bash, no expansion happens — no injection surface.
                 r"'\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?'",
-                # Bash [[ ... ]] conditionals suppress word splitting
-                # and glob expansion, so these variables are not an
-                # unquoted shell-injection surface.
+                # Bash ``[[ ]]`` conditional — per Bash manual §3.2.5.2,
+                # word splitting and pathname expansion are NOT performed
+                # on words between ``[[`` and ``]]``.  An unquoted variable
+                # reference there cannot inject.  Mirrors the
+                # equivalent exclude on SEC4-GL-003 (already present for
+                # the CI_COMMIT_REF_NAME family).  Surfaced on
+                # gitlab-org/cli `.gitlab-ci.yml:147` and gitlab-org/
+                # gitlab-runner `.gitlab/ci/qa.gitlab-ci.yml:227` during
+                # the 2026-05-19 negative-corpus harvest.
                 r"\[\[[^\n]*\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?[^\n]*\]\]",
-                # Bash assignment RHS is one word; word splitting is not
-                # applied to NAME=$CI_* assignments.
-                r"^\s*-?\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?\s*$",
+                # Bash variable assignment — per Bash manual §3.5.6,
+                # word splitting and pathname expansion are NOT
+                # performed on the RHS of a variable assignment.
+                # ``VAR=$X`` is equivalent to ``VAR="$X"`` (the entire
+                # expanded value binds as a single string).  Anchor on
+                # ``IDENT=$CI_...`` at the start of a shell-line
+                # position — not inside quotes, not inside a command
+                # argument.  The ``(?<![./\w])`` lookbehind prevents
+                # matching path fragments like ``../VAR=$X``.
+                r"(?<![./\w])\b[A-Z_][A-Z0-9_]*=\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?\b",
             ],
             # Quoted-marker heredoc bodies (<<'EOF' / <<"EOF" / <<\EOF)
             # suppress $VAR expansion per Bash §3.6.6; skip those lines.
@@ -579,7 +592,12 @@ RULES: list[Rule] = [
         ),
         pattern=SequencePattern(
             pattern_a=r"^\s*artifacts:\s*$",
-            absent_within=r"""access:\s*['\"]?(developer|none|maintainer)['\"]?\b""",
+            # GitLab CI accepts the access value with optional single or
+            # double quotes (e.g. ``access: "developer"``); the regex
+            # must allow both quoted and unquoted forms.  Pre-2026-05
+            # version did not, producing FPs on every quoted access
+            # declaration (round-2 corpus review, sec9-gl-001.md #29).
+            absent_within=r"""access:\s*['"]?(developer|none|maintainer)['"]?\b""",
             lookahead_lines=12,
             exclude=[r"^\s*#"],
         ),
@@ -600,6 +618,10 @@ RULES: list[Rule] = [
         test_negative=[
             "build:\n  script:\n    - make build\n  artifacts:\n    access: developer\n    paths:\n      - dist/",
             "test:\n  script:\n    - pytest\n  artifacts:\n    access: none\n    reports:\n      junit: report.xml",
+            # GitLab CI accepts optional quotes around the value;
+            # rule must not FP on either form.
+            'test:\n  script:\n    - pytest\n  artifacts:\n    access: "developer"\n    reports:\n      junit: report.xml',
+            "publish:\n  script:\n    - make release\n  artifacts:\n    access: 'maintainer'\n    paths:\n      - dist/",
         ],
         stride=["I"],
         threat_narrative=(
@@ -873,7 +895,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC1-GL-002",
-        title="Security scanning job configured to allow failure or manual run — verify gating policy",
+        title="Security scanning job configured to allow failure or manual run - verify gating policy",
         severity=Severity.MEDIUM,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-1",
@@ -1239,68 +1261,6 @@ RULES: list[Rule] = [
     # the GitHub-Actions rule.
     Rule(
         id="SEC4-GL-008",
-        title="Base64-decoded payload piped directly into shell or interpreter (GitLab CI)",
-        severity=Severity.HIGH,
-        platform=Platform.GITLAB,
-        owasp_cicd="CICD-SEC-4",
-        finding_family="script_injection",
-        description=(
-            "A GitLab CI ``script:`` step decodes a base64 string and "
-            "pipes the decoded bytes directly into bash / sh / zsh / "
-            "fish / python / perl / ruby / node.  Encoded payloads "
-            "bypass diff-review heuristics and string-pattern scanners "
-            "that don't decode before matching."
-        ),
-        pattern=RegexPattern(
-            match=(
-                # ``\b`` after the interpreter list prevents matching
-                # ``sh`` inside ``sha256sum`` / ``shasum``.
-                r"\|\s*base64\s+(-d|--decode)\s*\|\s*(bash|sh|zsh|fish|python|perl|ruby|node)\b"
-                r"|\bopenssl\s+enc\s+(-d|-base64|-d\s+-base64|-base64\s+-d)[^|\n]*\|\s*(bash|sh|zsh|python|perl)\b"
-            ),
-            exclude=[r"^\s*#"],
-        ),
-        remediation=(
-            "Never pipe a decoded payload to a shell.  If the encoded "
-            "data is legitimately needed, decode to a file, verify a "
-            "checksum, and only then execute:\n"
-            "  script:\n"
-            '    - echo "$ENCODED" | base64 -d > payload.bin\n'
-            "    - sha256sum -c payload.sha256\n"
-            "    - ./payload.bin"
-        ),
-        reference="https://owasp.org/www-project-top-10-ci-cd-security-risks/",
-        test_positive=[
-            "    - echo 'aHR0cHM6Ly9' | base64 -d | bash",
-            "    - echo $X | base64 --decode | sh",
-            '    - echo "${PAYLOAD}" | base64 -d | python',
-            "    - openssl enc -d -base64 <<< $X | bash",
-        ],
-        test_negative=[
-            "    - echo $X | base64 -d > payload.bin",
-            "    - echo $PASSWORD | base64",
-            "    - echo $X | base64 -d | sha256sum",
-            "    # - echo $X | base64 -d | bash",
-        ],
-        stride=["T", "E"],
-        threat_narrative=(
-            "Encoded payloads are the canonical fingerprint of "
-            "supply-chain attack code in CI: documented incidents in "
-            "GitHub Actions used base64-encoded shells to evade diff "
-            "reviewers and static scanners.  The same evasion shape "
-            "applies to GitLab CI ``script:`` blocks — executing any "
-            "decoded payload gives an attacker arbitrary code "
-            "execution with access to all CI variables and pipeline "
-            "secrets."
-        ),
-        incidents=["Ultralytics (Dec 2024, GH analog)", "Trivy supply chain (Mar 2026, GH analog)"],
-    ),
-    # =========================================================================
-    # SEC4-GL-009: dotenv artifact transit — review variables flowing
-    # between jobs via ``artifacts:reports:dotenv``
-    # =========================================================================
-    Rule(
-        id="SEC4-GL-009",
         title="dotenv artifact transit — variables passed between jobs need source review",
         severity=Severity.LOW,
         platform=Platform.GITLAB,
@@ -1317,6 +1277,85 @@ RULES: list[Rule] = [
             "(``$CI_COMMIT_TITLE``, ``$CI_MERGE_REQUEST_TITLE``, file "
             "contents, branch name).  Review every producer job's "
             "logic that writes into the dotenv artifact — if any "
+            "upstream value is attacker-controllable, sanitise at the "
+            "producer (allowlist regex, character-class filter) "
+            "before writing to ``$GITLAB_OUTPUT``-equivalent dotenv "
+            "files.  SEC4-GL-001 already covers the direct splice of "
+            "predefined CI variables; this rule covers the indirect "
+            "transit form."
+        ),
+        pattern=DotenvReportPattern(),
+        remediation=(
+            "Audit the producer job that writes to the dotenv "
+            "artifact:\n"
+            "\n"
+            "  build:\n"
+            "    script:\n"
+            "      # If CI_COMMIT_TITLE can carry attacker bytes,\n"
+            "      # sanitise before writing.\n"
+            '      - SAFE_TITLE=$(echo "$CI_COMMIT_TITLE" | tr -cd "[:alnum:] -")\n'
+            '      - echo "TITLE=$SAFE_TITLE" >> build.env\n'
+            "    artifacts:\n"
+            "      reports:\n"
+            "        dotenv: build.env\n"
+            "\n"
+            'The consumer\'s ``script: - echo \\"$TITLE\\"`` is then '
+            "safe because the producer enforces the alphabet."
+        ),
+        reference="https://docs.gitlab.com/ee/ci/yaml/artifacts_reports.html#artifactsreportsdotenv",
+        test_positive=[
+            (
+                'build:\n  stage: build\n  script:\n    - echo "VERSION=$CI_COMMIT_TAG" > vars.env\n'
+                "  artifacts:\n    reports:\n      dotenv: vars.env\n"
+            ),
+            (
+                'produce:\n  script:\n    - echo "X=value" > out.env\n'
+                "  artifacts:\n    reports:\n      dotenv: out.env\n"
+            ),
+        ],
+        test_negative=[
+            # Non-dotenv artifact reports — different transit channel.
+            (
+                "test:\n  script:\n    - pytest\n"
+                "  artifacts:\n    reports:\n      junit: junit.xml\n"
+            ),
+            # No reports: block at all.
+            "build:\n  script:\n    - make\n  artifacts:\n    paths:\n      - dist/\n",
+        ],
+        stride=["T"],
+        threat_narrative=(
+            "Dotenv artifacts are an opaque transit channel for "
+            "attacker-controllable bytes.  A pipeline author who "
+            "carefully quotes ``$CI_COMMIT_TITLE`` in a build job's "
+            "script can still be compromised when that job writes the "
+            "title to a dotenv artifact and a downstream job splices "
+            "it into a shell command unquoted.  SEC4-GL-001 catches "
+            "the direct form; this rule surfaces the transit form for "
+            "producer-side review."
+        ),
+    ),
+    # =========================================================================
+    # SEC4-GL-009: dotenv artifact transit — review variables flowing
+    # between jobs via ``artifacts:reports:dotenv``
+    # =========================================================================
+    Rule(
+        id="SEC4-GL-009",
+        title="dotenv artifact transit â€” variables passed between jobs need source review",
+        severity=Severity.LOW,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-4",
+        review_needed=True,
+        confidence="low",
+        description=(
+            "The pipeline uses ``artifacts:reports:dotenv`` to pass "
+            "variables from a producer job to a consumer job via "
+            "``needs:``.  Dotenv artifacts are an opaque taint transit "
+            "channel: the consumer job's ``script:`` references "
+            "``$KEY`` and has no static way to know whether the "
+            "producer derived KEY from attacker-controllable context "
+            "(``$CI_COMMIT_TITLE``, ``$CI_MERGE_REQUEST_TITLE``, file "
+            "contents, branch name).  Review every producer job's "
+            "logic that writes into the dotenv artifact â€” if any "
             "upstream value is attacker-controllable, sanitise at the "
             "producer before writing to the dotenv file.  GitLab "
             "analog of SEC4-GH-023 (step-output injection)."

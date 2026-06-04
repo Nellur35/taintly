@@ -18,14 +18,7 @@ RULES: list[Rule] = [
     Rule(
         id="SEC10-GH-001",
         title="GitHub Actions job has no timeout — unlimited runtime allowed",
-        # Severity is INFO (not LOW): firing on every untimed job
-        # creates fatigue without proportional risk signal.  INFO
-        # keeps it visible (review-needed=True surfaces it in scored
-        # reports) without dominating LOW-or-above runs.
-        # Operators who specifically want timeout enforcement at LOW
-        # severity can override with .taintly.yml.
-        severity=Severity.INFO,
-        review_needed=True,
+        severity=Severity.LOW,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-10",
         description=(

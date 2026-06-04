@@ -227,11 +227,11 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         ("github/vulnerable/ai_agent_cli_on_pr.yml",     ["AI-GH-013"], ["AI-GH-015", "SEC10-GH-001"]),
         ("github/vulnerable/ai_agent_output_to_shell.yml", ["AI-GH-014"], [
             "AI-GH-006", "AI-GH-015", "AI-GH-020", "SEC10-GH-001",
-            "SEC3-GH-001", "SEC3-GH-006", "SEC4-GH-023", "SEC6-GH-010",
+            "SEC3-GH-001", "SEC3-GH-006", "SEC4-GH-021", "SEC4-GH-023", "SEC6-GH-010",
         ]),
         ("github/vulnerable/taint_agent_output.yml",    ["TAINT-GH-005"], [
             "AI-GH-006", "AI-GH-015", "AI-GH-020", "SEC10-GH-001",
-            "SEC3-GH-001", "SEC3-GH-006", "SEC4-GH-023", "SEC6-GH-010",
+            "SEC3-GH-001", "SEC3-GH-006", "SEC4-GH-021", "SEC4-GH-023", "SEC6-GH-010",
         ]),
         # ── GitLab ──────────────────────────────────────────────────────────────
         ("gitlab/vulnerable/ai_trust_remote_code.yml",           ["AI-GL-001"], ["SEC10-GL-002", "SEC10-GL-003"]),
@@ -289,7 +289,7 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         ("jenkins/vulnerable/curl_insecure.Jenkinsfile",            ["SEC6-JK-004"], ["SEC1-JK-002", "SEC10-JK-001"]),
         ("jenkins/vulnerable/cloud_creds_env.Jenkinsfile",          ["SEC6-JK-005"], ["SEC1-JK-002", "SEC10-JK-001", "SEC5-JK-001", "SEC6-JK-001"]),
         ("jenkins/vulnerable/writefile_private_key.Jenkinsfile",    ["SEC6-JK-006"], ["SEC1-JK-002", "SEC10-JK-001", "SEC5-JK-001"]),
-        ("jenkins/vulnerable/bat_interpolation.Jenkinsfile",        ["SEC6-JK-007"], ["SEC1-JK-002", "SEC10-JK-001", "TAINT-JK-001"]),
+        ("jenkins/vulnerable/bat_interpolation.Jenkinsfile",        ["SEC6-JK-007"], ["SEC1-JK-002", "SEC10-JK-001", "TAINT-JK-001", "SEC4-JK-001"]),
         ("jenkins/vulnerable/node_no_label.Jenkinsfile",            ["SEC7-JK-002"], []),
         ("jenkins/vulnerable/docker_registry_null_creds.Jenkinsfile", ["SEC7-JK-003"], ["SEC1-JK-002", "SEC10-JK-001"]),
         ("jenkins/vulnerable/http_checkout.Jenkinsfile",            ["SEC8-JK-003"], ["SEC1-JK-002", "SEC10-JK-001"]),

@@ -599,7 +599,13 @@ RULES: list[Rule] = [
             "want timeout enforcement at LOW severity can override with .taintly.yml."
         ),
         pattern=ContextPattern(
+            # Anchor: any indented ``script:`` (the most reliable
+            # job marker in GitLab CI; jobs differ from GitHub by
+            # being top-level keys without a ``runs-on:`` marker).
             anchor=r"^\s{2,}script\s*:",
+            # Requires presence of ``script:`` itself — ensures this
+            # is a real pipeline file, not a fragment.  (Same shape
+            # SEC10-GH-001 uses with ``steps\s*:`` for GHA.)
             requires=r"script\s*:",
             # Fires when the file has no parseable ``timeout:`` value
             # anywhere — covers both per-job and the ``default:``

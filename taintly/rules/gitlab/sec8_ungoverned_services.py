@@ -117,7 +117,7 @@ RULES: list[Rule] = [
             "A GitLab CI `include: project:` directive pulls CI configuration from an "
             "external project without specifying a commit SHA as the `ref:`. "
             "Without a pinned ref, GitLab resolves the include against the default branch "
-            "at pipeline creation time â€” any push to that branch immediately affects all "
+            "at pipeline creation time — any push to that branch immediately affects all "
             "pipelines that include it. "
             "A branch name or tag ref is mutable: the branch can be force-pushed, the tag "
             "can be recreated to point at different content. "
