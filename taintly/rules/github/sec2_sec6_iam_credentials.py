@@ -212,6 +212,66 @@ class _OverbroadWorkflowPermissionsPattern:
         return count
 
 
+class _LongLivedCloudCredentialsPattern:
+    """SEC6-GH-003 emits once per credential set per workflow.
+
+    AWS key ID and secret key normally appear as a pair in every job of a
+    generated workflow. Reporting both variables in every job turns a
+    true posture finding into noise, so the rule coalesces repeated AWS
+    pairs while still keeping distinct production/staging credential sets
+    and distinct GCP/Azure credential families visible.
+    """
+
+    _AWS_RE = re.compile(r"(?i)\b(?:AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)\s*:")
+    _GCP_RE = re.compile(r"(?i)\bGOOGLE_CREDENTIALS\s*:")
+    _AZURE_RE = re.compile(r"(?i)\bAZURE_CREDENTIALS\s*:")
+    _SECRET_EXPR_RE = re.compile(r"\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}")
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        for i, line in enumerate(lines):
+            stripped = line.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                continue
+            credential_key = self._credential_key(line)
+            if not credential_key or credential_key in seen:
+                continue
+            seen.add(credential_key)
+            results.append((i + 1, line.strip()))
+        return results
+
+    def _credential_key(self, line: str) -> str:
+        if self._AWS_RE.search(line):
+            return f"aws:{self._aws_set_key(line)}"
+        if self._GCP_RE.search(line):
+            return "gcp"
+        if self._AZURE_RE.search(line):
+            return "azure"
+        return ""
+
+    def _aws_set_key(self, line: str) -> str:
+        secret_name_match = self._SECRET_EXPR_RE.search(line)
+        if not secret_name_match:
+            return "default"
+
+        secret_name = secret_name_match.group(1).upper()
+        if secret_name.startswith("AWS_"):
+            secret_name = secret_name.removeprefix("AWS_")
+
+        for suffix in (
+            "_SECRET_ACCESS_KEY",
+            "_ACCESS_KEY_ID",
+            "SECRET_ACCESS_KEY",
+            "ACCESS_KEY_ID",
+        ):
+            if secret_name.endswith(suffix):
+                secret_name = secret_name[: -len(suffix)]
+                break
+
+        return secret_name.strip("_") or "default"
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # CICD-SEC-2: Inadequate Identity and Access Management
@@ -299,11 +359,7 @@ RULES: list[Rule] = [
             "``permissions:``, scoped so each job gets exactly what it "
             "needs.  Use file-level ``permissions:`` only for read "
             "scopes that genuinely apply to every job; declare any "
-            "write scope on the specific job that needs it.\n"
-            "\n"
-            "Maps to zizmor's ``excessive-permissions`` audit — the "
-            "single biggest coverage gap surfaced by the round-3 "
-            "taintly-vs-zizmor cross-tool diff."
+            "write scope on the specific job that needs it."
         ),
         pattern=_OverbroadWorkflowPermissionsPattern(),
         remediation=(
@@ -313,7 +369,7 @@ RULES: list[Rule] = [
             "With:\n"
             "  permissions:\n    contents: read\n  jobs:\n    test:\n      permissions:\n        contents: read\n    publish:\n      permissions:\n        contents: write\n\n"
             "Reusable workflows (``on: workflow_call``-only) inherit the caller's "
-            "permissions and are exempt from this rule."
+            "permissions and are exempt from this rule — see SEC2-GH-002 sibling."
         ),
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication#modifying-the-permissions-for-the-github_token",
         test_positive=[
@@ -329,20 +385,24 @@ RULES: list[Rule] = [
             ),
         ],
         test_negative=[
+            # Single-job workflow — no scoping leverage, rule skips.
             (
                 "permissions:\n  contents: write\non: push\n"
                 "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: build.sh\n"
             ),
+            # All workflow-level scopes are read — fine.
             (
                 "permissions:\n  contents: read\non: push\n"
                 "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: x\n"
                 "  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: y\n"
             ),
+            # write-all is SEC2-GH-001's scope — don't double-report.
             (
                 "permissions: write-all\non: push\n"
                 "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: x\n"
                 "  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: y\n"
             ),
+            # Reusable workflow — inherits caller's permissions, exempt.
             (
                 "permissions:\n  contents: write\non:\n  workflow_call:\n"
                 "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: x\n"
@@ -430,10 +490,7 @@ RULES: list[Rule] = [
             "instead of OIDC-based short-lived tokens. Long-lived credentials can be exfiltrated "
             "and reused — OIDC tokens are scoped and ephemeral."
         ),
-        pattern=RegexPattern(
-            match=r"(?i)(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|GOOGLE_CREDENTIALS|AZURE_CREDENTIALS)\s*:",
-            exclude=[r"^\s*#"],
-        ),
+        pattern=_LongLivedCloudCredentialsPattern(),
         remediation=(
             "Use OIDC for cloud authentication:\n"
             "permissions:\n  id-token: write\n"

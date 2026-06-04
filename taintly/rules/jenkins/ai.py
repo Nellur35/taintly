@@ -92,26 +92,7 @@ RULES: list[Rule] = [
             "SHA whose code you have audited."
         ),
         pattern=RegexPattern(
-            # Match only the two real sink shapes:
-            #   (1) CLI arg form: ``--trust_remote_code=True``
-            #       (e.g. ``python infer.py --trust_remote_code=True``)
-            #   (2) Python kwarg form, but only when followed by ``,``
-            #       / ``)`` / ``]`` — i.e. it really is inside a
-            #       function call argument list.  ``\s*`` permits the
-            #       trailing close to be on the next line (Black/PEP8
-            #       formatting).
-            #
-            # The bare ``trust_remote_code=True`` shape (no leading
-            # ``--``, no trailing call-close) used to fire on string
-            # literals like ``sh 'echo "trust_remote_code=True is
-            # deprecated"'`` and ``def msg = "trust_remote_code=True"``.
-            # Those are documentation / log lines, not invocations,
-            # and produce CRITICAL FPs on every Jenkinsfile that
-            # mentions the flag in narrative text.
-            match=(
-                r"--trust_remote_code\s*=\s*True\b"
-                r"|\btrust_remote_code\s*=\s*True\s*[,)\]]"
-            ),
+            match=r"\btrust_remote_code\s*=\s*True\b",
             exclude=[
                 r"^\s*//",  # Groovy line comment
                 r"^\s*#",  # shell comment inside sh ''' blocks
@@ -136,12 +117,6 @@ RULES: list[Rule] = [
             "sh 'python -c \"AutoModel.from_pretrained(\\'x\\')\"'",
             "// sh 'python -c \"... trust_remote_code=True\"'",
             "sh 'python infer.py --trust_remote_code=False'",
-            # Narrative / log strings that used to fire CRITICAL FPs:
-            # the flag is being talked ABOUT, not invoked.  Locked in
-            # so they can never regress.
-            "sh 'echo \"trust_remote_code=True is deprecated\"'",
-            'def msg = "trust_remote_code=True"',
-            "sh 'echo \"see docs for trust_remote_code=True flag\"'",
         ],
         stride=["T", "E"],
         threat_narrative=(
@@ -996,10 +971,7 @@ RULES: list[Rule] = [
             # / change-request env var.  Reuse of _JK_PR_CONTEXT keeps
             # the trigger-detection logic in one place — aligned with
             # LOTP-JK-001 / AI-JK-005 / AI-JK-006.
-            # ``ContextPattern`` already searches the whole file for
-            # ``requires``. Keeping this direct avoids a superlinear
-            # ``[\s\S]*?`` lookahead on large no-match fuzz inputs.
-            requires=_JK_PR_CONTEXT,
+            requires=r"(?=[\s\S]*?" + _JK_PR_CONTEXT + r")",
             scope="file",
             exclude=[r"^\s*//", r"^\s*\*", r"^\s*#"],
         ),

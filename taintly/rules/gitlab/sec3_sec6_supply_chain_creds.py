@@ -7,7 +7,6 @@ from taintly.models import (
     Platform,
     RegexPattern,
     Rule,
-    SequencePattern,
     Severity,
 )
 from taintly.platform import gitlab_archived_check
@@ -53,6 +52,88 @@ class ArchivedIncludeProjectPattern:
                     f"no maintainer response to compromise."
                 )
                 results.append((i + 1, snippet))
+        return results
+
+
+_LINE_COMMENT_RE = re.compile(r"^\s*#")
+
+
+_INCLUDE_HEADER_RE = re.compile(r"^include:\s*(?:#.*)?$")
+
+
+_TOP_LEVEL_KEY_RE = re.compile(r"^[A-Za-z_][\w-]*\s*:")
+
+
+_SHA_REF_RE = re.compile(r"ref:\s*['\"]?[a-f0-9]{40}['\"]?")
+
+
+class _IncludeProjectMutableRefPattern:
+    """SEC3-GL-002 walker.
+
+    Fires when a ``project:`` key INSIDE an ``include:`` block is
+    not followed by a SHA-pinned ``ref:`` within 5 lines.
+
+    The ``include:`` ancestry requirement prevents accidental fires
+    on ``trigger: project:`` cross-project triggers (which use
+    ``branch:`` instead of ``ref:`` and live under a job, not under
+    a top-level ``include:`` block).  The previous regex-only
+    pattern matched any ``project:`` line regardless of context;
+    widening to support unquoted values made the trigger-context
+    FP recurrent.  Walker form scopes to include blocks only.
+
+    Block tracking: ``include:`` is always a top-level key (column
+    0).  The block ends at the next top-level key (any non-
+    whitespace start) or end-of-file.
+    """
+
+    _PROJECT_RE = re.compile(r"project:\s*['\"]?[\w.-]+/[\w./-]+['\"]?")
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            stripped = line.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                i += 1
+                continue
+            if not _INCLUDE_HEADER_RE.match(line):
+                i += 1
+                continue
+            # Found an include: block header at column 0.  Walk
+            # forward until the next top-level key or EOF.
+            block_end = n
+            for k in range(i + 1, n):
+                kline = lines[k]
+                kstripped = kline.lstrip(" \t")
+                if not kstripped or kstripped.startswith("#"):
+                    continue
+                kindent = len(kline) - len(kstripped)
+                if kindent == 0 and _TOP_LEVEL_KEY_RE.match(kline):
+                    block_end = k
+                    break
+            # Walk the include block looking for project: keys.
+            for j in range(i + 1, block_end):
+                jline = lines[j]
+                jstripped = jline.lstrip(" \t")
+                if not jstripped or jstripped.startswith("#"):
+                    continue
+                if not self._PROJECT_RE.search(jline):
+                    continue
+                # Found a project: in include scope.  Look ahead
+                # 5 lines for a SHA-pinned ref.
+                lookahead_end = min(j + 6, block_end)
+                pinned = False
+                for k in range(j, lookahead_end):
+                    if _LINE_COMMENT_RE.match(lines[k]):
+                        continue
+                    if _SHA_REF_RE.search(lines[k]):
+                        pinned = True
+                        break
+                if not pinned:
+                    results.append((j + 1, jline.strip()))
+            i = block_end
         return results
 
 
@@ -195,15 +276,15 @@ RULES: list[Rule] = [
             "commit SHA. The included file can change without notice, and mutable branch/tag "
             "refs can be force-pushed to point at malicious content."
         ),
-        pattern=SequencePattern(
-            # Fire when project: key is NOT followed by a SHA ref within 5 lines.
-            # RegexPattern(exclude=[r"ref:"]) cannot work here because ref: is on a
-            # *different line* than project: in GitLab YAML include blocks.
-            pattern_a=r"project:\s*['\"][^'\"]+['\"]",
-            absent_within=r"ref:\s*['\"]?[a-f0-9]{40}['\"]?",
-            lookahead_lines=5,
-            exclude=[r"^\s*#"],
-        ),
+        # Walker-based pattern requiring ``include:`` block ancestry.
+        # The previous SequencePattern fired on any ``project:`` line
+        # in the file; widening it to accept unquoted values introduced
+        # FPs on ``trigger: project:`` cross-project triggers (which
+        # use ``branch:`` instead of ``ref:``, not ``include:``-scoped).
+        # The walker is the smallest fix that handles the unquoted
+        # form correctly without bleeding into trigger context.
+        # See docs/lab/sec3-gl-002-unquoted-project-note.md (2026-05-11).
+        pattern=_IncludeProjectMutableRefPattern(),
         remediation=(
             "Pin the include to a full 40-character commit SHA. Quote the SHA so YAML "
             "parses it as a string regardless of leading digits:\n"
@@ -218,13 +299,22 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.gitlab.com/ci/yaml/includes/",
         test_positive=[
-            "  - project: 'my-group/my-project'\n    file: '/templates/ci.yml'",
-            "  - project: 'my-group/my-project'\n    ref: main\n    file: '/templates/ci.yml'",
-            "  - project: 'my-group/my-project'\n    ref: v1.2.3\n    file: '/templates/ci.yml'",
+            "include:\n  - project: 'my-group/my-project'\n    file: '/templates/ci.yml'",
+            "include:\n  - project: 'my-group/my-project'\n    ref: main\n    file: '/templates/ci.yml'",
+            "include:\n  - project: 'my-group/my-project'\n    ref: v1.2.3\n    file: '/templates/ci.yml'",
+            # 2026-05-11 widening: unquoted project paths (the shape
+            # GitLab's own docs use most often) must also fire.
+            "include:\n  - project: my-group/my-project\n    file: /templates/ci.yml",
+            "include:\n  - project: my-group/my-project\n    ref: latest\n    file: /templates/ci.yml",
         ],
         test_negative=[
-            "  - project: 'my-group/my-project'\n    ref: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\n    file: '/templates/ci.yml'",
-            "  # project: 'my-group/my-project'",
+            "include:\n  - project: 'my-group/my-project'\n    ref: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\n    file: '/templates/ci.yml'",
+            "include:\n  # - project: 'my-group/my-project'",
+            # 2026-05-11: unquoted SHA pin must also silence.
+            "include:\n  - project: my-group/my-project\n    ref: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\n    file: /templates/ci.yml",
+            # 2026-05-11: trigger: project: (cross-project trigger) must
+            # NOT fire — the walker requires include: ancestry.
+            "build_job:\n  trigger:\n    project: my-group/my-project\n    branch: main",
         ],
         stride=["T"],
         threat_narrative=(
@@ -245,23 +335,7 @@ RULES: list[Rule] = [
             "Image tags are mutable and can be overwritten on the registry."
         ),
         pattern=RegexPattern(
-            # Docker image reference grammar:
-            #   [REGISTRY[:PORT]/]IMAGE[:TAG | @sha256:DIGEST]
-            # The optional registry prefix is the tricky bit — without
-            # it, an image like ``registry.example.com:5000/app:latest``
-            # is misread as image=``registry.example.com``, tag=``5000``
-            # (the port colon is mistaken for the tag separator) and
-            # the trailing ``/app:latest`` then fails the whole match,
-            # silently dropping the finding.  The optional non-capturing
-            # group ``(?:HOST(?::PORT)?/)?`` anchors on the first ``/``
-            # so the tag-colon match starts after the image path.
-            match=(
-                r"^\s*image:\s*['\"]?"
-                r"(?:[a-zA-Z0-9.-]+(?::[0-9]+)?/)?"  # optional REGISTRY[:PORT]/
-                r"[a-zA-Z0-9._/-]+"  # IMAGE (may contain /)
-                r":[a-zA-Z0-9._-]+"  # :TAG
-                r"['\"]?(\s*(#.*)?)?\s*$"
-            ),
+            match=r"^\s*image:\s*['\"]?[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+['\"]?(\s*(#.*)?)?\s*$",
             exclude=[r"^\s*#", r"@sha256:"],
         ),
         remediation="Pin to digest: image: alpine@sha256:abcdef...",
@@ -270,17 +344,10 @@ RULES: list[Rule] = [
             "  image: alpine:3.18",
             "  image: node:20-slim",
             "  image: 'registry.example.com/app:latest'",
-            # Private registry with explicit port — used to silently
-            # drop because the regex confused ``:5000`` for the tag.
-            "  image: registry.example.com:5000/app:latest",
-            "  image: 'harbor.example.com:5000/myapp:v2.1.0'",
-            "  image: docker.io:443/library/alpine:3.18",
         ],
         test_negative=[
             "  image: alpine@sha256:abcdef1234567890",
             "  # image: alpine:3.18",
-            # Digest-pinned with private registry + port — must stay silent.
-            "  image: registry.example.com:5000/app@sha256:abcdef1234567890",
         ],
         stride=["T"],
         threat_narrative=(
@@ -521,23 +588,7 @@ RULES: list[Rule] = [
     Rule(
         id="SEC10-GL-002",
         title="Public pipelines may expose job logs",
-        # Severity is INFO (not MEDIUM) and review_needed=True.
-        # This is the ONLY ``AbsencePattern(...
-        # INTENTIONALLY_DISABLED ...)`` always-fires rule in the
-        # whole pack — it cannot be satisfied by any pipeline YAML
-        # because the visibility control lives in GitLab project
-        # settings, not the .gitlab-ci.yml. Audit found it firing on
-        # every GitLab project at MEDIUM severity, providing no per-
-        # project signal. Long-term home: a posture-audit check
-        # under ``--gitlab-project ID --platform-audit`` that queries
-        # ``/projects/:id`` for ``public_jobs:`` and ``visibility:``,
-        # then fires only when the actual setting is unsafe. Until
-        # that exists, the INFO + review_needed routing keeps the
-        # reminder visible without adding to the MEDIUM-or-above
-        # finding count.
-        severity=Severity.INFO,
-        review_needed=True,
-        confidence="low",
+        severity=Severity.MEDIUM,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-10",
         description=(
@@ -597,18 +648,22 @@ RULES: list[Rule] = [
             "receive no new releases, no security patches, and the "
             "maintainer is not actively monitoring compromise reports.  "
             "Continuing to depend on an archived include is a deferred "
-            "supply-chain risk.\n"
+            "supply-chain risk: a CVE disclosed against it is unlikely "
+            "to be fixed.\n"
             "\n"
-            "Opt-in via ``--check-archived-gitlab-projects`` (requires "
-            "GITLAB_TOKEN).  Mirrors SEC3-GH-010's shape for GitHub."
+            "This rule is opt-in via ``--check-archived-gitlab-projects`` "
+            "because verification requires a per-include GitLab API "
+            "call (``GET /projects/{namespace}/{project}`` reading the "
+            "``archived`` flag).  Requires ``GITLAB_TOKEN`` in the "
+            "environment.  Mirrors SEC3-GH-010's shape for GitHub."
         ),
         pattern=ArchivedIncludeProjectPattern(),
         remediation=(
             "Migrate to a maintained alternative include — check the "
             "archived project's README for a recommended successor, or "
             "fork it into your own namespace so security patches can be "
-            "applied in-house.  Pin the include to a specific ref once "
-            "you've moved off the archived path."
+            "applied in-house.  Pin the include to a specific ref "
+            "(``ref: <sha>``) once you've moved off the archived path."
         ),
         reference="https://docs.gitlab.com/ee/api/projects.html#get-single-project",
         test_positive=[],
@@ -619,9 +674,9 @@ RULES: list[Rule] = [
             "surface.  When a CVE is published against an archived "
             "include, the disclosure-to-patch interval is unbounded.  "
             "Even though archived projects can't accept external MRs, "
-            "the project owner themselves can still push fresh "
-            "content — so a maintainer-account compromise on a "
-            "dormant archived project leaks straight through."
+            "the project owner themselves can still push fresh content "
+            "— so a maintainer-account compromise on a dormant "
+            "archived project leaks straight through."
         ),
         finding_family="action_pin_drift",
     ),

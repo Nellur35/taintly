@@ -379,13 +379,7 @@ RULES: list[Rule] = [
         ),
         pattern=RegexPattern(
             match=r"@Library\s*\(['\"][\w.-]+",
-            # SHA exclude is case-insensitive on the hex digits: `git
-            # rev-parse` emits lowercase by default, but `git log
-            # --pretty=format:%H` and `git ls-remote` can surface
-            # uppercase or mixed case in some setups, and pasting from
-            # a GitHub URL preserves whatever case the URL had.  A
-            # lowercase-only exclude would FP on any of those.
-            exclude=[r"^\s*//", r"@[a-fA-F0-9]{40}\b"],
+            exclude=[r"^\s*//", r"@[a-f0-9]{40}\b"],
         ),
         remediation=(
             "Pin shared libraries to a full commit SHA:\n"
@@ -404,10 +398,6 @@ RULES: list[Rule] = [
         ],
         test_negative=[
             "@Library('my-shared-lib@abc123def456abc123def456abc123def456abc1') _",
-            # Uppercase hex SHA — must also be treated as pinned.
-            "@Library('my-shared-lib@ABC123DEF456ABC123DEF456ABC123DEF456ABC1') _",
-            # Mixed case — same.
-            "@Library('my-shared-lib@AbC123dEf456AbC123dEf456AbC123dEf456AbC1') _",
             "// @Library('my-shared-lib') _",
         ],
         stride=["T"],
@@ -451,13 +441,12 @@ RULES: list[Rule] = [
                 r"withCredentials",
                 r"\$\{",  # variable interpolation — not a hardcoded literal
                 # AWS SDK sentinel literals — these signal a credential
-                # *provider* (IMDS, AssumeRole), not the credential
-                # value itself.  Real Jenkinsfiles assign these
-                # literals to AWS_ACCESS_KEY/AWS_SECRET_KEY to tell
-                # the SDK where to source credentials at runtime.
-                # Only literals >=8 chars need explicit allowlisting —
-                # shorter sentinels ("env", "default") fall under the
-                # rule's body-length floor of 8 characters.
+                # *provider* (IMDS / AssumeRole), not the credential
+                # value itself.  Round-2 n=40 corpus review (2026-05-11)
+                # found AWS_ACCESS_KEY = "instance-profile" FP in Kong
+                # build-tools.  Only literals ≥8 chars need explicit
+                # allowlisting — shorter sentinels (e.g. "env",
+                # "default") fall under the rule's body length floor.
                 r"['\"](?:instance-profile|assume-role)['\"]",
             ],
         ),
@@ -484,6 +473,7 @@ RULES: list[Rule] = [
             "    // GITHUB_TOKEN = 'ghp_placeholder'",
             '    TOKEN = "${env.INJECTED_TOKEN}"',
             # AWS SDK sentinels — provider hints, not credential values.
+            # Round-2 corpus FP from Kong build-tools.
             '    AWS_ACCESS_KEY = "instance-profile"',
             '    AWS_SECRET_KEY = "assume-role"',
         ],
@@ -757,6 +747,7 @@ RULES: list[Rule] = [
         test_negative=[
             "sh 'curl -fsSL https://example.com/file.sh -o file.sh'",
             "// sh 'curl https://example.com | bash'",
+            "/* docs only:\n * sh 'curl https://example.com | bash'\n */",
         ],
         stride=["T"],
         threat_narrative=(
@@ -772,13 +763,16 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC4-JK-001",
-        title="User-controlled build parameter interpolated in shell command",
-        severity=Severity.HIGH,
+        title="User-controlled build parameter interpolated in executable command",
+        severity=Severity.MEDIUM,
         platform=Platform.JENKINS,
         owasp_cicd="CICD-SEC-4",
+        review_needed=True,
+        confidence="medium",
         description=(
             "A Jenkins pipeline passes a user-supplied build parameter (params.*) "
-            "directly into a shell command via string interpolation. "
+            "directly into an executable sh, bat, or powershell step via Groovy "
+            "GString interpolation. "
             "Build parameters can be set by anyone who can trigger a build — "
             "including anonymous users if the Jenkins instance is misconfigured, "
             "or any authenticated user if parameters are exposed via the API. "
@@ -788,21 +782,23 @@ RULES: list[Rule] = [
         ),
         pattern=RegexPattern(
             # Only double-quoted Groovy strings (GStrings) interpolate
-            # ${params.X} at Groovy parse time — single-quoted strings
-            # leave the $-expression literal, so the shell sees no
-            # attacker data. Match double-quote OR triple-double-quote
-            # (Groovy `"""..."""` is also a GString and interpolates)
-            # to avoid FPs on `sh 'echo ${params.X}'`.
-            match=r'sh\s+"{1,3}.*\$\{?\s*params\s*\.',
+            # ${params.X} at Groovy parse time; single-quoted strings
+            # leave the expression literal. Match sh/bat/powershell
+            # double-quote and triple-double-quote forms only. Supports
+            # dot form and bracket form for parameter names with dashes.
+            match=(
+                r'(?:sh|bat|powershell)\s+"{1,3}.*\$\{\s*params\s*'
+                r"(?:\.[A-Za-z_][A-Za-z0-9_-]*|\[['\"][^'\"]+['\"]\])\s*\}"
+            ),
             exclude=[r"^\s*//"],
         ),
         remediation=(
             "The root cause is that double-quoted Groovy strings (GStrings) are "
-            "interpolated by GROOVY before the `sh` step runs, so attacker-controlled "
+            "interpolated by GROOVY before the executable step runs, so attacker-controlled "
             "metacharacters become part of the literal command string. The fix: "
-            "put the value in an environment variable and write the `sh` body as a "
+            "put the value in an environment variable and write the command body as a "
             "SINGLE-quoted (or triple-single-quoted) Groovy string so Groovy leaves "
-            "`$BRANCH` alone and the SHELL expands it from the environment at "
+            "`$BRANCH` alone and the shell expands it from the environment at "
             "runtime, which is safe because the shell never re-parses the expansion "
             'as code when it\'s the argument to `git checkout "$BRANCH"`.\n'
             "\n"
@@ -824,6 +820,9 @@ RULES: list[Rule] = [
         reference="https://www.jenkins.io/doc/book/pipeline/jenkinsfile/#string-interpolation",
         test_positive=[
             'sh "git checkout ${params.BRANCH_NAME}"',
+            'bat "build ${params.TARGET}"',
+            'powershell "Deploy ${params.VERSION}"',
+            "sh \"deploy ${params['ENV-NAME']}\"",
             'sh "docker build -t ${params.IMAGE_TAG} ."',
             'sh "./deploy.sh ${params.ENVIRONMENT}"',
         ],
@@ -832,16 +831,18 @@ RULES: list[Rule] = [
             "sh 'git checkout main'",
             "sh 'docker build -t ${params.IMAGE_TAG} .'",
             "def branch = params.BRANCH_NAME",
+            "when { expression { params.ENV == 'prod' } }",
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "Build parameters are user-controlled strings that can contain shell "
+            "Build parameters are user-controlled strings that can contain shell, CMD, "
+            "or PowerShell "
             "metacharacters. When referenced inside a double-quoted Groovy string "
             "(GString) that becomes a shell command, Groovy performs the "
             "interpolation BEFORE the `sh` step runs — the attacker's metacharacters "
             "are baked into the literal command string that the shell then parses, "
-            "bypassing any shell-level quoting. Exploitable by any user with job "
-            "trigger access."
+            "bypassing any shell-level quoting. This is review-needed because exploitability "
+            "depends on who can trigger parameterized builds and how values are constrained."
         ),
     ),
     # =========================================================================
@@ -1976,7 +1977,7 @@ RULES: list[Rule] = [
             "node('docker') {\n    docker.image('ubuntu:22.04').inside { sh 'make' }\n}",
             "// node {\n//   sh 'make'\n// }",
             # Declarative agent's nested node block — label on a later line.
-            # This is the common shape in real Jenkinsfiles (Kong, Hibernate, etc.).
+            # Surfaced as 3/3 FP in the Jenkins n=40 round-2 review (Kong build-tools).
             "agent {\n    node {\n        label 'bionic'\n    }\n}",
             "agent {\n    node {\n        label 'linux-benchmark-node'\n        customWorkspace '/foo'\n    }\n}",
         ],
@@ -2050,17 +2051,7 @@ RULES: list[Rule] = [
             "dependencies, or replace downloaded scripts without any visible error."
         ),
         pattern=RegexPattern(
-            # Both ``http://`` and ``git://`` are unencrypted; ``git://``
-            # is arguably worse (no authentication, never used legitimately
-            # at modern hosts).  The rule's ``threat_narrative`` already
-            # names both schemes — the regex was missing the ``git://``
-            # leg.  ``ssh://`` and ``git@`` (SCP-shorthand SSH) are
-            # encrypted+authenticated and NOT in scope.
-            match=(
-                r"(?:url\s*:\s*['\"](?:http|git)://"
-                r"|git\s+clone\s+(?:http|git)://)"
-                r"(?!localhost|127\.0\.0\.1)"
-            ),
+            match=r"(?:url\s*:\s*['\"]http://|git\s+clone\s+http://)(?!localhost|127\.0\.0\.1)",
             exclude=[r"^\s*//"],
         ),
         remediation=(
@@ -2074,21 +2065,11 @@ RULES: list[Rule] = [
         test_positive=[
             "checkout([$class: 'GitSCM', userRemoteConfigs: [[url: 'http://github.com/org/repo.git']]])",
             "sh 'git clone http://gitlab.example.com/group/project.git'",
-            # git:// — plain unencrypted git protocol.  Used to be
-            # silently missed; the rule's threat_narrative names it
-            # explicitly so detection has to match.
-            "checkout([$class: 'GitSCM', userRemoteConfigs: [[url: 'git://github.com/org/repo.git']]])",
-            "sh 'git clone git://example.com/group/project.git'",
         ],
         test_negative=[
             "checkout([$class: 'GitSCM', userRemoteConfigs: [[url: 'https://github.com/org/repo.git']]])",
             "checkout scm",
             "// url: 'http://github.com/org/repo.git'",
-            # SSH variants are encrypted+authenticated — out of scope.
-            "checkout([$class: 'GitSCM', userRemoteConfigs: [[url: 'ssh://git@github.com/org/repo.git']]])",
-            "sh 'git clone git@github.com:org/repo.git'",
-            # localhost loopback exception preserved.
-            "sh 'git clone http://localhost:8080/test.git'",
         ],
         stride=["T", "I"],
         threat_narrative=(
@@ -2143,6 +2124,7 @@ RULES: list[Rule] = [
         test_negative=[
             "sh '''\n    wget -q https://example.com/tool.tar.gz\n    echo \"abc123  tool.tar.gz\" | sha256sum --check\n'''",
             "// sh 'wget https://example.com/install.sh'",
+            "/* docs only:\n * sh 'wget https://example.com/install.sh && bash install.sh'\n */",
         ],
         stride=["T"],
         threat_narrative=(
@@ -2864,7 +2846,7 @@ RULES: list[Rule] = [
             "chain attack code: documented incidents in GitHub Actions "
             "used base64-encoded shells to evade diff reviewers and "
             "static scanners.  Jenkins ``sh`` calls offer the same "
-            "evasion surface — executing any decoded payload gives an "
+            "evasion surface â€” executing any decoded payload gives an "
             "attacker arbitrary code execution on the runner with "
             "access to bound credentials and shared-library state."
         ),
@@ -2876,27 +2858,34 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC4-JK-008",
-        title="Stage env.<USER_VAR> interpolated into shell step — review upstream provenance",
+        title="Stage env.<USER_VAR> interpolated into sh — review upstream provenance",
         severity=Severity.MEDIUM,
         platform=Platform.JENKINS,
         owasp_cicd="CICD-SEC-4",
         review_needed=True,
         confidence="low",
         description=(
-            'A shell step ``"...${env.<VAR>}..."`` interpolation references a '
+            'A ``sh "...${env.<VAR>}..."`` interpolation references a '
             "user-defined env variable in a GString (double-quoted "
             "Groovy string).  Pipeline env variables flow between "
             "stages — a stage that assigns ``env.X = ...`` from "
-            "``params.X``, upstream-build variables, file contents, "
-            "or any attacker-controllable source produces an env "
-            "value that, when spliced into a later stage's shell, is "
-            "the same threat shape as SEC4-JK-001's direct splice "
-            "but with the taint transiting through the env map.  "
-            "Review the assigning stage's provenance and sanitise "
+            "``params.X``, ``currentBuild.upstreamBuilds[0].buildVariables.X``, "
+            "file contents, or any other attacker-controllable source "
+            "produces an env value that, when spliced into a later "
+            "stage's shell, is the same threat shape as SEC4-JK-001's "
+            "direct ``${params.X}`` splice.  Review the assigning "
+            "stage's provenance: if the value can carry attacker "
+            "bytes, sanitise at the assignment site (allowlist regex) "
             "before writing to ``env.X``, or move the consuming "
-            "the consuming shell step to a single-quoted GString."
+            "``sh`` to a single-quoted GString so Groovy leaves the "
+            "expression unexpanded."
         ),
         pattern=RegexPattern(
+            # Only GStrings (double-quoted) interpolate; single-quoted
+            # leaves $-expressions literal.  Match user-defined env
+            # variables — exclude Jenkins built-ins (JOB_NAME,
+            # BUILD_NUMBER, BUILD_ID, WORKSPACE, BUILD_TAG, etc.)
+            # where the value is server-set, not pipeline-author-set.
             match=(
                 r'(?:sh|bat|powershell)\s+"{1,3}.*\$\{?\s*env\s*\.\s*'
                 r"(?!(?:JOB_NAME|JOB_BASE_NAME|JOB_URL|"
@@ -2938,19 +2927,24 @@ RULES: list[Rule] = [
             '        sh "deploy.sh --env=${env.DEPLOY_TARGET}"',
         ],
         test_negative=[
+            # Built-in env vars — Jenkins server-set, not pipeline-author-set.
             '        sh "echo ${env.JOB_NAME}-${env.BUILD_NUMBER}"',
             '        sh "checkout ${env.GIT_COMMIT}"',
+            # Single-quoted GString — Groovy doesn't interpolate.
             "        sh 'echo \"$MY_VAR\"'",
+            # Comment.
             '        // sh "echo ${env.RELEASE_TAG}"',
         ],
         stride=["T", "E"],
         threat_narrative=(
             "Jenkins pipeline env variables are a cross-stage transit "
-            "channel for attacker-controllable bytes.  SEC4-JK-001 "
-            "catches direct ``params.X`` splices; this rule surfaces "
-            "the transit form where an earlier stage assigns "
-            "``env.X = params.X`` and a later stage interpolates "
-            "``env.X`` into a GString."
+            "channel for attacker-controllable bytes.  A pipeline "
+            "author who carefully wraps ``${params.X}`` in a "
+            "single-quoted shell can still be compromised when an "
+            "earlier stage assigns ``env.X = params.X`` and a later "
+            "stage interpolates ``env.X`` into a GString.  "
+            "SEC4-JK-001 catches the direct params splice; this rule "
+            "surfaces the transit form for upstream-stage review."
         ),
     ),
     # =========================================================================

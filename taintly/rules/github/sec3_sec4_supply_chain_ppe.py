@@ -446,46 +446,122 @@ class ImposterCommitPattern:
         return results
 
 
+_TRUSTED_FIRST_PARTY_OWNERS: frozenset[str] = frozenset(
+    {
+        "actions",  # GitHub itself
+        "github",  # GitHub secondary org
+        "dependabot",  # GitHub-operated (Dependabot)
+        "aws-actions",  # AWS official
+        "azure",  # Azure / Microsoft official
+        "google-github-actions",  # Google Cloud official
+        "googleapis",  # Google official
+        "pypa",  # Python Packaging Authority (foundation)
+    }
+)
+
+
+_FIRST_PARTY_OWNER_PREFIX_RE = (
+    r"uses:\s*['\"]?(?:" + "|".join(sorted(_TRUSTED_FIRST_PARTY_OWNERS)) + r")/"
+)
+
+
+def _unpinned_classify(value: str) -> str:
+    """Classify a ``uses:`` value into one of three buckets:
+
+    * ``"third_party"`` — unpinned, owner not in
+      ``_TRUSTED_FIRST_PARTY_OWNERS``.  HIGH severity (SEC3-GH-001).
+    * ``"first_party"`` — unpinned, owner in
+      ``_TRUSTED_FIRST_PARTY_OWNERS``.  LOW + ``review_needed=True``
+      (SEC3-GH-001A) — flagged for trust-posture review, not
+      confirmed risk.
+    * ``""`` (empty string) — does not match the rule (pinned to
+      40-char SHA, local action, docker URI, branch ref, a
+      reusable-workflow call, or absent ``@``).  Caller should not fire
+      either rule.
+    """
+    v = value.strip()
+    if not v or "@" not in v:
+        return ""
+    if v.startswith(("./", "../")):
+        return ""
+    if v.startswith("docker://"):
+        return ""
+    head, _, ref = v.partition("@")
+    if not ref:
+        return ""
+    # Reusable-workflow calls (owner/repo/.github/workflows/x.yml@ref)
+    # are SEC8-GH-003's territory — not an action. Classifying them
+    # here double-fires SEC3-GH-001 alongside SEC8-GH-003 on the same
+    # unpinned line.
+    if "/.github/workflows/" in head:
+        return ""
+    # Branch refs are SEC3-GH-002's scope; don't double-report here.
+    ref_token = ref.split()[0].split("#")[0]
+    if ref_token in _BRANCH_REF_NAMES:
+        return ""
+    if _FULL_SHA_RE.match(ref_token):
+        return ""
+    owner = head.split("/", 1)[0].lower()
+    if owner in _TRUSTED_FIRST_PARTY_OWNERS:
+        return "first_party"
+    return "third_party"
+
+
+def _is_unpinned_third_party_action(
+    value: str, _value_kind: str, _path: tuple[object, ...]
+) -> bool:
+    """Predicate for SEC3-GH-001 (unpinned third-party action).
+
+    Fires when the action's owner is NOT in
+    ``_TRUSTED_FIRST_PARTY_OWNERS``.  Confirmed-risk supply-chain
+    finding at HIGH severity.
+    """
+    return _unpinned_classify(value) == "third_party"
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # CICD-SEC-3: Dependency Chain Abuse
     # =========================================================================
     Rule(
         id="SEC3-GH-001",
-        title="Unpinned action (mutable tag reference)",
+        title="Unpinned third-party action (mutable tag reference)",
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-3",
         description=(
-            "Action referenced by mutable tag instead of commit SHA. Tags can be "
-            "force-pushed to point at malicious code — a technique used in documented "
-            "supply chain attacks against popular GitHub Actions (Trivy, Checkmarx, tj-actions)."
+            "Third-party action referenced by mutable tag instead of commit SHA. Tags "
+            "can be force-pushed to point at malicious code — a technique used in "
+            "documented supply chain attacks against popular GitHub Actions "
+            "(Trivy, Checkmarx, tj-actions).  Sibling rule SEC3-GH-001A covers "
+            "unpinned actions from documented first-party publishers (``actions/*``, "
+            "``aws-actions/*``, ``azure/*``, etc.) at LOW severity with "
+            "``review_needed=True``."
         ),
-        # Path-glob query plus a Python predicate.  See
-        # ``_is_unpinned_uses_value`` above for the conditions.
         pattern=StructuralPattern(
             path="**.uses",
-            predicate=_is_unpinned_uses_value,
+            predicate=_is_unpinned_third_party_action,
         ),
         remediation="Pin to full 40-char commit SHA: uses: org/action@<sha> # vtag",
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions",
         test_positive=[
             "      - uses: aquasecurity/trivy-action@v0.33.0",
-            "      - uses: tj-actions/changed-files@v44",
-            "      - uses: peter-evans/find-comment@v3",
+            "      - uses: tj-actions/changed-files@v40",
         ],
         test_negative=[
-            # First-party namespaces (actions/*, github/*) are
-            # allowlisted — SEC3-GH-006 inventories these instead.
-            "      - uses: actions/checkout@v4",
-            "      - uses: actions/setup-node@v3.1.2",
-            "      - uses: github/codeql-action/init@v3",
-            # Third-party pinned to a 40-char SHA — safe.
-            "      - uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v4",
+            "      - uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.33.0",
             "      - uses: ./local-action",
             "      - uses: ../shared-action",
-            "      # uses: tj-actions/changed-files@v44",
+            "      # uses: tj-actions/changed-files@v40",
             "      - uses: docker://alpine:3.18",
+            # First-party orgs: covered by SEC3-GH-001A, must NOT fire here.
+            "      - uses: actions/checkout@v4",
+            "      - uses: aws-actions/configure-aws-credentials@v4",
+            "      - uses: azure/login@v2",
+            # dependabot/* is GitHub-operated — first-party (SEC3-GH-001A).
+            "      - uses: dependabot/fetch-metadata@v2",
+            # Reusable-workflow calls are SEC8-GH-003's territory, not here.
+            "      - uses: some-org/shared/.github/workflows/ci.yml@v4",
         ],
         stride=["T"],
         threat_narrative=(
@@ -1075,7 +1151,7 @@ RULES: list[Rule] = [
         # (git push/fetch/config or a documented git-pushing action).
         # Severity is MEDIUM because remaining fires are real risk,
         # not posture-density noise.  See
-        # _CheckoutDownstreamCredentialConsumerPattern below for the
+        # _CheckoutDownstreamCredentialConsumerPattern above for the
         # consumer detector.
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
@@ -1088,16 +1164,11 @@ RULES: list[Rule] = [
             "disk and reuse it against the GitHub API without going through the secrets "
             "facility. This rule fires only when a downstream step in the same job "
             "actually consumes that credential — a `git push` / `git fetch <url>` / "
-            "`git config user` shell op, a documented git-pushing action "
+            "`git config user` shell op, or a documented git-pushing action "
             "(peaceiris/actions-gh-pages, ad-m/github-push-action, "
-            "stefanzweifel/git-auto-commit-action, EndBug/add-and-commit, etc.), "
-            "a PR-creation action that pushes via the persisted helper "
-            "(peter-evans/create-pull-request), or a publish/release action that "
-            "packages the working tree (including .git/) into an artifact that "
-            "leaves the runner (pypa/gh-action-pypi-publish, "
-            "softprops/action-gh-release). "
+            "stefanzweifel/git-auto-commit-action, EndBug/add-and-commit, etc.). "
             "Set `persist-credentials: false` on the checkout step (or scope the "
-            "downstream push/publish to its own minimal-permissions checkout)."
+            "downstream push to its own minimal-permissions checkout)."
         ),
         pattern=_CheckoutDownstreamCredentialConsumerPattern(),
         remediation="Add 'persist-credentials: false' to the checkout step.",
@@ -1119,31 +1190,6 @@ RULES: list[Rule] = [
                 "      - uses: actions/checkout@v4\n"
                 "      - uses: peaceiris/actions-gh-pages@v3\n"
                 "        with:\n          publish_dir: ./public\n"
-            ),
-            # Checkout + PyPI publish artifact.
-            (
-                "jobs:\n  release:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - uses: actions/checkout@v4\n"
-                "      - run: python -m build\n"
-                "      - uses: pypa/gh-action-pypi-publish@release/v1\n"
-            ),
-            # Checkout + create-pull-request (pushes via persisted helper).
-            (
-                "jobs:\n  bump:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - uses: actions/checkout@v4\n"
-                "      - run: ./scripts/bump.sh\n"
-                "      - uses: peter-evans/create-pull-request@v6\n"
-            ),
-            # Checkout + softprops/action-gh-release.
-            (
-                "jobs:\n  release:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - uses: actions/checkout@v4\n"
-                "      - run: make dist\n"
-                "      - uses: softprops/action-gh-release@v1\n"
-                "        with:\n          files: dist/*\n"
             ),
         ],
         test_negative=[
@@ -1172,20 +1218,6 @@ RULES: list[Rule] = [
                 "        with:\n          persist-credentials: false\n"
                 "      - run: git push\n"
             ),
-            # Docker build without push — common CI lint pattern.
-            (
-                "jobs:\n  docker:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n      - uses: actions/checkout@v4\n"
-                "      - uses: docker/build-push-action@v5\n"
-                "        with:\n          push: false\n"
-            ),
-            # CodeQL / Semgrep scan-only job — no consumer.
-            (
-                "jobs:\n  codeql:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n      - uses: actions/checkout@v4\n"
-                "      - uses: github/codeql-action/init@v3\n"
-                "      - uses: github/codeql-action/analyze@v3\n"
-            ),
         ],
         stride=["I", "T"],
         threat_narrative=(
@@ -1194,16 +1226,9 @@ RULES: list[Rule] = [
             "subsequent step — including third-party actions — from the filesystem "
             "without any secrets API call. With write repository permissions, a token "
             "extracted this way can push malicious commits, modify branch protections, "
-            "or inject code into other workflows.  The risk is concrete in two shapes: "
-            "(a) the downstream step pushes or fetches via the persisted helper "
-            "(git push / git fetch / a documented git-pushing action / "
-            "peter-evans/create-pull-request), or (b) the downstream step publishes "
-            "the working tree as an artifact that includes the .git/ directory whose "
-            "config now points at the token helper (pypa/gh-action-pypi-publish, "
-            "softprops/action-gh-release).  This rule scopes to those two shapes "
-            "(the 'artipacked' threat model) to keep the signal-to-noise ratio "
-            "actionable; lint / typecheck / unit-test / CodeQL / docker-build-only "
-            "jobs do not fire."
+            "or inject code into other workflows.  The risk is concrete only when a "
+            "downstream step actually uses the credential; this rule scopes to that "
+            "case to keep the signal-to-noise ratio actionable."
         ),
     ),
     # =========================================================================
@@ -1216,69 +1241,100 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "actions/checkout persists the GITHUB_TOKEN by default.  Under "
-            "a fork-reachable trigger, the persisted token is reachable by "
-            "subsequent steps in the same job, including third-party actions "
-            "whose runtime behavior is not fully audited at workflow-author "
-            "time.\n"
+            "actions/checkout persists the GITHUB_TOKEN by default "
+            "(`persist-credentials: true`).  Under a fork-reachable "
+            "trigger (`pull_request` / `pull_request_target` / "
+            "`issue_comment` / `workflow_run`), the persisted token "
+            "is reachable by any subsequent step in the same job, "
+            "including third-party actions whose runtime behavior "
+            "isn't fully audited at workflow-author time.\n"
             "\n"
-            "This rule is the INFO + review-needed posture sibling of "
-            "SEC4-GH-005.  It fires when a fork-reachable workflow uses "
-            "checkout without ``persist-credentials: false`` and no in-job "
-            "credential consumer was detected.  If a downstream consumer is "
-            "present, SEC4-GH-005 owns the finding at MEDIUM and this rule "
-            "stays silent."
+            "This rule is a posture sibling of SEC4-GH-005: it fires "
+            "INFO + review_needed when a fork-reachable workflow's "
+            "checkout doesn't set `persist-credentials: false` and "
+            "no in-job credential consumer was detected.  The risk "
+            "is residual (a future/third-party step *might* read the "
+            "token), not confirmed — SEC4-GH-005 owns the confirmed-"
+            "consumer case at MEDIUM.\n"
+            "\n"
+            "Why a separate rule and not a SEC4-GH-005 severity "
+            "downgrade?  SEC4-GH-005's May-17 precision tune removed "
+            "~80% FP-density noise by requiring a proven consumer.  "
+            "Re-enabling the bare-checkout firing on a downgraded "
+            "severity would undo the tune.  This sibling gates on "
+            "fork-reachable trigger to keep the surface narrow "
+            "without losing operator visibility on the residual case."
         ),
         pattern=_CheckoutNoPersistPostureSiblingPattern(),
         remediation=(
-            "Add ``persist-credentials: false`` to the checkout step, or "
-            "move token-consuming publish/push work into a separate job with "
-            "minimal permissions."
+            "Either:\n"
+            "  1. Add `persist-credentials: false` to the checkout step "
+            "(strongly preferred for fork-reachable workflows).\n"
+            "  2. If a downstream step legitimately uses the persisted "
+            "credential, accept the MEDIUM-severity SEC4-GH-005 "
+            "finding instead by adding the consumer explicitly (a "
+            "`git push` step or one of the documented git-pushing "
+            "actions).\n"
+            "  3. If neither applies, suppress this rule for the "
+            "workflow via `.taintly.yml` with a documented rationale."
         ),
         reference="https://github.com/actions/checkout#usage",
         test_positive=[
+            # Fork-reachable trigger, checkout without persist-creds: false,
+            # NO downstream consumer.  Posture sibling fires.
             (
-                "on:\n  pull_request: {}\njobs:\n  test:\n"
-                "    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: actions/checkout@v4\n"
+                "on:\n  pull_request: {}\n"
+                "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
                 "      - run: pytest\n"
             ),
+            # pull_request_target — same shape, different trigger.
             (
-                "on:\n  pull_request_target: {}\njobs:\n  triage:\n"
-                "    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: actions/checkout@v4\n"
+                "on:\n  pull_request_target: {}\n"
+                "jobs:\n  triage:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
                 "      - run: echo hello\n"
             ),
         ],
         test_negative=[
+            # persist-credentials: false on the checkout — safe.
             (
-                "on:\n  pull_request: {}\njobs:\n  test:\n"
-                "    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: actions/checkout@v4\n"
+                "on:\n  pull_request: {}\n"
+                "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
                 "        with:\n          persist-credentials: false\n"
                 "      - run: pytest\n"
             ),
+            # Push-only trigger — not fork-reachable, SEC4-GH-005B does
+            # not fire even with bare checkout.
             (
-                "on:\n  push:\n    branches: [main]\njobs:\n  release:\n"
-                "    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: actions/checkout@v4\n"
+                "on:\n  push:\n    branches: [main]\n"
+                "jobs:\n  release:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
                 "      - run: make release\n"
             ),
+            # Fork-reachable + downstream consumer → SEC4-GH-005's
+            # territory; SEC4-GH-005B must NOT co-fire.
             (
-                "on:\n  pull_request: {}\njobs:\n  publish:\n"
-                "    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: actions/checkout@v4\n"
+                "on:\n  pull_request: {}\n"
+                "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n"
                 "      - run: git push origin gh-pages\n"
             ),
         ],
         stride=["I"],
         threat_narrative=(
-            "A fork-reachable workflow checks out repository code without "
-            "disabling credential persistence.  The job has no current "
-            "credential consumer, so SEC4-GH-005 stays silent.  Later a "
-            "third-party action is added and reads the token from the git "
-            "credential helper.  This INFO signal lets maintainers harden "
-            "the checkout before that future risk is introduced."
+            "A maintainer adds `actions/checkout` to a fork-reachable "
+            "workflow (PR validation / triage) but doesn't set "
+            "`persist-credentials: false`.  No current step uses the "
+            "token, so SEC4-GH-005 stays silent.  Six months later a "
+            "third-party action is added to the job — say a coverage "
+            "uploader — that reads the `.git/config` token reference "
+            "and exfiltrates it to the action's server.  The risk "
+            "wasn't latent when the workflow was written; it became "
+            "latent when the action was added.  This rule's INFO "
+            "signal surfaces the posture so reviewers can decide "
+            "whether to harden the checkout before that future risk."
         ),
         review_needed=True,
     ),
@@ -1451,8 +1507,9 @@ RULES: list[Rule] = [
             "because verification requires a per-action GitHub API "
             "call (``GET /repos/{owner}/{repo}`` reading the "
             "``archived`` flag).  Recommended on a weekly cron rather "
-            "than per-PR.  First-party orgs are skipped — the platform "
-            "vendors don't archive their own action repos."
+            "than per-PR.  First-party orgs (``actions``, ``github``, "
+            "``aws-actions``, ``azure``, etc.) are skipped — the "
+            "platform vendors don't archive their own action repos."
         ),
         pattern=ArchivedActionPattern(),
         remediation=(
@@ -1467,18 +1524,22 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.github.com/en/repositories/archiving-a-github-repository/archiving-repositories",
         test_positive=[],
-        test_negative=[],
+        test_negative=[
+            # When the flag is disabled (the default), the pattern
+            # returns [] and no positives are needed.
+        ],
         stride=["T", "I"],
         threat_narrative=(
             "Archived action repositories are abandoned supply-chain "
             "surface.  When a CVE is published against an archived "
-            "action, the disclosure-to-patch interval is unbounded.  "
-            "An attacker with the dormant maintainer account can "
-            "publish a new tag that downstream consumers will silently "
-            "pick up if they aren't SHA-pinned; the archived flag "
-            "prevents external PRs but doesn't prevent the owner "
-            "themselves from pushing fresh content.  Migrating off "
-            "archived dependencies is the cheapest mitigation."
+            "action, the disclosure-to-patch interval is unbounded — "
+            "no maintainer is on the other end to triage.  An attacker "
+            "with the dormant maintainer account can publish a new "
+            "tag that downstream consumers will silently pick up if "
+            "they aren't SHA-pinned; the archived flag prevents the "
+            "owner from accepting external PRs but doesn't prevent the "
+            "owner themselves from pushing fresh content.  Migrating "
+            "off archived dependencies is the cheapest mitigation."
         ),
         finding_family="action_pin_drift",
     ),

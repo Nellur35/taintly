@@ -17,7 +17,7 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
-from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
+from taintly.workflow_aware_pattern import PredicateContext
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 
@@ -402,6 +402,54 @@ _IGNORE_SCRIPTS_INSTALL_LINE_RE = (
 )
 
 
+class NeedsOutputShellInterpolationPattern:
+    """SEC4-GH-022: ``${{ needs.<job>.outputs.<name> }}`` spliced
+    into a shell context.  Cross-job sibling of SEC4-GH-021 —
+    same walker shape, scoped at the workflow level rather than
+    the job level.  Job A's ``outputs:`` carry attacker-derived
+    bytes (a step in A read a PR title, file content, branch
+    name, etc.), Job B references those outputs via
+    ``needs.A.outputs.X`` in a ``run:`` block.  Threat is
+    identical to SEC4-GH-021's same-job transit, just across the
+    needs-graph boundary.
+
+    Round-2 v1 evidence (docs/field-validation/round-2/
+    sec4-gh-004-template-injection-gap.md): 4 of 11 confirmed
+    real misses against zizmor's ``template-injection`` audit
+    share this shape (36% of TPs).
+    """
+
+    _OUTPUT_RE = re.compile(
+        r"\$\{\{\s*needs\.[\w-]+\.outputs(?:\.[\w-]+|\[['\"][^'\"]+['\"]\])\s*\}\}"
+    )
+    _RUN_LINE_RE = re.compile(r"^\s*(?:-\s+)?run\s*:\s*(.*)$")
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        in_run_block = False
+        run_indent = 0
+        for i, line in enumerate(lines):
+            stripped = line.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            if in_run_block and indent <= run_indent:
+                in_run_block = False
+            m = self._RUN_LINE_RE.match(line)
+            if m:
+                value = m.group(1).strip()
+                if value in {"|", "|-", "|+", ">", ">-", ">+"}:
+                    in_run_block = True
+                    run_indent = indent
+                    continue
+                if self._OUTPUT_RE.search(value):
+                    results.append((i + 1, line.strip()))
+                continue
+            if in_run_block and self._OUTPUT_RE.search(line):
+                results.append((i + 1, line.strip()))
+        return results
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # SEC4-GH-006: GITHUB_ENV injection — CRITICAL
@@ -447,14 +495,6 @@ RULES: list[Rule] = [
             '        run: echo "TITLE=$SAFE_TITLE" >> $GITHUB_ENV',
             '        # run: echo "TITLE=${{ github.event.pull_request.title }}" >> $GITHUB_ENV',
         ],
-        # Same-line dedup: a line like
-        # ``run: echo "X=${{ github.event.pull_request.title }}" >> $GITHUB_ENV``
-        # matches both SEC4-GH-006 (this rule, CRITICAL — specific
-        # GITHUB_ENV write) and SEC4-GH-004 (HIGH — broad
-        # "tainted ${{ }} in run:" catch-all).  This rule is strictly
-        # more specific and more severe, so SEC4-GH-004's finding on
-        # the same line is suppressed.
-        supersedes=["SEC4-GH-004"],
         stride=["E", "T"],
         threat_narrative=(
             "Writing attacker-controlled values to $GITHUB_ENV sets environment variables inherited "
@@ -503,14 +543,6 @@ RULES: list[Rule] = [
             '        run: echo "sha=${{ github.sha }}" >> $GITHUB_OUTPUT',
             '        # run: echo "title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT',
         ],
-        # Same-line dedup: a line like
-        # ``run: echo "x=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT``
-        # matches both SEC4-GH-007 (this rule, HIGH — specific
-        # GITHUB_OUTPUT write) and SEC4-GH-004 (HIGH — broad
-        # "tainted ${{ }} in run:" catch-all).  This rule is strictly
-        # more specific (same severity, narrower shape), so the
-        # SEC4-GH-004 finding on the same line is suppressed.
-        supersedes=["SEC4-GH-004"],
         stride=["T", "E"],
         threat_narrative=(
             "Step outputs from attacker-controlled context values propagate to downstream steps "
@@ -536,23 +568,34 @@ RULES: list[Rule] = [
             "Manually triggered inputs are user-controlled and may contain shell metacharacters. "
             "Exploited in the Langflow and Ultralytics supply chain incidents (2024-2025)."
         ),
-        # WorkflowAwarePattern with a path-aware predicate.
-        # Sample-and-label of 30 corpus fires under the original
-        # regex form found 17/30 (57%) FP concentrated in
-        # path-shape false positives (env-block multi-expression
-        # concats, job/step ``name:`` strings, ``concurrency.group:``,
-        # ``with:`` slots whose
-        # action consumes them as plain strings).  The threat shape
-        # is shell-source splicing — covered by ``run:`` and a
-        # narrow allowlist of shell-executing ``with:`` slots
-        # (actions/github-script.script, nick-fields/retry.command,
-        # azure/CLI.inlineScript, …).
-        pattern=WorkflowAwarePattern(
-            path=[
-                "jobs.*.steps[*].run",
-                "jobs.*.steps[*].with.*",
+        pattern=RegexPattern(
+            match=r"\$\{\{\s*(github\.event\.inputs|inputs)\.[a-zA-Z0-9_-]+\s*\}\}",
+            exclude=[
+                r"^\s*#",
+                r"^\s*if:",
+                # Exclude lines where ${{ inputs.* }} is the entire value of a YAML key.
+                # env: MY_VAR: ${{ inputs.x }} is the RECOMMENDED safe pattern — don't flag it.
+                # with: param: ${{ inputs.x }} passes a string to an action, not a shell command.
+                r"""^\s*[\w.-]+:\s*["']?\$\{\{[^}]*\}\}["']?\s*(#.*)?$""",
+                # Multi-interpolation in metadata-only YAML keys.  These keys
+                # are display strings, concurrency-group keys, or scalar
+                # action inputs — they never reach a shell from the
+                # workflow itself.  The single-interpolation form is caught
+                # by the line above; this entry covers values with multiple
+                # interpolations or interleaved literal text (e.g.
+                # ``name: ${{ matrix.os }}-${{ inputs.suite }}``,
+                # ``group: deploy-${{ inputs.env }}``).  The allowed body
+                # alphabet is intentionally narrow: word chars, slashes,
+                # dots, dashes, underscores, plus interpolations — no
+                # shell metacharacters (`;`, `&`, `|`, `$()`, backticks,
+                # `<`, `>`).  An attacker-controlled value with shell
+                # metacharacters in a metadata field is still benign as
+                # long as the field itself isn't executed; the allowlist
+                # of keys below is the audited "not executed" set.
+                r"""^\s*(?:-\s+)?(?:name|group|title|body|tag_name|commit-message"""
+                r"""|repository|ref|branch|head|base)\s*:\s*['"]?"""
+                r"""(?:[\w./_\- ()\[\]]*\$\{\{[^}]+\}\})+[\w./_\- ()\[\]]*['"]?\s*(#.*)?$""",
             ],
-            predicate=_is_dispatch_input_in_shell_sink,
         ),
         remediation=(
             "Never interpolate ${{ inputs.* }} directly into a run: body\n"
@@ -566,114 +609,13 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-scripts-to-handle-untrusted-input",
         test_positive=[
-            # Direct shell-source splicing into run: body.
-            (
-                "on: workflow_dispatch\n"
-                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                '      - run: echo "${{ inputs.user_input }}"\n'
-            ),
-            # github.event.inputs alias — same threat shape.
-            (
-                "on: workflow_dispatch\n"
-                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - run: deploy.sh ${{ github.event.inputs.environment }}\n"
-            ),
-            # Shell-executing with: slot — actions/github-script
-            # evaluates `script:` as JS source.
-            (
-                "on: workflow_dispatch\n"
-                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - uses: actions/github-script@v7\n"
-                "        with:\n"
-                "          script: |\n"
-                "            console.log('${{ inputs.title }}')\n"
-            ),
-            # Shell-executing with: slot — nick-fields/retry runs
-            # `command:` as a shell.
-            (
-                "on: workflow_dispatch\n"
-                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - uses: nick-fields/retry@v3\n"
-                "        with:\n"
-                "          command: deploy.sh ${{ inputs.environment }}\n"
-            ),
+            '        run: echo "${{ inputs.user_input }}"',
+            "        run: deploy.sh ${{ github.event.inputs.environment }}",
         ],
         test_negative=[
-            # if: condition — engine-evaluated, not bash-evaluated.
-            (
-                "on: workflow_dispatch\n"
-                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - if: inputs.deploy == 'true'\n"
-                "        run: echo go\n"
-            ),
-            # Comment-only line.
-            (
-                "on: workflow_dispatch\n"
-                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - run: |\n"
-                '          # echo "${{ inputs.user_input }}"\n'
-                "          echo no-op\n"
-            ),
-            # env-routed — the recommended safe channel.
-            (
-                "on: workflow_dispatch\n"
-                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
-                "    env:\n"
-                "      MY_INPUT: ${{ inputs.user_input }}\n"
-                "    steps:\n"
-                '      - run: echo "$MY_INPUT"\n'
-            ),
-            # env-routed inside a step.
-            (
-                "on: workflow_dispatch\n"
-                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - env:\n"
-                "          MY_INPUT: ${{ inputs.user_input }}\n"
-                '        run: echo "$MY_INPUT"\n'
-            ),
-            # with: slot for a string-consuming action — artifact
-            # name is a string param, not a shell command.
-            (
-                "on: workflow_dispatch\n"
-                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - uses: actions/upload-artifact@v4\n"
-                "        with:\n"
-                "          name: artifact-${{ inputs.repo }}\n"
-                "          path: ./out\n"
-            ),
-            # with: slot for create-pull-request — title is a
-            # display string, not shell.
-            (
-                "on: workflow_dispatch\n"
-                "jobs:\n  pr:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - uses: peter-evans/create-pull-request@v6\n"
-                "        with:\n"
-                "          title: Release ${{ inputs.version }}\n"
-            ),
-            # Job-level name: — UI display string.
-            (
-                "on: workflow_dispatch\n"
-                "jobs:\n  deploy:\n    name: deploy-${{ inputs.suite }}\n"
-                "    runs-on: ubuntu-latest\n"
-                "    steps:\n      - run: echo go\n"
-            ),
-            # concurrency.group — run-coalescing key, not shell.
-            (
-                "on: workflow_dispatch\n"
-                "concurrency:\n"
-                "  group: tgc-${{ inputs.repo }}-${{ inputs.pr }}\n"
-                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n      - run: echo go\n"
-            ),
+            "        if: inputs.deploy == true",
+            '        # run: echo "${{ inputs.user_input }}"',
+            '        run: echo "$MY_INPUT"',
         ],
         stride=["T", "E"],
         threat_narrative=(
@@ -812,16 +754,10 @@ RULES: list[Rule] = [
             # needed because ContextPattern compiles regexes without
             # MULTILINE by default and ``requires`` is a file-wide
             # check.
-            requires=(
-                r"(?m)("
-                r"^\s*pull_request_target\s*:"
-                r"|^\s*-\s*pull_request_target\s*$"
-                r"|^on\s*:\s*pull_request_target\s*$"
-                r"|^on\s*:\s*\[[^\]]*\bpull_request_target\b[^\]]*\]"
-                r")"
-            ),
+            requires=_PRT_TRIGGER_RE,
             exclude=[
                 r"^\s*#",
+                _IGNORE_SCRIPTS_INSTALL_LINE_RE,
                 # BUG-8a: exclude "make" in JSON-style YAML string values like "message": "...make..."
                 # Lines where the YAML key itself is double-quoted (JSON-style data field)
                 # are content, not executable shell commands.
@@ -872,10 +808,6 @@ RULES: list[Rule] = [
             'on:\n  pull_request_target:\njobs:\n  manage:\n    steps:\n      - uses: tiangolo/issue-manager@0.6.0\n        with:\n          config: \'{"message": "make sure to read the docs about contributing"}\'\n',
             # BUG-8b: "make sure" English phrase in pr-message block scalar
             "on:\n  pull_request_target:\njobs:\n  greet:\n    steps:\n      - run: echo hi\n        env:\n          MSG: make sure to check the docs\n",
-            # "make" as an English verb inside a github-script log line —
-            # the real CRITICAL false positive found scanning
-            # tiangolo/fastapi (guard-dependencies.yml).
-            "on:\n  pull_request_target:\njobs:\n  guard:\n    steps:\n      - uses: actions/github-script@v7\n        with:\n          script: |\n            console.log(`Author is allowed to make dependency changes.`);\n",
             # pip install of a named PyPI package does NOT read from repo — safe in LOTP context
             "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n      - run: pip install PyGithub\n",
             "on:\n  pull_request_target:\njobs:\n  review:\n    steps:\n      - run: pip install --upgrade pip\n",
@@ -912,10 +844,7 @@ RULES: list[Rule] = [
             "dependencies) exposes every secret the caller has access to. "
             "Prefer explicitly listing only the secrets the called workflow actually needs."
         ),
-        pattern=RegexPattern(
-            match=r"^\s*secrets:\s*inherit\s*(#.*)?$",
-            exclude=[r"^\s*#\s"],
-        ),
+        pattern=ReusableWorkflowSecretsInheritPattern(local=False),
         remediation=(
             "`secrets: inherit` forwards every caller secret to the callee\n"
             "— one compromised transitive action exfiltrates the whole set.\n"
@@ -927,11 +856,12 @@ RULES: list[Rule] = [
         ),
         reference="https://woodruffw.github.io/zizmor/audits/secrets-inherit/",
         test_positive=[
-            "      secrets: inherit",
-            "        secrets: inherit",
-            "      secrets: inherit  # pass all",
+            "jobs:\n  call:\n    uses: owner/repo/.github/workflows/deploy.yml@v1\n    secrets: inherit",
+            "jobs:\n  call:\n    uses: 'owner/repo/.github/workflows/deploy.yml@v1'\n    secrets: inherit",
+            "jobs:\n  call:\n    uses: owner/repo/.github/workflows/deploy.yml@v1\n    secrets: inherit  # pass all",
         ],
         test_negative=[
+            "jobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    secrets: inherit",
             "      secrets:\n        MY_SECRET: ${{ secrets.MY_SECRET }}",
             "      # secrets: inherit",
         ],
@@ -1237,13 +1167,6 @@ RULES: list[Rule] = [
             "rule — they're hygiene at most and are covered by "
             "SEC4-GH-020."
         ),
-        # Pattern stays RegexPattern (not ContextPattern with a
-        # fork-reachable trigger requires).  When the only trigger
-        # is push:tags / workflow_dispatch / schedule, the engine's
-        # ``_downgrade_maintainer_gated_findings`` postprocessor
-        # already drops HIGH -> MEDIUM, so the FP on
-        # maintainer-only-trigger publish workflows is handled there
-        # rather than by a trigger filter on the pattern itself.
         pattern=RegexPattern(
             match=(r"\$\{?(GITHUB_REF_NAME|GITHUB_HEAD_REF|GITHUB_ACTOR)\}?"),
             exclude=[
@@ -1525,231 +1448,6 @@ RULES: list[Rule] = [
     # the same threat class.
     Rule(
         id="SEC4-GH-021",
-        title="``github.actor`` used as a trust gate (bot-conditions)",
-        severity=Severity.HIGH,
-        platform=Platform.GITHUB,
-        owasp_cicd="CICD-SEC-4",
-        review_needed=True,
-        confidence="medium",
-        finding_family="privileged_pr_trigger",
-        description=(
-            "A workflow gates a privileged operation on a "
-            "``github.actor == '<bot>[bot]'`` (or similar bot login) "
-            "comparison.  ``github.actor`` is not a strong-trust "
-            "channel: bot identities can be spoofed in some commit-"
-            "actor combinations, ``workflow_run`` chains conflate "
-            "the triggering and originating actors, and a user "
-            "account with the bot's display name shadows the gate "
-            "on legacy event paths.  Whenever a positive actor "
-            "match unlocks secrets, an environment, or a write-"
-            "scope ``GITHUB_TOKEN``, the gate becomes a target."
-        ),
-        pattern=ContextPattern(
-            # Anchor: ``github.actor == 'dependabot[bot]'`` /
-            # ``github.actor == 'renovate[bot]'`` /
-            # ``github.event.sender.login == 'X[bot]'`` and similar.
-            # ``[bot]`` literal is the giveaway — actual user logins
-            # don't end in that suffix.  Quoting variants supported.
-            anchor=(
-                r"(?:github\.actor|github\.triggering_actor|"
-                r"github\.event\.sender\.login)"
-                r"\s*==\s*['\"][\w-]+\[bot\]['\"]"
-            ),
-            # Requires a privileged context in the same file:
-            # secrets reference, environment binding, or pull_request
-            # / workflow_run trigger that the gate would be guarding.
-            requires=(
-                r"\$\{\{\s*secrets\.[A-Z_][A-Z0-9_]*\s*\}\}"
-                r"|^\s+environment\s*:"
-                r"|^\s*on:\s*workflow_run\b"
-                r"|^\s+workflow_run\s*:"
-                r"|^\s*on:\s*pull_request_target\b"
-                r"|^\s+pull_request_target\s*:"
-            ),
-            scope="file",
-            exclude=[r"^\s*#"],
-        ),
-        remediation=(
-            "Don't trust ``github.actor`` for security decisions.  "
-            "Either:\n"
-            "  1. Split the workflow into a non-privileged "
-            "``pull_request`` half (read-only, no secrets) and a "
-            "privileged ``workflow_run`` half gated on the upstream "
-            "workflow's name AND ``conclusion == 'success'`` — and "
-            "still treat the head_sha as untrusted.\n"
-            "  2. Verify the PR commit is signed by the bot's "
-            "expected verified-commit identity, not just the "
-            "actor field.\n"
-            "  3. For Dependabot specifically, prefer "
-            "``dependabot/fetch-metadata`` to validate that the PR "
-            "is genuinely a Dependabot update rather than asserting "
-            "it via ``github.actor``."
-        ),
-        reference=(
-            "https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/"
-        ),
-        test_positive=[
-            (
-                "on: pull_request_target\n"
-                "jobs:\n  auto-merge:\n    runs-on: ubuntu-latest\n"
-                "    if: github.actor == 'dependabot[bot]'\n"
-                "    steps:\n"
-                "      - run: gh pr merge --auto\n"
-                "        env:\n          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n"
-            ),
-            (
-                "on: workflow_run\n"
-                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
-                "    if: github.event.sender.login == 'release-bot[bot]'\n"
-                "    steps:\n"
-                "      - run: deploy.sh\n"
-                "        env:\n          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n"
-            ),
-        ],
-        test_negative=[
-            # Actor compared to a non-bot login — different threat
-            # shape (covered by other rules); not bot-conditions.
-            (
-                "on: pull_request_target\n"
-                "jobs:\n  test:\n    if: github.actor == 'asaf'\n"
-                "    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n"
-            ),
-            # Bot equality but no privileged context — anchor fires
-            # but requires fails.  No secret, no environment, no
-            # privileged trigger.
-            (
-                "on: push\n"
-                "jobs:\n  log:\n    runs-on: ubuntu-latest\n"
-                "    if: github.actor == 'dependabot[bot]'\n"
-                "    steps:\n      - run: echo $GITHUB_ACTOR\n"
-            ),
-            # Comment.
-            (
-                "on: pull_request_target\n"
-                "jobs:\n  test:\n"
-                "#    if: github.actor == 'dependabot[bot]'\n"
-                "    runs-on: ubuntu-latest\n"
-                "    steps:\n      - run: echo hi\n"
-            ),
-        ],
-        stride=["S", "E"],
-        threat_narrative=(
-            "An attacker submits a PR or chains a ``workflow_run`` "
-            "trigger that lands the privileged half of the workflow "
-            "with ``github.actor`` set to (or appearing to be) a "
-            "trusted bot identity.  The actor-equality gate "
-            "evaluates true; the privileged step runs with the "
-            "caller's full secret set and write-scope token.  Because "
-            "the actor field is observable BUT not cryptographically "
-            "verified at the workflow boundary, every workflow that "
-            "trusts it as the sole gate is one trigger-path "
-            "discovery away from compromise."
-        ),
-        incidents=[],
-    ),
-    # =========================================================================
-    # SEC4-GH-022: ``base64 -d | shell`` obfuscation in run-block
-    # =========================================================================
-    # A ``run:`` block decodes a base64-encoded string and pipes
-    # the decoded bytes directly into a shell or
-    # interpreter.  Encoded payloads are the canonical fingerprint of
-    # supply-chain attack code: diff reviewers and string-pattern
-    # scanners can't match the literal commands.  Industry peer audits
-    # (e.g. zizmor's ``obfuscation``) cover the same threat class.
-    Rule(
-        id="SEC4-GH-022",
-        title="Base64-decoded payload piped directly into shell or interpreter",
-        severity=Severity.HIGH,
-        platform=Platform.GITHUB,
-        owasp_cicd="CICD-SEC-4",
-        finding_family="script_injection",
-        description=(
-            "A ``run:`` step decodes a base64 string and pipes the "
-            "decoded bytes directly into bash / sh / zsh / fish / "
-            "python / perl / ruby / node.  Encoded payloads bypass "
-            "diff-review heuristics and string-pattern scanners that "
-            "don't decode before matching.  An auditor reading the "
-            "workflow file sees only an opaque base64 blob; the "
-            "actual code executes after decoding.\n"
-            "\n"
-            "Includes equivalent forms: ``base64 -d`` / "
-            "``base64 --decode``, ``openssl enc -d -base64`` piped to "
-            "a shell, and PowerShell ``[Convert]::FromBase64String`` "
-            "piped to ``Invoke-Expression``."
-        ),
-        pattern=RegexPattern(
-            match=(
-                # Form 1: <something> | base64 -d | bash (or any
-                # interpreter).  ``\b`` after the interpreter list
-                # prevents a partial match of ``sh`` inside
-                # ``sha256sum`` / ``shasum`` / ``shellcheck`` etc.
-                r"\|\s*base64\s+(-d|--decode)\s*\|\s*(bash|sh|zsh|fish|python|perl|ruby|node)\b"
-                # Form 2: openssl enc -d -base64 piped to shell.
-                # Same ``\b`` rationale for the interpreter list.
-                r"|\bopenssl\s+enc\s+(-d|-base64|-d\s+-base64|-base64\s+-d)[^|\n]*\|\s*(bash|sh|zsh|python|perl)\b"
-                # Form 3: PowerShell base64-decode then iex.
-                r"|\[Convert\]::FromBase64String\([^)]+\)[^|\n]*\|\s*(?i:iex|Invoke-Expression)"
-            ),
-            exclude=[r"^\s*#"],
-        ),
-        remediation=(
-            "Never pipe a decoded payload to a shell.  If the encoded "
-            "data is legitimately needed (e.g. a binary blob the "
-            "workflow must write to disk), decode it to a file with "
-            "an audit trail and reference the decoded content "
-            "explicitly:\n"
-            "  - run: |\n"
-            '      echo "$ENCODED" | base64 -d > payload.bin\n'
-            "      sha256sum -c payload.sha256\n"
-            "      ./payload.bin\n"
-            "If you can't justify what the decoded bytes do without "
-            "running them, the workflow shouldn't be running them."
-        ),
-        reference="https://owasp.org/www-project-top-10-ci-cd-security-risks/",
-        test_positive=[
-            "        run: echo 'aHR0cHM6Ly9' | base64 -d | bash",
-            "        run: echo $X | base64 --decode | sh",
-            '        run: echo "${PAYLOAD}" | base64 -d | python',
-            "        run: openssl enc -d -base64 <<< $X | bash",
-        ],
-        test_negative=[
-            # Decode to a file (no pipe to shell) — safe.
-            "        run: echo $X | base64 -d > payload.bin",
-            # Encode (not decode) — different direction.
-            "        run: echo $PASSWORD | base64",
-            # Decode then sha256sum (verify, don't execute) — safe.
-            "        run: echo $X | base64 -d | sha256sum",
-            # Comment.
-            "        # run: echo $X | base64 -d | bash",
-        ],
-        stride=["T", "E"],
-        threat_narrative=(
-            "Encoded payloads are the canonical fingerprint of "
-            "supply-chain attack code in CI: the 2024 Ultralytics and "
-            "2026 Trivy compromises both used base64-encoded shells "
-            "to evade diff reviewers and static scanners.  Executing "
-            "any decoded payload gives an attacker arbitrary code "
-            "execution inside the runner with access to all secrets "
-            "and write permissions, while leaving the workflow file "
-            "looking like an opaque blob to a casual reviewer."
-        ),
-        incidents=["Ultralytics (Dec 2024)", "Trivy supply chain (Mar 2026)"],
-    ),
-    # =========================================================================
-    # SEC4-GH-023: ``${{ steps.X.outputs.Y }}`` interpolated into shell
-    #
-    # Step outputs are common transit for attacker-controllable bytes:
-    # an earlier step that scrapes a PR title via ``gh api``, reads a
-    # file the PR author wrote, or captures any ``github.event.*``
-    # value into ``$GITHUB_OUTPUT`` produces an output that carries
-    # attacker bytes.  Splicing that output into a ``run:`` body is
-    # shell injection — same threat shape as ``github.event.X`` direct
-    # splice (SEC4-GH-004), but the taint transits through the
-    # step-output map.  Maps to part of zizmor's
-    # ``template-injection`` audit.
-    # =========================================================================
-    Rule(
-        id="SEC4-GH-023",
         title="Step output interpolated into shell — taint transit via outputs",
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
@@ -1793,6 +1491,172 @@ RULES: list[Rule] = [
             "        run: gh release create v1 ${{ steps.tag.outputs.name }}",
         ],
         test_negative=[
+            # Whole-value safe assignment.
+            "        env:\n          TITLE: ${{ steps.pr.outputs.title }}",
+            # Comment.
+            '        # run: echo "${{ steps.pr.outputs.title }}"',
+            # if-guard.
+            "        if: steps.check.outputs.status == 'ok'",
+            # Metadata key — ``name:`` of a step is display.
+            "      - name: Build ${{ steps.cfg.outputs.label }}",
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "Step outputs are an opaque transit channel for attacker-"
+            "controllable bytes.  A workflow author who carefully avoids "
+            "``${{ github.event.X }}`` directly in a ``run:`` body can "
+            "still be compromised when an earlier step reads the same "
+            "value into an output and the later step splices it in.  "
+            "The Langflow and Ultralytics injections (2024-2025) both "
+            "had upstream-output forms in the wild — SEC4-GH-004 "
+            "catches the direct form; this rule catches the transit "
+            "form."
+        ),
+    ),
+    # =========================================================================
+    # SEC4-GH-022: ``base64 -d | shell`` obfuscation in run-block
+    # =========================================================================
+    # A ``run:`` block decodes a base64-encoded string and pipes
+    # the decoded bytes directly into a shell or
+    # interpreter.  Encoded payloads are the canonical fingerprint of
+    # supply-chain attack code: diff reviewers and string-pattern
+    # scanners can't match the literal commands.  Industry peer audits
+    # (e.g. zizmor's ``obfuscation``) cover the same threat class.
+    Rule(
+        id="SEC4-GH-022",
+        title="Cross-job output interpolated into shell — taint transit via needs",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        review_needed=True,
+        confidence="low",
+        description=(
+            "A ``${{ needs.<job>.outputs.<name> }}`` reference is "
+            "spliced into a shell ``run:`` body.  Job-level "
+            "``outputs:`` are common transit for attacker-"
+            "controllable bytes: a step in the upstream job that "
+            "scrapes a PR title via ``gh api``, reads a file the "
+            "PR author wrote, or captures any ``github.event.*`` "
+            "value into ``$GITHUB_OUTPUT`` produces a job output "
+            "that carries attacker bytes.  Splicing that output "
+            "into a consumer job's ``run:`` body is shell "
+            "injection — the same threat shape as ``${{ "
+            "github.event.X }}`` direct interpolation, but the "
+            "taint transits through the needs-graph rather than "
+            "a same-job step output (see SEC4-GH-021 for the "
+            "same-job form).  Review the upstream job's "
+            "outputs-producing step; if any value can come from "
+            "a fork PR / issue / comment / branch name, route "
+            "through ``env:`` and validate."
+        ),
+        pattern=NeedsOutputShellInterpolationPattern(),
+        remediation=(
+            "Route the needs-output through an ``env:`` mapping at "
+            "the consuming step, then reference as a double-quoted "
+            "shell variable:\n"
+            "  env:\n    VERSION: ${{ needs.upstream.outputs.version }}\n"
+            '  run: deploy.sh "$VERSION"\n'
+            "If the upstream value can come from a fork PR / "
+            "issue body / comment, validate against an allowlist "
+            "at the consumer (parameter-expansion strip):\n"
+            "  env:\n    REF: ${{ needs.upstream.outputs.ref }}\n"
+            '  run: git checkout "${REF//[^a-zA-Z0-9._/-]/}"\n'
+            "This rule is review-needed because the taint source "
+            "is not visible from the consuming line alone — it "
+            "depends on the upstream job's outputs-producing step."
+        ),
+        reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable",
+        test_positive=[
+            "        run: deploy.sh ${{ needs.upstream.outputs.version }}",
+            "        run: gh release create ${{ needs.build.outputs.tag }}",
+        ],
+        test_negative=[
+            # Whole-value safe assignment.
+            "        env:\n          VERSION: ${{ needs.upstream.outputs.version }}",
+            # Comment.
+            "        # run: deploy.sh ${{ needs.upstream.outputs.version }}",
+            # if-guard.
+            "        if: needs.upstream.outputs.ready == 'true'",
+            # Metadata key — display.
+            "      - name: build ${{ needs.upstream.outputs.label }}",
+            # Sibling rule's territory: steps.X.outputs.Y is SEC4-GH-021,
+            # SEC4-GH-022 must not double-fire on it.
+            "        run: deploy.sh ${{ steps.compute.outputs.version }}",
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "Cross-job outputs are an opaque taint-transit channel "
+            "across the needs-graph.  A workflow author who "
+            "carefully avoids ``${{ github.event.X }}`` directly "
+            "in a consumer's ``run:`` body can still be compromised "
+            "when the upstream job in needs: captures the same "
+            "attacker bytes into its outputs.  The transit form "
+            "evades direct-context scanners while preserving the "
+            "injection risk at the consuming step.  SEC4-GH-004 "
+            "catches the direct form, SEC4-GH-021 catches the "
+            "same-job step-output transit, and this rule catches "
+            "the cross-job needs-output transit."
+        ),
+        incidents=["Ultralytics (Dec 2024, cross-job analog)"],
+    ),
+    # =========================================================================
+    # SEC4-GH-023: ``${{ steps.X.outputs.Y }}`` interpolated into shell
+    #
+    # Step outputs are common transit for attacker-controllable bytes:
+    # an earlier step that scrapes a PR title via ``gh api``, reads a
+    # file the PR author wrote, or captures any ``github.event.*``
+    # value into ``$GITHUB_OUTPUT`` produces an output that carries
+    # attacker bytes.  Splicing that output into a ``run:`` body is
+    # shell injection — same threat shape as ``github.event.X`` direct
+    # splice (SEC4-GH-004), but the taint transits through the
+    # step-output map.  Maps to part of zizmor's
+    # ``template-injection`` audit.
+    # =========================================================================
+    Rule(
+        id="SEC4-GH-023",
+        title="Step output interpolated into shell â€” taint transit via outputs",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        review_needed=True,
+        confidence="low",
+        description=(
+            "A ``${{ steps.<id>.outputs.<name> }}`` reference is "
+            "spliced into a workflow expression outside of a safe "
+            "``env:`` assignment.  Step outputs are common transit "
+            "for attacker-controllable bytes: a previous step that "
+            "scrapes a PR title via ``gh api``, reads a file the PR "
+            "author wrote, or captures any ``github.event.*`` value "
+            "into ``$GITHUB_OUTPUT`` produces an output that carries "
+            "attacker bytes.  Splicing that output into a ``run:`` "
+            "body is shell injection â€” the same threat shape as "
+            "``${{ github.event.X }}`` direct interpolation, but the "
+            "taint transits through the step-output map.  Review the "
+            "upstream step that produces the output; if any upstream "
+            "value can come from a fork PR / issue / comment / "
+            "branch name, route through ``env:`` and validate."
+        ),
+        pattern=StepOutputShellInterpolationPattern(),
+        remediation=(
+            "Route the step output through an ``env:`` mapping at the "
+            "consuming step, then reference as a double-quoted shell "
+            "variable.  Validate against an allowlist if the upstream "
+            "value can come from a fork PR:\n"
+            "  env:\n    TITLE: ${{ steps.read-pr.outputs.title }}\n"
+            '  run: case "$TITLE" in [A-Za-z0-9\\ -]*) ;; *) exit 1;; esac\n'
+            "If the upstream step is itself sanitising attacker input "
+            "(``jq -R`` shell-escape, allowlist regex), document that "
+            "in a comment on the producing step so future readers see "
+            "the chain.  This rule is review-needed because the "
+            "taint source is not visible from the consuming line "
+            "alone â€” it depends on the upstream producer."
+        ),
+        reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable",
+        test_positive=[
+            '        run: echo "${{ steps.pr.outputs.title }}"',
+            "        run: gh release create v1 ${{ steps.tag.outputs.name }}",
+        ],
+        test_negative=[
             "        env:\n          TITLE: ${{ steps.pr.outputs.title }}",
             '        # run: echo "${{ steps.pr.outputs.title }}"',
             "        if: steps.check.outputs.status == 'ok'",
@@ -1806,7 +1670,7 @@ RULES: list[Rule] = [
             "still be compromised when an earlier step reads the same "
             "value into an output and the later step splices it in.  "
             "The Langflow and Ultralytics injections (2024-2025) both "
-            "had upstream-output forms in the wild — SEC4-GH-004 "
+            "had upstream-output forms in the wild â€” SEC4-GH-004 "
             "catches the direct form; this rule catches the transit "
             "form."
         ),
@@ -1844,24 +1708,28 @@ RULES: list[Rule] = [
         owasp_cicd="CICD-SEC-4",
         description=(
             "A workflow whose ``on:`` block includes a ``pull_request`` "
-            "trigger (not ``pull_request_target`` - see SEC4-GH-026A) "
-            "writes to the GitHub Actions cache, either via ``uses: "
-            "actions/cache@`` or via a ``setup-*`` action with "
-            "``cache:`` enabled.\n"
+            "trigger (NOT ``pull_request_target`` — see SEC4-GH-026A "
+            "for that) writes to the GitHub Actions cache - either "
+            "via ``uses: actions/cache@`` (the direct form) or via a "
+            "``setup-*`` action with ``cache:`` enabled (the implicit "
+            "form, where ``setup-node``/``setup-python``/``setup-go``/"
+            "``setup-java`` store dependency caches keyed by lockfile "
+            "hash).\n"
             "\n"
             "Under ``pull_request``, the workflow runs with a default-"
-            "read-only ``GITHUB_TOKEN`` on modern repositories.  The "
-            "cache write surface exists, but exploitation usually needs "
-            "a later privileged workflow to restore under the same key "
-            "prefix; that cross-trigger shape is XF-GH-001 / XF-GH-001A's "
-            "domain.  This rule is a review signal, not a confirmed "
-            "exploit.\n"
+            "read-only ``GITHUB_TOKEN`` (since Feb-2023 for newly-"
+            "created orgs).  The cache write surface exists, but the "
+            "actual exploitation path requires a later privileged "
+            "workflow to restore under the same key prefix — that "
+            "cross-trigger shape is XF-GH-001 / XF-GH-001A's domain.  "
+            "This rule fires as a posture signal so the cache write "
+            "is visible during review, not as a confirmed exploit.\n"
             "\n"
             "INFO + ``review_needed``: many cache keys are PR-number-"
             "scoped (``${{ github.run_id }}`` / ``${{ github.event."
             "number }}``) and never matched by main-branch restores, "
-            "so the threat model only applies when the cache key shape "
-            "allows cross-branch restoration.  Operators who "
+            "so the threat model only applies when the cache key "
+            "shape allows cross-branch restoration.  Operators who "
             "want LOW enforcement can override via ``.taintly.yml``."
         ),
         pattern=ContextPattern(
@@ -1874,10 +1742,21 @@ RULES: list[Rule] = [
                 r"|cache:\s*(?:true|npm|yarn|pip|pipenv|poetry|gradle|maven|sbt|go|cargo)"
                 r")"
             ),
-            # Workflow must declare plain ``pull_request``.  The
-            # negative lookahead excludes pull_request_target and
-            # github.event.pull_request.* context references inside
-            # pull_request_target workflows.
+            # Workflow must declare ``pull_request`` (and NOT
+            # ``pull_request_target`` or a ``github.event.pull_request.*``
+            # context reference).  The lookahead chain
+            # ``(?!_target|\.)`` excludes both the superstring
+            # ``pull_request_target`` (SEC4-GH-026A's territory) and
+            # the github-context references like
+            # ``${{ github.event.pull_request.head.sha }}`` which
+            # technically contain ``pull_request`` as a substring but
+            # are NOT the trigger declaration.  Surfaced by the
+            # TanStack kill-chain fixture (tanstack-kill-chain-fixture-v1):
+            # ``pull_request_target`` workflows that also reference
+            # ``github.event.pull_request.head`` would otherwise
+            # co-fire 026 and 026A on the same line.  Tolerant of
+            # block form (``on:\n  pull_request:``) and inline
+            # list/flow forms.
             requires=r"(?ms)^on:\s*(?:\n\s+|\[?\s*).*?pull_request(?!_target|\.)\b",
             exclude=[r"^\s*#"],
         ),
@@ -1932,7 +1811,9 @@ RULES: list[Rule] = [
                 "      - uses: actions/cache/restore@v4\n        with:\n"
                 "          key: ${{ hashFiles('lockfile') }}\n"
             ),
-            # pull_request_target is SEC4-GH-026A's territory.
+            # pull_request_target is SEC4-GH-026A's territory.  The
+            # negative lookahead on ``pull_request(?!_target)`` keeps
+            # this rule silent on the higher-risk trigger.
             (
                 "on:\n  pull_request_target: {}\njobs:\n  test:\n"
                 "    runs-on: ubuntu-latest\n    steps:\n"
@@ -1969,32 +1850,61 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A workflow whose ``on:`` block includes ``pull_request_target`` "
-            "writes to the GitHub Actions cache, either via ``uses: "
-            "actions/cache@`` or via a ``setup-*`` action with ``cache:`` "
-            "enabled.\n"
+            "A workflow whose ``on:`` block includes a "
+            "``pull_request_target`` trigger writes to the GitHub "
+            "Actions cache - either via ``uses: actions/cache@`` "
+            "(the direct form) or via a ``setup-*`` action with "
+            "``cache:`` enabled (the implicit form, where "
+            "``setup-node`` / ``setup-python`` / ``setup-go`` / "
+            "``setup-java`` store dependency caches keyed by "
+            "lockfile hash).\n"
             "\n"
-            "Unlike plain ``pull_request``, ``pull_request_target`` can run "
-            "fork-controlled code with the parent repository's token and "
-            "explicit ``permissions:`` grants.  The cache write is therefore "
-            "a primary attack surface: attacker-controlled bytes may be "
-            "persisted into a cache entry that downstream privileged "
-            "workflows later restore."
+            "Unlike plain ``pull_request``, ``pull_request_target`` "
+            "checks out the fork's HEAD but executes with the PARENT "
+            "repo's ``GITHUB_TOKEN`` and any explicit ``permissions:`` "
+            "grants — typically including write scopes.  The cache "
+            "write is a primary attack surface: attacker-controlled "
+            "bytes from the fork are persisted into a cache entry "
+            "indexed by a key the maintainers' downstream workflows "
+            "may later restore from.  Combined with explicit ``write`` "
+            "permissions, the surface is exploitation-ready, not "
+            "posture noise.\n"
+            "\n"
+            "Restore-only forms (``actions/cache/restore``) are not "
+            "anchored - they read but do not write the poisoned "
+            "entry; the actual exploitation is the WRITE, not the "
+            "read.  Cross-workflow restoration of a previously-"
+            "poisoned cache is XF-GH-001 / XF-GH-001A's domain."
         ),
         pattern=ContextPattern(
+            # Same anchor as SEC4-GH-026 — cache write only.
             anchor=(
                 r"(?:"
                 r"uses:\s+actions/cache(?:/save)?@"
                 r"|cache:\s*(?:true|npm|yarn|pip|pipenv|poetry|gradle|maven|sbt|go|cargo)"
                 r")"
             ),
+            # Workflow must declare ``pull_request_target`` (the
+            # ``_target`` suffix is required — plain ``pull_request``
+            # is SEC4-GH-026's territory at INFO).
             requires=r"(?ms)^on:\s*(?:\n\s+|\[?\s*).*?pull_request_target\b",
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Move cache writes out of ``pull_request_target`` workflows, "
-            "switch to restore-only cache usage, or scope cache keys so "
-            "they cannot be restored by later privileged runs."
+            "Pick one:\n"
+            "  1. Move the cache write to a separate ``push``-only "
+            "workflow on protected branches.  ``pull_request_target`` "
+            "should run only the minimal, read-only steps required "
+            "for the trusted post-merge logic.\n"
+            "  2. If the cache write must remain in the PRT workflow, "
+            "drop ``permissions:`` to ``contents: read`` (or finer) "
+            "and verify the cache content is deterministic from "
+            "non-attacker-controlled inputs.\n"
+            "  3. Switch to ``actions/cache/restore@`` (read-only) "
+            "and let a separate post-merge workflow do the save.\n"
+            "  4. Scope the cache key to a value that NEVER matches "
+            "a later non-PRT run (e.g. include "
+            "``${{ github.event.number }}`` as a key prefix)."
         ),
         reference=(
             "https://docs.github.com/en/actions/security-for-github-actions/"
@@ -2004,10 +1914,10 @@ RULES: list[Rule] = [
         test_positive=[
             (
                 "on:\n  pull_request_target:\n    branches: [main]\n"
-                "permissions:\n  contents: write\njobs:\n  build:\n"
-                "    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: actions/cache@v4\n        with:\n"
-                "          path: ./node_modules\n"
+                "permissions:\n  contents: write\n"
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/cache@v4\n"
+                "        with:\n          path: ./node_modules\n"
                 "          key: ${{ hashFiles('package-lock.json') }}\n"
             ),
             (
@@ -2018,19 +1928,22 @@ RULES: list[Rule] = [
             ),
         ],
         test_negative=[
+            # pull_request (no _target) is SEC4-GH-026's territory.
             (
-                "on:\n  pull_request:\n    branches: [main]\njobs:\n"
-                "  build:\n    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: actions/cache@v4\n        with:\n"
-                "          path: ./node_modules\n"
+                "on:\n  pull_request:\n    branches: [main]\n"
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/cache@v4\n"
+                "        with:\n          path: ./node_modules\n"
                 "          key: ${{ hashFiles('package-lock.json') }}\n"
             ),
+            # Push-only trigger.
             (
                 "on:\n  push:\n    branches: [main]\njobs:\n  build:\n"
                 "    runs-on: ubuntu-latest\n    steps:\n"
                 "      - uses: actions/cache@v4\n        with:\n"
                 "          key: ${{ hashFiles('lockfile') }}\n"
             ),
+            # Restore-only under pull_request_target.
             (
                 "on:\n  pull_request_target: {}\njobs:\n  test:\n"
                 "    runs-on: ubuntu-latest\n    steps:\n"
@@ -2040,10 +1953,18 @@ RULES: list[Rule] = [
         ],
         stride=["T", "E", "I"],
         threat_narrative=(
-            "A pull_request_target workflow builds fork-controlled code, "
-            "saves dependency or build output caches under a key later "
-            "used by release jobs, and lets a privileged workflow restore "
-            "attacker-shaped bytes."
+            "A maintainer enables ``pull_request_target`` so the CI "
+            "build can post comments / labels / status checks on "
+            "external PRs.  The build also caches ``node_modules`` "
+            "or pip wheels keyed on ``hashFiles('package-lock.json')``.  "
+            "An attacker opens a PR that modifies ``package-lock.json`` "
+            "to point at a malicious tarball; the CI build runs "
+            "(with parent-repo permissions), the cache write captures "
+            "the malicious dependency layer indexed by the new lockfile "
+            "hash.  A maintainer's later release workflow on ``push`` "
+            "computes the same hash, restores the poisoned cache, and "
+            "publishes the malicious build artefacts under the "
+            "maintainer's signing identity."
         ),
     ),
     Rule(
