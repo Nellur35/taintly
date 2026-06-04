@@ -275,7 +275,13 @@ def test_discover_files_jenkins_nested_paths(tmp_path):
     (tmp_path / "Vendor" / "NeMo").mkdir(parents=True)
     (tmp_path / "Vendor" / "NeMo" / "Jenkinsfile").write_text("pipeline {}\n")
     (tmp_path / "jenkins").mkdir()
-    (tmp_path / "jenkins" / "build.groovy").write_text("// build\n")
+    # Real scripted pipeline — the loose-.groovy pickup is now content-gated,
+    # so the file needs a pipeline marker to be discovered.  The old fixture
+    # used a bare ``// build`` comment, which encoded the pre-gate behavior
+    # (a non-pipeline .groovy being parsed as a pipeline).
+    (tmp_path / "jenkins" / "build.groovy").write_text(
+        "node {\n    stage('build') { sh 'make' }\n}\n"
+    )
 
     files = discover_files(str(tmp_path), Platform.JENKINS)
     names = sorted(os.path.relpath(f, str(tmp_path)) for f in files)
@@ -285,6 +291,77 @@ def test_discover_files_jenkins_nested_paths(tmp_path):
     assert os.path.join("scripts", "Jenkinsfile") in names
     assert os.path.join("Vendor", "NeMo", "Jenkinsfile") in names
     assert os.path.join("jenkins", "build.groovy") in names
+
+
+def test_discover_files_jenkins_groovy_package_namespace_not_pipeline(tmp_path):
+    """A non-pipeline ``.groovy`` under a ``jenkins`` *package* path must NOT be
+    discovered.  jenkinsci/jenkins ships UI views and plain classes under
+    ``.../jenkins/model/...`` — ``jenkins`` there is a Java/Groovy namespace,
+    not a CI directory.  Content-gating drops these; a ``Jenkinsfile`` in the
+    same tree is still discovered (strong signal, never gated).
+    """
+    pkg = tmp_path / "core" / "src" / "main" / "resources" / "jenkins" / "model"
+    pkg.mkdir(parents=True)
+    # A UI view / form field — exactly the SEC4-JK-004 false positive source.
+    (pkg / "config.groovy").write_text(
+        'f.entry(field: "x") {\n    input(type: "hidden", name: "x")\n}\n'
+    )
+    (tmp_path / "Jenkinsfile").write_text("pipeline {\n    agent any\n}\n")
+
+    files = discover_files(str(tmp_path), Platform.JENKINS)
+    rel = sorted(os.path.relpath(f, str(tmp_path)) for f in files)
+    assert "Jenkinsfile" in rel
+    assert (
+        os.path.join("core", "src", "main", "resources", "jenkins", "model", "config.groovy")
+        not in rel
+    )
+
+
+def test_discover_files_jenkins_real_groovy_pipeline_under_jenkins_dir(tmp_path):
+    """A real scripted ``.groovy`` pipeline (``node {}`` / ``stage()``) under a
+    ``jenkins/`` directory is still discovered — content-gating keeps genuine
+    pipelines, it only drops non-pipeline package files.
+    """
+    (tmp_path / "jenkins").mkdir()
+    (tmp_path / "jenkins" / "deploy.groovy").write_text(
+        "node {\n    stage('deploy') { sh './deploy.sh' }\n}\n"
+    )
+
+    files = discover_files(str(tmp_path), Platform.JENKINS)
+    rel = sorted(os.path.relpath(f, str(tmp_path)) for f in files)
+    assert os.path.join("jenkins", "deploy.groovy") in rel
+
+
+def test_discover_files_gitlab_duo_config_not_ci(tmp_path):
+    """``.gitlab/duo/agent-config.yml`` (a GitLab Duo tool config carrying only
+    ``image:``) must NOT be discovered as CI.  ``.gitlab/`` is a weak signal —
+    a bare ``image:`` is exactly what tool YAMLs carry, so it is not enough.
+    ``.gitlab-ci.yml`` (entry file, never gated) is still discovered.
+    """
+    duo = tmp_path / ".gitlab" / "duo"
+    duo.mkdir(parents=True)
+    (duo / "agent-config.yml").write_text(
+        "image: registry.example.com/duo/agent:1.2.3\nname: duo-agent\n"
+    )
+    (tmp_path / ".gitlab-ci.yml").write_text("stages:\n  - build\nbuild:\n  script:\n    - make\n")
+
+    files = discover_files(str(tmp_path), Platform.GITLAB)
+    rel = sorted(os.path.relpath(f, str(tmp_path)) for f in files)
+    assert ".gitlab-ci.yml" in rel
+    assert os.path.join(".gitlab", "duo", "agent-config.yml") not in rel
+
+
+def test_discover_files_gitlab_dotgitlab_ci_fragment_discovered(tmp_path):
+    """A genuine CI fragment under ``.gitlab/`` (carrying a job-shaped
+    ``script:`` block) IS still discovered — content-gating keeps real CI YAML.
+    """
+    ci = tmp_path / ".gitlab" / "ci"
+    ci.mkdir(parents=True)
+    (ci / "build.yml").write_text("build:\n  stage: build\n  script:\n    - make all\n")
+
+    files = discover_files(str(tmp_path), Platform.GITLAB)
+    rel = sorted(os.path.relpath(f, str(tmp_path)) for f in files)
+    assert os.path.join(".gitlab", "ci", "build.yml") in rel
 
 
 def test_discover_files_jenkins_descends_hidden_directories(tmp_path):
