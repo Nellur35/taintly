@@ -89,6 +89,9 @@ jobs:
       - name: No-rules-change gate (rule-pack output stable across fixtures)
         run: python scripts/no_rules_change_gate.py --check
 
+      - name: Metadata-drift gate (rule definitions stable)
+        run: python scripts/no_rules_metadata_drift.py --check
+
       - name: No-leaks gate (public repo allow-list)
         # Second-tier defence against private R&D artifacts leaking
         # from the lab. The first tier is the lab's publish manifest;
