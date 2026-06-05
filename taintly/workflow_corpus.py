@@ -558,6 +558,20 @@ def _classify_triggers(events: set[str]) -> frozenset[TriggerFamily]:
     return frozenset(out)
 
 
+def is_fork_reachable(content: str) -> bool:
+    """True if a GitHub workflow's ``on:`` block declares any
+    fork-reachable trigger (``pull_request``, ``pull_request_target``,
+    ``issue_comment``, ``workflow_run``, …), in ANY of the four YAML
+    shapes (bare / flow-list / flow-mapping / block).
+
+    Single source of truth for "is this workflow attacker-triggerable?"
+    — reuses :func:`_extract_raw_events` (all-shapes parser) and the
+    vetted :data:`_FORK_REACHABLE_EVENTS` taxonomy, so callers never
+    re-derive trigger parsing with a shape-fragile regex.
+    """
+    return TriggerFamily.FORK_REACHABLE in _classify_triggers(_extract_raw_events(content))
+
+
 # Stub implementations — filled in by the next commits.  Returning empty
 # tuples keeps the WorkflowSummary contract honest while the per-feature
 # extractors are still pending.

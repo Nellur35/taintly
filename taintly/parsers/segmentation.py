@@ -123,6 +123,22 @@ def for_each_job(content: str) -> list[JobSegment]:
     return out
 
 
+def job_at_line(content: str, line: int) -> str | None:
+    """Return the name of the job whose 1-based line range contains
+    ``line``, or ``None`` (line in the preamble, in no job, or ``<= 0``).
+
+    Thin wrapper over :func:`for_each_job` for callers that need a
+    point lookup (e.g. job-scoping a finding by its line). Preamble
+    segments (``name==""``) are treated as "no job".
+    """
+    if line <= 0:
+        return None
+    for job in for_each_job(content):
+        if job.name and job.start_line <= line <= job.end_line:
+            return job.name
+    return None
+
+
 def for_each_step(content: str) -> list[StepSegment]:
     """Walk every GitHub Actions step in every job in ``content``.
 
