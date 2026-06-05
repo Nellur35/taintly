@@ -473,11 +473,126 @@ def _maintainer_downgrade_postprocessor(findings: list[Finding], ctx: _PostProce
     _downgrade_maintainer_gated_findings(findings, ctx.content)
 
 
+# ---------------------------------------------------------------------------
+# Guard / trigger-reachability calibration (W1, phase 1 — calibration only).
+#
+# CodeQL's ControlChecks model downgrades a finding when an identity / repo /
+# association guard dominates the sink.  taintly has no control-flow graph,
+# so it cannot PROVE dominance.  Phase 1 is therefore CALIBRATION ONLY: when
+# a fork-reachable GitHub/GitLab pipeline ALSO declares a strong guard, mark
+# the finding's exploitability "low" and record why — but do NOT change
+# severity.  Rationale: a mis-attributed guard must never suppress a real
+# finding, so a presence-only signal may inform triage but must not act as a
+# gate.  A later phase may downgrade severity once a job/step dominance
+# approximation is validated against the corpus.
+# ---------------------------------------------------------------------------
+
+# Same-repository check — the canonical fork-PR guard: the step only runs
+# when the PR head repo equals the base repo (i.e. not a fork).
+_GUARD_SAME_REPO_RE = re.compile(
+    r"github\.event\.pull_request\.head\.repo\.full_name\s*==\s*github\.repository"
+)
+# Actor / triggering-actor / PR-author identity comparison in a condition.
+_GUARD_ACTOR_RE = re.compile(
+    r"\bgithub\.(?:actor|triggering_actor)\b\s*(?:==|!=)"
+    r"|\bgithub\.event\.pull_request\.user\.login\b\s*(?:==|!=)"
+)
+# author_association gate (MEMBER / OWNER / COLLABORATOR membership).
+_GUARD_ASSOCIATION_RE = re.compile(r"\bauthor_association\b")
+
+
+def _detect_github_guards(content: str) -> list[str]:
+    """Return labels for strong identity/repo guards declared anywhere in a
+    GitHub workflow.  Presence-only — no dominance proof."""
+    guards: list[str] = []
+    if _GUARD_SAME_REPO_RE.search(content):
+        guards.append("same-repository check")
+    if _GUARD_ACTOR_RE.search(content):
+        guards.append("actor-identity check")
+    if _GUARD_ASSOCIATION_RE.search(content):
+        guards.append("author-association check")
+    return guards
+
+
+# GitLab fork-reachable triggers: MR pipelines (incl. the GitHub-mirror
+# external-PR bridge) and the ``only: merge_requests`` shorthand.
+_GL_FORK_REACHABLE_RE = re.compile(
+    r"merge_request_event|external_pull_request_event|\bmerge_requests\b"
+)
+# GitLab TRUSTWORTHY guards only — these are GitLab-assigned and an MR author
+# cannot forge them.  Deliberately EXCLUDES ``$GITLAB_USER_*`` and
+# ``$CI_MERGE_REQUEST_LABELS`` gates: those are attacker-spoofable, which is
+# exactly why SEC4-GL-007 / SEC4-GL-011 flag them as *bad* — treating them as
+# protective here would be unsound.
+_GL_GUARD_SAME_PROJECT_RE = re.compile(
+    r"CI_MERGE_REQUEST_SOURCE_PROJECT_ID\s*==\s*[\$\{]*\s*CI_PROJECT_ID"
+    r"|CI_PROJECT_ID\s*==\s*[\$\{]*\s*CI_MERGE_REQUEST_SOURCE_PROJECT_ID"
+)
+_GL_GUARD_PROTECTED_REF_RE = re.compile(r"CI_COMMIT_REF_PROTECTED\s*==\s*['\"]?true")
+
+
+def _detect_gitlab_guards(content: str) -> list[str]:
+    """Return labels for TRUSTWORTHY GitLab guards (non-spoofable, GitLab-
+    assigned).  Presence-only — no dominance proof."""
+    guards: list[str] = []
+    if _GL_GUARD_SAME_PROJECT_RE.search(content):
+        guards.append("same-project MR check")
+    if _GL_GUARD_PROTECTED_REF_RE.search(content):
+        guards.append("protected-ref check")
+    return guards
+
+
+# NOTE: Jenkins is deliberately NOT given a guard-calibration pass.  On a
+# fork PR, Jenkins runs the FORK's own Jenkinsfile, so the attacker controls
+# the ``when {}`` guards themselves (they can remove or rewrite them).  A
+# Jenkinsfile guard is therefore not a trustworthy protective signal; the real
+# gate lives in the multibranch PR-trust / plugin configuration, which is not
+# visible in the file.  Calibrating on an attacker-controllable guard would be
+# unsound, so we don't.
+
+
+def _annotate_guarded_findings(findings: list[Finding], content: str) -> None:
+    """Phase-1 calibration: on a fork-reachable GitHub or GitLab pipeline that
+    also declares a strong guard, set findings' exploitability to "low" and
+    record the guard in ``calibration_reason``.  Severity is unchanged — a
+    guard's presence is not proof that it dominates this finding's sink.  The
+    platform-specific regexes self-gate (GitHub guards only match GitHub
+    content, GitLab guards only GitLab content)."""
+    if not findings:
+        return
+    if _FORK_REACHABLE_TRIGGER_RE.search(content):
+        guards = _detect_github_guards(content)
+    elif _GL_FORK_REACHABLE_RE.search(content):
+        guards = _detect_gitlab_guards(content)
+    else:
+        return
+    if not guards:
+        return
+    note = (
+        f"Workflow is fork-reachable but declares a guard ({', '.join(guards)}); "
+        "verify it dominates this finding's job/step before treating it as exploitable."
+    )
+    for f in findings:
+        if f.origin != "file" or f.exploitability == "low":
+            continue
+        f.exploitability = "low"
+        f.calibration_reason = (
+            f"{f.calibration_reason} {note}".strip() if f.calibration_reason else note
+        )
+
+
+def _guard_calibration_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
+    if not any(rule.platform in (Platform.GITHUB, Platform.GITLAB) for rule in ctx.rules):
+        return
+    _annotate_guarded_findings(findings, ctx.content)
+
+
 POST_PROCESSORS: tuple[_PostProcessor, ...] = (
     _github_dead_postprocessor,
     _gitlab_dead_postprocessor,
     _jenkins_dead_postprocessor,
     _maintainer_downgrade_postprocessor,
+    _guard_calibration_postprocessor,
 )
 
 
