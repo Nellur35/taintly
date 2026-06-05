@@ -402,6 +402,23 @@ _IGNORE_SCRIPTS_INSTALL_LINE_RE = (
 )
 
 
+class GithubScriptStepOutputPattern(GithubScriptDangerousContextPattern):
+    """SEC4-GH-024: opaque step output interpolated into github-script.
+
+    This uses the same sink walker as SEC4-GH-025 but keeps the source
+    calibrated like SEC4-GH-021/022: a step output may carry attacker
+    bytes, but the upstream producer is not visible at the consuming
+    ``script:`` line, so the finding is review-needed.
+    """
+
+    _STEP_OUTPUT_RE = re.compile(
+        r"\$\{\{\s*steps\.[\w-]+\.outputs(?:\.[\w-]+|\[['\"][^'\"]+['\"]\])\s*\}\}"
+    )
+
+    def _is_dangerous(self, line: str) -> bool:
+        return bool(self._STEP_OUTPUT_RE.search(line))
+
+
 class NeedsOutputShellInterpolationPattern:
     """SEC4-GH-022: ``${{ needs.<job>.outputs.<name> }}`` spliced
     into a shell context.  Cross-job sibling of SEC4-GH-021 —
@@ -2050,6 +2067,66 @@ RULES: list[Rule] = [
             "sides, so the risk is lower than a third-party callee, but compromise of the callee's "
             "transitive dependencies still exposes the caller's complete secret set."
         ),
+    ),
+    # =========================================================================
+    # SEC4-GH-024: actions/github-script script: interpolates opaque step output
+    # =========================================================================
+    Rule(
+        id="SEC4-GH-024",
+        title="actions/github-script script: body interpolates opaque step output",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        review_needed=True,
+        confidence="low",
+        description=(
+            "An ``actions/github-script`` step's ``script:`` parameter "
+            "interpolates ``${{ steps.<id>.outputs.<name> }}`` into "
+            "JavaScript source. Step outputs can carry attacker-"
+            "controlled bytes from an upstream producer, but the source "
+            "is not visible at the consuming line. Review the producer "
+            "before treating this as exploitable."
+        ),
+        pattern=GithubScriptStepOutputPattern(),
+        remediation=(
+            "Route the step output through ``env:`` and read it via "
+            "``process.env`` inside github-script. If the upstream "
+            "producer reads fork PR, issue, comment, branch, or file "
+            "content, validate the value before using it in JavaScript."
+        ),
+        reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable",
+        test_positive=[
+            (
+                "      - uses: actions/github-script@v7\n"
+                "        with:\n"
+                "          script: |\n"
+                "            core.info('${{ steps.meta.outputs.version }}')\n"
+            ),
+        ],
+        test_negative=[
+            (
+                "      - uses: actions/github-script@v7\n"
+                "        env:\n"
+                "          VERSION: ${{ steps.meta.outputs.version }}\n"
+                "        with:\n"
+                "          script: |\n"
+                "            core.info(process.env.VERSION)\n"
+            ),
+            (
+                "      - uses: actions/github-script@v7\n"
+                "        script: |\n"
+                "          core.info('${{ steps.meta.outputs.version }}')\n"
+            ),
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "Step outputs are opaque transit channels. A prior step can "
+            "capture attacker-controlled bytes into ``GITHUB_OUTPUT``; "
+            "a later github-script step then splices that output into JS "
+            "source. This rule preserves the signal while requiring "
+            "review because the taint source is upstream."
+        ),
+        incidents=[],
     ),
     Rule(
         id="SEC4-GH-025",

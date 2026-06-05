@@ -18,7 +18,7 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
-from taintly.workflow_aware_pattern import PredicateContext
+from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
 
 # ---------------------------------------------------------------------------
 # SEC1-GH-001 — job-scoped variant of SequencePattern
@@ -402,6 +402,87 @@ def _is_unmasked_secret_input(
     uses_value = ctx.get_value(step_prefix + ("uses",)) or ""
     action_name = _action_name_from_uses(uses_value)
     return (action_name, input_slot) not in _SAFE_ACTION_INPUT_PAIRS
+
+
+_SEC1_PUBLISH_OR_DEPLOY_RE = (
+    r"\b(npm|pnpm|yarn|uv|cargo)\s+publish\b"
+    r"|\btwine\s+upload\b"
+    r"|\bdocker\s+push\b"
+    r"|\bgh\s+release\s+(create|upload)\b"
+    r"|\bpublish\.sh\b"
+)
+
+
+_SEC1_PUBLISH_SINK_RE = re.compile(_SEC1_PUBLISH_OR_DEPLOY_RE)
+
+
+_SEC1_PUBLISH_ACTION_RE = re.compile(
+    r"pypa/gh-action-pypi-publish|rubygems/release-gem",
+    re.IGNORECASE,
+)
+
+
+def _sec1_workflow_grants_id_token_write(ctx: PredicateContext) -> bool:
+    """True if the workflow's TOP-LEVEL permissions grant id-token:
+    write — explicitly (``id-token: write``) or via ``write-all``."""
+    top = ctx.get_value(("permissions",))
+    if top is not None and top.strip() == "write-all":
+        return True
+    id_token = ctx.get_value(("permissions", "id-token"))
+    return id_token is not None and id_token.strip() == "write"
+
+
+def _sec1_job_has_environment(ctx: PredicateContext, job_id: str) -> bool:
+    """True if ``jobs.<job_id>`` declares an ``environment:`` — string
+    form (``environment: prod``) or block form
+    (``environment:`` then ``name: prod``)."""
+    if ctx.get_value(("jobs", job_id, "environment")) is not None:
+        return True
+    return any(True for _ in ctx.descendants(("jobs", job_id, "environment")))
+
+
+def _sec1_distinct_job_count(ctx: PredicateContext) -> int:
+    """Number of distinct job ids declared under ``jobs:``."""
+    job_ids: set[str] = set()
+    for ev in ctx.leaves:
+        p = ev.path
+        if len(p) >= 2 and p[0] == "jobs" and isinstance(p[1], str):
+            job_ids.add(p[1])
+    return len(job_ids)
+
+
+def _sec1_publish_without_gate(
+    value: str,
+    _value_kind: str,
+    path: tuple[object, ...],
+    ctx: PredicateContext,
+) -> bool:
+    """Predicate for SEC1-GH-002 — see the rule description for the
+    four-part threat model.  Anchored on a step's ``run:`` or ``uses:``
+    leaf; fires when that step is a publish sink in a workflow that
+    broadly grants id-token: write across multiple jobs and leaves the
+    publishing job behind no environment gate."""
+    loc = ctx.step_index(path)
+    if loc is None:
+        return False
+    job_id, _step_i = loc
+    leaf_key = path[-1]
+    if leaf_key == "run":
+        if not _SEC1_PUBLISH_SINK_RE.search(value or ""):
+            return False
+    elif leaf_key == "uses":
+        if not _SEC1_PUBLISH_ACTION_RE.search(value or ""):
+            return False
+    else:
+        return False
+    # (1) broad, workflow-level OIDC-mint capability ...
+    if not _sec1_workflow_grants_id_token_write(ctx):
+        return False
+    # (2) ... shared across more than just the publish job ...
+    if _sec1_distinct_job_count(ctx) < 2:
+        return False
+    # (4) ... and no approval gate on the publishing job.
+    return not _sec1_job_has_environment(ctx, job_id)
 
 
 RULES: list[Rule] = [
@@ -2618,5 +2699,94 @@ RULES: list[Rule] = [
         ),
         confidence="medium",
         incidents=["Ultralytics (Dec 2024)"],
+    ),
+    # =========================================================================
+    # SEC1-GH-002: trusted-publishing job has no environment approval gate.
+    # Capability-based companion to SEC1-GH-001 (which keys on job NAME).
+    # =========================================================================
+    Rule(
+        id="SEC1-GH-002",
+        title="Trusted-publishing job has no environment approval gate",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-1",
+        review_needed=True,
+        confidence="medium",
+        description=(
+            "A job runs a real publish sink — a registry publish command "
+            "(``npm``/``uv``/``cargo publish``, ``twine upload``, "
+            "``docker push``, ``gh release``) or a trusted-publishing "
+            "action such as ``pypa/gh-action-pypi-publish`` — inside a "
+            "workflow that grants ``id-token: write`` at the TOP LEVEL, "
+            "so every job in the file (not just the publisher) can mint "
+            "an OIDC token, and the publishing job declares no "
+            "``environment:``.  Without an environment there is no "
+            "approval gate: any trigger that reaches the job ships the "
+            "artifact with no human in the loop.\n"
+            "\n"
+            "This is the capability-based companion to SEC1-GH-001, "
+            "which keys on the job NAME.  It catches publish jobs named "
+            "something other than deploy/release/publish, and is "
+            "deliberately scoped to the higher-risk case where the OIDC "
+            "grant is workflow-wide and shared across multiple jobs.  A "
+            "minimal single-job publisher is not flagged."
+        ),
+        pattern=WorkflowAwarePattern(
+            path=["jobs.*.steps[*].run", "jobs.*.steps[*].uses"],
+            predicate=_sec1_publish_without_gate,
+        ),
+        remediation=(
+            "Add an ``environment:`` with protection rules to the "
+            "publishing job so a reviewer must approve before it runs:\n"
+            "    jobs:\n"
+            "      publish:\n"
+            "        environment: release\n"
+            "        steps: ...\n"
+            "Then configure required reviewers under Settings > "
+            "Environments.  For PyPI/registry trusted publishing this is "
+            "the documented hardening — scope the OIDC mint to a gated "
+            "environment so a compromised step elsewhere in the workflow "
+            "cannot publish.  If the broad grant is unnecessary, move "
+            "``id-token: write`` out of the top-level ``permissions:`` "
+            "and onto only the publishing job."
+        ),
+        reference=(
+            "https://docs.github.com/en/actions/deployment/"
+            "security-hardening-your-deployments/using-environments-for-deployment"
+        ),
+        test_positive=[
+            "permissions:\n  id-token: write\njobs:\n"
+            "  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make build\n"
+            "  ship:\n    runs-on: ubuntu-latest\n    steps:\n      - run: uv publish",
+            "permissions:\n  id-token: write\njobs:\n"
+            "  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pytest\n"
+            "  pypi:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - uses: pypa/gh-action-pypi-publish@release/v1",
+        ],
+        test_negative=[
+            "permissions:\n  id-token: write\njobs:\n"
+            "  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: uv publish",
+            "permissions:\n  id-token: write\njobs:\n"
+            "  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make build\n"
+            "  ship:\n    environment: release\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - run: uv publish",
+            "jobs:\n"
+            "  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make build\n"
+            "  ship:\n    permissions:\n      id-token: write\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - run: uv publish",
+            "permissions:\n  id-token: write\njobs:\n"
+            "  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make build\n"
+            "  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - run: terraform apply",
+        ],
+        stride=["E", "T"],
+        threat_narrative=(
+            "A workflow that grants id-token: write to every job and "
+            "publishes without an approval gate lets any compromised "
+            "step — a malicious dependency, a poisoned action, an "
+            "injected build script — mint a short-lived OIDC credential "
+            "and push a backdoored artifact to the package registry. "
+            "The environment approval gate is the last human checkpoint "
+            "between automated CI and a published release."
+        ),
     ),
 ]

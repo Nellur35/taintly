@@ -43,6 +43,31 @@ class DependabotMissingCooldownPattern:
         return results
 
 
+class DependabotHardcodedRegistryCredPattern:
+    """Fire on a ``password:`` / ``token:`` / ``key:`` field inside a
+    ``.github/dependabot.yml`` ``registries:`` block whose value is a
+    plaintext literal rather than a ``${{ secrets.X }}`` reference.  The
+    ``registries:`` marker gates the rule to dependabot config so the
+    common ``token:``/``password:`` keys in ordinary workflow ``with:``
+    blocks are not swept in."""
+
+    _MARKER_RE = re.compile(r"^registries:", re.MULTILINE)
+    # value, after an optional opening quote, must NOT begin a ``${{ ``
+    # expression and must be a real literal character.
+    _CRED_RE = re.compile(r"^\s+(?:password|token|key|auth-key):\s+['\"]?(?!\$\{\{)[^\s'\"#]")
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if not self._MARKER_RE.search(content):
+            return []
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith("#"):
+                continue
+            if self._CRED_RE.match(line):
+                results.append((i + 1, line.strip()))
+        return results
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # SEC8-GH-001: Container / service image pinned to :latest
@@ -304,5 +329,63 @@ RULES: list[Rule] = [
             "lottie-player (Oct 2024)",
             "event-stream (Nov 2018)",
         ],
+    ),
+    # =========================================================================
+    # SEC8-GH-009: hardcoded credential in a Dependabot registries: block
+    # =========================================================================
+    Rule(
+        id="SEC8-GH-009",
+        title="Hardcoded credential in a Dependabot ``registries:`` block",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-8",
+        description=(
+            "A ``registries:`` entry in ``.github/dependabot.yml`` "
+            "declares a ``password``, ``token``, ``key`` or ``auth-key`` "
+            "as a plaintext literal instead of a ``${{ secrets.X }}`` "
+            "reference.  Authentication material in this file is "
+            "committed to the repository in clear text, exposing the "
+            "private-registry credential to anyone with read access and "
+            "to the full git history."
+        ),
+        pattern=DependabotHardcodedRegistryCredPattern(),
+        remediation=(
+            "Store the credential as an encrypted Dependabot secret and "
+            "reference it:\n"
+            "\n"
+            "    registries:\n"
+            "      my-registry:\n"
+            "        type: npm-registry\n"
+            "        url: https://npm.example.com\n"
+            "        token: ${{secrets.NPM_REGISTRY_TOKEN}}\n"
+            "\n"
+            "Add the secret under Settings > Secrets and variables > "
+            "Dependabot."
+        ),
+        reference=(
+            "https://docs.github.com/en/code-security/dependabot/working-with-dependabot/"
+            "configuring-access-to-private-registries-for-dependabot"
+        ),
+        test_positive=[
+            "registries:\n  my-npm:\n    type: npm-registry\n"
+            '    url: https://npm.example.com\n    token: "ghp_abc123HARDCODED"\n',
+            "registries:\n  maven:\n    type: maven-repository\n"
+            "    url: https://maven.example.com\n    password: hunter2\n",
+        ],
+        test_negative=[
+            "registries:\n  my-npm:\n    type: npm-registry\n"
+            "    url: https://npm.example.com\n    token: ${{secrets.NPM_REGISTRY_TOKEN}}\n",
+            "registries:\n  my-npm:\n    type: npm-registry\n"
+            '    url: https://npm.example.com\n    password: "${{ secrets.PW }}"\n',
+            # token: in an ordinary workflow with: block — not a dependabot file.
+            "      - uses: actions/checkout@v4\n        with:\n          token: abc123\n",
+        ],
+        stride=["I"],
+        threat_narrative=(
+            "A registry token committed in plaintext to dependabot.yml is "
+            "readable by every collaborator and lives forever in git "
+            "history; a single repo-read compromise hands the attacker "
+            "standing access to the private package registry."
+        ),
     ),
 ]
