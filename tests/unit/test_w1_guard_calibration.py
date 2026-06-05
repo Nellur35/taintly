@@ -1,8 +1,10 @@
-"""W1 — guard / trigger-reachability calibration (phase 1, calibration only).
+"""Guard / trigger-reachability calibration tests.
 
-The pass annotates a finding's exploitability when a fork-reachable GitHub
-workflow ALSO declares a strong identity/repo guard — but must never change
-severity (a mis-attributed guard must not suppress a real finding).
+The pass annotates a finding's exploitability when its job is
+fork-reachable AND that same job declares a strong identity/repo guard.
+It must never change severity, must be job-scoped (a guard in one job
+does not calibrate findings in another), and must recognise
+fork-reachable triggers in every ``on:`` YAML shape.
 """
 
 from __future__ import annotations
@@ -15,13 +17,14 @@ from taintly.engine import (
 from taintly.models import Finding, Severity
 
 
-def _mk() -> Finding:
+def _mk(line: int = 0) -> Finding:
     return Finding(
         rule_id="SEC4-GH-004",
         severity=Severity.CRITICAL,
         title="t",
         description="d",
         file="wf.yml",
+        line=line,
     )
 
 
@@ -37,13 +40,17 @@ def test_detect_github_guards():
     assert _detect_github_guards("run: echo hi") == []
 
 
+# A guarded job's finding is annotated (block-style trigger).
+# Lines: 1 on:/2 pull_request_target:/3 types/4 jobs:/5 x:/6 if:/7 steps:/8 run
+_BLOCK_GUARDED = (
+    "on:\n  pull_request_target:\n    types: [opened]\n"
+    "jobs:\n  x:\n    if: github.actor == 'admin'\n    steps:\n      - run: echo hi\n"
+)
+
+
 def test_fork_reachable_with_guard_is_annotated_not_downgraded():
-    content = (
-        "on:\n  pull_request_target:\n    types: [opened]\n"
-        "jobs:\n  x:\n    if: github.actor == 'admin'\n    steps:\n      - run: echo hi\n"
-    )
-    f = _mk()
-    _annotate_guarded_findings([f], content)
+    f = _mk(line=8)  # the run: step, inside guarded job x
+    _annotate_guarded_findings([f], _BLOCK_GUARDED)
     assert f.exploitability == "low"
     assert "guard" in f.calibration_reason.lower()
     # CALIBRATION ONLY — severity must be untouched.
@@ -52,7 +59,7 @@ def test_fork_reachable_with_guard_is_annotated_not_downgraded():
 
 def test_fork_reachable_without_guard_is_untouched():
     content = "on:\n  pull_request_target:\njobs:\n  x:\n    steps:\n      - run: echo hi\n"
-    f = _mk()
+    f = _mk(line=6)
     _annotate_guarded_findings([f], content)
     assert f.exploitability == "medium"
     assert f.calibration_reason == ""
@@ -64,8 +71,68 @@ def test_guard_without_fork_reachability_is_untouched():
         "on:\n  push:\n    tags: [v*]\n"
         "jobs:\n  x:\n    if: github.actor == 'admin'\n    steps:\n      - run: echo hi\n"
     )
-    f = _mk()
+    f = _mk(line=8)
     _annotate_guarded_findings([f], content)
+    assert f.exploitability == "medium"
+    assert f.calibration_reason == ""
+
+
+# --- Finding A: fork-reachability must be detected in every on: shape ----
+
+
+def test_flow_mapping_trigger_is_detected():
+    # on: { pull_request_target: {...} } — the block-only regex missed this.
+    content = (
+        "on: { pull_request_target: { types: [opened] } }\n"
+        "jobs:\n  x:\n    if: github.actor == 'admin'\n    steps:\n      - run: echo hi\n"
+    )
+    f = _mk(line=6)  # run: step inside job x
+    _annotate_guarded_findings([f], content)
+    assert f.exploitability == "low"
+
+
+def test_flow_list_trigger_is_detected():
+    # on: [pull_request_target] — list shorthand, also previously missed.
+    content = (
+        "on: [pull_request_target]\n"
+        "jobs:\n  x:\n    if: github.actor == 'admin'\n    steps:\n      - run: echo hi\n"
+    )
+    f = _mk(line=5)  # run: step inside job x
+    _annotate_guarded_findings([f], content)
+    assert f.exploitability == "low"
+
+
+# --- Finding B: job-scoping — a guard in one job must not reach another ---
+
+# Lines: 1 on:/2 prt:/3 jobs:/4 a:/5 if:(guard)/6 steps/7 run(a)
+#        8 b:/9 steps/10 run(b)  — job b has NO guard
+_TWO_JOBS_GUARD_IN_A = (
+    "on:\n  pull_request_target:\n"
+    "jobs:\n"
+    "  a:\n    if: github.actor == 'admin'\n    steps:\n      - run: echo a\n"
+    "  b:\n    steps:\n      - run: echo b\n"
+)
+
+
+def test_guard_in_other_job_does_not_calibrate_this_finding():
+    # Finding in unguarded job b must NOT be downgraded by job a's guard.
+    f_b = _mk(line=10)
+    _annotate_guarded_findings([f_b], _TWO_JOBS_GUARD_IN_A)
+    assert f_b.exploitability == "medium"
+    assert f_b.calibration_reason == ""
+
+
+def test_guard_in_same_job_still_calibrates():
+    # Control: a finding in guarded job a IS downgraded.
+    f_a = _mk(line=7)
+    _annotate_guarded_findings([f_a], _TWO_JOBS_GUARD_IN_A)
+    assert f_a.exploitability == "low"
+
+
+def test_line_zero_finding_is_not_calibrated():
+    # No resolvable job (line<=0) → conservative: never downgrade.
+    f = _mk(line=0)
+    _annotate_guarded_findings([f], _BLOCK_GUARDED)
     assert f.exploitability == "medium"
     assert f.calibration_reason == ""
 
@@ -85,15 +152,18 @@ def test_detect_gitlab_guards_trustworthy_only():
     assert _detect_gitlab_guards("rules:\n  - if: '$CI_MERGE_REQUEST_LABELS =~ /safe/'") == []
 
 
+# Lines: 1 job:/2 rules:/3 if(guard)/4 script:/5 echo
+_GL_GUARDED = (
+    "job:\n  rules:\n"
+    '    - if: \'$CI_PIPELINE_SOURCE == "merge_request_event" '
+    "&& $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'\n"
+    '  script:\n    - echo "$CI_MERGE_REQUEST_TITLE"\n'
+)
+
+
 def test_gitlab_fork_reachable_with_same_project_guard_is_annotated():
-    content = (
-        "job:\n  rules:\n"
-        '    - if: \'$CI_PIPELINE_SOURCE == "merge_request_event" '
-        "&& $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'\n"
-        '  script:\n    - echo "$CI_MERGE_REQUEST_TITLE"\n'
-    )
-    f = _mk()
-    _annotate_guarded_findings([f], content)
+    f = _mk(line=5)  # the script line, inside job "job"
+    _annotate_guarded_findings([f], _GL_GUARDED)
     assert f.exploitability == "low"
     assert "same-project" in f.calibration_reason
     assert f.severity == Severity.CRITICAL  # calibration only
@@ -107,7 +177,7 @@ def test_gitlab_fork_reachable_with_spoofable_gate_is_untouched():
         "    - if: '$CI_PIPELINE_SOURCE == \"merge_request_event\"'\n"
         '  script:\n    - if [ "$GITLAB_USER_LOGIN" = bot ]; then echo hi; fi\n'
     )
-    f = _mk()
+    f = _mk(line=5)
     _annotate_guarded_findings([f], content)
     assert f.exploitability == "medium"
     assert f.calibration_reason == ""

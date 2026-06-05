@@ -31,6 +31,7 @@ from .models import (
     scan_session,
 )
 from .parsers.anchor_expander import expand_anchors
+from .parsers.segmentation import for_each_job, job_at_line
 from .pse_enrichment import enrich_pse_findings
 from .staticguard import WorkflowContext as StaticGuardContext
 from .staticguard import (
@@ -40,7 +41,7 @@ from .staticguard import (
 )
 from .workflow_context import HARDEN_RUNNER_TEMPERED_FAMILIES, compute_exploitability
 from .workflow_context import analyze as analyze_workflow
-from .workflow_corpus import CorpusPattern, build_corpus
+from .workflow_corpus import CorpusPattern, build_corpus, is_fork_reachable
 
 # ---------------------------------------------------------------------------
 # Inline suppression
@@ -552,29 +553,58 @@ def _detect_gitlab_guards(content: str) -> list[str]:
 
 
 def _annotate_guarded_findings(findings: list[Finding], content: str) -> None:
-    """Calibration: on a fork-reachable GitHub or GitLab pipeline that
-    also declares a strong guard, set findings' exploitability to "low" and
-    record the guard in ``calibration_reason``.  Severity is unchanged — a
-    guard's presence is not proof that it dominates this finding's sink.  The
-    platform-specific regexes self-gate (GitHub guards only match GitHub
-    content, GitLab guards only GitLab content)."""
+    """Calibration: on a fork-reachable GitHub or GitLab pipeline where a
+    strong guard is declared IN THE SAME JOB as a finding, set that
+    finding's exploitability to "low" and record the guard in
+    ``calibration_reason``.  Severity is unchanged — a guard's presence is
+    not proof that it dominates the sink.
+
+    Two correctness properties:
+      * Fork-reachability is checked across all four ``on:`` YAML shapes
+        (block / flow-mapping / flow-list / bare) via the shared
+        :func:`is_fork_reachable` parser, so a flow-style trigger is not
+        missed.
+      * Guards are detected and applied PER JOB: a guard in job A never
+        calibrates a finding in job B.  A finding with no resolvable job
+        (``line <= 0`` or preamble) is left untouched — the conservative
+        direction for a calibration that must never suppress a real
+        finding.
+
+    The platform-specific guard detectors self-gate (GitHub guards only
+    match GitHub content, GitLab guards only GitLab content)."""
     if not findings:
         return
-    if _FORK_REACHABLE_TRIGGER_RE.search(content):
-        guards = _detect_github_guards(content)
+    if is_fork_reachable(content):
+        detect = _detect_github_guards
     elif _GL_FORK_REACHABLE_RE.search(content):
-        guards = _detect_gitlab_guards(content)
+        detect = _detect_gitlab_guards
     else:
         return
-    if not guards:
+    # Guards live in job/step ``if:`` (GitHub) or ``rules:`` (GitLab)
+    # bodies; detect them per job segment so each guard's reach is bounded
+    # to its own job.  ``for_each_job`` segments both GitHub and GitLab.
+    guards_by_job: dict[str, list[str]] = {}
+    for job in for_each_job(content):
+        if not job.name:
+            continue
+        job_guards = detect(job.text)
+        if job_guards:
+            guards_by_job[job.name] = job_guards
+    if not guards_by_job:
         return
-    note = (
-        f"Workflow is fork-reachable but declares a guard ({', '.join(guards)}); "
-        "verify it dominates this finding's job/step before treating it as exploitable."
-    )
     for f in findings:
         if f.origin != "file" or f.exploitability == "low":
             continue
+        job_name = job_at_line(content, f.line)
+        if job_name is None:
+            continue
+        guards = guards_by_job.get(job_name)
+        if not guards:
+            continue
+        note = (
+            f"This job is fork-reachable but declares a guard ({', '.join(guards)}); "
+            "verify it dominates this finding's step before treating it as exploitable."
+        )
         f.exploitability = "low"
         f.calibration_reason = (
             f"{f.calibration_reason} {note}".strip() if f.calibration_reason else note
