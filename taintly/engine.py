@@ -474,17 +474,17 @@ def _maintainer_downgrade_postprocessor(findings: list[Finding], ctx: _PostProce
 
 
 # ---------------------------------------------------------------------------
-# Guard / trigger-reachability calibration (W1, phase 1 — calibration only).
+# Guard / trigger-reachability calibration (calibration only).
 #
-# CodeQL's ControlChecks model downgrades a finding when an identity / repo /
+# A control-flow analyzer can downgrade a finding when an identity / repo /
 # association guard dominates the sink.  taintly has no control-flow graph,
-# so it cannot PROVE dominance.  Phase 1 is therefore CALIBRATION ONLY: when
+# so it cannot PROVE dominance.  This pass is therefore CALIBRATION ONLY: when
 # a fork-reachable GitHub/GitLab pipeline ALSO declares a strong guard, mark
 # the finding's exploitability "low" and record why — but do NOT change
 # severity.  Rationale: a mis-attributed guard must never suppress a real
 # finding, so a presence-only signal may inform triage but must not act as a
-# gate.  A later phase may downgrade severity once a job/step dominance
-# approximation is validated against the corpus.
+# gate.  Downgrading severity would require a validated job/step dominance
+# approximation, which is out of scope here.
 # ---------------------------------------------------------------------------
 
 # Same-repository check — the canonical fork-PR guard: the step only runs
@@ -552,7 +552,7 @@ def _detect_gitlab_guards(content: str) -> list[str]:
 
 
 def _annotate_guarded_findings(findings: list[Finding], content: str) -> None:
-    """Phase-1 calibration: on a fork-reachable GitHub or GitLab pipeline that
+    """Calibration: on a fork-reachable GitHub or GitLab pipeline that
     also declares a strong guard, set findings' exploitability to "low" and
     record the guard in ``calibration_reason``.  Severity is unchanged — a
     guard's presence is not proof that it dominates this finding's sink.  The
