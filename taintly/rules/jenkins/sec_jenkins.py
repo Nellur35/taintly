@@ -410,6 +410,352 @@ RULES: list[Rule] = [
         ),
     ),
     # =========================================================================
+    # SEC3-JK-007 — shared library loaded via the library() STEP without a
+    # commit-SHA pin.  SEC3-JK-001 matches only the ``@Library`` annotation;
+    # the runtime ``library`` step (``library 'lib@main'`` /
+    # ``library('lib@${params.V}')``) is a distinct, uncovered loader with
+    # the same mutable-ref / param-interpolation supply-chain risk
+    # (param interpolation is the CVE-2022-29047 class).  Mirrors
+    # SEC3-JK-001's SHA exclude so pinned refs do not fire; lowercase
+    # ``library`` cannot collide with the capital-L ``@Library`` annotation.
+    # =========================================================================
+    Rule(
+        id="SEC3-JK-007",
+        title="Shared library loaded via library() step without commit-SHA pinning",
+        severity=Severity.HIGH,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-3",
+        finding_family="Mutable dependency references",
+        description=(
+            "A Jenkins shared library is loaded with the runtime ``library`` "
+            "step against a mutable ref — a branch (``@main``), a tag "
+            "(``@v1.2``), the configured default version (no ``@`` at all), "
+            "or a parameter-interpolated ref (``@${params.VERSION}``). "
+            "Unlike the ``@Library`` annotation (SEC3-JK-001), the "
+            "``library`` step resolves at runtime, so the library code can "
+            "change between builds; a parameter-interpolated version is the "
+            "CVE-2022-29047 class, where a build parameter selects which "
+            "library revision (and thus which code) runs on the controller. "
+            "Shared-library code executes with the pipeline's full trust."
+        ),
+        pattern=RegexPattern(
+            # ``library 'x@ref'`` (command syntax) or ``library('x@ref')``
+            # (method syntax).  Fires on any non-SHA ref, like SEC3-JK-001.
+            match=r"\blibrary\s*\(?\s*['\"][\w.\-/]+",
+            exclude=[r"^\s*//", r"^\s*\*", r"@[a-fA-F0-9]{40}\b"],
+        ),
+        remediation=(
+            "Pin the library step to a full commit SHA, and never derive "
+            "the ref from a build parameter:\n\n"
+            "// BAD\n"
+            "library 'corp-lib@main'\n"
+            'library "corp-lib@${params.LIB_VERSION}"   // CVE-2022-29047 class\n\n'
+            "// GOOD — immutable commit SHA\n"
+            "library 'corp-lib@abc123def456abc123def456abc123def456abc1'\n\n"
+            "If you must select a version dynamically, validate it against "
+            "an allowlist of reviewed SHAs rather than passing it straight "
+            "into the step."
+        ),
+        reference="https://www.jenkins.io/doc/book/pipeline/shared-libraries/#loading-libraries-dynamically",
+        test_positive=[
+            "library 'my-lib@main'",
+            "library('corp-lib@develop')",
+            "library 'shared@v1.2.3'",
+            'library "dyn@${params.LIB_VERSION}"',
+            "library 'my-lib'",
+        ],
+        test_negative=[
+            "library 'my-lib@abc123def456abc123def456abc123def456abc1'",
+            "// library 'my-lib@main'",
+            # @Library annotation is SEC3-JK-001's territory (capital L).
+            "@Library('my-lib@main') _",
+            # A variable named library, not the step.
+            "def library = computeName()",
+        ],
+        stride=["T"],
+        threat_narrative=(
+            "The ``library`` step resolves its ref at build time. On a "
+            "mutable ref, any push to the library repo changes what runs on "
+            "the controller; with a parameter-interpolated ref, anyone who "
+            "can set the build parameter (a parameterized build, an API "
+            "trigger) chooses the library revision — arbitrary trusted-code "
+            "execution on the Jenkins controller."
+        ),
+    ),
+    # =========================================================================
+    # SEC4-JK-009 — checkout/git step clones a remote URL built from a build
+    # parameter.  SEC4-JK-001/002 cover shell-interpolation sinks, not the
+    # checkout DSL.  A ``url: "${params.REPO_URL}"`` lets whoever triggers a
+    # parameterized / API build point the checkout at an arbitrary remote,
+    # whose code then runs with the pipeline's trust.  Deliberately scoped
+    # to ``url:`` from ``params.`` only — ``branch: ${env.CHANGE_BRANCH}``
+    # is the NORMAL way Multibranch checks out a PR and must not fire.
+    # =========================================================================
+    Rule(
+        id="SEC4-JK-009",
+        title="Checkout clones a remote URL built from a build parameter",
+        severity=Severity.HIGH,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A ``checkout`` / ``git`` step's ``url:`` is interpolated from a "
+            'build parameter (``url: "${params.REPO_URL}"``). The remote '
+            "to clone is then chosen by whoever starts the build — via a "
+            "parameterized build form or an API trigger — so an attacker can "
+            "point the checkout at a repository they control. That repo's "
+            "Jenkinsfile / build scripts / submodules then execute with the "
+            "pipeline's credentials and on its agent. Unlike "
+            "``branch: ${env.CHANGE_BRANCH}`` (the normal Multibranch PR "
+            "checkout), a parameter-driven clone URL has no trust anchor."
+        ),
+        pattern=RegexPattern(
+            match=r"\burl\s*:\s*['\"]?\$\{?\s*params\s*\.",
+            exclude=[r"^\s*//", r"^\s*\*"],
+        ),
+        remediation=(
+            "Do not derive the checkout URL from a build parameter. Pin the "
+            "remote in the Jenkinsfile (or the Multibranch / job SCM "
+            "config) so it cannot be redirected at trigger time:\n\n"
+            "// BAD\n"
+            "git url: \"${params.REPO_URL}\", branch: 'main'\n\n"
+            "// GOOD — fixed remote\n"
+            "git url: 'https://github.com/org/repo.git', branch: 'main'\n\n"
+            "If you genuinely build multiple known repos, map a small "
+            "allowlist of parameter values to fixed URLs rather than "
+            "interpolating the parameter into the URL directly."
+        ),
+        reference="https://www.jenkins.io/doc/pipeline/steps/workflow-scm-step/",
+        test_positive=[
+            '        url: "${params.REPO_URL}"',
+            'userRemoteConfigs: [[url: "${params.GIT_URL}"]]',
+            "git url: \"${params.REPO}\", branch: 'main'",
+        ],
+        test_negative=[
+            "        url: 'https://github.com/org/repo.git'",
+            # Normal Multibranch PR checkout — branch, not url; env, not param.
+            '        branch: "${env.CHANGE_BRANCH}"',
+            '        // url: "${params.REPO_URL}"',
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "A parameter-driven clone URL turns the pipeline into a "
+            "confused deputy: the attacker supplies their own repository as "
+            "the build parameter, the agent clones and runs it with the "
+            "job's credentials, and the build looks legitimate because the "
+            "Jenkinsfile itself was never changed."
+        ),
+    ),
+    # =========================================================================
+    # SEC4-JK-010 — load step executes Groovy from an attacker-influenced
+    # path.  SEC4-JK-003 covers ``evaluate()`` / ``Eval.*`` but not the
+    # ``load`` step.  ``load "${params.X}"`` / ``load`` of a PR-controlled
+    # (``env.CHANGE_*`` / ghprb) path runs attacker-chosen Groovy on the
+    # controller.  Scoped to params / change / ghprb interpolation — a
+    # static ``load 'ci/lib.groovy'`` is the normal, safe use.
+    # =========================================================================
+    Rule(
+        id="SEC4-JK-010",
+        title="load step executes Groovy from a parameter / PR-controlled path",
+        severity=Severity.HIGH,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A Jenkinsfile ``load`` step takes a path interpolated from a "
+            "build parameter (``${params.X}``) or a PR-controlled variable "
+            "(``${env.CHANGE_*}`` / ghprb). ``load`` compiles and runs the "
+            "target file as Groovy on the controller with the pipeline's "
+            "trust, so an attacker who controls the path — or the file at "
+            "that path, e.g. a script pulled in by an untrusted checkout — "
+            "gets arbitrary code execution. A static ``load 'ci/lib.groovy'`` "
+            "is the normal, safe pattern and does not fire."
+        ),
+        pattern=RegexPattern(
+            match=(
+                r"\bload\s*\(?\s*['\"][^'\"\n]*"
+                r"\$\{?\s*(?:params\.|env\.CHANGE_|env\.ghprb|ghprb)"
+            ),
+            exclude=[r"^\s*//", r"^\s*\*"],
+        ),
+        remediation=(
+            "Load only fixed, in-repo Groovy files; never interpolate a "
+            "parameter or PR-controlled value into the path:\n\n"
+            "// BAD\n"
+            'load "${params.SCRIPT_PATH}"\n'
+            'load "${env.CHANGE_BRANCH}/deploy.groovy"\n\n'
+            "// GOOD — fixed path under version control\n"
+            "load 'ci/deploy.groovy'\n\n"
+            "If different builds need different logic, select among a fixed "
+            "set of in-repo scripts with a validated switch, not a path "
+            "built from untrusted input."
+        ),
+        reference="https://www.jenkins.io/doc/pipeline/steps/workflow-cps-global-lib/",
+        test_positive=[
+            'load "${params.SCRIPT_PATH}"',
+            'load("ci/${params.ENV}.groovy")',
+            'load "${env.CHANGE_BRANCH}/deploy.groovy"',
+        ],
+        test_negative=[
+            "load 'ci/lib.groovy'",
+            # Workspace-relative load of a fixed file — common and not
+            # parameter/PR-controlled.
+            'load "${WORKSPACE}/vars.groovy"',
+            '// load "${params.X}"',
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "``load`` is a Groovy code-execution sink. A path from "
+            "``params.*`` lets the build trigger choose which file runs; a "
+            "path from ``env.CHANGE_*`` lets a PR steer it. Either way the "
+            "attacker's Groovy executes on the controller with the "
+            "pipeline's full privilege."
+        ),
+    ),
+    # =========================================================================
+    # SEC10-JK-002 — security tool whose failure is suppressed (validation
+    # theatre).  No Jenkins THEATRE rule exists.  A scanner invocation
+    # followed by ``|| true`` / ``|| :`` on the same line can never fail the
+    # build — the gate is decorative.  Anchored on a named security tool so
+    # benign ``make || true`` cleanup does not fire.  (The block-wrapping
+    # ``catchError(buildResult:'SUCCESS')`` form needs Groovy block-awareness
+    # and is a deferred follow-up.)
+    # =========================================================================
+    Rule(
+        id="SEC10-JK-002",
+        title="Security tool failure suppressed with || true (validation theatre)",
+        severity=Severity.HIGH,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-10",
+        description=(
+            "A security scanner (Trivy, Semgrep, Gitleaks, Bandit, Snyk, "
+            "Grype, Checkov, TruffleHog, OSV-Scanner, dependency-check, "
+            "``npm audit`` …) is invoked with its exit status discarded via "
+            "``|| true`` / ``|| :``. The step always reports success, so the "
+            "gate can never fail the build — findings are produced but never "
+            "enforced. This is validation theatre: the pipeline looks like "
+            "it scans, but a real vulnerability or leaked secret does not "
+            "stop a release."
+        ),
+        pattern=RegexPattern(
+            match=(
+                r"\b(?:trivy|semgrep|gitleaks|bandit|snyk|grype|checkov"
+                r"|trufflehog|osv-scanner|dependency-check|safety\s+check"
+                r"|npm\s+audit)\b[^\n]*\|\|\s*(?:true|:)"
+            ),
+            exclude=[r"^\s*//", r"^\s*\*"],
+        ),
+        remediation=(
+            "Let the scanner fail the build, and handle expected findings "
+            "explicitly:\n\n"
+            "// BAD — result discarded; gate is decorative\n"
+            "sh 'trivy image myapp:latest || true'\n\n"
+            "// GOOD — non-zero exit fails the stage\n"
+            "sh 'trivy image --exit-code 1 --severity HIGH,CRITICAL myapp:latest'\n\n"
+            "If some findings are accepted, suppress them with the tool's "
+            "own ignore/baseline file (``.trivyignore``, a semgrep baseline) "
+            "so the gate still fails on NEW issues, instead of swallowing "
+            "every failure."
+        ),
+        reference="https://owasp.org/www-project-top-10-ci-cd-security-risks/CICD-SEC-10-Insufficient-Logging-and-Visibility",
+        test_positive=[
+            "sh 'trivy image myapp || true'",
+            'sh "semgrep --config auto . || true"',
+            "sh 'gitleaks detect || :'",
+        ],
+        test_negative=[
+            # Scanner that is actually allowed to fail the build.
+            "sh 'trivy image --exit-code 1 myapp'",
+            # || true on a non-security build step is out of scope.
+            "sh 'make docs || true'",
+            "// sh 'trivy image myapp || true'",
+        ],
+        stride=["R"],
+        threat_narrative=(
+            "A security gate wrapped in ``|| true`` produces logs but no "
+            "enforcement. Maintainers and auditors see a 'security scan' "
+            "stage that is green on every run, while critical findings sail "
+            "through to production — the worst kind of false assurance."
+        ),
+    ),
+    # =========================================================================
+    # SEC5-JK-002 — unattended trigger (cron / pollSCM) on a deploy/publish
+    # pipeline.  SEC5-JK-001 covers the concurrency race, not the trigger.
+    # An automatic schedule/poll that reaches a deploy or release stage runs
+    # a privileged action with no human in the loop.  review-needed, MEDIUM:
+    # scheduled deploys to non-prod are a legitimate pattern, so this
+    # surfaces the shape for a human to confirm rather than asserting a bug.
+    # =========================================================================
+    Rule(
+        id="SEC5-JK-002",
+        title="Deploy/publish pipeline runs on an unattended cron / pollSCM trigger",
+        severity=Severity.MEDIUM,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-5",
+        review_needed=True,
+        confidence="medium",
+        description=(
+            "A pipeline declares an automatic trigger (``cron(...)`` or "
+            "``pollSCM(...)``) AND contains a deploy / publish / release / "
+            "production stage. The privileged action then runs on a "
+            "schedule with no manual approval — there is no human gate "
+            "between a poisoned commit (or a compromised upstream "
+            "dependency) and a production deployment. Scheduled deploys to "
+            "non-production environments can be legitimate, so review "
+            "whether this unattended deploy is intended and adequately "
+            "scoped."
+        ),
+        pattern=ContextPattern(
+            anchor=r"\b(?:cron|pollSCM)\s*\(",
+            requires=(
+                r"stage\s*\(\s*['\"][^'\"]*"
+                r"(?:[Dd]eploy|[Pp]ublish|[Rr]elease|[Pp]rod|[Ll]ive)"
+            ),
+            scope="file",
+            exclude=[r"^\s*//", r"^\s*\*"],
+        ),
+        remediation=(
+            "Put a manual approval gate in front of the deploy stage so a "
+            "human authorizes each production release:\n\n"
+            "stage('Deploy') {\n"
+            "  input message: 'Deploy to production?', ok: 'Deploy'\n"
+            "  steps { sh './deploy.sh' }\n"
+            "}\n\n"
+            "Keep the cron / pollSCM trigger for build-and-test, but split "
+            "the deploy into a separate, manually-triggered (or "
+            "protected-branch-gated) pipeline so an unattended run cannot "
+            "reach production on its own."
+        ),
+        reference="https://www.jenkins.io/doc/book/pipeline/syntax/#triggers",
+        test_positive=[
+            (
+                "pipeline {\n  triggers { cron('H 2 * * *') }\n"
+                "  stages { stage('Deploy') { steps { sh './deploy.sh' } } }\n}"
+            ),
+            (
+                "pipeline {\n  triggers { pollSCM('H/15 * * * *') }\n"
+                "  stages { stage('Release to prod') { steps { sh 'make release' } } }\n}"
+            ),
+        ],
+        test_negative=[
+            # cron trigger but no deploy/publish stage.
+            (
+                "pipeline {\n  triggers { cron('H 2 * * *') }\n"
+                "  stages { stage('Test') { steps { sh 'pytest' } } }\n}"
+            ),
+            # Deploy stage but no automatic trigger.
+            ("pipeline {\n  stages { stage('Deploy') { steps { sh './deploy.sh' } } }\n}"),
+            "// triggers { cron('H 2 * * *') }  // stage('Deploy')",
+        ],
+        stride=["E"],
+        threat_narrative=(
+            "An unattended cron / pollSCM trigger that reaches a deploy "
+            "stage removes the human checkpoint from the most sensitive "
+            "step in the pipeline. A malicious commit merged (or a "
+            "dependency compromised) before the next scheduled run is "
+            "deployed automatically, with the pipeline's production "
+            "credentials and no one in the loop to catch it."
+        ),
+    ),
+    # =========================================================================
     # SEC6-JK-001: Hardcoded credential in environment block
     # =========================================================================
     Rule(
@@ -1776,6 +2122,63 @@ RULES: list[Rule] = [
         ),
     ),
     # =========================================================================
+    # SEC6-JK-009 — HTTP Request plugin step disables TLS verification.
+    # SEC6-JK-004 only catches ``curl -k`` / ``wget --no-check-certificate``
+    # in a shell body.  The Jenkins HTTP Request plugin (``httpRequest``)
+    # has its own knob, ``ignoreSslErrors: true``, which the shell-anchored
+    # rule never sees.  We deliberately do NOT also match an http:// URL in
+    # ``httpRequest``: a bare ``url: 'http://...'`` already fires SEC8-JK-003
+    # (its matcher keys on ``url: 'http://'``), so matching it here would
+    # double-fire.  ``ignoreSslErrors`` is httpRequest-specific → near-zero FP.
+    # =========================================================================
+    Rule(
+        id="SEC6-JK-009",
+        title="HTTP Request step disables TLS certificate verification (ignoreSslErrors)",
+        severity=Severity.HIGH,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-6",
+        description=(
+            "A Jenkins ``httpRequest`` step (HTTP Request plugin) sets "
+            "``ignoreSslErrors: true``, disabling TLS certificate verification "
+            "for that request. This is the plugin-step analogue of ``curl -k`` "
+            "(SEC6-JK-004, which only inspects shell bodies). An attacker on the "
+            "network path can present a forged certificate and intercept the "
+            "request — reading any credential or token sent in headers and "
+            "substituting a malicious response body (forged artifact, false API "
+            "result) that the pipeline then trusts."
+        ),
+        pattern=RegexPattern(
+            match=r"ignoreSslErrors\s*:\s*true\b",
+            exclude=[r"^\s*//", r"^\s*\*"],
+        ),
+        remediation=(
+            "Fix the certificate trust instead of ignoring errors:\n\n"
+            "// BAD\n"
+            "httpRequest url: 'https://internal/api', ignoreSslErrors: true\n\n"
+            "// GOOD — trust the internal CA on the agent / controller and drop\n"
+            "// the flag so the certificate chain is validated.\n"
+            "httpRequest url: 'https://internal/api'"
+        ),
+        reference="https://plugins.jenkins.io/http_request/",
+        test_positive=[
+            "httpRequest url: 'https://internal/api', ignoreSslErrors: true",
+            "httpRequest(url: 'https://x/y',\n  ignoreSslErrors: true)",
+        ],
+        test_negative=[
+            "httpRequest url: 'https://internal/api'",
+            "httpRequest url: 'https://x/y', ignoreSslErrors: false",
+            "// httpRequest url: 'https://x', ignoreSslErrors: true",
+        ],
+        stride=["I", "T"],
+        threat_narrative=(
+            "Ignoring SSL errors removes the guarantee that the responding host "
+            "is authentic. A MITM serves a forged certificate, reads any "
+            "Authorization header or token the step sends, and returns attacker "
+            "content the pipeline then executes or deploys — credentials in "
+            "transit are effectively public."
+        ),
+    ),
+    # =========================================================================
     # SEC6-JK-005: Long-lived cloud credentials in environment block
     # =========================================================================
     Rule(
@@ -2244,6 +2647,68 @@ RULES: list[Rule] = [
         ),
     ),
     # =========================================================================
+    # SEC7-JK-004 — Docker registry accessed over cleartext HTTP.
+    # SEC7-JK-003 catches ``docker.withRegistry(url, null)`` (anonymous push);
+    # this catches the orthogonal transport problem: an ``http://`` registry
+    # URL.  SEC8-JK-003's ``url: 'http://'`` matcher does NOT see the
+    # ``withRegistry('http://...')`` positional-arg form (the registry URL is
+    # not a ``url:`` key) and ``registryUrl`` has no lowercase ``url:`` token,
+    # so there is no double-fire.  localhost / 127.0.0.1 are excluded (local
+    # dev registries).
+    # =========================================================================
+    Rule(
+        id="SEC7-JK-004",
+        title="Docker registry accessed over cleartext HTTP",
+        severity=Severity.HIGH,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-7",
+        description=(
+            "A pipeline points Docker at a registry over plain ``http://`` "
+            "(``docker.withRegistry('http://...')`` or ``registryUrl: "
+            "'http://...'``). Registry traffic carries the credential used to "
+            "authenticate and the image layers being pushed/pulled. Over "
+            "cleartext, a network MITM can steal the registry credential and "
+            "substitute a backdoored image layer that later pipelines pull and "
+            "run. Use HTTPS so the registry endpoint is authenticated and the "
+            "session encrypted."
+        ),
+        pattern=RegexPattern(
+            match=(
+                r"(?:withRegistry\s*\(\s*['\"]http://|registryUrl\s*:\s*['\"]http://)"
+                r"(?!localhost|127\.0\.0\.1)"
+            ),
+            exclude=[r"^\s*//", r"^\s*\*"],
+        ),
+        remediation=(
+            "Use an HTTPS registry endpoint:\n\n"
+            "// BAD\n"
+            "docker.withRegistry('http://nexus:8081', 'registry-creds') { ... }\n\n"
+            "// GOOD\n"
+            "docker.withRegistry('https://nexus.example.com', 'registry-creds') { ... }\n\n"
+            "If the registry only speaks HTTP on the internal network, terminate "
+            "TLS at a reverse proxy rather than sending credentials in clear."
+        ),
+        reference="https://docs.docker.com/reference/cli/dockerd/#insecure-registries",
+        test_positive=[
+            "docker.withRegistry('http://nexus:8081', 'registry-creds') { sh 'docker push x' }",
+            'docker.withRegistry("http://registry.internal", "id")',
+        ],
+        test_negative=[
+            "docker.withRegistry('https://registry.internal', 'registry-creds') { }",
+            # Local dev registry — excluded.
+            "docker.withRegistry('http://localhost:5000', 'registry-creds')",
+            "// docker.withRegistry('http://nexus', 'creds')",
+        ],
+        stride=["I", "T"],
+        threat_narrative=(
+            "A cleartext registry connection exposes both the authentication "
+            "credential and the image bytes to anyone on the path. An attacker "
+            "harvests the registry credential and can push a backdoored layer; "
+            "downstream pipelines that pull from the same registry then execute "
+            "the attacker's image with the build's privileges."
+        ),
+    ),
+    # =========================================================================
     # SEC6-JK-008: Exfil-shaped primitive in Jenkinsfile sh step.
     # Jenkins port of SEC6-GH-008 (Wiz prt-scan class, April 2026).
     #
@@ -2589,6 +3054,98 @@ RULES: list[Rule] = [
         ),
     ),
     # =========================================================================
+    # SEC8-JK-005 — Docker container escape flags beyond --privileged.
+    # SEC8-JK-004 only matches ``--privileged``.  These other flags are
+    # each a container-escape primitive on their own: mounting the host
+    # Docker socket (daemon takeover), sharing the host network / PID /
+    # IPC namespace, or adding near-root capabilities.  Deliberately does
+    # NOT flag ``--cap-add=SYS_PTRACE`` — that narrow capability is the
+    # SAFE alternative SEC8-JK-004's own remediation recommends, so
+    # matching all ``--cap-add`` here would contradict it.  The host
+    # socket path is unambiguous and fires on its own; the namespace /
+    # capability flags are anchored to a docker container construct
+    # (mirroring SEC8-JK-004's anchors) so an unrelated ``--pid=host``
+    # in prose does not fire.
+    Rule(
+        id="SEC8-JK-005",
+        title="Docker container escape flag (host socket / namespace / near-root capability)",
+        severity=Severity.HIGH,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-8",
+        description=(
+            "A Docker container is launched with a flag that breaks container "
+            "isolation, short of (and distinct from) ``--privileged``: mounting "
+            "the host Docker socket (``-v /var/run/docker.sock``), sharing the "
+            "host network/PID/IPC namespace (``--network=host``, ``--pid=host``, "
+            "``--ipc=host``), or granting a near-root capability "
+            "(``--cap-add=ALL`` / ``--cap-add=SYS_ADMIN``). Each is, on its own, "
+            "a route out of the container onto the Jenkins agent host. Mounting "
+            "the daemon socket is the most direct: any process in the container "
+            "can create a new container that bind-mounts the host root filesystem."
+        ),
+        pattern=RegexPattern(
+            match=(
+                r"(?:"
+                # Host Docker socket mounted in — unambiguous, fires alone.
+                r"-v\s+[^'\"\n]*?/var/run/docker\.sock"
+                r"|"
+                # Host-namespace / near-root capability flags, only inside a
+                # docker container construct (args '...', .inside(...),
+                # .withRun(...), or a shell `docker run`).
+                r"(?:args\s+['\"]|\.(?:inside|withRun)\s*\(\s*['\"]|docker\s+run\b)"
+                r"[^'\"\n]*"
+                r"(?:--net(?:work)?=host|--pid=host|--ipc=host"
+                r"|--cap-add[ =]['\"]?(?:ALL|SYS_ADMIN))\b"
+                r")"
+            ),
+            exclude=[r"^\s*//", r"^\s*\*"],
+        ),
+        remediation=(
+            "Remove the isolation-breaking flag. Build/test containers almost "
+            "never need it:\n\n"
+            "// BAD — daemon socket gives full host control\n"
+            "agent { docker { image 'builder' args '-v /var/run/docker.sock:/var/run/docker.sock' } }\n\n"
+            "// BAD — host network namespace\n"
+            "docker.image('builder').inside('--network=host') { sh 'make' }\n\n"
+            "// GOOD — no host bridge; if you must build images, use a\n"
+            "// rootless/daemonless builder (Kaniko, BuildKit rootless) on a\n"
+            "// dedicated ephemeral agent, and request only the single narrow\n"
+            "// capability the build actually needs (e.g. --cap-add=SYS_PTRACE).\n"
+            "agent { docker { image 'builder' } }"
+        ),
+        reference="https://docs.docker.com/engine/containers/run/#runtime-privilege-and-linux-capabilities",
+        test_positive=[
+            "agent { docker { image 'x' args '-v /var/run/docker.sock:/var/run/docker.sock' } }",
+            "docker.image('x').inside('--network=host') { sh 'make' }",
+            "agent { docker { image 'x' args '--pid=host' } }",
+            "docker.image('b').withRun('--cap-add=SYS_ADMIN --rm') { c -> sh 'x' }",
+            "sh 'docker run --net=host --rm ubuntu make'",
+        ],
+        test_negative=[
+            # Benign bind mount.
+            "agent { docker { image 'x' args '-v /tmp:/tmp' } }",
+            # Narrow capability — the SAFE alternative SEC8-JK-004 recommends.
+            "agent { docker { image 'builder' args '--cap-add=SYS_PTRACE' } }",
+            # No flags.
+            "docker.image('ubuntu:22.04').inside { sh 'make' }",
+            # Comment.
+            "// docker.image('x').inside('--network=host') { sh 'make' }",
+            # --pid=host outside any docker construct must not fire.
+            "sh 'echo configure --pid=host in docs'",
+        ],
+        stride=["E", "T"],
+        threat_narrative=(
+            "Each flag is a self-contained escape: the host Docker socket lets "
+            "the container spawn a sibling that mounts the host root; "
+            "``--network=host`` exposes host-local services (the metadata "
+            "endpoint, other containers' ports); ``--pid=host`` allows "
+            "ptrace/inspection of host processes; ``--cap-add=SYS_ADMIN`` is "
+            "near-equivalent to ``--privileged``. On a shared, long-lived "
+            "Jenkins agent the escape persists across later builds and exposes "
+            "every future pipeline's credentials on that node."
+        ),
+    ),
+    # =========================================================================
     # SEC4-JK-007: Security gate keyed on a spoofable PR-author / actor
     # identity.  Jenkins port of SEC4-GH-010.  The JK analog of
     # ``github.actor`` is ``env.CHANGE_AUTHOR`` (Multibranch) /
@@ -2788,6 +3345,76 @@ RULES: list[Rule] = [
             "slip through."
         ),
         confidence="medium",
+    ),
+    # =========================================================================
+    # SEC3-JK-006 — Git SubmoduleOption forwards parent credentials or
+    # tracks a mutable submodule branch.  ``parentCredentials: true``
+    # hands the parent repo's checkout credential to every submodule
+    # fetch — if any submodule URL points at a host the attacker controls
+    # (or is later repointed), the token leaks to that host.
+    # ``trackingSubmodules: true`` fetches the tip of the submodule's
+    # tracked branch instead of the gitlink-pinned commit, so submodule
+    # content can change underneath the build (mutable supply chain).
+    # Neither is matched by SEC3-JK-001/005 (shared-library rules); both
+    # have legitimate uses (private submodules), hence review-needed.
+    # =========================================================================
+    Rule(
+        id="SEC3-JK-006",
+        title="Git submodule forwards parent credentials or tracks a mutable branch",
+        severity=Severity.MEDIUM,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-3",
+        review_needed=True,
+        confidence="medium",
+        finding_family="Mutable dependency references",
+        description=(
+            "A ``checkout`` step's ``SubmoduleOption`` extension sets "
+            "``parentCredentials: true`` and/or ``trackingSubmodules: true``. "
+            "``parentCredentials: true`` forwards the parent repository's "
+            "checkout credential to every submodule fetch — if a submodule URL "
+            "resolves to a host outside your trust boundary, that credential is "
+            "sent to it. ``trackingSubmodules: true`` fetches the latest commit "
+            "on the submodule's tracked branch instead of the commit the "
+            "superproject pins, so the submodule's code can change between "
+            "builds with no change in this repository. Review the submodule "
+            "sources before keeping either option."
+        ),
+        pattern=RegexPattern(
+            match=r"(?:parentCredentials|trackingSubmodules)\s*:\s*true\b",
+            exclude=[r"^\s*//", r"^\s*\*"],
+        ),
+        remediation=(
+            "Prefer the safe defaults (both options absent / false):\n\n"
+            "checkout([$class: 'GitSCM',\n"
+            "  userRemoteConfigs: [[url: 'https://github.com/org/repo.git']],\n"
+            "  extensions: [[$class: 'SubmoduleOption',\n"
+            "    recursiveSubmodules: true]]])   // pinned commits, no cred forwarding\n\n"
+            "If a private submodule genuinely needs authentication, scope a "
+            "dedicated read-only deploy key to that submodule rather than "
+            "forwarding the parent credential, and leave ``trackingSubmodules`` "
+            "off so the superproject's pinned commit is honoured."
+        ),
+        reference="https://plugins.jenkins.io/git/#plugin-content-submodules",
+        test_positive=[
+            "extensions: [[$class: 'SubmoduleOption', parentCredentials: true]]",
+            "[$class: 'SubmoduleOption', trackingSubmodules: true, recursiveSubmodules: true]",
+        ],
+        test_negative=[
+            "[$class: 'SubmoduleOption', parentCredentials: false]",
+            # recursive alone fetches the PINNED submodule commits — safe.
+            "[$class: 'SubmoduleOption', recursiveSubmodules: true]",
+            "// parentCredentials: true",
+        ],
+        stride=["S", "T"],
+        threat_narrative=(
+            "With ``parentCredentials: true`` the parent checkout token is sent "
+            "to every submodule remote; an attacker who can influence a "
+            "submodule URL (a typo-squatted host, a repointed ``.gitmodules`` in "
+            "a PR) harvests that credential. With ``trackingSubmodules: true`` "
+            "the submodule floats to its branch tip, so a maintainer of the "
+            "submodule project can inject code into this build without touching "
+            "the superproject's pinned gitlink."
+        ),
     ),
     # =========================================================================
     # SEC4-JK-006: ``base64 -d | shell`` obfuscation in pipeline shell call

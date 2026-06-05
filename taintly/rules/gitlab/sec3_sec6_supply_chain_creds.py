@@ -324,6 +324,82 @@ RULES: list[Rule] = [
             "SHAs to ensure the included configuration is immutable."
         ),
     ),
+    # =========================================================================
+    # SEC3-GL-007 — CI Component included at a mutable ref.
+    # SEC3-GL-002's walker only inspects ``include: - project:`` entries;
+    # the newer ``include: - component:`` form (a single
+    # ``host/group/project/component@VERSION`` string) is not pin-checked
+    # by it.  SEC3-GL-006 lists components as INFO inventory, but there is
+    # no HIGH "this component floats on a mutable ref" finding — the
+    # component analogue of SEC3-GL-002.  This rule fills that gap, firing
+    # only on the well-known mutable refs (``@main``, ``@~latest``, …) so
+    # FP stays near zero; pinned semver tags and commit SHAs do not fire.
+    Rule(
+        id="SEC3-GL-007",
+        title="CI Component included at a mutable ref",
+        severity=Severity.HIGH,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-3",
+        finding_family="Mutable dependency references",
+        description=(
+            "Pipeline includes a CI Component pinned to a mutable ref "
+            "(``@main``, ``@master``, ``@~latest``, …) instead of a released "
+            "version tag or commit SHA. ``~latest`` floats to the newest "
+            "published version and branch refs can be force-pushed, so the "
+            "component's job definitions can change underneath the pipeline "
+            "with no commit visible in this repository. This is the component "
+            "analogue of SEC3-GL-002 (which only checks ``include: project:``)."
+        ),
+        pattern=RegexPattern(
+            # component value is a single string `HOST/group/proj/comp@REF`.
+            # Fire only on the known-mutable REFs; pinned semver (`@1.2.3`,
+            # `@v1.2`) and 40-char SHAs fall through.  `~?latest` covers
+            # both `@latest` and GitLab's special `@~latest`.
+            match=(
+                r"^\s*-?\s*component:\s*['\"]?"
+                r"[^\s'\"]+@(?:main|master|develop|trunk|HEAD|~?latest)\b"
+            ),
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Pin the component to a released version tag or, for the strongest "
+            "guarantee, a commit SHA:\n"
+            "\n"
+            "include:\n"
+            "  - component: $CI_SERVER_FQDN/my-org/security/scan@1.4.2\n"
+            "\n"
+            "Released tags are immutable in the CI/CD Catalog; ``~latest`` and "
+            "branch refs are not. Renovate/Dependabot can keep the pinned "
+            "version current via reviewed merge requests."
+        ),
+        reference="https://docs.gitlab.com/ci/components/#use-a-component",
+        test_positive=[
+            "include:\n  - component: $CI_SERVER_FQDN/my-org/security/scan@main",
+            "include:\n  - component: 'gitlab.com/components/sast/sast@~latest'",
+            "  - component: gitlab.example.com/group/comp@master",
+            "  - component: $CI_SERVER_FQDN/g/p/comp@latest",
+        ],
+        test_negative=[
+            # Released semver tag — immutable in the catalog.
+            "include:\n  - component: $CI_SERVER_FQDN/my-org/security/scan@1.2.3",
+            "  - component: gitlab.com/components/sast/sast@v1.4",
+            # Commit SHA pin.
+            "  - component: gitlab.com/components/sast/sast@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            # Comment.
+            "  # - component: gitlab.com/comp@main",
+            # Project include (not a component) is SEC3-GL-002's territory.
+            "include:\n  - project: 'g/p'\n    ref: main\n    file: '/ci.yml'",
+        ],
+        stride=["T"],
+        threat_narrative=(
+            "A component on a mutable ref re-resolves on every pipeline run. A "
+            "maintainer of the component project (or anyone who can force-push "
+            "the branch / publish a new ``~latest`` release) can change the "
+            "jobs that execute in every consumer pipeline, with this project's "
+            "runner token and protected-variable scope, and no diff in the "
+            "consumer's repository to review."
+        ),
+    ),
     Rule(
         id="SEC3-GL-005",
         title="Docker image without digest pinning",

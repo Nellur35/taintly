@@ -181,8 +181,37 @@ def test_gitlab_taint_covers_user_identity_and_target_branch_vars():
         "GITLAB_USER_LOGIN",
         "GITLAB_USER_EMAIL",
         "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
+        # External-PR mirror free-text + target branch (added 2026-06).
+        "CI_EXTERNAL_PULL_REQUEST_TITLE",
+        "CI_EXTERNAL_PULL_REQUEST_DESCRIPTION",
+        "CI_EXTERNAL_PULL_REQUEST_TARGET_BRANCH_NAME",
     ):
         assert name in _TAINTED_VARS, f"{name} missing from tainted var list"
+
+
+def test_jenkins_taint_covers_change_desc_gerrit_email_and_bitbucket():
+    """List-extension (2026-06): GitHub-multibranch PR body, Gerrit
+    owner/uploader emails, and the Bitbucket Push-and-Pull-Request plugin's
+    PR title/description/branches/actor are all attacker-supplied taint
+    sources that must be matched by _TAINTED_NAMES.
+    """
+    import re
+
+    from taintly.rules.jenkins.taint import _TAINTED_NAMES
+
+    rx = re.compile(_TAINTED_NAMES)
+    for name in (
+        "CHANGE_DESCRIPTION",
+        "GERRIT_CHANGE_OWNER_EMAIL",
+        "GERRIT_PATCHSET_UPLOADER_EMAIL",
+        "BITBUCKET_PULL_REQUEST_TITLE",
+        "BITBUCKET_PULL_REQUEST_DESCRIPTION",
+        "BITBUCKET_SOURCE_BRANCH",
+        "BITBUCKET_TARGET_BRANCH",
+        "BITBUCKET_ACTOR",
+    ):
+        assert rx.fullmatch(name), f"{name} not matched by _TAINTED_NAMES"
+        assert rx.fullmatch("env." + name), f"env.{name} not matched by _TAINTED_NAMES"
 
 
 # =============================================================================

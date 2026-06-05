@@ -632,6 +632,74 @@ RULES: list[Rule] = [
             "attacks."
         ),
     ),
+    # =========================================================================
+    # SEC9-GL-004 — artifacts:untracked: true.
+    # ``untracked: true`` sweeps every file Git is not tracking — including
+    # everything in ``.gitignore`` (``.env`` files, downloaded credentials,
+    # ``*.pem`` keys, ``.npmrc`` with tokens) — into the job artifact, which
+    # is then downloadable per the project's artifact access level.  Distinct
+    # from SEC9-GL-001 (which is about the access *level* on whatever paths
+    # are collected): here the danger is *what* gets collected.  PathPattern
+    # is used so ``cache: untracked: true`` (internal, not downloadable)
+    # does not fire — only ``artifacts.untracked``.
+    Rule(
+        id="SEC9-GL-004",
+        title="Artifacts collect untracked files (may sweep gitignored secrets)",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-9",
+        review_needed=True,
+        confidence="medium",
+        finding_family="Artifact exposure",
+        description=(
+            "A job sets ``artifacts:untracked: true``, which uploads every file "
+            "not tracked by Git — including everything matched by ``.gitignore``. "
+            "Build trees routinely contain gitignored secrets at runtime: ``.env`` "
+            "files, fetched deploy keys, ``.npmrc``/``.pypirc`` with tokens, and "
+            "``*.pem`` material. With ``untracked: true`` these are bundled into the "
+            "job artifact and become downloadable to anyone at the artifact's "
+            "access level (anonymous, in a public project). Unlike SEC9-GL-001 "
+            "(which grades the access *level*), this rule flags the broad, "
+            "implicit *collection* set."
+        ),
+        pattern=PathPattern(
+            path=r"artifacts\.untracked$",
+            value=r"^['\"]?[Tt]rue['\"]?$",
+        ),
+        remediation=(
+            "Collect artifacts by explicit path instead of sweeping untracked "
+            "files:\n"
+            "\n"
+            "artifacts:\n"
+            "  paths:\n"
+            "    - dist/\n"
+            "    - build/output.bin\n"
+            "\n"
+            "If you must keep ``untracked: true`` for generated build output, pair "
+            "it with ``access: developer`` (or ``none``) and make sure no secret "
+            "material is written into the working tree during the job."
+        ),
+        reference="https://docs.gitlab.com/ci/yaml/#artifactsuntracked",
+        test_positive=[
+            "build:\n  script:\n    - make\n  artifacts:\n    untracked: true",
+            "test:\n  artifacts:\n    untracked: 'true'\n    paths:\n      - out/",
+        ],
+        test_negative=[
+            "build:\n  artifacts:\n    untracked: false\n    paths:\n      - dist/",
+            # cache: untracked is internal to the runner, not downloadable.
+            "cache:\n  untracked: true\n  paths:\n    - .cache/",
+            "build:\n  artifacts:\n    paths:\n      - dist/",
+        ],
+        stride=["I"],
+        threat_narrative=(
+            "``untracked: true`` is an allowlist inversion: instead of naming the "
+            "files to publish, it publishes everything Git ignores. Any secret a "
+            "job writes to the working tree (a fetched token, a generated kubeconfig, "
+            "a decrypted key) is then captured into a downloadable artifact, where "
+            "an attacker who can read job artifacts harvests it long after the job "
+            "ends."
+        ),
+    ),
     Rule(
         id="SEC9-GL-002",
         title="Binary or script downloaded without checksum verification",
@@ -1106,6 +1174,176 @@ RULES: list[Rule] = [
         incidents=[
             "Dependabot auto-merge bypass class (GH analog)",
         ],
+    ),
+    # =========================================================================
+    # SEC4-GL-011 — CI_MERGE_REQUEST_LABELS used as a security gate.
+    # Sibling of SEC4-GL-007 ($GITLAB_USER_* gate).  MR labels are set by
+    # the MR author — an attacker who opens a fork MR can apply any label
+    # to their own MR (or a project member can be social-engineered into
+    # labelling it), so a ``rules:if:`` that grants privileged execution
+    # based on ``$CI_MERGE_REQUEST_LABELS =~ /safe-to-test/`` is a
+    # spoofable gate.  CI_MERGE_REQUEST_LABELS is already a taint SOURCE
+    # (gitlab_taint._TAINTED_VARS) when it flows into ``script:``; this is
+    # the distinct access-control-gate misuse, not a script-injection.
+    # =========================================================================
+    Rule(
+        id="SEC4-GL-011",
+        title="Security gate uses attacker-settable CI_MERGE_REQUEST_LABELS",
+        severity=Severity.HIGH,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A ``rules:`` / ``if:`` condition gates job execution on "
+            "``$CI_MERGE_REQUEST_LABELS`` matching a TRUST-GRANTING label "
+            "(``safe-to-test``, ``approved``, ``lgtm``, ``ok-to-test``, "
+            "``ready-to-merge`` …). Merge-request labels are controlled by "
+            "the MR author: anyone who can open an MR — including from a "
+            "fork — can set the labels on their own MR, so a label is not a "
+            "trustworthy authorization signal. This is the GitLab twin of "
+            "GitHub's spoofable ``github.event.label.name`` gate (CodeQL's "
+            "LabelCheck), and the same confused-deputy class as SEC4-GL-007 "
+            "($GITLAB_USER_* gates). Scoped to trust-granting label names so "
+            "it does not fire on the common, benign pattern of using labels "
+            "to select a test matrix / pipeline variant "
+            "(``=~ /run-in-ruby3/``, ``/quarantine/``)."
+        ),
+        pattern=RegexPattern(
+            # Fire only when CI_MERGE_REQUEST_LABELS is compared against an
+            # RHS containing a trust-GRANTING label keyword.  Behaviour-
+            # selection labels (test matrix, quarantine, variant) do not
+            # match, which is the dominant benign use in real pipelines.
+            match=(
+                r"\$\{?CI_MERGE_REQUEST_LABELS\}?\s*(?:==|!=|=~|!~)\s*"
+                r"['\"/][^'\"\n]*?"
+                r"(?:safe[\s_-]?to[\s_-]?(?:test|run|merge|deploy)"
+                r"|ok[\s_-]?to[\s_-]?(?:test|run|merge)"
+                r"|approved|lgtm|trusted"
+                r"|ready[\s_-]?to[\s_-]?merge"
+                r"|allow[\s_-]?ci|ci[\s_-]?ok|run[\s_-]?ci)"
+            ),
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Do not gate privileged execution on MR labels. Gate on "
+            "fork-vs-same-project identity, which the MR author cannot "
+            "fake:\n"
+            "\n"
+            "# BAD — author sets their own MR labels\n"
+            "rules:\n"
+            "  - if: '$CI_MERGE_REQUEST_LABELS =~ /safe-to-test/'\n"
+            "    when: on_success\n"
+            "\n"
+            "# GOOD — same-project MRs only; forks skipped\n"
+            "rules:\n"
+            "  - if: '$CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'\n"
+            "    when: on_success\n"
+            "  - when: never\n"
+            "\n"
+            "If you genuinely want a human-approval step, use a manual "
+            "job (``when: manual``) on a protected environment — a "
+            "maintainer's click is an authenticated action; a label is not."
+        ),
+        reference="https://docs.gitlab.com/ci/variables/predefined_variables/",
+        test_positive=[
+            "    - if: '$CI_MERGE_REQUEST_LABELS =~ /safe-to-test/'",
+            "  rules:\n    - if: $CI_MERGE_REQUEST_LABELS =~ /approved/",
+            "    - if: '$CI_MERGE_REQUEST_LABELS == \"ci-ok\"'",
+            "    - if: '$CI_MERGE_REQUEST_LABELS =~ /ready-to-merge/'",
+        ],
+        test_negative=[
+            "    - if: '$CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'",
+            # Bare use in a script (no comparison) — that's TAINT-GL's
+            # injection territory, not an access-control gate.
+            '    - echo "$CI_MERGE_REQUEST_LABELS"',
+            "    # - if: '$CI_MERGE_REQUEST_LABELS =~ /safe-to-test/'",
+            # Behaviour-selection labels (test matrix / quarantine / variant)
+            # are the dominant benign use and must NOT fire — these are the
+            # real-corpus shapes from gitlab-org/gitlab.
+            "    - if: '$CI_MERGE_REQUEST_LABELS =~ /pipeline:run-in-ruby3_3/'",
+            "    - if: '$CI_MERGE_REQUEST_LABELS =~ /quarantine/'",
+            "    - if: '$CI_MERGE_REQUEST_LABELS =~ /Community contribution/'",
+        ],
+        stride=["S", "E"],
+        threat_narrative=(
+            "MR labels are author-controlled metadata. A gate keyed on "
+            "``$CI_MERGE_REQUEST_LABELS`` lets an attacker self-apply the "
+            "magic label on a fork MR and unlock whatever privileged job "
+            "the label was meant to protect, executing fork code with the "
+            "project's CI scope — the same bypass shape as label-gated "
+            "``pull_request_target`` workflows on GitHub."
+        ),
+    ),
+    # =========================================================================
+    # SEC4-GL-010 — trigger:forward:pipeline_variables: true.
+    # Forwards the parent pipeline's *manual* variables (which can carry
+    # secrets passed at trigger time) into a downstream child / multi-
+    # project pipeline. GitLab defaults ``forward:pipeline_variables`` to
+    # FALSE precisely because forwarding them widens secret exposure — to
+    # a child pipeline that may live in another project with a different
+    # trust boundary and that drops the parent's masking guarantees.
+    # Setting it ``true`` is an explicit opt-in worth a review.  No
+    # existing rule inspects ``trigger:forward:``.
+    # =========================================================================
+    Rule(
+        id="SEC4-GL-010",
+        title="trigger:forward:pipeline_variables forwards parent variables downstream",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-4",
+        review_needed=True,
+        confidence="medium",
+        description=(
+            "A ``trigger:`` block sets ``forward: pipeline_variables: "
+            "true``, forwarding the parent pipeline's manually-passed "
+            "variables into the downstream (child or multi-project) "
+            "pipeline. Manual pipeline variables frequently carry secrets "
+            "supplied at trigger time; forwarding them sends those values "
+            "across a pipeline boundary — potentially into a different "
+            "project with a different set of maintainers — and the "
+            "downstream pipeline does not inherit the parent's masking. "
+            "GitLab defaults this to ``false`` for exactly this reason."
+        ),
+        pattern=RegexPattern(
+            # ``pipeline_variables`` is a trigger:forward-only key in
+            # GitLab CI, so a bare line match is low-FP.
+            match=r"^\s*pipeline_variables:\s*true\b",
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Leave ``forward:pipeline_variables`` at its default (false) "
+            "and pass only the specific variables the downstream pipeline "
+            "needs, explicitly, as non-secret values:\n"
+            "\n"
+            "trigger-child:\n"
+            "  trigger:\n"
+            "    include: child.gitlab-ci.yml\n"
+            "    forward:\n"
+            "      pipeline_variables: false   # default; manual vars stay in the parent\n"
+            "\n"
+            "If the child genuinely needs a secret, define it as a "
+            "Masked + Protected CI/CD variable in the child project rather "
+            "than forwarding it across the trigger boundary."
+        ),
+        reference="https://docs.gitlab.com/ci/yaml/#triggerforward",
+        test_positive=[
+            "trigger:\n  include: child.yml\n  forward:\n    pipeline_variables: true",
+            "    forward:\n      pipeline_variables: true",
+        ],
+        test_negative=[
+            "    forward:\n      pipeline_variables: false",
+            # yaml_variables forwarding is the safe, defaulted behaviour.
+            "    forward:\n      yaml_variables: true",
+            "    # pipeline_variables: true",
+        ],
+        stride=["I", "E"],
+        threat_narrative=(
+            "Forwarding pipeline variables hands the parent's manual "
+            "(often secret) inputs to a downstream pipeline that may run "
+            "in another project's trust domain and without the parent's "
+            "masking. An attacker who can influence the downstream "
+            "pipeline — or simply read its job logs — harvests secrets "
+            "that were never meant to leave the parent."
+        ),
     ),
     # =========================================================================
     # LOTP-GL-003: npm/yarn/pnpm install without --ignore-scripts in an MR

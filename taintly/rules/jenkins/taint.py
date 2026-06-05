@@ -70,10 +70,13 @@ from taintly.models import ContextPattern, Platform, RegexPattern, Rule, Severit
 # The optional ``env.`` prefix covers both scripted
 # (``env.CHANGE_TITLE``) and declarative (``CHANGE_TITLE``) pipelines.
 _TAINTED_NAMES = (
-    r"(?:env\.)?CHANGE_(?:TITLE|BRANCH|AUTHOR_EMAIL|AUTHOR_DISPLAY_NAME"
+    r"(?:env\.)?CHANGE_(?:TITLE|DESCRIPTION|BRANCH|AUTHOR_EMAIL|AUTHOR_DISPLAY_NAME"
     r"|AUTHOR|TARGET|URL|FORK|ID)"
+    # Gerrit Trigger: the change subject / commit message / owner / uploader
+    # are author-supplied. The ``*_EMAIL`` variants carry an attacker-set
+    # git email (arbitrary UTF-8), same exposure class as the name fields.
     r"|(?:env\.)?GERRIT_(?:CHANGE_SUBJECT|CHANGE_COMMIT_MESSAGE"
-    r"|CHANGE_OWNER|PATCHSET_UPLOADER|EVENT_TYPE|TOPIC)"
+    r"|CHANGE_OWNER(?:_EMAIL)?|PATCHSET_UPLOADER(?:_EMAIL)?|EVENT_TYPE|TOPIC)"
     r"|(?:env\.)?ghprb(?:PullTitle|PullDescription|PullLink|PullAuthorEmail"
     r"|PullAuthorLogin|PullAuthorLoginMention|SourceBranch|TargetBranch"
     r"|ActualCommitAuthor)"
@@ -103,6 +106,13 @@ _TAINTED_NAMES = (
     r"|(?:env\.)?gitlab(?:SourceBranch|TargetBranch|Branch"
     r"|MergeRequestTitle|MergeRequestDescription"
     r"|UserName|UserEmail|SourceRepoName)"
+    # Bitbucket Push and Pull Request plugin
+    # (jenkinsci/bitbucket-push-and-pull-request-plugin): the PR title /
+    # description / source+target branch / actor are all attacker-supplied
+    # on a Bitbucket pull-request trigger — the Bitbucket analog of the
+    # CHANGE_* / gitlab* sets above.
+    r"|(?:env\.)?BITBUCKET_(?:PULL_REQUEST_(?:TITLE|DESCRIPTION)"
+    r"|SOURCE_BRANCH|TARGET_BRANCH|ACTOR)"
     r"|params\.\w+"
 )
 

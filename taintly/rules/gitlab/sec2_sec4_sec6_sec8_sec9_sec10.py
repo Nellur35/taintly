@@ -115,6 +115,89 @@ RULES: list[Rule] = [
         ),
     ),
     # =========================================================================
+    # SEC2-GL-004 — Docker daemon TLS *explicitly* disabled / host socket targeted.
+    # SEC2-GL-002 fires when DOCKER_TLS_CERTDIR is ABSENT on a docker:dind
+    # job (forgot to set it).  It uses ``requires_absent=DOCKER_TLS_CERTDIR\s*:``,
+    # so an operator who *explicitly* writes ``DOCKER_TLS_CERTDIR: ""`` (the
+    # documented "turn TLS off" knob) makes the key PRESENT and silences
+    # SEC2-GL-002 — a blind spot.  This rule catches the explicit insecure
+    # literals SEC2-GL-002 cannot see: the empty cert dir, and pointing
+    # DOCKER_HOST at the host's own unix socket (full daemon takeover, no
+    # dind involved at all).  Deliberately does NOT match ``tcp://...:2375``:
+    # the dangerous variant of that (dind without certs) already fires
+    # SEC2-GL-002, and matching it here would double-fire on that rule's
+    # own fixtures.
+    Rule(
+        id="SEC2-GL-004",
+        title="Docker daemon TLS explicitly disabled or host socket targeted",
+        severity=Severity.HIGH,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-2",
+        description=(
+            "A pipeline variable explicitly turns OFF Docker daemon TLS or points the "
+            'Docker client at the host\'s own daemon socket. ``DOCKER_TLS_CERTDIR: ""`` '
+            "(empty string) tells the docker:dind service to publish its daemon on the "
+            "unencrypted TCP port 2375, and ``DOCKER_HOST: unix:///var/run/docker.sock`` "
+            "targets the host's Docker socket directly. Either gives any process sharing "
+            "the job's network namespace full, unauthenticated control of a Docker daemon "
+            "— a direct runner-host escape. This is distinct from SEC2-GL-002, which "
+            "catches the *absence* of DOCKER_TLS_CERTDIR on a dind job; explicitly setting "
+            "it to empty makes the key present and silences that rule."
+        ),
+        pattern=RegexPattern(
+            match=(
+                # Explicit-empty cert dir: DOCKER_TLS_CERTDIR: "" / '' / (bare null)
+                r"""DOCKER_TLS_CERTDIR\s*:\s*(?:""|''|)\s*(?:#.*)?$"""
+                # Host daemon socket targeted via DOCKER_HOST.
+                r"|DOCKER_HOST\s*:\s*['\"]?unix:///var/run/docker\.sock"
+            ),
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Do not disable Docker daemon TLS or mount the host socket. Use GitLab's "
+            "canonical TLS-enabled DinD setup so the daemon is reachable only over an "
+            "authenticated channel:\n"
+            "\n"
+            "variables:\n"
+            '  DOCKER_TLS_CERTDIR: "/certs"\n'
+            "  DOCKER_HOST: tcp://docker:2376\n"
+            '  DOCKER_TLS_VERIFY: "1"\n'
+            '  DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"\n'
+            "\n"
+            "services:\n"
+            "  - docker:dind\n"
+            "\n"
+            "If a build genuinely needs image building, prefer a rootless/daemonless "
+            "builder (Kaniko, BuildKit rootless) over exposing a daemon socket."
+        ),
+        reference="https://docs.gitlab.com/ci/docker/using_docker_build/",
+        test_positive=[
+            'variables:\n  DOCKER_TLS_CERTDIR: ""\nservices:\n  - docker:dind',
+            "variables:\n  DOCKER_TLS_CERTDIR: ''",
+            "variables:\n  DOCKER_HOST: unix:///var/run/docker.sock",
+            "  DOCKER_HOST: 'unix:///var/run/docker.sock'",
+        ],
+        test_negative=[
+            # Proper non-empty cert dir — TLS enabled.
+            "variables:\n  DOCKER_TLS_CERTDIR: '/certs'\nservices:\n  - docker:dind",
+            'variables:\n  DOCKER_TLS_CERTDIR: "/certs"',
+            # TLS port over TCP — the dangerous no-cert variant is owned
+            # by SEC2-GL-002, so this rule must stay quiet here.
+            "  DOCKER_HOST: tcp://docker:2376",
+            # Comment.
+            '  # DOCKER_TLS_CERTDIR: ""',
+        ],
+        stride=["E", "T"],
+        threat_narrative=(
+            "Explicitly emptying DOCKER_TLS_CERTDIR republishes the dind daemon on "
+            "cleartext TCP 2375, and DOCKER_HOST=unix:///var/run/docker.sock hands the "
+            "job the host's own daemon. Either way a co-tenant container or an injected "
+            "script step gets unauthenticated daemon access: it can spawn a privileged "
+            "container, bind-mount the host root filesystem, and escape onto the runner "
+            "host, persisting across every later build on that shared agent."
+        ),
+    ),
+    # =========================================================================
     # SEC2-GL-003: hardcoded service-instance password in variables/services.
     # GitLab port of SEC2-GH-004. GitLab jobs use ``services:`` for sidecars
     # (postgres, mysql, redis, etc.) and pass instance credentials through

@@ -132,7 +132,7 @@
   "jenkins/negative_corpus/safe_lotp/jenkinsci_docker_tag_gated_publish.Jenkinsfile": "59a7f58f5617966d456a05d08e6d69cb2d2d93ac583c1ce1c70dbcab658b5fe6",
   "jenkins/negative_corpus/safe_lotp/jenkinsio_doc_comments.Jenkinsfile": "9df02b406ed3cffb83edc396573c75f8cf6ca9d0a9622b7c2ab7f52377df6d9f",
   "jenkins/realistic/java_library_ci.Jenkinsfile": "aeb0bd03fc94eee5fa6d382411d86a2a4641d27ff8e3a8cb4db528eb84cc061d",
-  "jenkins/realistic/plugin_ci_build.Jenkinsfile": "44b2e8b512b596cf9a1a81c8cd4ceba54957dad4f8f1aec7385b553a818ce0a7",
+  "jenkins/realistic/plugin_ci_build.Jenkinsfile": "f2b74dbd4da239ff2bde59f49a3fa8de2179704a123666f0010c37c03976aa38",
   "jenkins/realistic/release_pipeline.Jenkinsfile": "a39eea4207553c81eb462b8c9884a46e73fb90ab102af6b20096b86d7b8d5f51",
   "jenkins/realistic/web_app_deploy.Jenkinsfile": "3ea8afc9feab8425e316e0b6b6b36900c23ab5aacfee0b00dbb8848dec08d608",
   "jenkins/safe/Jenkinsfile": "a821ce66615dd8527d500babad7deafacc59834055ba340ba826eb6899215f79",

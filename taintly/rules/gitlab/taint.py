@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 from taintly.gitlab_taint import TaintPath
 from taintly.gitlab_taint import analyze as taint_analyze
-from taintly.models import ContextPattern, Platform, Rule, Severity
+from taintly.models import ContextPattern, Platform, RegexPattern, Rule, Severity
 from taintly.taint import _shell_quote_context_at
 
 # Re-parsing commands that defeat double-quote protection. Mirror of
@@ -1051,6 +1051,91 @@ RULES = [
             "variable into a job's ``tags:``.  The job is dispatched "
             "to a runner the attacker registered, handing them the "
             "job's masked CI/CD variables and runner credentials."
+        ),
+        incidents=[],
+    ),
+    # =========================================================================
+    # TAINT-GL-007 — Vault secret PATH built from an attacker-controlled CI
+    # variable.  GitLab ``secrets:`` resolves a Vault path at job time; if
+    # that path interpolates a ref/branch/free-text variable an attacker can
+    # influence (a fork MR's source-branch name, a commit title), the
+    # attacker redirects WHICH secret the job fetches — e.g. point it at a
+    # higher-privilege path, or at a path whose value they can then exfil
+    # via the job.  No existing rule inspects ``secrets:vault:``.  Scoped to
+    # the inline ``vault:`` short form interpolating a known-tainted CI var
+    # (gitlab_taint._TAINTED_VARS family) so static paths do not fire; the
+    # multi-line ``vault: { path: ... }`` long form is a known follow-up gap.
+    # =========================================================================
+    Rule(
+        id="TAINT-GL-007",
+        title="Vault secret path built from an attacker-controlled CI variable",
+        severity=Severity.HIGH,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A ``secrets:`` entry resolves a Vault path that interpolates an "
+            "attacker-influenceable CI variable — a ref/branch name "
+            "(``$CI_COMMIT_REF_NAME``, ``$CI_COMMIT_BRANCH``, "
+            "``$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME``) or commit free-text "
+            "(``$CI_COMMIT_TITLE`` / ``MESSAGE``). On a fork merge request "
+            "the source branch name and commit metadata are chosen by the "
+            "attacker, so they steer which Vault secret the job reads. That "
+            "lets them redirect the lookup to a path whose value the job "
+            "then exposes, or probe the Vault namespace — a confused-deputy "
+            "secret-disclosure primitive distinct from script injection."
+        ),
+        pattern=RegexPattern(
+            # Inline ``vault:`` short form whose path interpolates a tainted
+            # CI variable.  Static paths (``vault: prod/db@ops``) and
+            # non-attacker vars (``$CI_ENVIRONMENT_NAME``) do not match.
+            match=(
+                r"vault\s*:\s*['\"]?[^'\"\n]*"
+                r"\$\{?(?:CI_COMMIT_(?:REF_NAME|REF_SLUG|BRANCH|TITLE|MESSAGE|DESCRIPTION|AUTHOR|TAG_NAME)"
+                r"|CI_MERGE_REQUEST_(?:SOURCE_BRANCH_NAME|TITLE|DESCRIPTION|LABELS)"
+                r"|CI_EXTERNAL_PULL_REQUEST_\w+)\b"
+            ),
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Never build a Vault path from a CI variable an attacker can "
+            "influence. Use a fixed path, or scope the lookup by the "
+            "protected environment / project, not by the ref:\n"
+            "\n"
+            "# BAD — fork MR branch name steers the secret lookup\n"
+            "job:\n"
+            "  secrets:\n"
+            "    DB_PASSWORD:\n"
+            '      vault: "$CI_COMMIT_REF_NAME/db/password@ops"\n'
+            "\n"
+            "# GOOD — fixed path; gate the job on a protected ref so only\n"
+            "# trusted pipelines can reach it\n"
+            "job:\n"
+            "  secrets:\n"
+            "    DB_PASSWORD:\n"
+            '      vault: "production/db/password@ops"\n'
+            "  rules:\n"
+            "    - if: '$CI_COMMIT_REF_PROTECTED == \"true\"'"
+        ),
+        reference="https://docs.gitlab.com/ci/secrets/",
+        test_positive=[
+            '      vault: "$CI_COMMIT_REF_NAME/db/password@ops"',
+            "      vault: '${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}/secret@kv'",
+            '      vault: "secrets/$CI_COMMIT_BRANCH/token@ops"',
+        ],
+        test_negative=[
+            # Static path — safe.
+            "      vault: production/db/password@ops",
+            '      vault: "ops/data/$CI_ENVIRONMENT_NAME/db"',
+            '      # vault: "$CI_COMMIT_REF_NAME/db@ops"',
+        ],
+        stride=["S", "I"],
+        threat_narrative=(
+            "GitLab resolves the Vault path at job runtime. A path built "
+            "from ``$CI_COMMIT_REF_NAME`` (or another fork-controlled "
+            "variable) lets an attacker who opens a merge request choose "
+            "the secret the job retrieves — redirecting it to a "
+            "higher-privilege path or one whose value the job subsequently "
+            "leaks, all without changing a line of the committed pipeline."
         ),
         incidents=[],
     ),
