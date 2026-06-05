@@ -1306,7 +1306,7 @@ RULES: list[Rule] = [
         pattern=RegexPattern(
             # ``pipeline_variables`` is a trigger:forward-only key in
             # GitLab CI, so a bare line match is low-FP.
-            match=r"^\s*pipeline_variables:\s*true\b",
+            match=r"^\s*pipeline_variables:\s*[Tt]rue\b",
             exclude=[r"^\s*#"],
         ),
         remediation=(

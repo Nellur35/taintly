@@ -639,7 +639,7 @@ RULES: list[Rule] = [
             match=(
                 r"\b(?:trivy|semgrep|gitleaks|bandit|snyk|grype|checkov"
                 r"|trufflehog|osv-scanner|dependency-check|safety\s+check"
-                r"|npm\s+audit)\b[^\n]*\|\|\s*(?:true|:)"
+                r"|npm\s+audit)\b[^\n]*\|\|\s*(?:[Tt]rue|:)"
             ),
             exclude=[r"^\s*//", r"^\s*\*"],
         ),
@@ -2148,7 +2148,7 @@ RULES: list[Rule] = [
             "result) that the pipeline then trusts."
         ),
         pattern=RegexPattern(
-            match=r"ignoreSslErrors\s*:\s*true\b",
+            match=r"ignoreSslErrors\s*:\s*[Tt]rue\b",
             exclude=[r"^\s*//", r"^\s*\*"],
         ),
         remediation=(
@@ -3380,7 +3380,7 @@ RULES: list[Rule] = [
             "sources before keeping either option."
         ),
         pattern=RegexPattern(
-            match=r"(?:parentCredentials|trackingSubmodules)\s*:\s*true\b",
+            match=r"(?:parentCredentials|trackingSubmodules)\s*:\s*[Tt]rue\b",
             exclude=[r"^\s*//", r"^\s*\*"],
         ),
         remediation=(
