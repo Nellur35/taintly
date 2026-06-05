@@ -603,7 +603,7 @@ do not recompute risk.
 
 
 <!-- AUTOGEN:summary -->
-274 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+289 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 
@@ -612,17 +612,17 @@ do not recompute risk.
 | Category | GitHub | GitLab | Jenkins |
 |----------|--------|--------|---------|
 | SEC-1 — Insufficient Flow Control | 1 | 3 | 2 |
-| SEC-2 — Inadequate IAM | 5 | 3 | 3 |
-| SEC-3 — Dependency Chain Abuse | 10 | 6 | 5 |
-| SEC-4 — Poisoned Pipeline Execution | 29 | 9 | 8 |
-| SEC-5 — Insufficient PBAC | 2 | 1 | 1 |
-| SEC-6 — Insufficient Credential Hygiene | 10 | 9 | 8 |
-| SEC-7 — Insecure System Configuration | 4 | 1 | 3 |
-| SEC-8 — Ungoverned 3rd Party Services | 5 | 3 | 4 |
-| SEC-9 — Improper Artifact Integrity | 6 | 3 | 4 |
-| SEC-10 — Insufficient Logging | 4 | 3 | 1 |
+| SEC-2 — Inadequate IAM | 5 | 4 | 3 |
+| SEC-3 — Dependency Chain Abuse | 10 | 7 | 7 |
+| SEC-4 — Poisoned Pipeline Execution | 29 | 11 | 10 |
+| SEC-5 — Insufficient PBAC | 2 | 1 | 2 |
+| SEC-6 — Insufficient Credential Hygiene | 10 | 9 | 9 |
+| SEC-7 — Insecure System Configuration | 4 | 1 | 4 |
+| SEC-8 — Ungoverned 3rd Party Services | 5 | 3 | 5 |
+| SEC-9 — Improper Artifact Integrity | 6 | 4 | 4 |
+| SEC-10 — Insufficient Logging | 4 | 3 | 2 |
 | AI / ML | 39 | 16 | 12 |
-| TAINT — Multi-stage taint flows | 19 | 6 | 2 |
+| TAINT — Multi-stage taint flows | 19 | 7 | 2 |
 <!-- /AUTOGEN:coverage -->
 
 Plus 32 platform-posture rules in `--platform-audit` mode.

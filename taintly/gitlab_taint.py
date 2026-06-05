@@ -115,7 +115,15 @@ _TAINTED_VARS = [
     "CI_MERGE_REQUEST_SOURCE_BRANCH_NAME",
     "CI_MERGE_REQUEST_TARGET_BRANCH_NAME",
     "CI_MERGE_REQUEST_LABELS",
+    # External pull-request mirror variables (a GitHub repo mirrored into
+    # GitLab with CI/CD on external PRs enabled). The external PR author
+    # controls the source branch (already listed), and equally the title,
+    # description, and target-branch name — all attacker-supplied free
+    # text, the same exposure class as the CI_MERGE_REQUEST_* set above.
     "CI_EXTERNAL_PULL_REQUEST_SOURCE_BRANCH_NAME",
+    "CI_EXTERNAL_PULL_REQUEST_TARGET_BRANCH_NAME",
+    "CI_EXTERNAL_PULL_REQUEST_TITLE",
+    "CI_EXTERNAL_PULL_REQUEST_DESCRIPTION",
     # Triggerer-identity variables: populated from the user's GitLab
     # profile. Display name and email accept arbitrary UTF-8 including
     # shell metacharacters; they reach scripts the moment a job echoes

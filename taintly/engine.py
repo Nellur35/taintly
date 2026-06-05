@@ -1050,9 +1050,7 @@ def _discover_gitlab_files(repo_path: str) -> list[str]:
     return files
 
 
-def _discovery_confidence(
-    repo_path: str, platform: Platform, files: list[str]
-) -> dict[str, str]:
+def _discovery_confidence(repo_path: str, platform: Platform, files: list[str]) -> dict[str, str]:
     """Classify each discovered file's discovery confidence (normpath -> tier).
 
     "high" — admitted by an AUTHORITATIVE signal: a canonical GitHub location
