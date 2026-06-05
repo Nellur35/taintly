@@ -32,6 +32,12 @@ from taintly.rules.github.sec3_sec4_supply_chain_ppe import (
         "echo \"${{ github.event.head_commit.message }}\"",
         "echo \"${{ github.event.head_commit.author.email }}\"",
         "echo \"${{ github.event.head_commit.author.name }}\"",
+        "echo \"${{ github.event.review_comment.body }}\"",
+        "echo \"${{ github.event.discussion.title }}\"",
+        "echo \"${{ github.event.discussion.body }}\"",
+        "echo \"${{ github.event.head_commit.committer.email }}\"",
+        "echo \"${{ github.event.head_commit.committer.name }}\"",
+        "echo \"${{ github.event.pull_request.head.repo.default_branch }}\"",
         "git checkout ${{ github.head_ref }}",
     ],
 )
@@ -51,6 +57,14 @@ def test_dangerous_context_shapes_match(value: str) -> None:
         "echo \"${{ secrets.TOKEN }}\"",
         # Bare shell with no expression
         "echo hi",
+        # Near-misses of the new additions: sibling fields that are NOT
+        # attacker-controlled free text and must stay unflagged.
+        # ``repo.full_name`` is the same-repo guard the calibration pass
+        # relies on — flagging it as a source would be actively wrong.
+        "echo \"${{ github.event.pull_request.head.repo.full_name }}\"",
+        "echo \"${{ github.event.discussion.html_url }}\"",
+        "echo \"${{ github.event.review_comment.html_url }}\"",
+        "echo \"${{ github.event.head_commit.committer.date }}\"",
     ],
 )
 def test_safe_shapes_do_not_match(value: str) -> None:

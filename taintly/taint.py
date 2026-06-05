@@ -174,9 +174,25 @@ _TAINTED_CONTEXTS = [
     r"github\.event\.issue\.body",
     r"github\.event\.comment\.body",
     r"github\.event\.review\.body",
+    # ``review_comment.body`` is the inline PR-review comment body — listed
+    # alongside the other comment/body fields in GitHub's "Understanding the
+    # risk of script injections" untrusted-input table.
+    r"github\.event\.review_comment\.body",
+    # GitHub Discussions are opened by any user; the discussion event payload
+    # ``title`` / ``body`` are attacker-controlled in the same way as the
+    # issue equivalents.
+    r"github\.event\.discussion\.title",
+    r"github\.event\.discussion\.body",
     r"github\.event\.head_commit\.message",
     r"github\.event\.head_commit\.author\.name",
     r"github\.event\.head_commit\.author\.email",
+    # The ``committer`` identity of a push/commit is set from git metadata
+    # just like ``author`` and is equally attacker-controlled.
+    r"github\.event\.head_commit\.committer\.name",
+    r"github\.event\.head_commit\.committer\.email",
+    # The fork's default branch name (PR head repo) is chosen by the PR
+    # author — GitHub documents it as untrusted input.
+    r"github\.event\.pull_request\.head\.repo\.default_branch",
     # ``commits`` is the push-event array of commits; element fields
     # (``[0].message``, ``[0].author.name``) carry the same attacker
     # bytes as ``head_commit``.  Word-boundary matching downstream
