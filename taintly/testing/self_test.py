@@ -110,6 +110,21 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "with no space; real workflows always include a space. Same "
         "family as AI-GH-019 / 020 / 021."
     ),
+    ("SEC1-GH-002", "whitespace_pad"): (
+        "Unsound transform for YAML mappings: whitespace_pad collapses "
+        "``id-token: write`` to ``id-token:write``, which YAML parses as a "
+        "scalar string, not a ``permissions.id-token`` mapping. The "
+        "predicate's value lookup correctly returns nothing, so the rule "
+        "does not fire — that is correct behaviour on malformed YAML, not "
+        "a miss. Same class as the SEC10-GH-004 / AI-GH-019 family."
+    ),
+    ("SEC8-GH-009", "whitespace_pad"): (
+        "Unsound transform for YAML mappings: collapsing ``token: secret`` "
+        "to ``token:secret`` turns the mapping into a scalar, so the "
+        "``registries:``-gated credential matcher correctly does not fire. "
+        "Broadening to ``\\s*`` would match invalid YAML and weaken "
+        "precision; same family as SEC10-GH-004."
+    ),
     ("AI-GH-019", "whitespace_pad"): (
         "Same family: requires clause uses ``_AI_AGENT_ANCHOR`` whose "
         "``uses:\\s+`` anchor loses coverage when whitespace is stripped. "
