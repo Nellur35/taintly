@@ -13,6 +13,7 @@ from taintly.models import (
     Rule,
     Severity,
 )
+from taintly.parsers.segmentation import for_each_step
 from taintly.platform import github_archived_check, github_sha_verify
 from taintly.structural_pattern import StructuralPattern
 
@@ -521,7 +522,133 @@ def _is_unpinned_third_party_action(
     return _unpinned_classify(value) == "third_party"
 
 
+_UPLOAD_ARTIFACT_RE = re.compile(r"uses:\s*\S*upload-artifact", re.IGNORECASE)
+
+# High-confidence private-secret file indicators.  Deliberately conservative:
+# ``.pem`` / ``.key`` are excluded because they are just as often *public*
+# certificates, which would inflate false positives.  p12/pfx/jks/keystore
+# are private-key archives, so they stay.
+_SECRET_FILE_RE = re.compile(
+    r"(?:^|[\s/'\"=:])("
+    r"\.env(?:\.[\w.-]+)?"
+    r"|\.npmrc|\.netrc|\.pypirc|\.dockercfg"
+    r"|id_rsa|id_ed25519|id_ecdsa|secring\.\w+"
+    r"|kubeconfig|\.kube/config"
+    r"|credentials(?:\.(?:json|ya?ml|ini))?"
+    r"|service[-_]account[\w-]*\.json"
+    r"|[\w./-]*\.(?:p12|pfx|keystore|jks)"
+    r"|\.aws/|\.ssh/|\.gnupg/"
+    r")(?:$|[\s/'\":,])",
+    re.IGNORECASE,
+)
+_PATH_KEY_RE = re.compile(r"^(\s*)path\s*:\s*(.*)$")
+_BLOCK_SCALAR = {"|", ">", "|-", ">-", "|+", ">+"}
+
+
+class SecretsInArtifactPathPattern:
+    """Fire when an ``actions/upload-artifact`` step's ``path:`` names a
+    private-secret file (``.env``, ``id_rsa``, ``.npmrc``, ``credentials``,
+    ``.aws/``, a keystore, …).  Uploaded artifacts are downloadable — on a
+    public repo by anyone, on a fork PR by the PR author — so a secret in
+    the upload set is an exfiltration channel.
+
+    Distinct from SEC10's artifact rules (which concern *missing* artifacts
+    / debug-log upload).  Matches the secret-file *pattern*, not arbitrary
+    paths, so ordinary ``path: dist/`` uploads do not fire."""
+
+    def check(self, content: str, _lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        for step in for_each_step(content):
+            if not _UPLOAD_ARTIFACT_RE.search(step.text):
+                continue
+            in_path = False
+            path_indent = -1
+            for offset, line in enumerate(step.body_lines):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                m = _PATH_KEY_RE.match(line)
+                if m:
+                    path_indent = len(m.group(1))
+                    inline = m.group(2).strip()
+                    in_path = inline in _BLOCK_SCALAR or inline == ""
+                    if inline and inline not in _BLOCK_SCALAR and _SECRET_FILE_RE.search(inline):
+                        results.append((step.start_line + offset, stripped))
+                    continue
+                if in_path:
+                    cur_indent = len(line) - len(line.lstrip())
+                    if cur_indent <= path_indent:
+                        in_path = False
+                    elif _SECRET_FILE_RE.search(stripped):
+                        results.append((step.start_line + offset, stripped))
+        return results
+
+
 RULES: list[Rule] = [
+    # =========================================================================
+    # SEC3-GH-011: secret file uploaded as a downloadable artifact
+    # =========================================================================
+    Rule(
+        id="SEC3-GH-011",
+        title="Private-secret file uploaded as a workflow artifact",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-3",
+        review_needed=True,
+        description=(
+            "An ``actions/upload-artifact`` step uploads a path that names a "
+            "private-secret file — a ``.env``, an SSH private key "
+            "(``id_rsa``), ``.npmrc`` / ``.netrc`` credentials, a cloud "
+            "``credentials`` file, a ``.aws/`` or ``.ssh/`` directory, or a "
+            "key archive (``.p12``/``.pfx``/``.jks``). Workflow artifacts "
+            "are downloadable — publicly on a public repo, and by the PR "
+            "author on a fork pull request — so a secret in the upload set "
+            "is an exfiltration channel that survives the run."
+        ),
+        pattern=SecretsInArtifactPathPattern(),
+        remediation=(
+            "Never include secret-bearing files in an artifact upload. "
+            "Scope ``path:`` to build outputs only, and add an exclusion "
+            "for secret patterns:\n"
+            "\n"
+            "    - uses: actions/upload-artifact@<sha>\n"
+            "      with:\n"
+            "        path: |\n"
+            "          dist/\n"
+            "          !**/.env\n"
+            "          !**/*.p12\n"
+        ),
+        reference="https://docs.github.com/actions/using-workflows/storing-workflow-data-as-artifacts",
+        test_positive=[
+            "on: push\njobs:\n  x:\n    steps:\n"
+            "      - uses: actions/upload-artifact@v4\n"
+            "        with:\n          path: .env\n",
+            "on: push\njobs:\n  x:\n    steps:\n"
+            "      - uses: actions/upload-artifact@v4\n"
+            "        with:\n          name: keys\n          path: |\n"
+            "            dist/\n            secrets/id_rsa\n",
+        ],
+        test_negative=[
+            # Ordinary build output — must not fire.
+            "on: push\njobs:\n  x:\n    steps:\n"
+            "      - uses: actions/upload-artifact@v4\n"
+            "        with:\n          path: dist/\n",
+            # Secret-looking path but NOT an upload-artifact step.
+            "on: push\njobs:\n  x:\n    steps:\n      - run: cp .env /tmp/backup\n",
+            # Public cert extension (.pem) is intentionally not flagged.
+            "on: push\njobs:\n  x:\n    steps:\n"
+            "      - uses: actions/upload-artifact@v4\n"
+            "        with:\n          path: certs/server.pem\n",
+        ],
+        stride=["I"],
+        threat_narrative=(
+            "Uploading a secret file as an artifact turns a one-time "
+            "in-run credential into a persistent, downloadable copy. On a "
+            "public repository the artifact is world-readable; on a fork "
+            "PR the very actor who opened the PR can download it — a clean "
+            "exfiltration path that leaves the workflow looking green."
+        ),
+    ),
     # =========================================================================
     # CICD-SEC-3: Dependency Chain Abuse
     # =========================================================================
