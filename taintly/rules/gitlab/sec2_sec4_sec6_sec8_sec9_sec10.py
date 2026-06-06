@@ -5,6 +5,8 @@ Covers OWASP CICD-SEC-2, SEC-4 (extended), SEC-6 (extended), SEC-8 (extended),
 SEC-9 (extended), SEC-10 (extended).
 """
 
+import re
+
 from taintly.models import (
     ContextPattern,
     Platform,
@@ -13,6 +15,65 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+
+_CACHE_RE = re.compile(r"^(\s*)cache:\s*$")
+_KEY_INLINE_RE = re.compile(r"^\s*key:\s*(\S.*?)\s*$")
+_KEY_BLOCK_RE = re.compile(r"^\s*key:\s*$")
+_BLOCK_SCALAR = {"|", ">", "|-", ">-", "|+", ">+"}
+
+
+class StaticCacheKeyPattern:
+    """Fire on a ``cache:`` block whose ``key:`` is a STATIC literal (contains
+    no ``$`` variable). A static key is identical on every branch and merge
+    request — including fork MRs — so an attacker who can run a pipeline can
+    write the cache that a protected-branch build later restores (cache
+    poisoning, gitlab-org/gitlab#330047).
+
+    Complements SEC9-GL-003, which covers the ABSENT-key case; this fires only
+    when a key IS present but static, so the two never double-fire. Treated as
+    SAFE (no fire): a key referencing any ``$`` variable (per-ref isolation,
+    e.g. ``$CI_COMMIT_REF_SLUG``) and a ``key:`` block form (``key:\\n  files:``,
+    which is content-addressed)."""
+
+    def check(self, content: str, _lines: list[str]) -> list[tuple[int, str]]:
+        lines = content.splitlines()
+        results: list[tuple[int, str]] = []
+        i = 0
+        while i < len(lines):
+            m = _CACHE_RE.match(lines[i])
+            if not m:
+                i += 1
+                continue
+            cache_indent = len(m.group(1))
+            j = i + 1
+            while j < len(lines):
+                ln = lines[j]
+                if not ln.strip() or ln.lstrip().startswith("#"):
+                    j += 1
+                    continue
+                if len(ln) - len(ln.lstrip()) <= cache_indent:
+                    break  # cache block ended
+                if _KEY_BLOCK_RE.match(ln):
+                    break  # key: files: block — content-addressed, safe
+                km = _KEY_INLINE_RE.match(ln)
+                if km:
+                    val = km.group(1).strip().strip("'\"")
+                    # Static literal only. Exclude: $-variables (per-ref
+                    # isolation), YAML ``!reference``/``!``-tags and ``*``-aliases
+                    # (resolve to another key we can't evaluate statically),
+                    # and block scalars.
+                    if (
+                        val
+                        and "$" not in val
+                        and not val.startswith(("!", "*"))
+                        and val not in _BLOCK_SCALAR
+                    ):
+                        results.append((j + 1, ln.strip()))
+                    break  # one key per cache block
+                j += 1
+            i = max(j, i + 1)
+        return results
+
 
 RULES: list[Rule] = [
     # =========================================================================
@@ -592,6 +653,56 @@ RULES: list[Rule] = [
             "by protected branch pipelines. Injected cache content — modified node_modules, "
             "compiled objects, or tool binaries — persists into builds that run with higher "
             "privileges."
+        ),
+    ),
+    Rule(
+        id="SEC9-GL-005",
+        title="Cache key is a static literal — cross-branch / fork-MR cache poisoning risk",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-9",
+        review_needed=True,
+        confidence="low",
+        description=(
+            "A cache: block sets an explicit but STATIC key (no $ variable). A "
+            "static key is identical on every branch and merge request — "
+            "including fork MRs — so the cache is shared across trust "
+            "boundaries. An attacker who can run a pipeline (e.g. via a fork "
+            "merge request) can write malicious content into that cache, which "
+            "a protected-branch build then restores and trusts. SEC9-GL-003 "
+            "covers the no-key case; this covers the present-but-static-key "
+            "case it cannot see."
+        ),
+        pattern=StaticCacheKeyPattern(),
+        remediation=(
+            "Scope the cache key per ref so attacker-reachable refs cannot share "
+            "a protected branch's cache:\n\n"
+            "cache:\n"
+            "  key: $CI_COMMIT_REF_SLUG\n"
+            "  paths:\n"
+            "    - .cache/\n\n"
+            "Or content-address it so the key reflects the inputs:\n"
+            "  key:\n"
+            "    files:\n"
+            "      - package-lock.json"
+        ),
+        reference="https://docs.gitlab.com/ee/ci/caching/#cache-key-names",
+        test_positive=[
+            "build:\n  cache:\n    key: build-cache\n    paths:\n      - dist/",
+            'test:\n  cache:\n    key: "global"\n    paths:\n      - node_modules/',
+        ],
+        test_negative=[
+            "build:\n  cache:\n    key: $CI_COMMIT_REF_SLUG\n    paths:\n      - dist/",
+            "t:\n  cache:\n    key:\n      files:\n        - go.sum\n    paths:\n      - .cache/",
+            "t:\n  cache:\n    paths:\n      - node_modules/",
+        ],
+        stride=["T"],
+        threat_narrative=(
+            "A statically-keyed cache is a single shared bucket every pipeline "
+            "writes to. A fork merge request can populate it with poisoned "
+            "node_modules, compiled objects, or tool binaries that a protected "
+            "build later restores and executes with higher privileges — the "
+            "cache becomes a cross-trust-boundary code-delivery channel."
         ),
     ),
     # =========================================================================
