@@ -18,6 +18,7 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+from taintly.parsers.segmentation import for_each_step
 from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
 
 # ---------------------------------------------------------------------------
@@ -485,7 +486,108 @@ def _sec1_publish_without_gate(
     return not _sec1_job_has_environment(ctx, job_id)
 
 
+_PYPI_PUBLISH_ACTION_RE = re.compile(r"uses:\s*['\"]?pypa/gh-action-pypi-publish")
+_PYPI_PASSWORD_INPUT_RE = re.compile(r"^\s*password:\s*\S")
+
+
+class PyPiPublishLongLivedTokenPattern:
+    """Fire on a ``pypa/gh-action-pypi-publish`` step that authenticates with a
+    long-lived API token (a ``password:`` input) instead of OIDC trusted
+    publishing (PEP 740). Trusted publishing needs no password — its presence
+    means a long-lived PyPI token is stored as a secret and can be exfiltrated
+    and reused to publish malicious releases.
+
+    Step-scoped (via :func:`for_each_step`) so it can't fire on an unrelated
+    ``password:`` elsewhere in the workflow. Complement to SEC5-GH-001, which
+    fires on ``id-token: write`` granted with NO OIDC consumer present; here the
+    publish action IS present but still uses a token."""
+
+    def check(self, content: str, _lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        for step in for_each_step(content):
+            if not _PYPI_PUBLISH_ACTION_RE.search(step.text):
+                continue
+            for offset, line in enumerate(step.body_lines):
+                if line.lstrip().startswith("#"):
+                    continue
+                if _PYPI_PASSWORD_INPUT_RE.match(line):
+                    results.append((step.start_line + offset, line.strip()))
+                    break
+        return results
+
+
 RULES: list[Rule] = [
+    # =========================================================================
+    # SEC6-GH-013: long-lived PyPI token instead of OIDC trusted publishing
+    # =========================================================================
+    Rule(
+        id="SEC6-GH-013",
+        title="PyPI publish uses a long-lived API token instead of OIDC trusted publishing",
+        severity=Severity.LOW,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-6",
+        finding_family="credential_persistence",
+        description=(
+            "A ``pypa/gh-action-pypi-publish`` step authenticates with a "
+            "``password:`` input — a long-lived PyPI API token stored as a "
+            "secret. PyPI supports OIDC trusted publishing (PEP 740), which mints "
+            "a short-lived token per run from the workflow's own identity and "
+            "needs no stored secret. A long-lived token can be exfiltrated by a "
+            "compromised dependency or a poisoned-pipeline step and reused to "
+            "publish malicious releases. Complements SEC5-GH-001 (which flags "
+            "``id-token: write`` granted without any OIDC consumer); here the "
+            "publish action is present but still uses a token."
+        ),
+        pattern=PyPiPublishLongLivedTokenPattern(),
+        remediation=(
+            "Switch to trusted publishing: register a trusted publisher for the "
+            "project on PyPI, grant the job ``permissions: id-token: write``, and "
+            "remove the ``password:`` input so the action authenticates via OIDC:\n"
+            "\n"
+            "    permissions:\n"
+            "      id-token: write\n"
+            "    steps:\n"
+            "      - uses: pypa/gh-action-pypi-publish@<sha>\n"
+            "        # no username/password — OIDC trusted publishing\n"
+        ),
+        reference="https://docs.pypi.org/trusted-publishers/",
+        test_positive=[
+            (
+                "on: push\n"
+                "jobs:\n"
+                "  release:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: pypa/gh-action-pypi-publish@release/v1\n"
+                "        with:\n"
+                "          password: ${{ secrets.PYPI_API_TOKEN }}\n"
+            ),
+        ],
+        test_negative=[
+            # Trusted publishing — no password input.
+            (
+                "on: push\n"
+                "jobs:\n"
+                "  release:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    permissions:\n"
+                "      id-token: write\n"
+                "    steps:\n"
+                "      - uses: pypa/gh-action-pypi-publish@release/v1\n"
+            ),
+            # A password on a DIFFERENT action (docker login) — not the publish step.
+            (
+                "on: push\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: docker/login-action@v3\n"
+                "        with:\n"
+                "          password: ${{ secrets.DOCKER_TOKEN }}\n"
+            ),
+        ],
+    ),
     # =========================================================================
     # CICD-SEC-1: Insufficient Flow Control Mechanisms
     # =========================================================================

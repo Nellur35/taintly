@@ -77,3 +77,37 @@ def test_job_at_line_preamble_and_oob_return_none() -> None:
     assert job_at_line(_TWO_JOBS, 1) is None  # preamble (on:/jobs:)
     assert job_at_line(_TWO_JOBS, 0) is None  # non-positive
     assert job_at_line(_TWO_JOBS, 999) is None  # past EOF
+
+
+# ---------------------------------------------------------------------------
+# for_each_step — must handle SAME-INDENT block-sequence steps (the `- ` at the
+# same column as `steps:`), valid YAML used by many real workflows. Previously
+# dropped (0 steps), silently under-firing every step-based rule.
+# ---------------------------------------------------------------------------
+
+from taintly.parsers.segmentation import for_each_step  # noqa: E402
+
+_STEPS_INDENTED = (
+    "on: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n"
+    "      - uses: a/b@v1\n        with:\n          x: 1\n      - run: echo hi\n"
+)
+_STEPS_SAME_INDENT = (
+    "on: push\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n"
+    "    - uses: a/b@v1\n      with:\n        x: 1\n    - run: echo hi\n"
+    "    env:\n      K: v\n"
+)
+
+
+def test_for_each_step_indented_style() -> None:
+    steps = for_each_step(_STEPS_INDENTED)
+    assert len(steps) == 2
+
+
+def test_for_each_step_same_indent_style() -> None:
+    # The `- ` is at the same column as `steps:` — valid YAML, must yield 2
+    # steps (regression for the parser fix), and the trailing `env:` sibling
+    # key at steps-indent must NOT be mistaken for a step.
+    steps = for_each_step(_STEPS_SAME_INDENT)
+    assert len(steps) == 2
+    assert "uses: a/b@v1" in steps[0].text
+    assert any("x: 1" in line for line in steps[0].body_lines)
