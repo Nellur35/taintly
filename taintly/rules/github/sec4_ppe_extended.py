@@ -17,9 +17,11 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+from taintly.parsers.segmentation import for_each_step
 from taintly.workflow_aware_pattern import PredicateContext
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
+from .sec3_sec4_supply_chain_ppe import _DANGEROUS_GITHUB_CONTEXT_RE
 
 
 class StepOutputShellInterpolationPattern:
@@ -467,7 +469,125 @@ class NeedsOutputShellInterpolationPattern:
         return results
 
 
+# Command-argument-style ``with:`` input keys: an action receiving one of
+# these passes the value into a command's argv, so an attacker-controlled
+# value there is *argument injection* (extra flags/options), not the shell
+# metacharacter injection SEC4-GH-004 covers.  ``ref``/``sha`` are
+# deliberately excluded — untrusted checkout refs are PPE owned by the
+# checkout rules, and flagging them here would double-fire on the
+# ubiquitous ``with: ref: ${{ ...head.sha }}`` pattern.
+_ARG_INPUT_KEY_RE = re.compile(
+    r"^\s*(args|arguments|command|cmd|options|opts|flags|entrypoint)\s*:\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
+
+
+class ArgumentInjectionInWithPattern:
+    """Fire when an action step (``uses:``) passes an attacker-controlled
+    GitHub context into a command-argument ``with:`` input
+    (``args``/``command``/``flags``/…).
+
+    Distinct from SEC4-GH-004, whose path filter is ``**.run`` (shell
+    strings only): a value handed to an action as an argument never
+    appears in a ``run:`` block, so this is a genuine coverage gap.  The
+    attacker-controlled contexts are detected with the shared
+    :data:`_DANGEROUS_GITHUB_CONTEXT_RE` (which already excludes
+    ``inputs.*`` — owned by SEC4-GH-008 — so the two never overlap)."""
+
+    def check(self, content: str, _lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        for step in for_each_step(content):
+            if "uses:" not in step.text:
+                continue
+            for offset, line in enumerate(step.body_lines):
+                if line.lstrip().startswith("#"):
+                    continue
+                m = _ARG_INPUT_KEY_RE.match(line)
+                if not m:
+                    continue
+                if _DANGEROUS_GITHUB_CONTEXT_RE.search(m.group(2)):
+                    results.append((step.start_line + offset, line.strip()))
+        return results
+
+
 RULES: list[Rule] = [
+    # =========================================================================
+    # SEC4-GH-028: argument injection via a command-arg with: input
+    # =========================================================================
+    Rule(
+        id="SEC4-GH-028",
+        title="Attacker-controlled context flows into an action's command-argument input",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        finding_family="script_injection",
+        description=(
+            "A step that ``uses:`` an action passes an attacker-controlled "
+            "GitHub context (a PR title, issue body, head ref, commit "
+            "message, …) into a command-argument-style ``with:`` input "
+            "such as ``args``, ``command``, ``flags`` or ``entrypoint``. "
+            "The action forwards that value into a command line, so the "
+            "attacker can inject extra flags/options — argument injection. "
+            "This is distinct from SEC4-GH-004 (shell injection in ``run:`` "
+            "blocks): the value never touches a shell string, it is handed "
+            "straight to the action's argv."
+        ),
+        pattern=ArgumentInjectionInWithPattern(),
+        remediation=(
+            "Never pass a raw ``${{ github.event.* }}`` context into an "
+            "action's argument input. Stage it through an ``env:`` var and "
+            "let the action read the env var, or validate/allow-list the "
+            "value first:\n"
+            "\n"
+            "    - uses: some/action@<sha>\n"
+            "      env:\n"
+            "        TITLE: ${{ github.event.pull_request.title }}\n"
+            "      with:\n"
+            '        args: --title "$TITLE"   # quoted, from env\n'
+        ),
+        reference="https://securitylab.github.com/resources/github-actions-untrusted-input/",
+        test_positive=[
+            "on: pull_request_target\n"
+            "jobs:\n  x:\n    steps:\n"
+            "      - uses: docker://alpine\n"
+            "        with:\n"
+            "          args: ${{ github.event.pull_request.title }}\n",
+            "on: pull_request_target\n"
+            "jobs:\n  x:\n    steps:\n"
+            "      - uses: some/runner@v1\n"
+            "        with:\n"
+            "          command: deploy ${{ github.event.issue.body }}\n",
+        ],
+        test_negative=[
+            # Argument is a static/safe value.
+            "on: pull_request_target\n"
+            "jobs:\n  x:\n    steps:\n"
+            "      - uses: some/action@v1\n        with:\n          args: --verbose\n",
+            # The classic checkout ref pattern must NOT fire here (PPE owns it).
+            "on: pull_request_target\n"
+            "jobs:\n  x:\n    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n",
+            # Dangerous context in a run: block is SEC4-GH-004's job, not ours.
+            "on: pull_request_target\n"
+            "jobs:\n  x:\n    steps:\n"
+            "      - run: echo ${{ github.event.pull_request.title }}\n",
+            # inputs.* is SEC4-GH-008's domain — excluded by the shared regex.
+            "on: pull_request_target\n"
+            "jobs:\n  x:\n    steps:\n"
+            "      - uses: some/action@v1\n"
+            "        with:\n          args: ${{ github.event.inputs.mode }}\n",
+        ],
+        stride=["T"],
+        threat_narrative=(
+            "An action's argument input is a command line in disguise. A "
+            "fork PR author who controls the title or body can smuggle "
+            "extra flags into the tool the action runs — changing its "
+            "output path, enabling a dangerous mode, or pivoting to code "
+            "execution — without ever needing a shell metacharacter, so a "
+            "``run:``-focused injection check never sees it."
+        ),
+    ),
     # =========================================================================
     # SEC4-GH-006: GITHUB_ENV injection — CRITICAL
     # =========================================================================
