@@ -612,7 +612,12 @@ RULES: list[Rule] = [
             "user-controlled input, it enables code injection."
         ),
         pattern=RegexPattern(
-            match=r"^\s*-?\s*eval\s+",
+            # Require a non-space argument after eval (eval\s+\S): a bare
+            # ``eval`` followed only by whitespace is a no-op, not a dangerous
+            # dynamic-string eval. The old ``eval\s+`` fired on ``eval  ``
+            # (trailing-whitespace-only) — a latent false positive. The
+            # tightened pattern is invariant to trailing-whitespace reformatting.
+            match=r"^\s*-?\s*eval\s+\S",
             exclude=[r"^\s*#", r"echo", r"do not"],
         ),
         remediation="Replace eval with direct command execution. Avoid evaluating dynamic strings.",
