@@ -1,0 +1,20 @@
+# SEC6-GH-013 TP fixture. Uses SAME-INDENT step style (the `- ` at the same
+# column as `steps:`) so it ALSO regression-tests the for_each_step parser fix
+# that previously dropped same-indent steps.
+name: release
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: python -m build
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        password: ${{ secrets.PYPI_API_TOKEN }}

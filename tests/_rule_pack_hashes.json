@@ -73,6 +73,7 @@
   "github/vulnerable/release_notes_with_gh_release_create.yml": "bd5149b7c4551fb6a55a5a4867e04fd2b4b65e89c312b65a3ad7815c95a4e043",
   "github/vulnerable/release_please_with_publish_step.yml": "0846f32d9d97e504c2940594180404128745d9b9140bdab7997ed67f3fc6db09",
   "github/vulnerable/release_pr_then_publish.yml": "01cfcfe8e2c8f417f15899f253a64df2dce363d1bf6243119c36a97ea25fdc2f",
+  "github/vulnerable/sec6_gh_013_pypi_long_lived_token.yml": "1e8cc74e12c97921ac3f7c933b09c6183b29f3db7d3657578b57f8554a27b6b4",
   "github/vulnerable/secret_in_with_input.yml": "322a0c4517051c29c35bcb9681979e7394f92f869e6bf28596b75f805cb564d7",
   "github/vulnerable/tag_push_unquoted_ref_name.yml": "d1d43b32784f4e2d52558a49b35d6d04cb3d17759c271bcad717343d4f81899d",
   "github/vulnerable/taint_agent_output.yml": "aabd30eeefde23d9000b9fb5d574d33fdaa715e856a29187f5351bd28e86208a",

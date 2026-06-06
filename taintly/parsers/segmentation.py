@@ -273,11 +273,14 @@ def _steps_in_job(job: JobSegment) -> list[StepSegment]:
                 current_lines.append(line)
             continue
         indent = len(line) - len(stripped)
-        if indent <= steps_indent:
-            # Left the steps block.
+        m = _STEP_ITEM_RE.match(line)
+        if indent < steps_indent or (indent == steps_indent and not m):
+            # Left the steps block: dedented past steps:, or a sibling
+            # key at the steps: indent. A ``-`` item AT steps_indent is a
+            # valid same-indent YAML block-sequence step (``steps:`` then
+            # ``- uses:`` at the same column) and must NOT end the block.
             _flush()
             break
-        m = _STEP_ITEM_RE.match(line)
         if m and (item_indent is None or indent == item_indent):
             # New step.
             _flush()
