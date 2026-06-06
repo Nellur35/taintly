@@ -43,6 +43,11 @@ dev = [
     # the absence of pytest-snapshot in a minimal environment doesn't
     # break the existing 886-test baseline.
     "pytest-snapshot>=0.9",
+    # SARIF 2.1.0 schema-conformance gate (Domain 6 / §8.3). Validates the
+    # emitted SARIF against its published schema so a structural violation
+    # GitHub Advanced Security would silently drop fails the build instead.
+    # Tests fall back to pytest.importorskip when absent.
+    "jsonschema>=4.0",
 ]
 # Lab-only deps: never ship publicly.  Used as oracles in tests/lab/
 # to validate in-house implementations against reference libraries.
