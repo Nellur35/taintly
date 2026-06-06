@@ -1,0 +1,76 @@
+name: FP budget (scheduled)
+
+# Public-repo false-positive budget gate.
+#
+# scripts/check_public_repo_fp_budget.py clones a handful of
+# representative public repos and asserts taintly's finding count on
+# each stays within a committed budget. It catches FP regressions that
+# pass the per-rule self-test but would explode on real-world workflows.
+#
+# Why this is a SCHEDULED job and not a PR gate:
+#   * It needs network — it git-clones external repositories. Clone
+#     flakiness must never block an unrelated PR.
+#   * The budgets only move when the rule pack changes, which is rare.
+#
+# Why it is wired in at all: the script existed but nothing ran it, so
+# a real over-budget regression could (and did) sit unnoticed. A gate
+# that is never executed is the same as no gate.
+#
+# Skip handling (the part that previously let it hide): the script is
+# run with --strict-skips. A clone failure or unparseable scan is then
+# a DISTINCT non-pass (exit 2), not a silent green. The job therefore
+# goes red on a skip as well as on a real over-budget — loud on the
+# schedule, where a human reviews the run, rather than silently green.
+# Annotations and a step summary make the outcome readable without
+# opening the raw log.
+
+on:
+  schedule:
+    # Weekly, Monday 09:00 UTC — an hour after the Security weekly scan
+    # so the two network-using scheduled jobs don't contend.
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel a scheduled run mid-flight; same rationale as ci.yml.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  fp-budget:
+    name: Public-repo FP budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # Keep the corpus clones inside the workspace so they are
+      # ephemeral per-run and never collide with anything on the runner.
+      TAINTLY_SCAN_CACHE: ${{ github.workspace }}/.fp-budget-cache
+    steps:
+      # Audited egress boundary (audit mode -> block + allow-list after
+      # baseline). See ci.yml's lint job for the full rationale. A future
+      # block allow-list MUST include the clone hosts (github.com:443,
+      # codeload.github.com:443) since this job git-clones external repos.
+      # MUST be the first step so it can monitor every later step's egress.
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Run public-repo FP budget (strict on skips)
+        # taintly has zero runtime deps, so it runs straight from the
+        # checked-out tree without an install (same pattern as the
+        # self-audit job in ci.yml). --strict-skips makes a clone or
+        # scan failure a visible non-pass instead of a silent green.
+        run: python scripts/check_public_repo_fp_budget.py --strict-skips
