@@ -51,6 +51,17 @@ _PR_HEAD_CHECKOUT = (
 # Evidence untrusted artefacts have been pulled into the job workspace.
 _UNTRUSTED_ARTIFACT = r"uses:\s*actions/download-artifact"
 
+# Provenance-qualified untrusted artefact: a download-artifact step that pulls
+# from ANOTHER workflow run (download-artifact v4 needs ``run-id`` to cross runs;
+# a same-run handoff has neither) keyed to ``github.event.workflow_run`` — the
+# attacker-influenceable cross-workflow source. The double-lookahead asserts BOTH
+# signals are present somewhere in the job segment (order-independent). Same-run
+# upload->download handoffs (trusted) carry no workflow_run reference and so do
+# not fire — they were the dominant false-positive class for this rule.
+_CROSS_WORKFLOW_UNTRUSTED_ARTIFACT = (
+    r"(?=[\s\S]*uses:\s*actions/download-artifact)" r"(?=[\s\S]*github\.event\.workflow_run)"
+)
+
 
 # ---------------------------------------------------------------------------
 # Rules
@@ -262,7 +273,7 @@ RULES: list[Rule] = [
         ),
         pattern=ContextPattern(
             anchor=_BUILD_TOOL_ANCHOR,
-            requires=_UNTRUSTED_ARTIFACT,
+            requires=_CROSS_WORKFLOW_UNTRUSTED_ARTIFACT,
             scope="job",
             exclude=[r"^\s*#"],
         ),
@@ -284,18 +295,32 @@ RULES: list[Rule] = [
         ),
         reference="https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/",
         test_positive=[
+            # Cross-workflow download (run-id from github.event.workflow_run —
+            # the artefact came from another, possibly fork-influenced, run) +
+            # build tool: the genuine untrusted-artefact LOTP shape.
+            "jobs:\n  release:\n    steps:\n"
+            "      - uses: actions/download-artifact@v4\n"
+            "        with:\n          name: build-output\n"
+            "          run-id: ${{ github.event.workflow_run.id }}\n"
+            "          github-token: ${{ secrets.GITHUB_TOKEN }}\n"
+            "      - run: npm publish",
+            "jobs:\n  deploy:\n    steps:\n"
+            "      - uses: actions/download-artifact@v4\n"
+            "        with:\n          run-id: ${{ github.event.workflow_run.id }}\n"
+            "      - run: docker build -t myapp .",
+        ],
+        test_negative=[
+            # Same-run upload->download handoff (no run-id / workflow_run) —
+            # the artefact was produced by a trusted earlier job in THIS run.
+            # This was the dominant false positive before the provenance gate.
             "jobs:\n  release:\n    steps:\n"
             "      - uses: actions/download-artifact@v4\n"
             "        with:\n          name: build-output\n"
             "      - run: npm publish",
-            "jobs:\n  deploy:\n    steps:\n"
-            "      - uses: actions/download-artifact@v4\n"
-            "      - run: docker build -t myapp .",
-        ],
-        test_negative=[
             # No build tool after download — just using the artefact content as data
             "jobs:\n  deploy:\n    steps:\n"
             "      - uses: actions/download-artifact@v4\n"
+            "        with:\n          run-id: ${{ github.event.workflow_run.id }}\n"
             "      - run: aws s3 cp dist/ s3://bucket/ --recursive",
             # Build tool without download-artifact
             "jobs:\n  build:\n    steps:\n      - run: npm install",

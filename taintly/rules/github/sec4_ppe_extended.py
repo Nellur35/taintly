@@ -707,6 +707,10 @@ RULES: list[Rule] = [
         ),
         pattern=RegexPattern(
             match=r"\$\{\{\s*(github\.event\.inputs|inputs)\.[a-zA-Z0-9_-]+\s*\}\}",
+            # ``${{ inputs.* }}`` inside a with:/env: block is an action input or
+            # env assignment (incl. github-script's script: arg), NOT this
+            # workflow's shell — mask those block bodies. Only run: shell fires.
+            github_with_env_block_aware=True,
             exclude=[
                 r"^\s*#",
                 r"^\s*if:",
@@ -753,6 +757,11 @@ RULES: list[Rule] = [
             "        if: inputs.deploy == true",
             '        # run: echo "${{ inputs.user_input }}"',
             '        run: echo "$MY_INPUT"',
+            # with: action-input block — passed to the action, not this
+            # workflow's shell (github-script's script: is also a with: input).
+            "      - uses: some/action@v1\n        with:\n          output: ${{ inputs.target }}",
+            # env: block scalar — an environment assignment, not shell.
+            "      - uses: some/action@v1\n        env:\n          OUT: |\n            ${{ inputs.target }}",
         ],
         stride=["T", "E"],
         threat_narrative=(
