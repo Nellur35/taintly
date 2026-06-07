@@ -13,6 +13,12 @@ from taintly.models import (
     Rule,
     Severity,
 )
+from taintly.parsers.gha_expr import (
+    ExprSyntaxError,
+    context_paths,
+    iter_expression_bodies,
+    structural_expr_enabled,
+)
 from taintly.parsers.segmentation import for_each_step
 from taintly.platform import github_archived_check, github_sha_verify
 from taintly.structural_pattern import StructuralPattern
@@ -25,6 +31,20 @@ from taintly.structural_pattern import StructuralPattern
 
 _FULL_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
 _BRANCH_REF_NAMES = frozenset({"main", "master", "develop", "dev"})
+
+
+def _is_pull_request_target_trigger(
+    value: str, _value_kind: str, _path: tuple[object, ...]
+) -> bool:
+    """SEC4-GH-002 predicate (structural). Fires when ``pull_request_target``
+    is declared as a trigger under ``on:`` in ANY encoding — bare scalar,
+    flow/block list item (a LEAF value), or block/flow mapping key (a MAP_KEY).
+    The on:-anchored path globs scope it to real triggers, so a stray
+    ``pull_request_target:`` key elsewhere, or the name appearing as a
+    string-literal comparand in a defensive ``github.event_name == ...`` guard,
+    does not match (the false-positive classes the old regex needed explicit
+    excludes for)."""
+    return value == "pull_request_target"
 
 # First-party GitHub-published action namespaces.  The supply-chain
 # threat model that motivates SEC3-GH-001 (force-push over a tag,
@@ -287,12 +307,33 @@ def _has_dangerous_github_context(value: str, _value_kind: str, _path: tuple[obj
     The ``**.run`` path query already filters to step ``run:``
     keys, so this predicate only needs to detect the dangerous
     GitHub-context expressions inside the shell-string value.
-    The original regex's exclusion for "value is just the
-    expression alone passed to a non-shell key" is not needed
-    here — the path filter does the structural job the regex was
-    approximating.
+
+    Two-stage detection:
+      1. The dot-literal regex ``_DANGEROUS_GITHUB_CONTEXT_RE`` — the fast
+         path and the single source of truth for *which* contexts are
+         dangerous.
+      2. When the regex misses, parse each ``${{ }}`` body with the
+         structural expression parser, normalise every context reference to a
+         canonical lowercased dotted path, and re-test the SAME regex against
+         that canonical form. This catches the documented-equivalent
+         obfuscations the line regex is blind to — index/bracket access
+         (``pull_request['title']``) and context-name case (``GITHUB.event``)
+         — by reusing the regex's dangerous-path definition rather than
+         duplicating it. Purely ADDITIVE: stage 2 can only add a detection,
+         never remove one, and a parse error simply leaves the stage-1 result.
     """
-    return bool(_DANGEROUS_GITHUB_CONTEXT_RE.search(value))
+    if _DANGEROUS_GITHUB_CONTEXT_RE.search(value):
+        return True
+    if not structural_expr_enabled():
+        return False
+    try:
+        for body in iter_expression_bodies(value):
+            for path in context_paths(body):
+                if _DANGEROUS_GITHUB_CONTEXT_RE.search("${{ " + path + " }}"):
+                    return True
+    except ExprSyntaxError:
+        return False
+    return False
 
 
 def _is_unpinned_uses_value(value: str, _value_kind: str, _path: tuple[object, ...]) -> bool:
@@ -1087,37 +1128,42 @@ RULES: list[Rule] = [
             "Any future modification could introduce a PPE vulnerability. "
             "If the workflow also checks out PR code, SEC4-GH-001 escalates to CRITICAL."
         ),
-        pattern=RegexPattern(
-            # FP-audit class A: bare substring matched
-            # ``pull_request_target`` ANYWHERE in the file, including
-            # inside defensive conditionals like ``github.event_name ==
-            # 'pull_request_target'`` (which routes untrusted triggers
-            # to safe code paths — the OPPOSITE of vulnerable).
-            # Restrict to trigger-declaration shapes: block-form key,
-            # list element, inline-form value, or list-shorthand.
-            match=(
-                r"^\s*pull_request_target\s*:"  # block-form key
-                r"|^\s*-\s*pull_request_target\s*$"  # YAML list item
-                r"|^on\s*:\s*pull_request_target\s*$"  # inline form
-                r"|^on\s*:\s*\[[^\]]*\bpull_request_target\b[^\]]*\]"  # list shorthand
-            ),
-            exclude=[r"^\s*#"],
+        pattern=StructuralPattern(
+            # Read the parsed config structurally instead of regex-matching
+            # trigger shapes line-by-line. The globs cover every encoding:
+            #   * ``on``                     bare scalar (``on: pull_request_target``)
+            #   * ``on[*]``                  flow/block list item (LEAF value)
+            #   * ``**.pull_request_target`` the trigger as a MAPPING KEY in any
+            #                                position — block (``on:\n  pr_t:``)
+            #                                AND flow (``on: { pr_t: {} }``) —
+            #                                via the opt-in MAP_KEY events.
+            # The key glob is deliberately position-independent (parity with the
+            # prior ``^\s*pull_request_target\s*:`` regex, which matched the key
+            # at any indent); structural matching still drops the FP classes the
+            # regex needed explicit excludes for — a comment (tokenizer skips it)
+            # and a string-literal comparand inside ``github.event_name == ...``
+            # (that's a scalar value, not a key). Closes the flow-mapping form
+            # the prior 4-branch regex missed.
+            path=["on", "on[*]", "**.pull_request_target"],
+            predicate=_is_pull_request_target_trigger,
+            include_keys=True,
         ),
         remediation="Use 'pull_request' trigger if write access is not required.",
         reference="https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/",
         test_positive=[
-            "  pull_request_target:",
-            "    pull_request_target:",
-            "on: [pull_request_target]",
+            "on:\n  pull_request_target:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
+            "on: pull_request_target\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
+            "on: [pull_request_target]\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
+            "on: { pull_request_target: {} }\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
+            "on:\n  - push\n  - pull_request_target\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
         ],
         test_negative=[
-            "  pull_request:",
-            "  # pull_request_target:",
+            "on:\n  pull_request:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
+            "on:\n  push:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      # pull_request_target: in a comment is not a trigger\n      - run: echo hi",
             # FP-audit: defensive conditional that mentions the trigger
             # name as a string-literal comparand, NOT as a trigger.
-            "ref: ${{ (github.event_name == 'pull_request_target') && 'main' || github.sha }}",
-            "# fallback if event is pull_request_target",
-            'echo "event=$EVENT_NAME pull_request_target=$PRT"',
+            "on:\n  push:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"${{ (github.event_name == 'pull_request_target') && 'main' || github.sha }}\"",
+            'on:\n  push:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo "event=$EVENT_NAME pull_request_target=$PRT"',
         ],
         stride=["E"],
         threat_narrative=(
