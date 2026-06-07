@@ -46,6 +46,7 @@ def _is_pull_request_target_trigger(
     excludes for)."""
     return value == "pull_request_target"
 
+
 # First-party GitHub-published action namespaces.  The supply-chain
 # threat model that motivates SEC3-GH-001 (force-push over a tag,
 # maintainer compromise) applies in principle to any action; in

