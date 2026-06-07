@@ -54,12 +54,14 @@ _UNTRUSTED_ARTIFACT = r"uses:\s*actions/download-artifact"
 # Provenance-qualified untrusted artefact: a download-artifact step that pulls
 # from ANOTHER workflow run (download-artifact v4 needs ``run-id`` to cross runs;
 # a same-run handoff has neither) keyed to ``github.event.workflow_run`` — the
-# attacker-influenceable cross-workflow source. The double-lookahead asserts BOTH
-# signals are present somewhere in the job segment (order-independent). Same-run
-# upload->download handoffs (trusted) carry no workflow_run reference and so do
-# not fire — they were the dominant false-positive class for this rule.
+# attacker-influenceable cross-workflow source. Written as ``download-artifact``
+# FOLLOWED BY ``github.event.workflow_run`` (the reliable ``uses:``-before-
+# ``with: run-id:`` text order) rather than two ``(?=[\s\S]*…)`` lookaheads,
+# which are O(n^2) under ``.search`` on a large no-match segment (a fuzz hang).
+# Same-run upload->download handoffs (trusted) carry no workflow_run reference
+# and so do not fire — they were the dominant false-positive class for this rule.
 _CROSS_WORKFLOW_UNTRUSTED_ARTIFACT = (
-    r"(?=[\s\S]*uses:\s*actions/download-artifact)" r"(?=[\s\S]*github\.event\.workflow_run)"
+    r"uses:\s*actions/download-artifact[\s\S]*?github\.event\.workflow_run"
 )
 
 

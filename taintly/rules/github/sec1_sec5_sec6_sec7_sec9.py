@@ -2453,6 +2453,9 @@ RULES: list[Rule] = [
         pattern=WorkflowAwarePattern(
             path="jobs.*.steps[*].with.*",
             predicate=_is_unmasked_secret_input,
+            # The rule only fires on ``${{ secrets.X }}`` — skip the structural
+            # walk on secret-free (and adversarially deep) workflows.
+            requires="secrets.",
         ),
         remediation=(
             "Route the secret through the step's ``env:`` block and\n"
