@@ -43,6 +43,15 @@ from .tokenizer import Token, TokenizerError, TokenKind, tokenize
 
 class EventKind(Enum):
     LEAF_SCALAR = "leaf_scalar"
+    # A mapping key was seen, emitted at the key's own path with
+    # ``value`` = the key name and ``value_kind = "key"``.  OPT-IN ONLY:
+    # emitted only when the walk is started with ``include_keys=True``
+    # (default False keeps the event stream byte-identical for every
+    # existing consumer).  This surfaces keys whose value is empty/null
+    # or a nested map — e.g. ``on:\n  pull_request_target:`` or
+    # ``on: { pull_request_target: {} }`` — which produce no LEAF_SCALAR
+    # and were therefore invisible to leaf-only consumers.
+    MAP_KEY = "map_key"
     CUTOFF = "cutoff"
     ERROR = "error"
 
@@ -152,11 +161,16 @@ def walk(
     *,
     query: Optional[str] = None,
     recover: bool = True,
+    include_keys: bool = False,
 ) -> Iterator[Event]:
     glob_segments = _glob_to_segments(query) if query else None
-    walker = _Walker(content, recover=recover)
+    walker = _Walker(content, recover=recover, include_keys=include_keys)
     for ev in walker.run():
-        if ev.kind != EventKind.LEAF_SCALAR or glob_segments is None:
+        # LEAF_SCALAR and (opt-in) MAP_KEY are path-addressable and so are
+        # glob-filtered; CUTOFF/ERROR always pass through.  When
+        # include_keys is False no MAP_KEY is ever emitted, so this branch
+        # is behaviourally identical to the prior leaf-only filter.
+        if ev.kind not in (EventKind.LEAF_SCALAR, EventKind.MAP_KEY) or glob_segments is None:
             yield ev
             continue
         if _path_matches(ev.path, glob_segments):
@@ -181,9 +195,10 @@ class _Walker:
         non-block token or EOF.
     """
 
-    def __init__(self, content: str, *, recover: bool) -> None:
+    def __init__(self, content: str, *, recover: bool, include_keys: bool = False) -> None:
         self._content = content
         self._recover = recover
+        self._include_keys = include_keys
         self._stack: list[_Frame] = [_Frame(key=None, indent=-1, container="mapping")]
         self._open_key: Optional[Token] = None
         # Block-scalar state.  Each buffer entry is
@@ -445,27 +460,37 @@ class _Walker:
         if self._post_dash_attach:
             self._post_dash_attach = False
             self._open_key = tok
-            return iter(())
-
-        # If there's an open key whose value side hasn't been seen,
-        # the previous key's value is a mapping at deeper indent.
-        if self._open_key is not None and tok.indent > self._open_key.indent:
-            self._stack.append(
-                _Frame(
-                    key=self._open_key.value,
-                    indent=tok.indent,
-                    container="mapping",
-                )
-            )
-            self._open_key = None
         else:
-            # Same-indent KEY — pop frames deeper than this and
-            # update the current frame's key for the new sibling.
-            self._adjust_to_indent(tok.indent)
-            self._open_key = None
+            # If there's an open key whose value side hasn't been seen,
+            # the previous key's value is a mapping at deeper indent.
+            if self._open_key is not None and tok.indent > self._open_key.indent:
+                self._stack.append(
+                    _Frame(
+                        key=self._open_key.value,
+                        indent=tok.indent,
+                        container="mapping",
+                    )
+                )
+                self._open_key = None
+            else:
+                # Same-indent KEY — pop frames deeper than this and
+                # update the current frame's key for the new sibling.
+                self._adjust_to_indent(tok.indent)
+                self._open_key = None
+            self._open_key = tok
 
-        self._open_key = tok
-        return iter(())  # explicitly empty generator
+        # Opt-in key visibility (default off → byte-identical event stream).
+        # Emitted at the key's own resolved path so empty/null/nested-map
+        # keys — which produce no LEAF_SCALAR — are still observable.
+        if self._include_keys:
+            yield Event(
+                EventKind.MAP_KEY,
+                self._current_path() + (tok.value,),
+                tok.line,
+                tok.column,
+                value=tok.value,
+                value_kind="key",
+            )
 
     def _enter_sequence(self, indent: int) -> None:
         # If a previous element's mapping frame is open at deeper
@@ -677,6 +702,18 @@ class _Walker:
                 continue
             if t.kind == TokenKind.KEY:
                 flow_pending_key = t.value
+                # Opt-in flow-mapping key visibility — this is the site that
+                # surfaces ``on: { pull_request_target: {} }``, whose value is
+                # an empty nested map yielding no LEAF_SCALAR.
+                if self._include_keys:
+                    yield Event(
+                        EventKind.MAP_KEY,
+                        self._current_path() + (t.value,),
+                        t.line,
+                        t.column,
+                        value=t.value,
+                        value_kind="key",
+                    )
                 i += 1
                 continue
             if t.kind in (TokenKind.FLOW_OPEN_SEQ, TokenKind.FLOW_OPEN_MAP):

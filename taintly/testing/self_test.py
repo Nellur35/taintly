@@ -91,6 +91,16 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
 #
 # Each value documents the failure flavour and follow-up pointer.
 _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
+    ("SEC4-GH-002", "whitespace_pad"): (
+        "SEC4-GH-002 is a StructuralPattern reading the parsed "
+        "``on:`` node. whitespace_pad's ``': ' -> ':'`` collapse turns "
+        "``on: pull_request_target`` into ``on:pull_request_target`` — a plain "
+        "YAML SCALAR, not an ``on:`` mapping, so it declares no trigger and the "
+        "rule correctly does not fire. The prior RegexPattern only 'killed' "
+        "this mutant because ``on\\s*:\\s*`` tolerated zero spaces, i.e. it "
+        "false-matched a malformed non-trigger; the structural rule is strictly "
+        "more correct. Not a real evasion (the mutant is not a working trigger)."
+    ),
     ("SEC1-GH-001", "indent_shift"): (
         "SequencePattern's absent_within regex assumes a specific indent "
         "level; doubled-indent variants look like a different structure."

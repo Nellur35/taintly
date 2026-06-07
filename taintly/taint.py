@@ -155,6 +155,7 @@ import re
 from dataclasses import dataclass, field
 
 from .models import _split_into_job_segments
+from .parsers.gha_expr import ExprSyntaxError, context_paths, structural_expr_enabled
 from .parsers.structural import EventKind, walk_workflow
 from .taint_facts import Database, solve
 
@@ -1866,14 +1867,35 @@ def _extract_tainted_source(value: str, include_inputs: bool = False) -> str | N
     tainted, whereas ``inputs.X`` is only *conditionally* so (the
     caller decides) — see TAINT-GH-017.
     """
+    structural = structural_expr_enabled()
     for expr in _GHA_EXPR_RE.finditer(value):
-        m = _TAINTED_IN_EXPR_RE.search(expr.group(1))
+        body = expr.group(1)
+        m = _TAINTED_IN_EXPR_RE.search(body)
         if m:
             return m.group(0)
         if include_inputs:
-            im = _INPUT_REF_IN_EXPR_RE.search(expr.group(1))
+            im = _INPUT_REF_IN_EXPR_RE.search(body)
             if im:
                 return im.group(0)
+        # Structural augmentation: when the dot-literal regex misses, parse the
+        # body and normalise every context reference to a canonical dotted path,
+        # then re-test the SAME taint regexes on it — so an attacker context
+        # written with index/bracket access or context-case
+        # (``github.event.pull_request['title']`` / ``GITHUB.event...``) is still
+        # caught as a cross-step taint source. Purely additive; a parse error
+        # leaves the regex-only result for this body.
+        if structural:
+            try:
+                for path in context_paths(body):
+                    cm = _TAINTED_IN_EXPR_RE.search(path)
+                    if cm:
+                        return cm.group(0)
+                    if include_inputs:
+                        cim = _INPUT_REF_IN_EXPR_RE.search(path)
+                        if cim:
+                            return cim.group(0)
+            except ExprSyntaxError:
+                pass
     return None
 
 

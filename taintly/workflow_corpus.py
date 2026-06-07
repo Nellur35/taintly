@@ -358,14 +358,21 @@ def build_corpus(repo_path: str) -> WorkflowCorpus:
 def _summarize_workflow(filepath: str, content: str) -> WorkflowSummary:
     """Run every extractor against a single workflow file and return
     the assembled :class:`WorkflowSummary`."""
+    from .parsers.structural import triggers as _structural_triggers
+
     lines = content.splitlines()
-    raw_events = _extract_raw_events(content)
-    triggers = _classify_triggers(raw_events)
+    # Read the on: node structurally (same all-shapes source as
+    # is_fork_reachable), and unlike the regex _extract_raw_events it also reads
+    # the block-list form (``on:\n  - push``). Falls back to the regex if the
+    # structural read yields nothing (non-YAML / cutoff) so a parse failure
+    # never loses triggers the regex would have found.
+    raw_events: set[str] = set(_structural_triggers(content)) or _extract_raw_events(content)
+    classified = _classify_triggers(raw_events)
     return WorkflowSummary(
         filepath=filepath,
         content=content,
         lines=lines,
-        triggers=triggers,
+        triggers=classified,
         raw_event_names=frozenset(raw_events),
         cache_keys=tuple(_extract_cache_refs(lines)),
         concurrency_groups=tuple(_extract_concurrency_refs(lines)),
@@ -543,7 +550,7 @@ def _extract_raw_events(content: str) -> set[str]:
     return events
 
 
-def _classify_triggers(events: set[str]) -> frozenset[TriggerFamily]:
+def _classify_triggers(events: set[str] | frozenset[str]) -> frozenset[TriggerFamily]:
     """Map raw event names to :class:`TriggerFamily` flags."""
     out: set[TriggerFamily] = set()
     for ev in events:
@@ -565,11 +572,16 @@ def is_fork_reachable(content: str) -> bool:
     shapes (bare / flow-list / flow-mapping / block).
 
     Single source of truth for "is this workflow attacker-triggerable?"
-    — reuses :func:`_extract_raw_events` (all-shapes parser) and the
-    vetted :data:`_FORK_REACHABLE_EVENTS` taxonomy, so callers never
-    re-derive trigger parsing with a shape-fragile regex.
+    — reads the ``on:`` node STRUCTURALLY via
+    :func:`parsers.structural.triggers` and classifies with the vetted
+    :data:`_FORK_REACHABLE_EVENTS` taxonomy, so callers never re-derive trigger
+    parsing with a shape-fragile regex. The structural read additionally fixes
+    the block-list form (``on:\n  - pull_request_target``) that the regex
+    ``_extract_raw_events`` silently dropped (it skipped block-sequence dashes).
     """
-    return TriggerFamily.FORK_REACHABLE in _classify_triggers(_extract_raw_events(content))
+    from .parsers.structural import triggers
+
+    return TriggerFamily.FORK_REACHABLE in _classify_triggers(triggers(content))
 
 
 # Stub implementations — filled in by the next commits.  Returning empty

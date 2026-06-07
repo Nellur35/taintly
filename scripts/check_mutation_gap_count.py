@@ -28,7 +28,7 @@ from pathlib import Path
 # Lower this number when entries are removed (real fixes); never
 # raise it to silence a regression.
 #
-_BASELINE = 99  # +2: SEC1-GH-002 / SEC8-GH-009 whitespace_pad — the ": "->":" rewrite turns a YAML mapping into a scalar (unsound transform), so the rule correctly does not fire; documented, not a regression. Same class as SEC10-GH-004.
+_BASELINE = 100  # +1: SEC4-GH-002 whitespace_pad — same class as SEC1-GH-002 / SEC8-GH-009 / SEC10-GH-004: the ": "->":" rewrite turns the on: mapping into a scalar (unsound transform), so the now-structural rule correctly does not fire; documented, not a regression.
 
 
 def _count_entries() -> int:
