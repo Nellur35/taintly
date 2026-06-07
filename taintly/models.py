@@ -346,6 +346,7 @@ class RegexPattern:
     exclude: list[str] = field(default_factory=list)
     heredoc_aware: bool = False
     gitlab_if_block_aware: bool = False
+    github_with_env_block_aware: bool = False
     groovy_comment_aware: bool = False
 
     def __post_init__(self):
@@ -360,6 +361,8 @@ class RegexPattern:
         skip = _quoted_heredoc_body_lines(lines) if self.heredoc_aware else set()
         if self.gitlab_if_block_aware:
             skip = skip | _gitlab_rules_if_body_lines(lines)
+        if self.github_with_env_block_aware:
+            skip = skip | _github_with_env_body_lines(lines)
         scan_lines = (
             _strip_groovy_comments(content).splitlines() if self.groovy_comment_aware else lines
         )
@@ -578,6 +581,57 @@ def _gitlab_rules_if_body_lines(lines: list[str]) -> set[int]:
         # is structurally outside the block and shouldn't be masked.
         # (Harmless either way for our usage, but keeps the contract
         # tight: skip only contains lines we actively want suppressed.)
+        while j - 1 > i and lines[j - 1].strip() == "" and (j - 1) in skip:
+            skip.discard(j - 1)
+            j -= 1
+        i = j if j > i else i + 1
+    return skip
+
+
+# Matches a GitHub Actions ``with:`` or ``env:`` mapping key (optionally
+# preceded by a list marker ``- ``).  ``(?:with|env)\s*:`` matches the exact
+# keys only — ``environment:``/``env_file:``/``with-x:`` do not match.
+_GH_WITH_ENV_KEY = re.compile(r"^(?P<prefix>\s*(?:-\s+)?)(?:with|env)\s*:\s*.*$")
+
+
+def _github_with_env_body_lines(lines: list[str]) -> set[int]:
+    """Return 0-based indices of lines inside a GitHub Actions ``with:`` or
+    ``env:`` block body.
+
+    Mirrors :func:`_gitlab_rules_if_body_lines`: find the key, then mask every
+    line indented strictly deeper than the key (inline children AND block-scalar
+    continuations alike), stopping at the first non-blank line at or below the
+    key's indent.  Values interpolated inside these blocks are action inputs or
+    env-var assignments — passed to an action or set as an environment variable,
+    NOT executed by this workflow's shell (``actions/github-script``'s
+    ``script:`` is itself a ``with:`` input, so JS-context interpolations are
+    covered too).  The key line itself is not masked (the rule's single-key-value
+    exclude already covers the opener).  Blank/comment lines inside the block are
+    masked but do not terminate the run; trailing blanks are trimmed.
+    """
+    skip: set[int] = set()
+    n = len(lines)
+    i = 0
+    while i < n:
+        m = _GH_WITH_ENV_KEY.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        key_indent = len(m.group("prefix"))
+        j = i + 1
+        while j < n:
+            cont = lines[j]
+            stripped = cont.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                skip.add(j)
+                j += 1
+                continue
+            cont_indent = len(cont) - len(stripped)
+            if cont_indent <= key_indent:
+                break
+            skip.add(j)
+            j += 1
+        # Trim trailing blank/comment lines that don't belong to the block.
         while j - 1 > i and lines[j - 1].strip() == "" and (j - 1) in skip:
             skip.discard(j - 1)
             j -= 1

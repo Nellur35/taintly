@@ -168,7 +168,9 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
     r"configure-aws-credentials",
     r"pypa/gh-action-pypi-publish",
     r"sigstore/gh-action-sigstore",
-    r"actions/attest-build-provenance",
+    # Generalized from ``-build-provenance`` to cover attest / attest-sbom too;
+    # all actions/attest* require id-token:write for Sigstore signing.
+    r"actions/attest",
     # OIDC-consuming actions that legitimately need
     # ``id-token: write`` (documented OIDC-only flows where the
     # token is the actual auth surface, not a misconfigured
@@ -179,6 +181,13 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
     # CodSpeed benchmarking action requires ``id-token: write``
     # for OIDC-based result attestation.
     r"CodSpeedHQ/action",
+    # Additional generic OIDC consumers (sample-labeled, additive — each
+    # requires id-token:write by design, so its presence makes the grant
+    # legitimate).
+    r"hashicorp/vault-action",
+    r"sigstore/cosign-installer",
+    r"octo-sts",
+    r"rubygems/configure-rubygems-credentials",
     # Shell-form.  ``--`` is two non-word characters, so a leading
     # ``\b`` would never match on the flag — the preceding space is
     # also non-word, so there is no word boundary between them.  The
@@ -187,6 +196,7 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
     r"\buv\s+publish\b",
     r"\btwine\s+upload\b[^\n]*--use-oidc\b",
     r"\bcargo\s+publish\b",
+    r"\bcosign\s+sign\b",
     r"\bnpm\s+publish\b[^\n]*--provenance\b",
 )
 
@@ -387,6 +397,12 @@ def _is_unmasked_secret_input(
     if not _CREDENTIAL_INPUT_RE.match(input_slot):
         return False
     if not _SECRETS_REF_VALUE_RE.match(value or ""):
+        return False
+    # ``secrets.GITHUB_TOKEN`` is auto-registered with the runner's log redactor
+    # on every job regardless of env/with routing, so a with-input GITHUB_TOKEN
+    # is always masked — not the unmasked-long-lived-secret threat this rule
+    # targets. (Long-lived PATs / API keys passed via with: are the real risk.)
+    if re.search(r"\bsecrets\.GITHUB_TOKEN\b", value):
         return False
     job_id = path[1]
     step_i = path[3]
@@ -2425,36 +2441,21 @@ RULES: list[Rule] = [
             "``${{ env.NAME }}`` — the env-block path is masked, the "
             "with-input is then a non-secret reference."
         ),
-        pattern=ContextPattern(
-            # Per-line anchor: a YAML key ending in a credential-shape
-            # token, mapped to a ``${{ secrets.X }}`` value.  The
-            # ``(?i)`` flag accepts both ``token:`` and ``Token:``
-            # spellings; the leading whitespace requirement excludes
-            # workflow-level keys.  The prefix portion is zero-or-more
-            # word/hyphen characters so bare ``token:`` / ``password:``
-            # match alongside hyphenated forms like ``api-key:``.
-            anchor=(
-                r"(?i)^\s+[\w-]*"
-                r"(?:token|key|secret|password|pass)"
-                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
-            ),
-            # The full file must contain at least one such pattern for
-            # the rule to fire — the anchor regex itself is the
-            # presence check.
-            requires=(
-                r"(?i)\s+[\w-]*"
-                r"(?:token|key|secret|password|pass)"
-                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
-            ),
-            # Step-scope suppression: when this step's ``env:`` block
-            # routes a secret, the safe pattern is in use at the
-            # step level — suppress.  The redactor registration is
-            # per-step, so co-locating the safe-pattern signal at
-            # step granularity matches the runner's actual masking
-            # semantics: a secret declared in step A's env block is
-            # masked for step A's logs only.
-            anchor_step_exclude=(r"env:\s*\n[\s\S]*?\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"),
-            exclude=[r"^\s*#"],
+        # Path-aware (structural): a credential-shape ``with:`` input slot set
+        # to ``${{ secrets.X }}`` on a step whose ``env:`` block routes no
+        # secret (the safe pattern) and whose (action, slot) pair is not on the
+        # safe-consumer allowlist. The predicate enforces the
+        # ``jobs.<j>.steps[<i>].with.<slot>`` path shape, so job/step ``env:``
+        # blocks (the recommended remediation) and reusable-call ``secrets:``
+        # passthroughs no longer false-fire, and the curated
+        # ``_SAFE_ACTION_INPUT_PAIRS`` allowlist is honored — replacing the
+        # line regex whose anchor matched any indented credential key.
+        pattern=WorkflowAwarePattern(
+            path="jobs.*.steps[*].with.*",
+            predicate=_is_unmasked_secret_input,
+            # The rule only fires on ``${{ secrets.X }}`` — skip the structural
+            # walk on secret-free (and adversarially deep) workflows.
+            requires="secrets.",
         ),
         remediation=(
             "Route the secret through the step's ``env:`` block and\n"
@@ -2494,7 +2495,7 @@ RULES: list[Rule] = [
             # password input.
             (
                 "jobs:\n  push:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n      - uses: docker/login-action@v3\n"
+                "    steps:\n      - uses: some-org/registry-push@v1\n"
                 "        with:\n"
                 "          password: ${{ secrets.REGISTRY_PASSWORD }}"
             ),
@@ -2536,6 +2537,32 @@ RULES: list[Rule] = [
                 "    steps:\n      - uses: some-org/some-action@v1\n"
                 "        with:\n"
                 "          repository: ${{ secrets.PRIVATE_REPO }}"
+            ),
+            # Safe-consumer allowlist: docker/login-action handling its own
+            # password input is the action's documented purpose — the
+            # (action, slot) pair is on _SAFE_ACTION_INPUT_PAIRS, so it must
+            # NOT fire (this is the dead-allowlist FP the regex form leaked).
+            (
+                "jobs:\n  push:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: docker/login-action@v3\n"
+                "        with:\n"
+                "          password: ${{ secrets.REGISTRY_PASSWORD }}"
+            ),
+            # GITHUB_TOKEN is auto-masked by the runner's redactor on every job
+            # regardless of routing, so a with-input GITHUB_TOKEN is not the
+            # unmasked-secret threat — must not fire.
+            (
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/some-action@v1\n"
+                "        with:\n"
+                "          token: ${{ secrets.GITHUB_TOKEN }}"
+            ),
+            # secrets: passthrough in a reusable-workflow call is not a step
+            # with: input — must not fire.
+            (
+                "jobs:\n  call:\n    uses: ./.github/workflows/publish.yml\n"
+                "    secrets:\n"
+                "      token: ${{ secrets.CRATES_IO_TOKEN }}"
             ),
             # Comment.
             "          # token: ${{ secrets.GH_TOKEN }}",
