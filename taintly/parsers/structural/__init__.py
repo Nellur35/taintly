@@ -12,6 +12,7 @@ and the schema-lookup performance choice.
 """
 
 from .api import walk_workflow
+from .query import triggers
 from .walker import Event, EventKind
 
-__all__ = ["Event", "EventKind", "walk_workflow"]
+__all__ = ["Event", "EventKind", "triggers", "walk_workflow"]

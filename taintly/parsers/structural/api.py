@@ -36,6 +36,7 @@ def walk_workflow(
     schema: Optional[str] = None,
     content: Optional[str] = None,
     recover: bool = True,
+    include_keys: bool = False,
 ) -> Iterator[Event]:
     """Walk a CI YAML file, yielding events.
 
@@ -54,6 +55,10 @@ def walk_workflow(
             event when the tokenizer hits an unsupported construct
             and stops.  If False, the underlying ``TokenizerError``
             propagates.
+        include_keys: if True, additionally yield ``MAP_KEY`` events for
+            mapping keys (incl. keys with empty/null/nested-map values
+            that produce no ``LEAF_SCALAR``).  Default False keeps the
+            event stream byte-identical for leaf-only consumers.
 
     The schema name is accepted for forward compatibility; the
     walker currently treats every path as ``ValueShape.UNKNOWN``
@@ -65,7 +70,7 @@ def walk_workflow(
     # is preserved so a future schema-consultation hook wires in
     # here without touching the call sites.
     _ = schema or detect_schema_for_path(filepath)
-    yield from _walk(content, query=query, recover=recover)
+    yield from _walk(content, query=query, recover=recover, include_keys=include_keys)
 
 
 __all__ = ["Event", "EventKind", "walk_workflow"]
