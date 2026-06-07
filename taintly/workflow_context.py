@@ -77,22 +77,24 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .parsers.structural import triggers
+
 # ---------------------------------------------------------------------------
 # Signal detection — each regex is intentionally forgiving so trailing
 # whitespace / quoting / YAML flow-style keys don't miss matches.
 # ---------------------------------------------------------------------------
 
-# The leading ``(?:^|[{,])`` lets the event name be matched either at
-# the start of a line (block style — ``on:\n  pull_request_target:``)
-# OR immediately after a ``{`` / ``,`` (flow style —
-# ``on: { pull_request_target: { types: [opened] } }``). GitHub accepts
-# inline trigger syntax, and a purely line-anchored regex silently
-# missed it, collapsing the exploitability context for every finding in
-# such a file. See tests/unit/test_workflow_context.py flow-style cases.
-_RE_PR_TARGET = re.compile(r"(?:^|[{,])\s*pull_request_target\s*:", re.MULTILINE)
-_RE_FORK_TRIGGER = re.compile(
-    r"(?:^|[{,])\s*(pull_request|pull_request_target|issue_comment|workflow_run)\s*:",
-    re.MULTILINE,
+# GitHub fork-reachable triggers are read STRUCTURALLY via
+# ``parsers.structural.triggers`` (read structurally): the previous regexes
+# required the event name to be followed by a colon (``pull_request_target\s*:``),
+# which matched the block- and flow-MAPPING forms but silently missed the
+# bare-scalar (``on: pull_request_target``) and flow-LIST
+# (``on: [pull_request_target]``) forms — collapsing the exploitability context
+# for every finding in such a file (block/flow-map rated `medium`, the identical
+# bare/list rated `low`). Reading the parsed ``on:`` node collapses all four
+# encodings to one answer.
+_GH_FORK_EVENTS = frozenset(
+    {"pull_request", "pull_request_target", "issue_comment", "workflow_run"}
 )
 # GitLab / Jenkins fork-trigger equivalents: MR pipeline rules and
 # Jenkins multibranch `pullRequest`/`ghprb*` webhooks bring attacker-
@@ -258,14 +260,18 @@ def analyze(content: str, file: str = "") -> WorkflowContext:
     """
     if not content:
         return WorkflowContext(file=file)
+    # GitHub triggers read structurally (all four on: encodings); GitLab /
+    # Jenkins fork-equivalents stay on their regexes (different languages, no
+    # on: node). triggers() returns an empty set for non-GitHub content.
+    gh_events = triggers(content)
     return WorkflowContext(
         file=file,
         has_fork_triggered=bool(
-            _RE_FORK_TRIGGER.search(content)
+            (gh_events & _GH_FORK_EVENTS)
             or _RE_FORK_TRIGGER_OTHER.search(content)
             or _RE_JENKINS_PARAMS.search(content)
         ),
-        has_pr_target=bool(_RE_PR_TARGET.search(content)),
+        has_pr_target="pull_request_target" in gh_events,
         has_checkout=bool(_RE_CHECKOUT.search(content)),
         has_secrets_reference=bool(_RE_SECRETS_REF.search(content)),
         has_write_permissions=bool(_RE_WRITE_PERM.search(content) or _RE_WRITE_ALL.search(content)),
