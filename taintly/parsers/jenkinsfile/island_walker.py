@@ -462,7 +462,7 @@ class _IslandWalker:
         ``key: value`` pairs where value is a string, and nested bracket/
         call markers).  Non-string positional args are recorded as opaque.
         """
-        assert self._toks[self._i].kind == TokKind.LPAREN
+        assert self._toks[self._i].kind == TokKind.LPAREN  # nosec B101 - internal cursor invariant (caller dispatches here only on LPAREN)
         self._i += 1
         args: list[_Arg] = []
         pending_key: str | None = None
@@ -558,7 +558,7 @@ class _IslandWalker:
     def _parse_bracket_args(self) -> list[_Arg]:
         """Cursor is on ``[``.  Consume through the matching ``]``; same arg
         grammar as ``_parse_arg_list`` (list/map literal)."""
-        assert self._toks[self._i].kind == TokKind.LBRACKET
+        assert self._toks[self._i].kind == TokKind.LBRACKET  # nosec B101 - internal cursor invariant (caller dispatches here only on LBRACKET)
         self._i += 1
         args: list[_Arg] = []
         pending_key: str | None = None
