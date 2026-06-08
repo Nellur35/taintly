@@ -329,15 +329,13 @@ def test_no_redos_on_long_inputs(payload, github_rules):
 # entry when the underlying rule is fixed; never add new entries to
 # silence a freshly-introduced hang. New hangs are exactly the signal
 # this test set exists to surface.
-_KNOWN_PLATFORM_FUZZ_HANGS: set[tuple[str, str]] = {
-    # Jenkins rule pack does not bound regex work on deeply-nested-dict
-    # inputs the way the GitHub rules do; surfaced when fuzz was fanned
-    # across platforms. Rule pack already passes for the GH equivalent
-    # (the 500-level nested-dicts payload completes in <1s on GH rules).
-    # Follow-up: trace which Jenkins rule's regex is super-linear in
-    # nesting depth and add a length cap matching _safe_search.
-    ("jenkins", "deeply_nested_dicts"),
-}
+_KNOWN_PLATFORM_FUZZ_HANGS: set[tuple[str, str]] = set()
+# Empty as of 2026-06-08. The former ("jenkins", "deeply_nested_dicts") entry
+# was traced: the island-walker / _JenkinsfileShellLeafPattern family is
+# ~O(n^2) in NESTING depth, but at the depth-500 fuzz input it scans in ~0.9s
+# (11x under the 10s gate), so the exemption was stale. The deep O(n^2) only
+# bites at adversarial nesting depths >1000 — no real Jenkinsfile nests that
+# deep — and is tracked as a latent parser follow-up, not masked here.
 
 
 @pytest.mark.parametrize(("platform", "fname"), _PLATFORM_PARAMS)
