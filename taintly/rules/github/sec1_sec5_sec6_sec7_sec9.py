@@ -1975,6 +1975,13 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-9",
         finding_family="supply_chain_immutability",
+        # SEC6-GH-007 (the SEC-6 framing of curl|bash) fires on the same lines
+        # with byte-identical remediation; on a co-located line this rule's
+        # SEC-9 integrity framing is the more accurate one, so supersede it to
+        # collapse the duplicate HIGH finding. (SEC6-GH-007 still fires standalone
+        # on the broad-iex shapes — WebClient/DownloadString — this rule's
+        # narrower iex branch doesn't match, so no coverage is lost.)
+        supersedes=["SEC6-GH-007"],
         description=(
             "A ``run:`` step downloads a script from the network and "
             "pipes it directly into a shell or interpreter — "

@@ -5,7 +5,7 @@ a policy JSON, returns a :class:`BlastRadius` verdict that categorises
 the policy's potential impact if an attacker obtained the federated
 token it grants.
 
-Used by (future) PSE-GH-002 to escalate ``PSE-GH-001`` findings when a
+Used by the IAM blast-radius escalation pass to escalate ``PSE-GH-001`` findings when a
 local IAM policy file can be matched to the ``role-to-assume`` ARN
 referenced in the workflow.  Shipped standalone here so the scoring
 logic can be unit-tested and audited independently of the rule engine.

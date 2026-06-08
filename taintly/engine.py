@@ -1575,8 +1575,8 @@ def scan_repo(
                         ):
                             report.families_with_surface.add(family)
                             break
-        # PSE-GH-002: enrich PSE-GH-001 findings by classifying any
-        # local IAM policy that matches the workflow's role-to-assume
+        # IAM blast-radius escalation: enrich PSE-GH-001 findings by classifying
+        # any local IAM policy that matches the workflow's role-to-assume
         # ARN.  Mutates findings in-place — escalation only happens on
         # a CRITICAL classifier verdict; absence of evidence keeps the
         # finding at HIGH.  GitHub-only (the rule is GH-platform).
