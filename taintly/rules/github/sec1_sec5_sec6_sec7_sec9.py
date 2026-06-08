@@ -753,7 +753,7 @@ RULES: list[Rule] = [
             "literal string value rather than a ``${{ secrets.X }}`` "
             "reference.  The credential is stored in the workflow "
             "YAML, in every commit's history, and is visible to "
-            "every fork â€” far broader exposure than any GitHub "
+            "every fork — far broader exposure than any GitHub "
             "secrets channel.  Even ``actions/checkout`` is enough "
             "to surface the value to an attacker who runs an arbitrary "
             "step in the workflow.\n"
@@ -801,7 +801,7 @@ RULES: list[Rule] = [
             ),
         ],
         test_negative=[
-            # Secret-referenced password â€” safe.
+            # Secret-referenced password — safe.
             "jobs:\n  test:\n    services:\n      db:\n        image: postgres:14\n"
             "        credentials:\n          username: postgres\n"
             "          password: ${{ secrets.POSTGRES_PASSWORD }}\n",
@@ -818,7 +818,7 @@ RULES: list[Rule] = [
             "publicly readable on every public repo, in every fork, "
             "in every commit's history) recovers the literal "
             "credential and uses it to push a backdoored image to the "
-            "private registry â€” or to authenticate as the registry "
+            "private registry — or to authenticate as the registry "
             "user account in any other system the user has access "
             "to.  Unlike a leaked secret in CI logs (which has a "
             "redaction layer), workflow-text leaks are immediate and "
@@ -1975,7 +1975,7 @@ RULES: list[Rule] = [
         finding_family="supply_chain_immutability",
         description=(
             "A ``run:`` step downloads a script from the network and "
-            "pipes it directly into a shell or interpreter â€” "
+            "pipes it directly into a shell or interpreter — "
             "``curl ... | bash``, ``wget ... | sh``, "
             "``bash <(curl ...)``, or PowerShell "
             "``iex(Invoke-WebRequest ...)``.  The downloaded bytes "
@@ -1983,7 +1983,7 @@ RULES: list[Rule] = [
             "so whoever controls the URL controls the workflow.\n"
             "\n"
             "Distinct from SEC3-GH-001 (action pinning) and SEC3-GH-"
-            "005 (Docker image pinning) â€” those guard the workflow "
+            "005 (Docker image pinning) — those guard the workflow "
             "definition; this rule guards the runtime tool chain "
             "the workflow invokes."
         ),
@@ -2032,7 +2032,7 @@ RULES: list[Rule] = [
             "      - run: wget -q -O setup.sh https://example.com/setup.sh",
             # Comment.
             "      # - run: curl https://example.com | bash",
-            # Pipe but not network â€” no curl/wget anchor.
+            # Pipe but not network — no curl/wget anchor.
             "      - run: cat install.sh | bash",
             # Powershell command unrelated to web download.
             "      - run: iex 'Get-Process | Format-Table'",
@@ -2044,7 +2044,7 @@ RULES: list[Rule] = [
             "to review the bytes before execution.  DNS hijack, CDN "
             "compromise, expired-and-resquatted domain, or a supply-"
             "chain attack on the hosting infrastructure all let the "
-            "attacker substitute a malicious payload â€” at which point "
+            "attacker substitute a malicious payload — at which point "
             "every secret bound to the workflow is exfiltrable on the "
             "next run."
         ),

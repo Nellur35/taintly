@@ -222,16 +222,16 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         ]),
         ("github/vulnerable/ai_mcp_privileged.yml",      ["AI-GH-012"], [
             "AI-GH-006", "AI-GH-015", "AI-GH-020", "SEC10-GH-001",
-            "SEC3-GH-001", "SEC3-GH-006", "SEC4-GH-023", "SEC6-GH-010",
+            "SEC3-GH-001", "SEC3-GH-006", "SEC6-GH-010",
         ]),
         ("github/vulnerable/ai_agent_cli_on_pr.yml",     ["AI-GH-013"], ["AI-GH-015", "SEC10-GH-001"]),
         ("github/vulnerable/ai_agent_output_to_shell.yml", ["AI-GH-014"], [
             "AI-GH-006", "AI-GH-015", "AI-GH-020", "SEC10-GH-001",
-            "SEC3-GH-001", "SEC3-GH-006", "SEC4-GH-021", "SEC4-GH-023", "SEC6-GH-010",
+            "SEC3-GH-001", "SEC3-GH-006", "SEC4-GH-021", "SEC6-GH-010",
         ]),
         ("github/vulnerable/taint_agent_output.yml",    ["TAINT-GH-005"], [
             "AI-GH-006", "AI-GH-015", "AI-GH-020", "SEC10-GH-001",
-            "SEC3-GH-001", "SEC3-GH-006", "SEC4-GH-021", "SEC4-GH-023", "SEC6-GH-010",
+            "SEC3-GH-001", "SEC3-GH-006", "SEC4-GH-021", "SEC6-GH-010",
         ]),
         # ── GitLab ──────────────────────────────────────────────────────────────
         ("gitlab/vulnerable/ai_trust_remote_code.yml",           ["AI-GL-001"], ["SEC10-GL-002", "SEC10-GL-003"]),

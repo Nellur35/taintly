@@ -3141,12 +3141,12 @@ RULES = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "An ``action.yml`` lifecycle hook â€” ``runs.pre``, "
+            "An ``action.yml`` lifecycle hook — ``runs.pre``, "
             "``runs.post``, ``runs.pre-entrypoint`` or "
-            "``runs.post-entrypoint`` â€” builds its command line from "
+            "``runs.post-entrypoint`` — builds its command line from "
             "``${{ inputs.X }}``.  These hooks run a script before/after "
             "the action's main step with the same job permissions, and "
-            "the input value is whatever the caller passed â€” which may be "
+            "the input value is whatever the caller passed — which may be "
             "attacker-controlled (``${{ github.event.* }}`` forwarded by "
             "the caller).  Interpolating it directly into the hook "
             "command is shell injection in a privileged lifecycle stage; "
@@ -3190,11 +3190,11 @@ RULES = [
             "  post: /tmp/teardown ${{ inputs.target }}\n",
         ],
         test_negative=[
-            # Hook with no input interpolation â€” safe.
+            # Hook with no input interpolation — safe.
             "runs:\n  using: docker\n  image: Dockerfile\n  pre: /init.sh\n",
             # pre-if gates execution, not command content.
             "  pre-if: success()\n",
-            # inputs reach a run: step, not a pre/post hook â€” owned by
+            # inputs reach a run: step, not a pre/post hook — owned by
             # XF-GH-006 / composite taint, not this rule.
             "  steps:\n    - run: echo ${{ inputs.x }}\n      shell: bash\n",
             "  # pre: setup.sh ${{ inputs.branch }}",

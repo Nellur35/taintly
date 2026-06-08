@@ -3531,7 +3531,7 @@ RULES: list[Rule] = [
             "chain attack code: documented incidents in GitHub Actions "
             "used base64-encoded shells to evade diff reviewers and "
             "static scanners.  Jenkins ``sh`` calls offer the same "
-            "evasion surface â€” executing any decoded payload gives an "
+            "evasion surface — executing any decoded payload gives an "
             "attacker arbitrary code execution on the runner with "
             "access to bound credentials and shared-library state."
         ),
@@ -3539,7 +3539,7 @@ RULES: list[Rule] = [
     ),
     # =========================================================================
     # SEC4-JK-008: ``env.<USER_VAR>`` interpolated into sh — taint
-    # transit between stages.  Jenkins analog of SEC4-GH-023.
+    # transit between stages.  Jenkins analog of SEC4-GH-021.
     # =========================================================================
     Rule(
         id="SEC4-JK-008",
