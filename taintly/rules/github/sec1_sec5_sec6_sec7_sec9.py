@@ -202,6 +202,18 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
 
 _OIDC_CONSUMER_REGEX: str = "|".join(_OIDC_CONSUMER_ALTERNATES)
 
+# Unseeable-consumer signals for SEC5-GH-001 / SEC5-GH-001B. A local composite
+# (``uses: ./...``) or a reusable-workflow call can hold the OIDC consumer
+# INSIDE the called thing, which a shallow scan never sees. When one is present
+# we cannot confidently call id-token:write over-provisioned — that case routes
+# to the review-needed sibling SEC5-GH-001B instead of a confident MEDIUM.
+_LOCAL_COMPOSITE_USES: str = r"uses:\s*['\"]?\./"
+# Remote reusable-workflow call: ``uses: owner/repo/.github/workflows/x.yml@ref``
+# (local reusable calls — ``uses: ./.github/workflows/x.yml`` — are already
+# covered by _LOCAL_COMPOSITE_USES via the leading ``./``).
+_REUSABLE_WORKFLOW_CALL: str = r"uses:\s*['\"]?[\w.\-]+/[\w.\-]+/\.github/workflows/[\w.\-/]+\.ya?ml"
+_UNSEEABLE_CONSUMER_REGEX: str = _LOCAL_COMPOSITE_USES + "|" + _REUSABLE_WORKFLOW_CALL
+
 
 # ---------------------------------------------------------------------------
 # SEC6-GH-010 helpers — see the rule's docstring for the threat model.
@@ -837,12 +849,12 @@ RULES: list[Rule] = [
         pattern=ContextPattern(
             anchor=r"id-token:\s*write",
             requires=r"id-token:\s*write",
-            # OIDC consumers — see _OIDC_CONSUMER_ALTERNATES above for
-            # the canonical list.  Action-form covers the established
-            # federated-credential and trusted-publishing actions;
-            # shell-form covers PEP-740 / registry-OIDC publish
-            # commands that don't go through a uses: reference.
-            requires_absent=_OIDC_CONSUMER_REGEX,
+            # No VISIBLE OIDC consumer (see _OIDC_CONSUMER_ALTERNATES) AND no
+            # unseeable indirection (local composite / reusable-workflow call,
+            # which can hold the consumer out of view). Only then is the grant a
+            # confident over-provision; the indirection case routes to the
+            # review-needed sibling SEC5-GH-001B instead.
+            requires_absent=_OIDC_CONSUMER_REGEX + "|" + _UNSEEABLE_CONSUMER_REGEX,
             exclude=[r"^\s*#"],
         ),
         remediation=(
@@ -864,6 +876,11 @@ RULES: list[Rule] = [
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: twine upload --use-oidc dist/*",
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: cargo publish",
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: npm publish --provenance --access public",
+            # Unseeable consumer — the OIDC consumer may live inside the called
+            # local composite / reusable workflow; routed to SEC5-GH-001B
+            # (review-needed), not a confident over-provision here.
+            "permissions:\n  id-token: write\njobs:\n  build:\n    steps:\n      - uses: ./.github/actions/dd-sts-api-key",
+            "permissions:\n  id-token: write\njobs:\n  call:\n    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0",
         ],
         stride=["E"],
         threat_narrative=(
@@ -871,6 +888,70 @@ RULES: list[Rule] = [
             "OIDC action is available for any compromised step to mint and exchange for cloud credentials. "
             "Attackers who compromise a single step in a workflow with this permission can silently "
             "obtain persistent cloud access beyond the workflow run."
+        ),
+    ),
+    # =========================================================================
+    # SEC5-GH-001B: id-token: write + an unseeable consumer (composite/reusable)
+    # =========================================================================
+    Rule(
+        id="SEC5-GH-001B",
+        title="id-token: write granted; OIDC consumer may live in a called composite/workflow",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-5",
+        confidence="low",
+        review_needed=True,
+        description=(
+            "The workflow grants 'id-token: write' and has no OIDC-consuming "
+            "action or command visible in this file, but it DOES invoke a local "
+            "composite action (uses: ./...) or a reusable workflow call. The "
+            "legitimate OIDC consumer is very likely inside that called "
+            "composite/workflow, which taintly cannot see from this file alone "
+            "(shallow checkout). Rather than assert over-provisioning with false "
+            "confidence, this is surfaced for human review: confirm the called "
+            "composite/workflow actually mints and exchanges the OIDC token, and "
+            "that the grant is scoped to the job that needs it."
+        ),
+        pattern=ContextPattern(
+            anchor=r"id-token:\s*write",
+            # An unseeable indirection must be present (file-wide); the anchor
+            # already enforces the id-token: write line per match.
+            requires=_UNSEEABLE_CONSUMER_REGEX,
+            # ...and NO visible OIDC consumer — the exact complement of the
+            # tightened SEC5-GH-001 within the id-token: write population.
+            requires_absent=_OIDC_CONSUMER_REGEX,
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Open the referenced composite action / reusable workflow and "
+            "confirm it consumes the OIDC token (e.g. "
+            "aws-actions/configure-aws-credentials, azure/login, a "
+            "trusted-publishing step). If it does, no change is needed — the "
+            "grant is justified. If it does NOT, remove 'id-token: write' as "
+            "over-provisioned. Scope the grant to the specific job that calls "
+            "the consumer rather than the whole workflow."
+        ),
+        reference="https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect",
+        test_positive=[
+            # Local composite holds the consumer (the dd-trace-js shape).
+            "permissions:\n  id-token: write\njobs:\n  build:\n    steps:\n      - uses: ./.github/actions/dd-sts-api-key",
+            # Local reusable-workflow call.
+            "permissions:\n  id-token: write\njobs:\n  call:\n    uses: ./.github/workflows/release.yml",
+        ],
+        test_negative=[
+            # No indirection — that's SEC5-GH-001's confident territory, not 1B.
+            "permissions:\n  id-token: write\njobs:\n  c:\n    steps:\n      - uses: anthropics/claude-code-action@v1",
+            # Visible consumer present — neither rule fires.
+            "permissions:\n  id-token: write\njobs:\n  c:\n    steps:\n      - uses: ./.github/actions/foo\n      - uses: pypa/gh-action-pypi-publish@v1",
+            # No id-token grant at all.
+            "permissions:\n  contents: read\njobs:\n  c:\n    steps:\n      - uses: ./.github/actions/foo",
+        ],
+        stride=["E"],
+        threat_narrative=(
+            "id-token: write is granted but the OIDC consumer (if any) is hidden "
+            "behind a composite/reusable indirection. If the called unit does "
+            "not actually consume the token, the permission is silently "
+            "over-provisioned and any compromised step can mint cloud credentials."
         ),
     ),
     # =========================================================================
