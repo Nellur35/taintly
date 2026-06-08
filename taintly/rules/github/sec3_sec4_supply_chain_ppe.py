@@ -1085,6 +1085,9 @@ RULES: list[Rule] = [
             anchor=r"pull_request_target",
             requires=r"github\.event\.pull_request\.head\.(sha|ref)",
             exclude=[r"^\s*#"],
+            # GH-B1: pure attacker-context requires — gha_expr-augmented so an
+            # index/bracket-encoded or context-cased head ref gates the rule.
+            expr_augment_requires=True,
         ),
         remediation=(
             "Use 'pull_request' trigger instead. If secrets are required, use a two-workflow "
