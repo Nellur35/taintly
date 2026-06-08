@@ -77,6 +77,9 @@ class GitlabIdentityGatePattern:
                     break  # reached a top-level key without finding a marker
             if marker_indent is None:
                 return False
+        # ``marker_indent`` is an int on both paths here (a marker was found,
+        # or we returned above); the assert narrows the type for mypy.
+        assert marker_indent is not None
         # Scan the item body (lines indented deeper than the marker) up to the
         # next sibling item / dedent, looking for ``when: never``.
         for j in range(start + 1, len(lines)):
