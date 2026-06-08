@@ -603,7 +603,7 @@ do not recompute risk.
 
 
 <!-- AUTOGEN:summary -->
-297 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+298 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 
@@ -613,7 +613,7 @@ do not recompute risk.
 |----------|--------|--------|---------|
 | SEC-1 — Insufficient Flow Control | 2 | 3 | 2 |
 | SEC-2 — Inadequate IAM | 5 | 4 | 3 |
-| SEC-3 — Dependency Chain Abuse | 11 | 7 | 7 |
+| SEC-3 — Dependency Chain Abuse | 12 | 7 | 7 |
 | SEC-4 — Poisoned Pipeline Execution | 30 | 10 | 10 |
 | SEC-5 — Insufficient PBAC | 3 | 1 | 2 |
 | SEC-6 — Insufficient Credential Hygiene | 12 | 9 | 10 |
