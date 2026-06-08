@@ -24,10 +24,19 @@ from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 from .sec3_sec4_supply_chain_ppe import _DANGEROUS_GITHUB_CONTEXT_RE
 
 
-class StepOutputShellInterpolationPattern:
-    _OUTPUT_RE = re.compile(
-        r"\$\{\{\s*steps\.[\w-]+\.outputs(?:\.[\w-]+|\[['\"][^'\"]+['\"]\])\s*\}\}"
-    )
+class _OutputToRunShellPattern:
+    """Shared ``run:``-block sink walker: an output reference spliced into a
+    shell context.  Subclasses set ``_OUTPUT_RE`` to the source shape; fires
+    only when the interpolation lands in a ``run:`` shell parser (inline value
+    or block-scalar body), not in a sibling YAML key.
+
+    SEC4-GH-021 (step outputs) and SEC4-GH-022 (cross-job needs outputs) share
+    this exact state machine — keeping it in ONE place means a fix to the
+    block-scalar / dedent logic (the reformatting-evadable surface) can't
+    half-land across two copies.
+    """
+
+    _OUTPUT_RE: re.Pattern[str]  # set by subclass
     _RUN_LINE_RE = re.compile(r"^\s*(?:-\s+)?run\s*:\s*(.*)$")
 
     def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
@@ -41,7 +50,6 @@ class StepOutputShellInterpolationPattern:
             indent = len(line) - len(stripped)
             if in_run_block and indent <= run_indent:
                 in_run_block = False
-
             m = self._RUN_LINE_RE.match(line)
             if m:
                 value = m.group(1).strip()
@@ -52,10 +60,18 @@ class StepOutputShellInterpolationPattern:
                 if self._OUTPUT_RE.search(value):
                     results.append((i + 1, line.strip()))
                 continue
-
             if in_run_block and self._OUTPUT_RE.search(line):
                 results.append((i + 1, line.strip()))
         return results
+
+
+class StepOutputShellInterpolationPattern(_OutputToRunShellPattern):
+    """SEC4-GH-021: ``${{ steps.X.outputs.Y }}`` spliced into a shell context.
+    Supports dot-form (``outputs.Y``) and bracket-form (``outputs['Y']``)."""
+
+    _OUTPUT_RE = re.compile(
+        r"\$\{\{\s*steps\.[\w-]+\.outputs(?:\.[\w-]+|\[['\"][^'\"]+['\"]\])\s*\}\}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -421,7 +437,7 @@ class GithubScriptStepOutputPattern(GithubScriptDangerousContextPattern):
         return bool(self._STEP_OUTPUT_RE.search(line))
 
 
-class NeedsOutputShellInterpolationPattern:
+class NeedsOutputShellInterpolationPattern(_OutputToRunShellPattern):
     """SEC4-GH-022: ``${{ needs.<job>.outputs.<name> }}`` spliced
     into a shell context.  Cross-job sibling of SEC4-GH-021 —
     same walker shape, scoped at the workflow level rather than
@@ -441,32 +457,6 @@ class NeedsOutputShellInterpolationPattern:
     _OUTPUT_RE = re.compile(
         r"\$\{\{\s*needs\.[\w-]+\.outputs(?:\.[\w-]+|\[['\"][^'\"]+['\"]\])\s*\}\}"
     )
-    _RUN_LINE_RE = re.compile(r"^\s*(?:-\s+)?run\s*:\s*(.*)$")
-
-    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
-        results: list[tuple[int, str]] = []
-        in_run_block = False
-        run_indent = 0
-        for i, line in enumerate(lines):
-            stripped = line.lstrip(" \t")
-            if not stripped or stripped.startswith("#"):
-                continue
-            indent = len(line) - len(stripped)
-            if in_run_block and indent <= run_indent:
-                in_run_block = False
-            m = self._RUN_LINE_RE.match(line)
-            if m:
-                value = m.group(1).strip()
-                if value in {"|", "|-", "|+", ">", ">-", ">+"}:
-                    in_run_block = True
-                    run_indent = indent
-                    continue
-                if self._OUTPUT_RE.search(value):
-                    results.append((i + 1, line.strip()))
-                continue
-            if in_run_block and self._OUTPUT_RE.search(line):
-                results.append((i + 1, line.strip()))
-        return results
 
 
 # Command-argument-style ``with:`` input keys: an action receiving one of

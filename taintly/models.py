@@ -1073,6 +1073,12 @@ class SequencePattern:
 
     pattern_a: str
     absent_within: str
+    # Optional "context required" gate: when set, the rule fires only if this
+    # pattern is ALSO present in the lookahead window. Scopes pattern_a to the
+    # right block — e.g. an ``include: project:`` always carries ``file:``,
+    # while a ``trigger:``/``needs: project:`` (branch-/job-pinned, legitimate)
+    # does not, so requiring ``file:`` drops those false positives.
+    requires_within: str = ""
     lookahead_lines: int = 10
     exclude: list[str] = field(default_factory=list)
     groovy_comment_aware: bool = False
@@ -1080,6 +1086,7 @@ class SequencePattern:
     def __post_init__(self):
         self._a_re = re.compile(self.pattern_a)
         self._b_re = re.compile(self.absent_within)
+        self._req_re = re.compile(self.requires_within) if self.requires_within else None
         self._excludes = [re.compile(e) for e in self.exclude]
 
     # CONTRACT: returns (line_num, snippet) where snippet is the
@@ -1096,6 +1103,8 @@ class SequencePattern:
                 continue
             if _safe_search(self._a_re, line):
                 window = "\n".join(scan_lines[i : i + self.lookahead_lines])
+                if self._req_re is not None and not _safe_search(self._req_re, window):
+                    continue
                 if not _safe_search(self._b_re, window):
                     snippet = lines[i].strip() if i < len(lines) else line.strip()
                     results.append((i + 1, snippet))

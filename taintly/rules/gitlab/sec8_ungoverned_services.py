@@ -129,6 +129,13 @@ RULES: list[Rule] = [
             # by a `ref:` containing a full 40-char commit SHA within the next 4 lines.
             pattern_a=r"^\s+-?\s*project:\s+['\"]?[a-zA-Z0-9]",
             absent_within=r"ref:\s+['\"]?[a-f0-9]{40}['\"]?",
+            # Scope to `include: project:` only. An include item ALWAYS carries
+            # `file:`; a `trigger: project:` (branch-pinned downstream pipeline)
+            # and `needs: project:` (cross-project artifact dep) do not — and
+            # those are legitimate, not unpinned includes. Requiring `file:`
+            # drops that false-positive class (the same one SEC3-GL-002's walker
+            # migration closed; this SequencePattern had reintroduced it).
+            requires_within=r"\bfile\s*:",
             lookahead_lines=4,
             exclude=[r"^\s*#"],
         ),
@@ -152,6 +159,11 @@ RULES: list[Rule] = [
             "    ref: abc123def456abc123def456abc123def456abc1\n    file: /ci.yml",
             "include:\n  - remote: https://example.com/ci.yml",
             "include:\n  - local: /templates/ci.yml",
+            # trigger: project: is a downstream-pipeline trigger (branch-pinned,
+            # legitimate) — no file:, so it must NOT fire as an unpinned include.
+            "trigger:\n  - project: org/downstream\n    branch: main",
+            # needs: project: is a cross-project artifact dependency — no file:.
+            "needs:\n  - project: org/upstream\n    job: build\n    ref: main\n    artifacts: true",
         ],
         stride=["T", "E"],
         threat_narrative=(

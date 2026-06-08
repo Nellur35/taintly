@@ -77,7 +77,6 @@ _FAMILIES: tuple[FindingFamily, ...] = (
                 "SEC8-GH-003",  # unpinned reusable workflow
                 "SEC3-GL-001",
                 "SEC3-GL-002",
-                "SEC3-GL-003",
                 "PLAT-GH-009",  # Dependabot security updates disabled
                 "PLAT-GH-010",  # Vulnerability alerts disabled
             }
@@ -122,7 +121,6 @@ _FAMILIES: tuple[FindingFamily, ...] = (
                 "SEC4-GH-008",
                 "SEC4-GH-011",
                 "LOTP-GH-001",
-                "LOTP-GH-002",
                 "LOTP-GH-003",
                 "LOTP-GH-005",
                 "TAINT-GH-001",
@@ -143,7 +141,6 @@ _FAMILIES: tuple[FindingFamily, ...] = (
                 "SEC4-GH-005",  # checkout persists credentials — classic pivot surface
                 "SEC4-GH-005B",  # checkout persists credentials — posture sibling
                 "SEC6-GH-001",
-                "SEC6-GH-002",
                 "SEC6-GH-003",
                 "SEC6-GL-001",
                 "SEC6-GL-002",
@@ -383,7 +380,6 @@ _CONFIDENCE_OVERRIDES: dict[str, str] = {
     # Trigger-level rule: can be safe or dangerous depending on design intent.
     "SEC4-GH-002": Confidence.MEDIUM.value,
     # Secret-string heuristics — pattern-based, not context-aware.
-    "SEC6-GH-002": Confidence.MEDIUM.value,
     "SEC6-GL-002": Confidence.MEDIUM.value,
 }
 
