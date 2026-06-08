@@ -78,8 +78,10 @@ class GitlabIdentityGatePattern:
             if marker_indent is None:
                 return False
         # ``marker_indent`` is an int on both paths here (a marker was found,
-        # or we returned above); the assert narrows the type for mypy.
-        assert marker_indent is not None
+        # or we returned above); this guard narrows the type for mypy without
+        # an ``assert`` (bandit B101 flags asserts in non-test code).
+        if marker_indent is None:
+            return False
         # Scan the item body (lines indented deeper than the marker) up to the
         # next sibling item / dedent, looking for ``when: never``.
         for j in range(start + 1, len(lines)):
