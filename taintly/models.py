@@ -9,6 +9,17 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
+# Structural ``${{ }}`` expression parser — used to OPTIONALLY normalise an
+# attacker-context ``requires`` regex over its documented-equivalent encodings
+# (index/bracket access, context-name case). ``gha_expr`` is a leaf module
+# (no taintly imports) so this top-level import introduces no cycle.
+from .parsers.gha_expr import (
+    ExprSyntaxError,
+    context_paths,
+    iter_expression_bodies,
+    structural_expr_enabled,
+)
+
 
 class _PatternTimeout(Exception):
     """Raised when a pattern match exceeds the safety timeout."""
@@ -929,6 +940,20 @@ class ContextPattern:
     # than spread across the job: a sibling step's content cannot
     # influence whether the matched step is suppressed.
     anchor_step_exclude: str = ""
+    # GH-B1: route the ``requires`` match through the structural ``${{ }}``
+    # expression parser, ADDITIVELY.  When the dot-literal ``requires`` regex
+    # misses, every ``${{ }}`` body in the scoped text is parsed and each
+    # context reference normalised to a canonical lowercased dotted path, then
+    # the SAME ``requires`` regex is re-tested against that path.  This makes a
+    # rule catch the documented-equivalent obfuscations the line regex is blind
+    # to — index/bracket access (``github.event.pull_request['head']['sha']``)
+    # and context-name case (``GITHUB.event…``) — without duplicating the
+    # context list.  ONLY sound when ``requires`` is a pure GitHub-context-path
+    # matcher: a flat-string or sequence ``requires`` (e.g. ``uses: …`` text or
+    # ``A[\s\S]*?B``) will never match a single canonical path, so leave the
+    # flag off for those (they stay regex-only).  Off by default → zero change
+    # for every existing rule.
+    expr_augment_requires: bool = False
 
     def __post_init__(self):
         self._anchor_re = re.compile(self.anchor)
@@ -960,6 +985,40 @@ class ContextPattern:
             return self._check_job_scoped(lines)
         return self._check_file_scoped(content, lines)
 
+    def _requires_hit(self, text: str) -> bool:
+        """Whether ``requires`` is satisfied within ``text``.
+
+        Fast path: the dot-literal ``requires`` regex (chunk-safe for large
+        content).  When that misses AND ``expr_augment_requires`` is set, parse
+        every ``${{ }}`` body, normalise each context reference to a canonical
+        lowercased dotted path, and re-test the SAME ``requires`` regex against
+        it — so an index/bracket-encoded or context-cased attacker context
+        satisfies the same gate its canonical form already does.  Purely
+        ADDITIVE: the augmentation can only turn a miss into a hit, and a parse
+        error simply leaves the regex-only result.  Mirrors the SEC4-GH-004
+        predicate (``rules/github/sec3_sec4_supply_chain_ppe.py``) so the two
+        consumers normalise expressions identically."""
+        if _safe_search_chunked(self._requires_re, text):
+            return True
+        if self.expr_augment_requires and structural_expr_enabled():
+            try:
+                for body in iter_expression_bodies(text):
+                    for path in context_paths(body):
+                        # Test the canonical path both bare and re-wrapped in
+                        # ``${{ }}``: a ``requires`` regex may be written against
+                        # the bare context (``github\.event\.…`` — LOTP-GH-001)
+                        # OR against the full interpolation
+                        # (``\$\{\{\s*github\.…`` — AI-GH-021).  The wrapped form
+                        # satisfies both, since a bare-context regex still finds
+                        # its substring inside the wrapper.
+                        if self._requires_re.search(path) or self._requires_re.search(
+                            "${{ " + path + " }}"
+                        ):
+                            return True
+            except ExprSyntaxError:
+                return False
+        return False
+
     def _check_file_scoped(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         # File-scope requires / requires_absent: chunked-safe so
         # legitimate large workflows (>50KB) don't silently lose
@@ -979,7 +1038,7 @@ class ContextPattern:
         gated_content = (
             _strip_groovy_comments(content) if self._platform is Platform.JENKINS else content
         )
-        if not _safe_search_chunked(self._requires_re, gated_content):
+        if not self._requires_hit(gated_content):
             return []
         if self._requires_absent_re and _safe_search_chunked(
             self._requires_absent_re, gated_content
@@ -1031,7 +1090,7 @@ class ContextPattern:
             # Chunked-safe: a single-job workflow over 50KB would
             # produce a >50KB segment; ``_safe_search`` returns None
             # outright in that case, silently disabling the rule.
-            if not _safe_search_chunked(self._requires_re, seg_content):
+            if not self._requires_hit(seg_content):
                 continue
             if self._requires_absent_re and _safe_search_chunked(
                 self._requires_absent_re, seg_content
