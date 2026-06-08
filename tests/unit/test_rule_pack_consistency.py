@@ -127,7 +127,7 @@ _INCIDENT_REF_RE = re.compile(
 # count GROWS — same growth-only discipline as
 # taintly/testing/self_test.py::_KNOWN_MUTATION_GAPS. Lower this
 # number as you replace free-text references with URL / CVE IDs.
-_INCIDENT_REF_BASELINE = 109  # ported fine-tuned rules use more structured refs (shrink)
+_INCIDENT_REF_BASELINE = 108  # -1: removed the SEC4-GH-023 exact-duplicate rule
 
 
 def test_incident_references_are_structured_no_growth(all_rules):
@@ -178,7 +178,7 @@ def test_incident_references_are_structured_no_growth(all_rules):
 # is a positive sample for both SEC3-GH-004 and SEC3-GH-006 — both
 # rules legitimately fire on the same incident-shaped line). New
 # overlaps are flagged for review; reducing the count is a goal.
-_DUPLICATE_POSITIVE_BASELINE = 9  # +3 from ported fine-tuned rules sharing sibling samples
+_DUPLICATE_POSITIVE_BASELINE = 5  # -4: removed SEC4-GH-023/SEC4-GL-009 exact-duplicate rules
 
 
 def test_no_duplicate_positive_samples_across_rules_no_growth(all_rules):

@@ -225,7 +225,9 @@ def test_sec8_gh_005_is_per_dependabot_update_spec(tmp_path, all_rules):
     assert fired[0].snippet == "- package-ecosystem: pip"
 
 
-def test_sec4_gh_023_detects_bracketed_step_output_in_run(tmp_path, github_rules):
+# SEC4-GH-023 was an exact duplicate of SEC4-GH-021 (same pattern, identical
+# firing) and was removed; these regressions now assert the surviving rule.
+def test_sec4_gh_021_detects_bracketed_step_output_in_run(tmp_path, github_rules):
     wf = _write(
         tmp_path / ".github" / "workflows" / "ci.yml",
         "on: workflow_dispatch\n"
@@ -238,10 +240,10 @@ def test_sec4_gh_023_detects_bracketed_step_output_in_run(tmp_path, github_rules
         "      - run: echo ${{ steps.meta.outputs['title-with-dash'] }}\n",
     )
     findings = scan_file(str(wf), github_rules)
-    assert "SEC4-GH-023" in _rule_ids(findings)
+    assert "SEC4-GH-021" in _rule_ids(findings)
 
 
-def test_sec4_gh_023_does_not_fire_on_non_shell_action_metadata_inputs(tmp_path, github_rules):
+def test_sec4_gh_021_does_not_fire_on_non_shell_action_metadata_inputs(tmp_path, github_rules):
     wf = _write(
         tmp_path / ".github" / "workflows" / "ci.yml",
         "on: workflow_dispatch\n"
@@ -259,7 +261,7 @@ def test_sec4_gh_023_does_not_fire_on_non_shell_action_metadata_inputs(tmp_path,
         "          description: release ${{ steps.meta.outputs.path }}\n",
     )
     findings = scan_file(str(wf), github_rules)
-    assert "SEC4-GH-023" not in _rule_ids(findings)
+    assert "SEC4-GH-021" not in _rule_ids(findings)
 
 
 def test_github_archived_check_404_is_indeterminate(monkeypatch):
@@ -291,7 +293,9 @@ def test_gitlab_archived_check_404_is_indeterminate(monkeypatch):
     assert gitlab_archived_check.is_archived("missing/repo") is None
 
 
-def test_sec4_gl_009_anchors_on_dotenv_report_only(tmp_path, gitlab_rules):
+# SEC4-GL-009 was an exact duplicate of SEC4-GL-008 (same DotenvReportPattern,
+# identical firing) and was removed; this regression now asserts the survivor.
+def test_sec4_gl_008_anchors_on_dotenv_report_only(tmp_path, gitlab_rules):
     ci = _write(
         tmp_path / ".gitlab-ci.yml",
         "test:\n"
@@ -306,7 +310,7 @@ def test_sec4_gl_009_anchors_on_dotenv_report_only(tmp_path, gitlab_rules):
         "      dotenv: out.env\n",
     )
     findings = scan_file(str(ci), gitlab_rules)
-    fired = [f for f in findings if f.rule_id == "SEC4-GL-009"]
+    fired = [f for f in findings if f.rule_id == "SEC4-GL-008"]
     assert len(fired) == 1
     assert fired[0].snippet == "dotenv: out.env"
 
