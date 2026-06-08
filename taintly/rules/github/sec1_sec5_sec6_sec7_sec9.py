@@ -211,7 +211,9 @@ _LOCAL_COMPOSITE_USES: str = r"uses:\s*['\"]?\./"
 # Remote reusable-workflow call: ``uses: owner/repo/.github/workflows/x.yml@ref``
 # (local reusable calls — ``uses: ./.github/workflows/x.yml`` — are already
 # covered by _LOCAL_COMPOSITE_USES via the leading ``./``).
-_REUSABLE_WORKFLOW_CALL: str = r"uses:\s*['\"]?[\w.\-]+/[\w.\-]+/\.github/workflows/[\w.\-/]+\.ya?ml"
+_REUSABLE_WORKFLOW_CALL: str = (
+    r"uses:\s*['\"]?[\w.\-]+/[\w.\-]+/\.github/workflows/[\w.\-/]+\.ya?ml"
+)
 _UNSEEABLE_CONSUMER_REGEX: str = _LOCAL_COMPOSITE_USES + "|" + _REUSABLE_WORKFLOW_CALL
 
 
