@@ -1997,9 +1997,9 @@ RULES: list[Rule] = [
             "the workflow invokes."
         ),
         pattern=RegexPattern(
-            # Five idiomatic shapes: curl|sh, wget|sh, bash <(curlâ€¦),
-            # iex(Invoke-WebRequestâ€¦) or iex(iwrâ€¦), and the bare
-            # ``... | python -c 'â€¦'`` shape that downloads then evals.
+            # Five idiomatic shapes: curl|sh, wget|sh, bash <(curl…),
+            # iex(Invoke-WebRequest…) or iex(iwr…), and the bare
+            # ``... | python -c '…'`` shape that downloads then evals.
             match=(
                 r"(?:curl|wget)\s+[^|\n#]*\|\s*(?:bash|sh|zsh|fish|python|perl|ruby|node)"
                 r"|bash\s*<\s*\(\s*(?:curl|wget)"
