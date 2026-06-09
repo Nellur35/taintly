@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from taintly.families import cluster_findings
 from taintly.models import AuditReport
+from taintly.reporters.sarif import _finding_sort_key
 from taintly.reporters.text import INVENTORY_RULE_IDS
 
 if TYPE_CHECKING:
@@ -43,8 +44,8 @@ def format_json(report: AuditReport, score_report: ScoreReport | None = None) ->
         "distinct_risk_count": len(confirmed_clusters),
         "review_needed_count": len(review_clusters),
         "families": [cl.to_dict() for cl in clusters],
-        "findings": [f.to_dict() for f in report.findings],
-        "errors": [f.to_dict() for f in report.engine_errors()],
+        "findings": [f.to_dict() for f in sorted(report.findings, key=_finding_sort_key)],
+        "errors": [f.to_dict() for f in sorted(report.engine_errors(), key=_finding_sort_key)],
     }
 
     if score_report is not None:

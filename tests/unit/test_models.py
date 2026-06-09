@@ -217,6 +217,170 @@ def test_context_pattern_requires_absent_suppresses():
 
 
 # =============================================================================
+# ContextPattern.expr_augment_requires (GH-B1: gha_expr-routed requires)
+# =============================================================================
+
+# A pure attacker-context-path requires regex.
+_PR_HEAD_REQ = r"github\.event\.pull_request\.head\.(?:sha|ref)|github\.head_ref"
+
+
+def _checkout_build_job(ref_expr: str) -> str:
+    return (
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n"
+        f"          ref: {ref_expr}\n"
+        "      - run: npm install\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "ref_expr",
+    [
+        "${{ github.event.pull_request.head.sha }}",  # canonical (fast path)
+        "${{ github.event.pull_request['head']['sha'] }}",  # bracket/index access
+        "${{ github['event']['pull_request']['head']['sha'] }}",  # full bracket chain
+        "${{ GITHUB.event.pull_request.head.sha }}",  # context-name case
+    ],
+)
+def test_expr_augment_requires_catches_obfuscated_context(ref_expr):
+    """With the flag on, every documented-equivalent encoding of the PR-head
+    ref satisfies the dot-literal ``requires`` gate."""
+    content = _checkout_build_job(ref_expr)
+    lines = content.splitlines()
+    p = ContextPattern(
+        anchor=r"npm (install|ci)",
+        requires=_PR_HEAD_REQ,
+        scope="job",
+        expr_augment_requires=True,
+    )
+    assert p.check(content, lines), f"should fire on {ref_expr!r}"
+
+
+@pytest.mark.parametrize(
+    "ref_expr",
+    [
+        "${{ github.event.pull_request['head']['sha'] }}",
+        "${{ GITHUB.event.pull_request.head.sha }}",
+    ],
+)
+def test_expr_augment_off_by_default_misses_obfuscation(ref_expr):
+    """The augmentation is opt-in: the default flag leaves the rule regex-only,
+    so an obfuscated encoding is NOT matched (proves the flag is what closes the
+    gap, not some incidental behaviour)."""
+    content = _checkout_build_job(ref_expr)
+    lines = content.splitlines()
+    p = ContextPattern(anchor=r"npm (install|ci)", requires=_PR_HEAD_REQ, scope="job")
+    assert p.check(content, lines) == []
+
+
+def test_expr_augment_canonical_still_fires_without_flag():
+    """Sanity: the canonical (dot-literal) form fires via the fast regex path
+    regardless of the flag."""
+    content = _checkout_build_job("${{ github.event.pull_request.head.sha }}")
+    lines = content.splitlines()
+    p = ContextPattern(anchor=r"npm (install|ci)", requires=_PR_HEAD_REQ, scope="job")
+    assert p.check(content, lines)
+
+
+def test_expr_augment_respects_structural_disable(monkeypatch):
+    """The ``TAINTLY_STRUCTURAL_EXPR=0`` escape hatch turns the augmentation off
+    even when the flag is set (shared toggle with the taint engine /
+    SEC4-GH-004)."""
+    monkeypatch.setenv("TAINTLY_STRUCTURAL_EXPR", "0")
+    content = _checkout_build_job("${{ github.event.pull_request['head']['sha'] }}")
+    lines = content.splitlines()
+    p = ContextPattern(
+        anchor=r"npm (install|ci)",
+        requires=_PR_HEAD_REQ,
+        scope="job",
+        expr_augment_requires=True,
+    )
+    assert p.check(content, lines) == []
+
+
+def test_expr_augment_tolerates_malformed_expression():
+    """A malformed ``${{ }}`` body must not crash the augmentation — it leaves
+    the regex-only result (here: no match, so no fire)."""
+    content = _checkout_build_job("${{ github.event.pull_request[ }}")
+    lines = content.splitlines()
+    p = ContextPattern(
+        anchor=r"npm (install|ci)",
+        requires=_PR_HEAD_REQ,
+        scope="job",
+        expr_augment_requires=True,
+    )
+    assert p.check(content, lines) == []
+
+
+def test_expr_augment_file_scope_also_augmented():
+    """The augmentation is wired into the file-scoped requires gate too (not
+    just job scope)."""
+    content = _checkout_build_job("${{ github.event.pull_request['head']['sha'] }}")
+    lines = content.splitlines()
+    p = ContextPattern(
+        anchor=r"npm (install|ci)",
+        requires=_PR_HEAD_REQ,
+        scope="file",
+        expr_augment_requires=True,
+    )
+    assert p.check(content, lines)
+
+
+def test_expr_augment_handles_brace_wrapped_requires():
+    """A ``requires`` written against the FULL interpolation (``\\$\\{\\{ … \\}\\}``,
+    the AI-GH-021 shape) is augmented too: the canonical path is re-wrapped in
+    ``${{ }}`` before re-testing, so an obfuscated body still satisfies it."""
+    wrapped_req = r"\$\{\{\s*github\.event\.pull_request\.head\.(?:sha|ref)\s*\}\}"
+    content = _checkout_build_job("${{ github['event']['pull_request']['head']['sha'] }}")
+    lines = content.splitlines()
+    p = ContextPattern(
+        anchor=r"npm (install|ci)",
+        requires=wrapped_req,
+        scope="job",
+        expr_augment_requires=True,
+    )
+    assert p.check(content, lines)
+    # The same rule without the flag stays regex-only and misses it.
+    p_off = ContextPattern(anchor=r"npm (install|ci)", requires=wrapped_req, scope="job")
+    assert p_off.check(content, lines) == []
+
+
+# Every rule whose ContextPattern.requires was routed through gha_expr by GH-B1,
+# paired with a documented-equivalent OBFUSCATED context the bare regex misses.
+# Keep in sync with the ``expr_augment_requires=True`` flags in the rule modules.
+# (LOTP-GH-001/003 use a ``ref:``-anchored requires here and are NOT migrated.)
+_GH_B1_MIGRATED = {
+    "SEC4-GH-001": "github['event']['pull_request']['head']['sha']",
+    "AI-GH-005": "github['event']['pull_request']['title']",
+    "AI-GH-008": "github['event']['pull_request']['head']['sha']",
+    "AI-GH-021": "github['event']['pull_request']['head']['sha']",
+    "AI-GH-024": "github['event']['pull_request']['head']['sha']",
+    "AI-GH-030": "github['event']['pull_request']['title']",
+}
+
+
+@pytest.mark.parametrize("rule_id,obf", sorted(_GH_B1_MIGRATED.items()))
+def test_gh_b1_migrated_rule_requires_is_obfuscation_invariant(all_rules, rule_id, obf):
+    """Per-rule teeth-test: each migrated rule carries the flag, its bare
+    ``requires`` regex MISSES the obfuscated context (so the augmentation is
+    load-bearing), and the augmented gate CATCHES it."""
+    rule = next((r for r in all_rules if r.id == rule_id), None)
+    assert rule is not None, f"{rule_id} not found in the rule pack"
+    pat = rule.pattern
+    assert isinstance(pat, ContextPattern), f"{rule_id} is not a ContextPattern"
+    assert pat.expr_augment_requires is True, f"{rule_id} is missing expr_augment_requires"
+    wrapped = "${{ " + obf + " }}"
+    assert not pat._requires_re.search(wrapped), (
+        f"{rule_id} bare regex unexpectedly matched obfuscated {obf!r} — "
+        "the augmentation would not be load-bearing"
+    )
+    assert pat._requires_hit(wrapped), f"{rule_id} augmentation failed to catch {obf!r}"
+
+
+# =============================================================================
 # SequencePattern
 # =============================================================================
 

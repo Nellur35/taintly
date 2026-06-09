@@ -20,6 +20,7 @@ Usage::
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Optional
@@ -27,6 +28,32 @@ from typing import Optional
 from .schemas import detect_schema_for_path
 from .walker import Event, EventKind
 from .walker import walk as _walk
+
+# ---------------------------------------------------------------------------
+# Parse memoization.
+#
+# The walk is a PURE function of (content, query, recover, include_keys) — the
+# schema lookup is not consumed and the filepath only feeds it.  A single
+# ``scan_file`` calls ``walk_workflow`` hundreds-to-tens-of-thousands of times
+# on the SAME content (one call per structural rule / query / taint fact-build);
+# every one re-tokenizes and re-walks from scratch.  Materialising the event
+# stream once per distinct key and replaying it collapses that to one walk.
+#
+# Bounded LRU: the dominant redundancy is *within* one file's scan (same
+# content, a handful of query/flag variants), so a small cap captures nearly all
+# of the win while keeping memory flat across a whole-repo scan (old files
+# evict).  Events are treated as read-only by every consumer (parse output), so
+# replaying the same Event objects is safe — the no-rules-change / determinism /
+# mutation gates prove behaviour is preserved.
+_WALK_CACHE_MAXSIZE = 64
+_walk_cache: OrderedDict[tuple[object, ...], tuple[Event, ...]] = OrderedDict()
+
+
+def clear_walk_cache() -> None:
+    """Drop all memoised walks (test hook; not needed in normal operation —
+    the LRU bounds memory and the walk is content-keyed so stale hits are
+    impossible)."""
+    _walk_cache.clear()
 
 
 def walk_workflow(
@@ -36,6 +63,7 @@ def walk_workflow(
     schema: Optional[str] = None,
     content: Optional[str] = None,
     recover: bool = True,
+    include_keys: bool = False,
 ) -> Iterator[Event]:
     """Walk a CI YAML file, yielding events.
 
@@ -54,6 +82,10 @@ def walk_workflow(
             event when the tokenizer hits an unsupported construct
             and stops.  If False, the underlying ``TokenizerError``
             propagates.
+        include_keys: if True, additionally yield ``MAP_KEY`` events for
+            mapping keys (incl. keys with empty/null/nested-map values
+            that produce no ``LEAF_SCALAR``).  Default False keeps the
+            event stream byte-identical for leaf-only consumers.
 
     The schema name is accepted for forward compatibility; the
     walker currently treats every path as ``ValueShape.UNKNOWN``
@@ -65,7 +97,20 @@ def walk_workflow(
     # is preserved so a future schema-consultation hook wires in
     # here without touching the call sites.
     _ = schema or detect_schema_for_path(filepath)
-    yield from _walk(content, query=query, recover=recover)
+    # Memoised replay: the walk is a pure function of these four args (see the
+    # cache note above), so materialise once per key and replay.  filepath /
+    # schema do not affect the event stream.
+    key = (content, query, recover, include_keys)
+    cached = _walk_cache.get(key)
+    if cached is not None:
+        _walk_cache.move_to_end(key)
+        return iter(cached)
+    events = tuple(_walk(content, query=query, recover=recover, include_keys=include_keys))
+    _walk_cache[key] = events
+    _walk_cache.move_to_end(key)
+    if len(_walk_cache) > _WALK_CACHE_MAXSIZE:
+        _walk_cache.popitem(last=False)
+    return iter(events)
 
 
-__all__ = ["Event", "EventKind", "walk_workflow"]
+__all__ = ["Event", "EventKind", "clear_walk_cache", "walk_workflow"]

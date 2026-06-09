@@ -86,6 +86,12 @@ jobs:
         # heuristic; runs in <100ms.
         run: python scripts/check_doc_impl_drift.py
 
+      - name: Duplicate-rule gate (no two rules fire identically)
+        run: python scripts/check_rule_duplicates.py
+
+      - name: Encoding gate (no mojibake in user-facing rule text)
+        run: python scripts/check_rule_encoding.py
+
       - name: No-rules-change gate (rule-pack output stable across fixtures)
         run: python scripts/no_rules_change_gate.py --check
 

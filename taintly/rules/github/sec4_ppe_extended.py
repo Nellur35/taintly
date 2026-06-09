@@ -24,10 +24,19 @@ from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 from .sec3_sec4_supply_chain_ppe import _DANGEROUS_GITHUB_CONTEXT_RE
 
 
-class StepOutputShellInterpolationPattern:
-    _OUTPUT_RE = re.compile(
-        r"\$\{\{\s*steps\.[\w-]+\.outputs(?:\.[\w-]+|\[['\"][^'\"]+['\"]\])\s*\}\}"
-    )
+class _OutputToRunShellPattern:
+    """Shared ``run:``-block sink walker: an output reference spliced into a
+    shell context.  Subclasses set ``_OUTPUT_RE`` to the source shape; fires
+    only when the interpolation lands in a ``run:`` shell parser (inline value
+    or block-scalar body), not in a sibling YAML key.
+
+    SEC4-GH-021 (step outputs) and SEC4-GH-022 (cross-job needs outputs) share
+    this exact state machine — keeping it in ONE place means a fix to the
+    block-scalar / dedent logic (the reformatting-evadable surface) can't
+    half-land across two copies.
+    """
+
+    _OUTPUT_RE: re.Pattern[str]  # set by subclass
     _RUN_LINE_RE = re.compile(r"^\s*(?:-\s+)?run\s*:\s*(.*)$")
 
     def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
@@ -41,7 +50,6 @@ class StepOutputShellInterpolationPattern:
             indent = len(line) - len(stripped)
             if in_run_block and indent <= run_indent:
                 in_run_block = False
-
             m = self._RUN_LINE_RE.match(line)
             if m:
                 value = m.group(1).strip()
@@ -52,10 +60,18 @@ class StepOutputShellInterpolationPattern:
                 if self._OUTPUT_RE.search(value):
                     results.append((i + 1, line.strip()))
                 continue
-
             if in_run_block and self._OUTPUT_RE.search(line):
                 results.append((i + 1, line.strip()))
         return results
+
+
+class StepOutputShellInterpolationPattern(_OutputToRunShellPattern):
+    """SEC4-GH-021: ``${{ steps.X.outputs.Y }}`` spliced into a shell context.
+    Supports dot-form (``outputs.Y``) and bracket-form (``outputs['Y']``)."""
+
+    _OUTPUT_RE = re.compile(
+        r"\$\{\{\s*steps\.[\w-]+\.outputs(?:\.[\w-]+|\[['\"][^'\"]+['\"]\])\s*\}\}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +464,7 @@ class GithubScriptStepOutputPattern(GithubScriptDangerousContextPattern):
         return bool(self._STEP_OUTPUT_RE.search(line))
 
 
-class NeedsOutputShellInterpolationPattern:
+class NeedsOutputShellInterpolationPattern(_OutputToRunShellPattern):
     """SEC4-GH-022: ``${{ needs.<job>.outputs.<name> }}`` spliced
     into a shell context.  Cross-job sibling of SEC4-GH-021 —
     same walker shape, scoped at the workflow level rather than
@@ -468,32 +484,6 @@ class NeedsOutputShellInterpolationPattern:
     _OUTPUT_RE = re.compile(
         r"\$\{\{\s*needs\.[\w-]+\.outputs(?:\.[\w-]+|\[['\"][^'\"]+['\"]\])\s*\}\}"
     )
-    _RUN_LINE_RE = re.compile(r"^\s*(?:-\s+)?run\s*:\s*(.*)$")
-
-    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
-        results: list[tuple[int, str]] = []
-        in_run_block = False
-        run_indent = 0
-        for i, line in enumerate(lines):
-            stripped = line.lstrip(" \t")
-            if not stripped or stripped.startswith("#"):
-                continue
-            indent = len(line) - len(stripped)
-            if in_run_block and indent <= run_indent:
-                in_run_block = False
-            m = self._RUN_LINE_RE.match(line)
-            if m:
-                value = m.group(1).strip()
-                if value in {"|", "|-", "|+", ">", ">-", ">+"}:
-                    in_run_block = True
-                    run_indent = indent
-                    continue
-                if self._OUTPUT_RE.search(value):
-                    results.append((i + 1, line.strip()))
-                continue
-            if in_run_block and self._OUTPUT_RE.search(line):
-                results.append((i + 1, line.strip()))
-        return results
 
 
 # Command-argument-style ``with:`` input keys: an action receiving one of
@@ -734,6 +724,10 @@ RULES: list[Rule] = [
         ),
         pattern=RegexPattern(
             match=r"\$\{\{\s*(github\.event\.inputs|inputs)\.[a-zA-Z0-9_-]+\s*\}\}",
+            # ``${{ inputs.* }}`` inside a with:/env: block is an action input or
+            # env assignment (incl. github-script's script: arg), NOT this
+            # workflow's shell — mask those block bodies. Only run: shell fires.
+            github_with_env_block_aware=True,
             exclude=[
                 r"^\s*#",
                 r"^\s*if:",
@@ -780,6 +774,11 @@ RULES: list[Rule] = [
             "        if: inputs.deploy == true",
             '        # run: echo "${{ inputs.user_input }}"',
             '        run: echo "$MY_INPUT"',
+            # with: action-input block — passed to the action, not this
+            # workflow's shell (github-script's script: is also a with: input).
+            "      - uses: some/action@v1\n        with:\n          output: ${{ inputs.target }}",
+            # env: block scalar — an environment assignment, not shell.
+            "      - uses: some/action@v1\n        env:\n          OUT: |\n            ${{ inputs.target }}",
         ],
         stride=["T", "E"],
         threat_narrative=(
@@ -1777,70 +1776,6 @@ RULES: list[Rule] = [
     # step-output map.  Maps to part of zizmor's
     # ``template-injection`` audit.
     # =========================================================================
-    Rule(
-        id="SEC4-GH-023",
-        title="Step output interpolated into shell â€” taint transit via outputs",
-        severity=Severity.MEDIUM,
-        platform=Platform.GITHUB,
-        owasp_cicd="CICD-SEC-4",
-        review_needed=True,
-        confidence="low",
-        description=(
-            "A ``${{ steps.<id>.outputs.<name> }}`` reference is "
-            "spliced into a workflow expression outside of a safe "
-            "``env:`` assignment.  Step outputs are common transit "
-            "for attacker-controllable bytes: a previous step that "
-            "scrapes a PR title via ``gh api``, reads a file the PR "
-            "author wrote, or captures any ``github.event.*`` value "
-            "into ``$GITHUB_OUTPUT`` produces an output that carries "
-            "attacker bytes.  Splicing that output into a ``run:`` "
-            "body is shell injection â€” the same threat shape as "
-            "``${{ github.event.X }}`` direct interpolation, but the "
-            "taint transits through the step-output map.  Review the "
-            "upstream step that produces the output; if any upstream "
-            "value can come from a fork PR / issue / comment / "
-            "branch name, route through ``env:`` and validate."
-        ),
-        pattern=StepOutputShellInterpolationPattern(),
-        remediation=(
-            "Route the step output through an ``env:`` mapping at the "
-            "consuming step, then reference as a double-quoted shell "
-            "variable.  Validate against an allowlist if the upstream "
-            "value can come from a fork PR:\n"
-            "  env:\n    TITLE: ${{ steps.read-pr.outputs.title }}\n"
-            '  run: case "$TITLE" in [A-Za-z0-9\\ -]*) ;; *) exit 1;; esac\n'
-            "If the upstream step is itself sanitising attacker input "
-            "(``jq -R`` shell-escape, allowlist regex), document that "
-            "in a comment on the producing step so future readers see "
-            "the chain.  This rule is review-needed because the "
-            "taint source is not visible from the consuming line "
-            "alone â€” it depends on the upstream producer."
-        ),
-        reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable",
-        test_positive=[
-            '        run: echo "${{ steps.pr.outputs.title }}"',
-            "        run: gh release create v1 ${{ steps.tag.outputs.name }}",
-        ],
-        test_negative=[
-            "        env:\n          TITLE: ${{ steps.pr.outputs.title }}",
-            '        # run: echo "${{ steps.pr.outputs.title }}"',
-            "        if: steps.check.outputs.status == 'ok'",
-            "      - name: Build ${{ steps.cfg.outputs.label }}",
-        ],
-        stride=["T", "E"],
-        threat_narrative=(
-            "Step outputs are an opaque transit channel for attacker-"
-            "controllable bytes.  A workflow author who carefully avoids "
-            "``${{ github.event.X }}`` directly in a ``run:`` body can "
-            "still be compromised when an earlier step reads the same "
-            "value into an output and the later step splices it in.  "
-            "The Langflow and Ultralytics injections (2024-2025) both "
-            "had upstream-output forms in the wild â€” SEC4-GH-004 "
-            "catches the direct form; this rule catches the transit "
-            "form."
-        ),
-        incidents=["Ultralytics (Dec 2024)"],
-    ),
     # =========================================================================
     # SEC4-GH-026: cache poisoning surface — fork-reachable trigger writes
     # to a workflow cache that subsequent privileged runs read from.

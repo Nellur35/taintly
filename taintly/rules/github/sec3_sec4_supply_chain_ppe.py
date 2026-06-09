@@ -13,6 +13,12 @@ from taintly.models import (
     Rule,
     Severity,
 )
+from taintly.parsers.gha_expr import (
+    ExprSyntaxError,
+    context_paths,
+    iter_expression_bodies,
+    structural_expr_enabled,
+)
 from taintly.parsers.segmentation import for_each_step
 from taintly.platform import github_archived_check, github_sha_verify
 from taintly.structural_pattern import StructuralPattern
@@ -25,6 +31,21 @@ from taintly.structural_pattern import StructuralPattern
 
 _FULL_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
 _BRANCH_REF_NAMES = frozenset({"main", "master", "develop", "dev"})
+
+
+def _is_pull_request_target_trigger(
+    value: str, _value_kind: str, _path: tuple[object, ...]
+) -> bool:
+    """SEC4-GH-002 predicate (structural). Fires when ``pull_request_target``
+    is declared as a trigger under ``on:`` in ANY encoding — bare scalar,
+    flow/block list item (a LEAF value), or block/flow mapping key (a MAP_KEY).
+    The on:-anchored path globs scope it to real triggers, so a stray
+    ``pull_request_target:`` key elsewhere, or the name appearing as a
+    string-literal comparand in a defensive ``github.event_name == ...`` guard,
+    does not match (the false-positive classes the old regex needed explicit
+    excludes for)."""
+    return value == "pull_request_target"
+
 
 # First-party GitHub-published action namespaces.  The supply-chain
 # threat model that motivates SEC3-GH-001 (force-push over a tag,
@@ -287,12 +308,33 @@ def _has_dangerous_github_context(value: str, _value_kind: str, _path: tuple[obj
     The ``**.run`` path query already filters to step ``run:``
     keys, so this predicate only needs to detect the dangerous
     GitHub-context expressions inside the shell-string value.
-    The original regex's exclusion for "value is just the
-    expression alone passed to a non-shell key" is not needed
-    here — the path filter does the structural job the regex was
-    approximating.
+
+    Two-stage detection:
+      1. The dot-literal regex ``_DANGEROUS_GITHUB_CONTEXT_RE`` — the fast
+         path and the single source of truth for *which* contexts are
+         dangerous.
+      2. When the regex misses, parse each ``${{ }}`` body with the
+         structural expression parser, normalise every context reference to a
+         canonical lowercased dotted path, and re-test the SAME regex against
+         that canonical form. This catches the documented-equivalent
+         obfuscations the line regex is blind to — index/bracket access
+         (``pull_request['title']``) and context-name case (``GITHUB.event``)
+         — by reusing the regex's dangerous-path definition rather than
+         duplicating it. Purely ADDITIVE: stage 2 can only add a detection,
+         never remove one, and a parse error simply leaves the stage-1 result.
     """
-    return bool(_DANGEROUS_GITHUB_CONTEXT_RE.search(value))
+    if _DANGEROUS_GITHUB_CONTEXT_RE.search(value):
+        return True
+    if not structural_expr_enabled():
+        return False
+    try:
+        for body in iter_expression_bodies(value):
+            for path in context_paths(body):
+                if _DANGEROUS_GITHUB_CONTEXT_RE.search("${{ " + path + " }}"):
+                    return True
+    except ExprSyntaxError:
+        return False
+    return False
 
 
 def _is_unpinned_uses_value(value: str, _value_kind: str, _path: tuple[object, ...]) -> bool:
@@ -1043,6 +1085,9 @@ RULES: list[Rule] = [
             anchor=r"pull_request_target",
             requires=r"github\.event\.pull_request\.head\.(sha|ref)",
             exclude=[r"^\s*#"],
+            # GH-B1: pure attacker-context requires — gha_expr-augmented so an
+            # index/bracket-encoded or context-cased head ref gates the rule.
+            expr_augment_requires=True,
         ),
         remediation=(
             "Use 'pull_request' trigger instead. If secrets are required, use a two-workflow "
@@ -1087,37 +1132,42 @@ RULES: list[Rule] = [
             "Any future modification could introduce a PPE vulnerability. "
             "If the workflow also checks out PR code, SEC4-GH-001 escalates to CRITICAL."
         ),
-        pattern=RegexPattern(
-            # FP-audit class A: bare substring matched
-            # ``pull_request_target`` ANYWHERE in the file, including
-            # inside defensive conditionals like ``github.event_name ==
-            # 'pull_request_target'`` (which routes untrusted triggers
-            # to safe code paths — the OPPOSITE of vulnerable).
-            # Restrict to trigger-declaration shapes: block-form key,
-            # list element, inline-form value, or list-shorthand.
-            match=(
-                r"^\s*pull_request_target\s*:"  # block-form key
-                r"|^\s*-\s*pull_request_target\s*$"  # YAML list item
-                r"|^on\s*:\s*pull_request_target\s*$"  # inline form
-                r"|^on\s*:\s*\[[^\]]*\bpull_request_target\b[^\]]*\]"  # list shorthand
-            ),
-            exclude=[r"^\s*#"],
+        pattern=StructuralPattern(
+            # Read the parsed config structurally instead of regex-matching
+            # trigger shapes line-by-line. The globs cover every encoding:
+            #   * ``on``                     bare scalar (``on: pull_request_target``)
+            #   * ``on[*]``                  flow/block list item (LEAF value)
+            #   * ``**.pull_request_target`` the trigger as a MAPPING KEY in any
+            #                                position — block (``on:\n  pr_t:``)
+            #                                AND flow (``on: { pr_t: {} }``) —
+            #                                via the opt-in MAP_KEY events.
+            # The key glob is deliberately position-independent (parity with the
+            # prior ``^\s*pull_request_target\s*:`` regex, which matched the key
+            # at any indent); structural matching still drops the FP classes the
+            # regex needed explicit excludes for — a comment (tokenizer skips it)
+            # and a string-literal comparand inside ``github.event_name == ...``
+            # (that's a scalar value, not a key). Closes the flow-mapping form
+            # the prior 4-branch regex missed.
+            path=["on", "on[*]", "**.pull_request_target"],
+            predicate=_is_pull_request_target_trigger,
+            include_keys=True,
         ),
         remediation="Use 'pull_request' trigger if write access is not required.",
         reference="https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/",
         test_positive=[
-            "  pull_request_target:",
-            "    pull_request_target:",
-            "on: [pull_request_target]",
+            "on:\n  pull_request_target:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
+            "on: pull_request_target\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
+            "on: [pull_request_target]\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
+            "on: { pull_request_target: {} }\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
+            "on:\n  - push\n  - pull_request_target\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
         ],
         test_negative=[
-            "  pull_request:",
-            "  # pull_request_target:",
+            "on:\n  pull_request:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
+            "on:\n  push:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      # pull_request_target: in a comment is not a trigger\n      - run: echo hi",
             # FP-audit: defensive conditional that mentions the trigger
             # name as a string-literal comparand, NOT as a trigger.
-            "ref: ${{ (github.event_name == 'pull_request_target') && 'main' || github.sha }}",
-            "# fallback if event is pull_request_target",
-            'echo "event=$EVENT_NAME pull_request_target=$PRT"',
+            "on:\n  push:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"${{ (github.event_name == 'pull_request_target') && 'main' || github.sha }}\"",
+            'on:\n  push:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo "event=$EVENT_NAME pull_request_target=$PRT"',
         ],
         stride=["E"],
         threat_narrative=(
@@ -1671,5 +1721,152 @@ RULES: list[Rule] = [
             "off archived dependencies is the cheapest mitigation."
         ),
         finding_family="action_pin_drift",
+    ),
+    # =========================================================================
+    # SEC3-GH-013: Privileged/release job restores a poisonable build cache
+    # =========================================================================
+    # The CONSUME/sink side of cache poisoning.  (The WRITE/poison side --
+    # granting ``actions: write`` so a step can mutate caches -- is AI-GH-023's
+    # job; this rule is its complement and the two can co-occur.)  A job that
+    # restores a build cache AND holds release/write privilege trusts bytes that
+    # a separate, less-trusted workflow run (a fork PR build, a branch a
+    # contributor can push) could have written under the same cache key.  GitHub
+    # Actions caches are shared across a repository's workflows with only
+    # branch-scoped read restrictions, so a cache populated by an attacker-
+    # influenced run can be restored into a privileged build and execute under
+    # the production trigger's permissions and secrets.  The malicious bytes
+    # live in a cache blob, not in git, so the attack survives PR review.
+    # Field grounding: Cacheract (Adnan Khan, Dec 2024); Angular dev-infra
+    # compromise (Dec 2025).  Whether an untrusted ref can actually reach the
+    # same cache key is NOT statically decidable, so this is MEDIUM + review-
+    # needed: it surfaces the cache-into-privileged-build shape for a human to
+    # confirm the key scoping, rather than asserting a confident finding.
+    Rule(
+        id="SEC3-GH-013",
+        title="Privileged or release job restores a build cache that a less-trusted workflow can poison",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-3",
+        description=(
+            "A job restores a build cache (``actions/cache``, or a setup / "
+            "build action that caches -- ``setup-go``, ``Swatinem/rust-cache``, "
+            "``gradle-build-action``, or any ``setup-*`` with ``cache:`` "
+            "enabled) AND that same job holds an exfil/release privilege "
+            "(``id-token: write``, ``contents`` / ``packages`` / "
+            "``deployments: write``, ``write-all``, or a publish step -- "
+            "``npm publish``, ``goreleaser``, ``docker push``, "
+            "``gh release``, a PyPI/release action). GitHub Actions caches are "
+            "shared across a repository's workflows; a cache key populated by a "
+            "less-trusted run (a fork pull-request build, or any workflow a "
+            "contributor can trigger) is restored verbatim into this privileged "
+            "build, so attacker-controlled cache bytes execute with the "
+            "production job's token and secrets. Because the payload lives in a "
+            "cache blob rather than in the repository, it is invisible to anyone "
+            "reviewing the pull request. This is the cache-poisoning sink that "
+            "Cacheract (Dec 2024) and the Angular dev-infra compromise "
+            "(Dec 2025) weaponised."
+        ),
+        pattern=ContextPattern(
+            # Anchor: genuine cache usage in the job.  ``setup-go`` and the
+            # rust/gradle cache actions cache by default; ``setup-node`` /
+            # ``setup-python`` / ``setup-java`` only cache when ``cache:`` is
+            # set, so those are matched via the ``cache:`` key, not the bare
+            # ``uses:`` line (which would over-fire on every repo).
+            anchor=(
+                r"uses:\s*actions/cache(?:/restore)?@"
+                r"|uses:\s*actions/setup-go@"
+                r"|uses:\s*Swatinem/rust-cache@"
+                r"|uses:\s*gradle/(?:gradle-build-action|actions/setup-gradle)@"
+                r"|^\s*cache:\s*['\"]?(?:true|npm|yarn|pip|pnpm|gradle|maven|sbt|poetry|gomod)\b"
+            ),
+            # Requires (same job): a release / write privilege.  Permissions can
+            # sit at job level (in the segment) or workflow level (folded into
+            # the first job's segment); the publish-step signals are always
+            # job-local.
+            requires=(
+                r"id-token:\s*write"
+                r"|(?:contents|packages|deployments)\s*:\s*write"
+                r"|permissions:\s*write-all"
+                r"|\b(?:npm\s+publish|twine\s+upload|goreleaser|docker\s+push"
+                r"|gh\s+release\s+(?:create|upload))\b"
+                r"|uses:\s*(?:softprops/action-gh-release|docker/build-push-action"
+                r"|actions/deploy-pages|pypa/gh-action-pypi-publish"
+                r"|ncipollo/release-action|goreleaser/goreleaser-action)@"
+            ),
+            scope="job",
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Treat a restored cache as untrusted input to a privileged build:\n"
+            "\n"
+            "1. Scope cache keys so a less-trusted run cannot populate the key "
+            "   a privileged build restores. Include a trusted discriminator in "
+            "   the key (e.g. the protected ref / a content hash of vetted "
+            "   inputs), and avoid broad ``restore-keys:`` prefixes that fall "
+            "   back to a fork-populated entry.\n"
+            "2. Split the pipeline: build/cache untrusted code in a job with no "
+            "   secrets and no write token, and do the privileged release in a "
+            "   separate job that does NOT restore that cache (or restores only "
+            "   a cache it produced itself in the same run).\n"
+            "3. Verify integrity before use -- restore into a scratch dir and "
+            "   validate a signed manifest of the cached contents.\n"
+            "4. Minimise the blast radius: keep ``actions: write`` off the "
+            "   workflow (see AI-GH-023) so no step can mutate caches via the "
+            "   GitHub API in the first place."
+        ),
+        reference="https://adnanthekhan.com/2024/12/21/cacheract-the-monster-in-your-actions-cache/",
+        test_positive=[
+            # goreleaser release job: setup-go (default cache) + contents:write
+            # + a release action.
+            "jobs:\n  goreleaser:\n    runs-on: ubuntu-latest\n"
+            "    permissions:\n      contents: write\n"
+            "    steps:\n      - uses: actions/setup-go@v5\n"
+            "      - uses: goreleaser/goreleaser-action@v6\n",
+            # explicit actions/cache restore + id-token:write + npm publish.
+            "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+            "    permissions:\n      id-token: write\n"
+            "    steps:\n      - uses: actions/cache@v4\n"
+            "        with:\n          path: ~/.npm\n          key: npm-cache\n"
+            "      - run: npm publish\n",
+            # setup-node with cache: enabled + packages:write + docker push.
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+            "    permissions:\n      packages: write\n"
+            "    steps:\n      - uses: actions/setup-node@v4\n"
+            "        with:\n          node-version: 20\n          cache: npm\n"
+            "      - run: docker push ghcr.io/org/app:latest\n",
+        ],
+        test_negative=[
+            # Cache in a plain test job with no privilege -- not a sink.
+            "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+            "    permissions:\n      contents: read\n"
+            "    steps:\n      - uses: actions/setup-go@v5\n"
+            "      - run: go test ./...\n",
+            # Privileged publish job with NO cache -- nothing to poison.
+            "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+            "    permissions:\n      id-token: write\n"
+            "    steps:\n      - run: npm publish\n",
+            # setup-node WITHOUT caching (no cache: key) in a release job.
+            "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+            "    permissions:\n      contents: write\n"
+            "    steps:\n      - uses: actions/setup-node@v4\n"
+            "        with:\n          node-version: 20\n      - run: npm publish\n",
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "An attacker opens a fork pull request whose build job populates a "
+            "shared cache key (lockfile-hash keys collide across the fork and "
+            "the base repo). Later, a privileged release workflow on the "
+            "default branch restores that key, and the attacker's cached "
+            "build artefact -- a poisoned ``node_modules``, a tampered Go "
+            "module cache, a swapped compiler plugin -- executes with the "
+            "release job's ``id-token``/write token and secrets. The repo "
+            "owner sees only innocent YAML in the PR; the payload is in the "
+            "cache blob."
+        ),
+        confidence="medium",
+        review_needed=True,
+        incidents=[
+            "https://adnanthekhan.com/2024/12/21/cacheract-the-monster-in-your-actions-cache/"
+        ],
     ),
 ]

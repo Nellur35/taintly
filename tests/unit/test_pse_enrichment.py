@@ -208,7 +208,7 @@ def test_enrich_escalates_to_critical_on_iam_star_policy(tmp_path: Path) -> None
     assert enriched[0].severity == Severity.CRITICAL
     assert "[CRITICAL IAM blast radius]" in enriched[0].title
     assert "iam:*" in enriched[0].description
-    assert "PSE-GH-002 escalation" in enriched[0].description
+    assert "IAM-policy blast-radius escalation" in enriched[0].description
 
 
 def test_enrich_does_not_escalate_when_policy_is_high_only(tmp_path: Path) -> None:
@@ -429,7 +429,7 @@ def test_scan_repo_escalates_pse_finding_via_iam_policy(tmp_path: Path) -> None:
     pse_findings = [f for r in reports for f in r.findings if f.rule_id == "PSE-GH-001"]
     assert len(pse_findings) == 1
     assert pse_findings[0].severity == Severity.CRITICAL
-    assert "PSE-GH-002 escalation" in pse_findings[0].description
+    assert "IAM-policy blast-radius escalation" in pse_findings[0].description
 
 
 def test_scan_repo_leaves_pse_at_high_without_iam_policy(tmp_path: Path) -> None:

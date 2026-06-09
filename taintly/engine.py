@@ -1544,26 +1544,33 @@ def scan_repo(
         jenkinsctx = JenkinsContext() if plat == Platform.JENKINS else None
         for fpath in files:
             file_rules = _rules_for_file(fpath, platform_rules)
+            # Read the file ONCE; both the scan and the surface-evaluation pass
+            # below share the content (each previously opened the file
+            # separately — a redundant read per scanned file). On a read
+            # failure ``_content`` stays None: scan_file re-reads and emits the
+            # ENGINE-ERR finding (preserving the prior error behaviour) and the
+            # surface pass is skipped.
+            try:
+                with open(fpath, encoding="utf-8", errors="replace") as _f:
+                    _content = _f.read()
+            except OSError:
+                _content = None
             all_findings.extend(
                 scan_file(
                     fpath,
                     file_rules,
+                    _content=_content,
                     repoctx=repoctx,
                     gitlabctx=gitlabctx,
                     jenkinsctx=jenkinsctx,
                 )
             )
-            # Surface-evaluation pass: re-read the file once and
-            # check each ContextPattern's anchor regex.  Only families
-            # whose anchors found a candidate get added — so a family
-            # with no candidates anywhere stays "Not applicable".
-            if ctx_rules_by_family:
-                try:
-                    with open(fpath, encoding="utf-8", errors="replace") as _f:
-                        _content = _f.read()
-                    _lines = _content.splitlines()
-                except OSError:
-                    continue
+            # Surface-evaluation pass (reusing the content read above): a
+            # family whose ContextPattern anchors find a candidate is marked
+            # "has surface"; a family with no candidates anywhere stays
+            # "Not applicable".
+            if ctx_rules_by_family and _content is not None:
+                _lines = _content.splitlines()
                 for family, fam_rules in ctx_rules_by_family.items():
                     if family in report.families_with_surface:
                         continue
@@ -1575,8 +1582,8 @@ def scan_repo(
                         ):
                             report.families_with_surface.add(family)
                             break
-        # PSE-GH-002: enrich PSE-GH-001 findings by classifying any
-        # local IAM policy that matches the workflow's role-to-assume
+        # IAM blast-radius escalation: enrich PSE-GH-001 findings by classifying
+        # any local IAM policy that matches the workflow's role-to-assume
         # ARN.  Mutates findings in-place — escalation only happens on
         # a CRITICAL classifier verdict; absence of evidence keeps the
         # finding at HIGH.  GitHub-only (the rule is GH-platform).

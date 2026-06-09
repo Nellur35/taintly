@@ -60,7 +60,14 @@ shape is different and we track it separately in a future rule.
 
 from __future__ import annotations
 
-from taintly.models import ContextPattern, Platform, RegexPattern, Rule, Severity
+import re
+
+from taintly.models import ContextPattern, Platform, Rule, Severity
+
+# TAINT-JK-001 reads shell-sink bodies structurally via the island reader
+# (same consumer SEC9/SEC4-JK use). sec_jenkins does not import this module, so
+# this import is acyclic.
+from .sec_jenkins import _JenkinsfileShellLeafPattern
 
 # Classic / well-namespaced source bindings.  These are recognised in
 # both ``${...}`` interpolated form AND bare form (e.g. ``value: title``
@@ -141,6 +148,23 @@ _GWT_NAMES = (
 )
 
 _TAINTED_REF = r"\$\{(?:" + _TAINTED_NAMES + r"|" + _GWT_NAMES + r")\}"
+_TAINT_JK_001_BODY_RE = re.compile(_TAINTED_REF)
+
+
+def _taint_jk_001_predicate(shell_body: str, interpolated: bool) -> bool:
+    """TAINT-JK-001 (structural): an attacker-controlled binding
+    (``${env.CHANGE_TITLE}``, ``${params.X}``, well-namespaced GWT names, …)
+    interpolated into a shell-sink body. Quote-aware — fires ONLY on an
+    interpolating GString body (``interpolated=True``); a single-quoted body
+    leaves the ``${...}`` literal (Groovy does not substitute) and is the
+    separate (safe-by-Groovy) shell-env vector, not this CRITICAL finding.
+    Reuses the exact ``_TAINTED_REF`` word-boundaried pattern, so the precise
+    negatives (``${env.title}`` ≠ GWT, ``${entitled_users}`` substring, bare
+    ``${title}``/``${body}``/``${ref}`` Groovy-locals) stay clean. Reading the
+    body structurally additionally covers the ``sh(script: ...)`` method form
+    and the triple-double ``sh \"\"\"...\"\"\"`` heredoc the line regex deferred."""
+    return interpolated and bool(_TAINT_JK_001_BODY_RE.search(shell_body))
+
 
 # Bare Groovy expression form (no ``${...}`` wrapper) — legal wherever
 # Groovy expects an expression (e.g., a parameter ``value:`` slot).
@@ -175,30 +199,14 @@ RULES: list[Rule] = [
             "RCE with the build agent's credentials, SSH keys for "
             "SCM, and whatever ``withCredentials`` scope is active."
         ),
-        pattern=RegexPattern(
-            # Anchor on the sink (``sh`` / ``bat`` / ``powershell``
-            # followed by an optional opening paren and a double
-            # quote), then require a tainted ``${...}`` reference
-            # inside the same double-quoted string.  Non-greedy
-            # ``[^"\n]*?`` keeps the match to a single line so we
-            # don't bridge across unrelated strings.
-            match=(r'\b(?:sh|bat|powershell|pwsh)\s*\(?\s*"[^"\n]*?' + _TAINTED_REF),
-            exclude=[
-                # Single-line Groovy / Java comment
-                r"^\s*//",
-                # Docstring / javadoc continuation
-                r"^\s*/\*",  # `/*` block-comment opener (single-line
-                # `/* ... */` or multi-line opener)
-                r"^\s*\*",
-                # Heredoc-style: tracked as a separate follow-up rule,
-                # so don't fire on the opening delimiter of a
-                # ``sh \"\"\"...`` block.
-                r'\bsh\s*"""',
-                r'\bbat\s*"""',
-                r'\bpowershell\s*"""',
-                r'\bpwsh\s*"""',
-            ],
-        ),
+        # Migrated from a line-anchored RegexPattern to the structural island
+        # reader (quote-aware predicate). The reader handles the sink/quote
+        # shapes the regex enumerated (incl. the sh(script: ...) method form and
+        # the triple-double heredoc the regex excluded), masks comments
+        # structurally, and the `interpolated` flag preserves the double-quote-
+        # GString-only precision (single-quoted bodies don't interpolate → not
+        # this finding).
+        pattern=_JenkinsfileShellLeafPattern(_taint_jk_001_predicate),
         remediation=(
             "The injection breaks because Groovy substitutes the\n"
             "variable into the command string before the shell ever\n"
@@ -255,6 +263,13 @@ RULES: list[Rule] = [
             # pwsh — cross-platform PowerShell Core sink (same GString
             # interpolation as `powershell`).
             'pwsh "Write-Host ${env.CHANGE_TITLE}"',
+            # Triple-double heredoc — a GString, so it interpolates the PR
+            # title just like the single-line double-quote form. The line
+            # regex deferred this; the structural reader covers it.
+            'sh """echo ${env.CHANGE_TITLE}"""',
+            # sh(script: ...) method-call form — the body is the script: arg;
+            # the line regex's `\\(?\\s*"` anchor missed the named-arg shape.
+            'sh(script: "echo ${env.CHANGE_TITLE}")',
             # SCM branch / tag identifiers (Git + Multibranch plugins).
             # Distinct command text from SEC4-JK-002's GIT_BRANCH sample.
             'sh "fetch origin ${env.GIT_BRANCH}"',
@@ -293,11 +308,10 @@ RULES: list[Rule] = [
             'sh "echo building ${env.BUILD_NUMBER}"',
             # Interpolated local Groovy variable, not a taint source.
             'sh "echo ${myLocalVar}"',
-            # Triple-quoted heredoc — excluded (follow-up rule).
-            'sh """echo ${env.CHANGE_TITLE}"""',
-            # Commented line.
+            # Commented line — structurally masked, so no shell sink is seen.
             '// sh "deploy ${env.CHANGE_TITLE}"',
-            '   * sh "deploy ${env.CHANGE_TITLE}"',
+            # Block comment (javadoc) — the sh is inside /* ... */ and masked.
+            '/*\n * sh "deploy ${env.CHANGE_TITLE}"\n */',
             # withCredentials scope using env.CHANGE_TITLE in the
             # BINDING list, not inside a sh step.
             'withEnv(["TITLE=${env.CHANGE_TITLE}"]) { echo "title set" }',

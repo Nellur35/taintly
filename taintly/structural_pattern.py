@@ -52,6 +52,13 @@ class StructuralPattern:
     path: str | list[str]
     predicate: Callable[[str, str, tuple[object, ...]], bool]
     snippet_format: Optional[str] = None
+    # When True, MAP_KEY events are also matched against the predicate
+    # (``value`` = the key name, ``value_kind`` = "key"), so a rule can fire on
+    # a mapping key whose value is empty/null/nested — e.g. a trigger declared
+    # as ``on:\n  pull_request_target:`` or ``on: { pull_request_target: {} }``,
+    # which produce no LEAF_SCALAR. Default False keeps every existing pattern's
+    # walk leaf-only and byte-identical.
+    include_keys: bool = False
     _schema_name: Optional[str] = field(default=None, init=False, repr=False)
 
     def _paths(self) -> list[str]:
@@ -75,11 +82,30 @@ class StructuralPattern:
                 query=path_glob,
                 content=content,
                 recover=True,
+                include_keys=self.include_keys,
             ):
                 if ev.kind == EventKind.CUTOFF:
                     cutoff_seen = True
                     cutoff_line = ev.line
                     break
+                if ev.kind == EventKind.MAP_KEY:
+                    # Only reached when include_keys=True (else no MAP_KEY is
+                    # emitted). Match the key name through the same predicate.
+                    any_leaf_seen = True
+                    kvalue = ev.value or ""
+                    try:
+                        khit = self.predicate(kvalue, ev.value_kind or "key", ev.path)
+                    except Exception:
+                        khit = False
+                    if khit:
+                        ksnippet = self._render_snippet(
+                            kvalue, ev.value_kind or "key", ev.path, ev.line, lines
+                        )
+                        kkey = (ev.line, ksnippet)
+                        if kkey not in seen:
+                            seen.add(kkey)
+                            results.append((ev.line, ksnippet))
+                    continue
                 if ev.kind != EventKind.LEAF_SCALAR:
                     continue
                 any_leaf_seen = True

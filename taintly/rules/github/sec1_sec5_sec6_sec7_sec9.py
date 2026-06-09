@@ -168,7 +168,9 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
     r"configure-aws-credentials",
     r"pypa/gh-action-pypi-publish",
     r"sigstore/gh-action-sigstore",
-    r"actions/attest-build-provenance",
+    # Generalized from ``-build-provenance`` to cover attest / attest-sbom too;
+    # all actions/attest* require id-token:write for Sigstore signing.
+    r"actions/attest",
     # OIDC-consuming actions that legitimately need
     # ``id-token: write`` (documented OIDC-only flows where the
     # token is the actual auth surface, not a misconfigured
@@ -179,6 +181,13 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
     # CodSpeed benchmarking action requires ``id-token: write``
     # for OIDC-based result attestation.
     r"CodSpeedHQ/action",
+    # Additional generic OIDC consumers (sample-labeled, additive — each
+    # requires id-token:write by design, so its presence makes the grant
+    # legitimate).
+    r"hashicorp/vault-action",
+    r"sigstore/cosign-installer",
+    r"octo-sts",
+    r"rubygems/configure-rubygems-credentials",
     # Shell-form.  ``--`` is two non-word characters, so a leading
     # ``\b`` would never match on the flag — the preceding space is
     # also non-word, so there is no word boundary between them.  The
@@ -187,10 +196,25 @@ _OIDC_CONSUMER_ALTERNATES: tuple[str, ...] = (
     r"\buv\s+publish\b",
     r"\btwine\s+upload\b[^\n]*--use-oidc\b",
     r"\bcargo\s+publish\b",
+    r"\bcosign\s+sign\b",
     r"\bnpm\s+publish\b[^\n]*--provenance\b",
 )
 
 _OIDC_CONSUMER_REGEX: str = "|".join(_OIDC_CONSUMER_ALTERNATES)
+
+# Unseeable-consumer signals for SEC5-GH-001 / SEC5-GH-001B. A local composite
+# (``uses: ./...``) or a reusable-workflow call can hold the OIDC consumer
+# INSIDE the called thing, which a shallow scan never sees. When one is present
+# we cannot confidently call id-token:write over-provisioned — that case routes
+# to the review-needed sibling SEC5-GH-001B instead of a confident MEDIUM.
+_LOCAL_COMPOSITE_USES: str = r"uses:\s*['\"]?\./"
+# Remote reusable-workflow call: ``uses: owner/repo/.github/workflows/x.yml@ref``
+# (local reusable calls — ``uses: ./.github/workflows/x.yml`` — are already
+# covered by _LOCAL_COMPOSITE_USES via the leading ``./``).
+_REUSABLE_WORKFLOW_CALL: str = (
+    r"uses:\s*['\"]?[\w.\-]+/[\w.\-]+/\.github/workflows/[\w.\-/]+\.ya?ml"
+)
+_UNSEEABLE_CONSUMER_REGEX: str = _LOCAL_COMPOSITE_USES + "|" + _REUSABLE_WORKFLOW_CALL
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +411,12 @@ def _is_unmasked_secret_input(
     if not _CREDENTIAL_INPUT_RE.match(input_slot):
         return False
     if not _SECRETS_REF_VALUE_RE.match(value or ""):
+        return False
+    # ``secrets.GITHUB_TOKEN`` is auto-registered with the runner's log redactor
+    # on every job regardless of env/with routing, so a with-input GITHUB_TOKEN
+    # is always masked — not the unmasked-long-lived-secret threat this rule
+    # targets. (Long-lived PATs / API keys passed via with: are the real risk.)
+    if re.search(r"\bsecrets\.GITHUB_TOKEN\b", value):
         return False
     job_id = path[1]
     step_i = path[3]
@@ -725,7 +755,7 @@ RULES: list[Rule] = [
             "literal string value rather than a ``${{ secrets.X }}`` "
             "reference.  The credential is stored in the workflow "
             "YAML, in every commit's history, and is visible to "
-            "every fork â€” far broader exposure than any GitHub "
+            "every fork — far broader exposure than any GitHub "
             "secrets channel.  Even ``actions/checkout`` is enough "
             "to surface the value to an attacker who runs an arbitrary "
             "step in the workflow.\n"
@@ -773,7 +803,7 @@ RULES: list[Rule] = [
             ),
         ],
         test_negative=[
-            # Secret-referenced password â€” safe.
+            # Secret-referenced password — safe.
             "jobs:\n  test:\n    services:\n      db:\n        image: postgres:14\n"
             "        credentials:\n          username: postgres\n"
             "          password: ${{ secrets.POSTGRES_PASSWORD }}\n",
@@ -790,7 +820,7 @@ RULES: list[Rule] = [
             "publicly readable on every public repo, in every fork, "
             "in every commit's history) recovers the literal "
             "credential and uses it to push a backdoored image to the "
-            "private registry â€” or to authenticate as the registry "
+            "private registry — or to authenticate as the registry "
             "user account in any other system the user has access "
             "to.  Unlike a leaked secret in CI logs (which has a "
             "redaction layer), workflow-text leaks are immediate and "
@@ -821,12 +851,12 @@ RULES: list[Rule] = [
         pattern=ContextPattern(
             anchor=r"id-token:\s*write",
             requires=r"id-token:\s*write",
-            # OIDC consumers — see _OIDC_CONSUMER_ALTERNATES above for
-            # the canonical list.  Action-form covers the established
-            # federated-credential and trusted-publishing actions;
-            # shell-form covers PEP-740 / registry-OIDC publish
-            # commands that don't go through a uses: reference.
-            requires_absent=_OIDC_CONSUMER_REGEX,
+            # No VISIBLE OIDC consumer (see _OIDC_CONSUMER_ALTERNATES) AND no
+            # unseeable indirection (local composite / reusable-workflow call,
+            # which can hold the consumer out of view). Only then is the grant a
+            # confident over-provision; the indirection case routes to the
+            # review-needed sibling SEC5-GH-001B instead.
+            requires_absent=_OIDC_CONSUMER_REGEX + "|" + _UNSEEABLE_CONSUMER_REGEX,
             exclude=[r"^\s*#"],
         ),
         remediation=(
@@ -848,6 +878,11 @@ RULES: list[Rule] = [
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: twine upload --use-oidc dist/*",
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: cargo publish",
             "permissions:\n  id-token: write\njobs:\n  publish:\n    steps:\n      - run: npm publish --provenance --access public",
+            # Unseeable consumer — the OIDC consumer may live inside the called
+            # local composite / reusable workflow; routed to SEC5-GH-001B
+            # (review-needed), not a confident over-provision here.
+            "permissions:\n  id-token: write\njobs:\n  build:\n    steps:\n      - uses: ./.github/actions/dd-sts-api-key",
+            "permissions:\n  id-token: write\njobs:\n  call:\n    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0",
         ],
         stride=["E"],
         threat_narrative=(
@@ -855,6 +890,70 @@ RULES: list[Rule] = [
             "OIDC action is available for any compromised step to mint and exchange for cloud credentials. "
             "Attackers who compromise a single step in a workflow with this permission can silently "
             "obtain persistent cloud access beyond the workflow run."
+        ),
+    ),
+    # =========================================================================
+    # SEC5-GH-001B: id-token: write + an unseeable consumer (composite/reusable)
+    # =========================================================================
+    Rule(
+        id="SEC5-GH-001B",
+        title="id-token: write granted; OIDC consumer may live in a called composite/workflow",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-5",
+        confidence="low",
+        review_needed=True,
+        description=(
+            "The workflow grants 'id-token: write' and has no OIDC-consuming "
+            "action or command visible in this file, but it DOES invoke a local "
+            "composite action (uses: ./...) or a reusable workflow call. The "
+            "legitimate OIDC consumer is very likely inside that called "
+            "composite/workflow, which taintly cannot see from this file alone "
+            "(shallow checkout). Rather than assert over-provisioning with false "
+            "confidence, this is surfaced for human review: confirm the called "
+            "composite/workflow actually mints and exchanges the OIDC token, and "
+            "that the grant is scoped to the job that needs it."
+        ),
+        pattern=ContextPattern(
+            anchor=r"id-token:\s*write",
+            # An unseeable indirection must be present (file-wide); the anchor
+            # already enforces the id-token: write line per match.
+            requires=_UNSEEABLE_CONSUMER_REGEX,
+            # ...and NO visible OIDC consumer — the exact complement of the
+            # tightened SEC5-GH-001 within the id-token: write population.
+            requires_absent=_OIDC_CONSUMER_REGEX,
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Open the referenced composite action / reusable workflow and "
+            "confirm it consumes the OIDC token (e.g. "
+            "aws-actions/configure-aws-credentials, azure/login, a "
+            "trusted-publishing step). If it does, no change is needed — the "
+            "grant is justified. If it does NOT, remove 'id-token: write' as "
+            "over-provisioned. Scope the grant to the specific job that calls "
+            "the consumer rather than the whole workflow."
+        ),
+        reference="https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect",
+        test_positive=[
+            # Local composite holds the consumer (the dd-trace-js shape).
+            "permissions:\n  id-token: write\njobs:\n  build:\n    steps:\n      - uses: ./.github/actions/dd-sts-api-key",
+            # Local reusable-workflow call.
+            "permissions:\n  id-token: write\njobs:\n  call:\n    uses: ./.github/workflows/release.yml",
+        ],
+        test_negative=[
+            # No indirection — that's SEC5-GH-001's confident territory, not 1B.
+            "permissions:\n  id-token: write\njobs:\n  c:\n    steps:\n      - uses: anthropics/claude-code-action@v1",
+            # Visible consumer present — neither rule fires.
+            "permissions:\n  id-token: write\njobs:\n  c:\n    steps:\n      - uses: ./.github/actions/foo\n      - uses: pypa/gh-action-pypi-publish@v1",
+            # No id-token grant at all.
+            "permissions:\n  contents: read\njobs:\n  c:\n    steps:\n      - uses: ./.github/actions/foo",
+        ],
+        stride=["E"],
+        threat_narrative=(
+            "id-token: write is granted but the OIDC consumer (if any) is hidden "
+            "behind a composite/reusable indirection. If the called unit does "
+            "not actually consume the token, the permission is silently "
+            "over-provisioned and any compromised step can mint cloud credentials."
         ),
     ),
     # =========================================================================
@@ -1876,9 +1975,16 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-9",
         finding_family="supply_chain_immutability",
+        # SEC6-GH-007 (the SEC-6 framing of curl|bash) fires on the same lines
+        # with byte-identical remediation; on a co-located line this rule's
+        # SEC-9 integrity framing is the more accurate one, so supersede it to
+        # collapse the duplicate HIGH finding. (SEC6-GH-007 still fires standalone
+        # on the broad-iex shapes — WebClient/DownloadString — this rule's
+        # narrower iex branch doesn't match, so no coverage is lost.)
+        supersedes=["SEC6-GH-007"],
         description=(
             "A ``run:`` step downloads a script from the network and "
-            "pipes it directly into a shell or interpreter â€” "
+            "pipes it directly into a shell or interpreter — "
             "``curl ... | bash``, ``wget ... | sh``, "
             "``bash <(curl ...)``, or PowerShell "
             "``iex(Invoke-WebRequest ...)``.  The downloaded bytes "
@@ -1886,14 +1992,14 @@ RULES: list[Rule] = [
             "so whoever controls the URL controls the workflow.\n"
             "\n"
             "Distinct from SEC3-GH-001 (action pinning) and SEC3-GH-"
-            "005 (Docker image pinning) â€” those guard the workflow "
+            "005 (Docker image pinning) — those guard the workflow "
             "definition; this rule guards the runtime tool chain "
             "the workflow invokes."
         ),
         pattern=RegexPattern(
-            # Five idiomatic shapes: curl|sh, wget|sh, bash <(curlâ€¦),
-            # iex(Invoke-WebRequestâ€¦) or iex(iwrâ€¦), and the bare
-            # ``... | python -c 'â€¦'`` shape that downloads then evals.
+            # Five idiomatic shapes: curl|sh, wget|sh, bash <(curl…),
+            # iex(Invoke-WebRequest…) or iex(iwr…), and the bare
+            # ``... | python -c '…'`` shape that downloads then evals.
             match=(
                 r"(?:curl|wget)\s+[^|\n#]*\|\s*(?:bash|sh|zsh|fish|python|perl|ruby|node)"
                 r"|bash\s*<\s*\(\s*(?:curl|wget)"
@@ -1935,7 +2041,7 @@ RULES: list[Rule] = [
             "      - run: wget -q -O setup.sh https://example.com/setup.sh",
             # Comment.
             "      # - run: curl https://example.com | bash",
-            # Pipe but not network â€” no curl/wget anchor.
+            # Pipe but not network — no curl/wget anchor.
             "      - run: cat install.sh | bash",
             # Powershell command unrelated to web download.
             "      - run: iex 'Get-Process | Format-Table'",
@@ -1947,7 +2053,7 @@ RULES: list[Rule] = [
             "to review the bytes before execution.  DNS hijack, CDN "
             "compromise, expired-and-resquatted domain, or a supply-"
             "chain attack on the hosting infrastructure all let the "
-            "attacker substitute a malicious payload â€” at which point "
+            "attacker substitute a malicious payload — at which point "
             "every secret bound to the workflow is exfiltrable on the "
             "next run."
         ),
@@ -2425,36 +2531,21 @@ RULES: list[Rule] = [
             "``${{ env.NAME }}`` — the env-block path is masked, the "
             "with-input is then a non-secret reference."
         ),
-        pattern=ContextPattern(
-            # Per-line anchor: a YAML key ending in a credential-shape
-            # token, mapped to a ``${{ secrets.X }}`` value.  The
-            # ``(?i)`` flag accepts both ``token:`` and ``Token:``
-            # spellings; the leading whitespace requirement excludes
-            # workflow-level keys.  The prefix portion is zero-or-more
-            # word/hyphen characters so bare ``token:`` / ``password:``
-            # match alongside hyphenated forms like ``api-key:``.
-            anchor=(
-                r"(?i)^\s+[\w-]*"
-                r"(?:token|key|secret|password|pass)"
-                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
-            ),
-            # The full file must contain at least one such pattern for
-            # the rule to fire — the anchor regex itself is the
-            # presence check.
-            requires=(
-                r"(?i)\s+[\w-]*"
-                r"(?:token|key|secret|password|pass)"
-                r"\s*:\s*\$\{\{\s*secrets\.\w+\s*\}\}"
-            ),
-            # Step-scope suppression: when this step's ``env:`` block
-            # routes a secret, the safe pattern is in use at the
-            # step level — suppress.  The redactor registration is
-            # per-step, so co-locating the safe-pattern signal at
-            # step granularity matches the runner's actual masking
-            # semantics: a secret declared in step A's env block is
-            # masked for step A's logs only.
-            anchor_step_exclude=(r"env:\s*\n[\s\S]*?\$\{\{\s*secrets\.[A-Za-z0-9_]+\s*\}\}"),
-            exclude=[r"^\s*#"],
+        # Path-aware (structural): a credential-shape ``with:`` input slot set
+        # to ``${{ secrets.X }}`` on a step whose ``env:`` block routes no
+        # secret (the safe pattern) and whose (action, slot) pair is not on the
+        # safe-consumer allowlist. The predicate enforces the
+        # ``jobs.<j>.steps[<i>].with.<slot>`` path shape, so job/step ``env:``
+        # blocks (the recommended remediation) and reusable-call ``secrets:``
+        # passthroughs no longer false-fire, and the curated
+        # ``_SAFE_ACTION_INPUT_PAIRS`` allowlist is honored — replacing the
+        # line regex whose anchor matched any indented credential key.
+        pattern=WorkflowAwarePattern(
+            path="jobs.*.steps[*].with.*",
+            predicate=_is_unmasked_secret_input,
+            # The rule only fires on ``${{ secrets.X }}`` — skip the structural
+            # walk on secret-free (and adversarially deep) workflows.
+            requires="secrets.",
         ),
         remediation=(
             "Route the secret through the step's ``env:`` block and\n"
@@ -2494,7 +2585,7 @@ RULES: list[Rule] = [
             # password input.
             (
                 "jobs:\n  push:\n    runs-on: ubuntu-latest\n"
-                "    steps:\n      - uses: docker/login-action@v3\n"
+                "    steps:\n      - uses: some-org/registry-push@v1\n"
                 "        with:\n"
                 "          password: ${{ secrets.REGISTRY_PASSWORD }}"
             ),
@@ -2536,6 +2627,32 @@ RULES: list[Rule] = [
                 "    steps:\n      - uses: some-org/some-action@v1\n"
                 "        with:\n"
                 "          repository: ${{ secrets.PRIVATE_REPO }}"
+            ),
+            # Safe-consumer allowlist: docker/login-action handling its own
+            # password input is the action's documented purpose — the
+            # (action, slot) pair is on _SAFE_ACTION_INPUT_PAIRS, so it must
+            # NOT fire (this is the dead-allowlist FP the regex form leaked).
+            (
+                "jobs:\n  push:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: docker/login-action@v3\n"
+                "        with:\n"
+                "          password: ${{ secrets.REGISTRY_PASSWORD }}"
+            ),
+            # GITHUB_TOKEN is auto-masked by the runner's redactor on every job
+            # regardless of routing, so a with-input GITHUB_TOKEN is not the
+            # unmasked-secret threat — must not fire.
+            (
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: some-org/some-action@v1\n"
+                "        with:\n"
+                "          token: ${{ secrets.GITHUB_TOKEN }}"
+            ),
+            # secrets: passthrough in a reusable-workflow call is not a step
+            # with: input — must not fire.
+            (
+                "jobs:\n  call:\n    uses: ./.github/workflows/publish.yml\n"
+                "    secrets:\n"
+                "      token: ${{ secrets.CRATES_IO_TOKEN }}"
             ),
             # Comment.
             "          # token: ${{ secrets.GH_TOKEN }}",
@@ -2889,6 +3006,45 @@ RULES: list[Rule] = [
             "and push a backdoored artifact to the package registry. "
             "The environment approval gate is the last human checkpoint "
             "between automated CI and a published release."
+        ),
+    ),
+    # =========================================================================
+    # SEC6-GH-014: world-writable permissions (chmod 777) in a run: step
+    # =========================================================================
+    Rule(
+        id="SEC6-GH-014",
+        title="chmod 777 (world-writable permissions) in a run: step",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-6",
+        description=(
+            "A ``run:`` step sets world-writable permissions (``chmod 777`` / "
+            "``chmod -R 777`` / ``chmod a+rwx``). Any process — including other "
+            "jobs on a shared or self-hosted runner — can then modify the file. "
+            "Cross-platform sibling of SEC6-GL-005 (GitLab) and SEC6-JK-010 "
+            "(Jenkins)."
+        ),
+        pattern=RegexPattern(
+            match=r"chmod\s+(-R\s+)?(0?777|a\+rwx)",
+            exclude=[r"^\s*#"],
+        ),
+        remediation="Use minimal permissions: chmod 755 for executables, chmod 644 for files.",
+        reference="https://owasp.org/www-project-top-10-ci-cd-security-risks/",
+        test_positive=[
+            "        run: chmod 777 /app/deploy.sh",
+            "        run: chmod -R 777 .",
+        ],
+        test_negative=[
+            "        run: chmod 755 /app/deploy.sh",
+            "        run: chmod +x tool.bin",
+            "        # run: chmod 777 /app",
+        ],
+        stride=["E"],
+        threat_narrative=(
+            "World-writable files on a runner can be modified by any concurrent "
+            "job or, on a self-hosted runner, by an attacker who achieved initial "
+            "execution — a common persistence mechanism where a modified script "
+            "survives across jobs."
         ),
     ),
 ]

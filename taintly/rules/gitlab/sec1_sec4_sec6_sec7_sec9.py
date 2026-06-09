@@ -4,6 +4,8 @@ Covers OWASP CICD-SEC-1, SEC-2, SEC-4, SEC-5, SEC-6 (extended), SEC-7, SEC-9.
 These were entirely missing or undercovered in the initial implementation.
 """
 
+import re
+
 from taintly.models import (
     ContextPattern,
     PathPattern,
@@ -13,6 +15,84 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+
+# Identity-gate shape shared by SEC4-GL-007: ``$GITLAB_USER_*`` compared against
+# a literal / slash-regex / bareword — the spoofable access-control match.
+_GITLAB_USER_GATE_RE = re.compile(
+    r"\$\{?GITLAB_USER_(?:LOGIN|NAME|ID|EMAIL)\}?"
+    r"\s*(?:==|!=|=~|!~)\s*"
+    r"(?:['\"][^'\"]+['\"]|/[^/\n]+/|[@\w.+-]+)"
+)
+_WHEN_NEVER_RE = re.compile(r"^\s*when\s*:\s*never\b")
+_RULES_ITEM_RE = re.compile(r"^(\s*)-\s")
+
+
+class GitlabIdentityGatePattern:
+    """SEC4-GL-007: a pipeline ``rules:if:`` access-control gate keyed on the
+    spoofable ``$GITLAB_USER_*`` trigger identity.
+
+    Fires on GRANT rules (``when: on_success`` / default) but NOT on
+    ``when: never`` DENY rules.  A deny gate keyed on the identity withholds
+    execution — it grants nothing to a spoofed actor — so flagging it as a
+    confused-deputy access grant is a logic-direction false positive.  Replaces
+    a bare :class:`RegexPattern`, which was blind to the rule's ``when:``
+    direction.
+    """
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            if line.lstrip(" \t").startswith("#"):
+                continue
+            if not _GITLAB_USER_GATE_RE.search(line):
+                continue
+            if self._rule_is_deny_gate(lines, i):
+                continue
+            results.append((i + 1, line.strip()))
+        return results
+
+    @staticmethod
+    def _rule_is_deny_gate(lines: list[str], idx: int) -> bool:
+        """True when the matched ``if:`` at ``idx`` belongs to a ``rules:``
+        list item whose ``when:`` is ``never`` (a defensive deny gate)."""
+        marker = _RULES_ITEM_RE.match(lines[idx])
+        if marker:
+            marker_indent = len(marker.group(1))
+            start = idx
+        else:
+            # Block-scalar / continuation ``if:`` — walk back to the list-item
+            # marker that owns this condition line.
+            marker_indent = None
+            start = idx
+            for j in range(idx - 1, -1, -1):
+                s = lines[j].lstrip(" \t")
+                if not s or s.startswith("#"):
+                    continue
+                back = _RULES_ITEM_RE.match(lines[j])
+                if back:
+                    marker_indent = len(back.group(1))
+                    start = j
+                    break
+                if len(lines[j]) - len(s) == 0:
+                    break  # reached a top-level key without finding a marker
+            if marker_indent is None:
+                return False
+        # ``marker_indent`` is an int on both paths here (a marker was found,
+        # or we returned above); this guard narrows the type for mypy without
+        # an ``assert`` (bandit B101 flags asserts in non-test code).
+        if marker_indent is None:
+            return False
+        # Scan the item body (lines indented deeper than the marker) up to the
+        # next sibling item / dedent, looking for ``when: never``.
+        for j in range(start + 1, len(lines)):
+            s = lines[j].lstrip(" \t")
+            if not s or s.startswith("#"):
+                continue
+            if len(lines[j]) - len(s) <= marker_indent:
+                break  # next sibling rule item or dedent out of rules:
+            if _WHEN_NEVER_RE.match(lines[j]):
+                return True
+        return False
 
 
 class DotenvReportPattern:
@@ -1115,17 +1195,7 @@ RULES: list[Rule] = [
             "author / committer identity instead, or gate on a ref "
             "that only the intended actor can push."
         ),
-        pattern=RegexPattern(
-            match=(
-                r"\$\{?GITLAB_USER_(?:LOGIN|NAME|ID|EMAIL)\}?"
-                r"\s*(?:==|!=|=~|!~)\s*"
-                # Literal string (quoted or unquoted) OR a slash-
-                # delimited regex (GitLab's ``=~`` operator).  Both
-                # shapes are the insecure string-match gate.
-                r"(?:['\"][^'\"]+['\"]|/[^/\n]+/|[@\w.+-]+)"
-            ),
-            exclude=[r"^\s*#"],
-        ),
+        pattern=GitlabIdentityGatePattern(),
         remediation=(
             "Use the MR author / source-project identity rather than "
             "the trigger actor.  ``$CI_MERGE_REQUEST_AUTHOR`` (GitLab "
@@ -1154,11 +1224,18 @@ RULES: list[Rule] = [
             "  rules:\n    - if: $GITLAB_USER_NAME == 'renovate-bot'",
             "    - if: '$GITLAB_USER_ID == 42'",
             "    - if: '$GITLAB_USER_EMAIL =~ /bot@/'",
+            # GRANT rule (explicit when: on_success) keyed on the spoofable
+            # identity is still the confused-deputy vector — must fire.
+            "  rules:\n    - if: '$GITLAB_USER_LOGIN == \"trusted-bot\"'\n      when: on_success",
         ],
         test_negative=[
             "    - if: '$CI_MERGE_REQUEST_AUTHOR == \"dependabot\"'",
             "    - if: $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID",
             "    # - if: '$GITLAB_USER_LOGIN == \"bot\"'",
+            # DENY gate (when: never) keyed on the identity is DEFENSIVE — it
+            # withholds execution and grants nothing to a spoofed actor, so it
+            # must NOT fire.
+            "  rules:\n    - if: '$GITLAB_USER_LOGIN == \"release-bot\"'\n      when: never",
         ],
         stride=["S", "E"],
         threat_narrative=(
@@ -1558,80 +1635,6 @@ RULES: list[Rule] = [
                 "  artifacts:\n    reports:\n      junit: junit.xml\n"
             ),
             # No reports: block at all.
-            "build:\n  script:\n    - make\n  artifacts:\n    paths:\n      - dist/\n",
-        ],
-        stride=["T"],
-        threat_narrative=(
-            "Dotenv artifacts are an opaque transit channel for "
-            "attacker-controllable bytes.  A pipeline author who "
-            "carefully quotes ``$CI_COMMIT_TITLE`` in a build job's "
-            "script can still be compromised when that job writes the "
-            "title to a dotenv artifact and a downstream job splices "
-            "it into a shell command unquoted.  SEC4-GL-001 catches "
-            "the direct form; this rule surfaces the transit form for "
-            "producer-side review."
-        ),
-    ),
-    # =========================================================================
-    # SEC4-GL-009: dotenv artifact transit — review variables flowing
-    # between jobs via ``artifacts:reports:dotenv``
-    # =========================================================================
-    Rule(
-        id="SEC4-GL-009",
-        title="dotenv artifact transit â€” variables passed between jobs need source review",
-        severity=Severity.LOW,
-        platform=Platform.GITLAB,
-        owasp_cicd="CICD-SEC-4",
-        review_needed=True,
-        confidence="low",
-        description=(
-            "The pipeline uses ``artifacts:reports:dotenv`` to pass "
-            "variables from a producer job to a consumer job via "
-            "``needs:``.  Dotenv artifacts are an opaque taint transit "
-            "channel: the consumer job's ``script:`` references "
-            "``$KEY`` and has no static way to know whether the "
-            "producer derived KEY from attacker-controllable context "
-            "(``$CI_COMMIT_TITLE``, ``$CI_MERGE_REQUEST_TITLE``, file "
-            "contents, branch name).  Review every producer job's "
-            "logic that writes into the dotenv artifact â€” if any "
-            "upstream value is attacker-controllable, sanitise at the "
-            "producer before writing to the dotenv file.  GitLab "
-            "analog of SEC4-GH-023 (step-output injection)."
-        ),
-        pattern=DotenvReportPattern(),
-        remediation=(
-            "Audit the producer job that writes to the dotenv "
-            "artifact:\n"
-            "\n"
-            "  build:\n"
-            "    script:\n"
-            "      # If CI_COMMIT_TITLE can carry attacker bytes,\n"
-            "      # sanitise before writing.\n"
-            '      - SAFE_TITLE=$(echo "$CI_COMMIT_TITLE" | tr -cd "[:alnum:] -")\n'
-            '      - echo "TITLE=$SAFE_TITLE" >> build.env\n'
-            "    artifacts:\n"
-            "      reports:\n"
-            "        dotenv: build.env\n"
-            "\n"
-            'The consumer\'s ``script: - echo \\"$TITLE\\"`` is then '
-            "safe because the producer enforces the alphabet."
-        ),
-        reference="https://docs.gitlab.com/ee/ci/yaml/artifacts_reports.html#artifactsreportsdotenv",
-        test_positive=[
-            (
-                'build:\n  stage: build\n  script:\n    - echo "VERSION=$CI_COMMIT_TAG" > vars.env\n'
-                "  artifacts:\n    reports:\n      dotenv: vars.env\n"
-            ),
-            (
-                'produce:\n  script:\n    - echo "X=value" > out.env\n'
-                "  artifacts:\n    reports:\n      dotenv: out.env\n"
-            ),
-        ],
-        test_negative=[
-            (
-                "test:\n  script:\n    - pytest\n"
-                "  artifacts:\n    reports:\n      junit: junit.xml\n"
-            ),
             "build:\n  script:\n    - make\n  artifacts:\n    paths:\n      - dist/\n",
         ],
         stride=["T"],

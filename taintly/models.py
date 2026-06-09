@@ -9,6 +9,17 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
+# Structural ``${{ }}`` expression parser — used to OPTIONALLY normalise an
+# attacker-context ``requires`` regex over its documented-equivalent encodings
+# (index/bracket access, context-name case). ``gha_expr`` is a leaf module
+# (no taintly imports) so this top-level import introduces no cycle.
+from .parsers.gha_expr import (
+    ExprSyntaxError,
+    context_paths,
+    iter_expression_bodies,
+    structural_expr_enabled,
+)
+
 
 class _PatternTimeout(Exception):
     """Raised when a pattern match exceeds the safety timeout."""
@@ -346,6 +357,7 @@ class RegexPattern:
     exclude: list[str] = field(default_factory=list)
     heredoc_aware: bool = False
     gitlab_if_block_aware: bool = False
+    github_with_env_block_aware: bool = False
     groovy_comment_aware: bool = False
 
     def __post_init__(self):
@@ -360,6 +372,8 @@ class RegexPattern:
         skip = _quoted_heredoc_body_lines(lines) if self.heredoc_aware else set()
         if self.gitlab_if_block_aware:
             skip = skip | _gitlab_rules_if_body_lines(lines)
+        if self.github_with_env_block_aware:
+            skip = skip | _github_with_env_body_lines(lines)
         scan_lines = (
             _strip_groovy_comments(content).splitlines() if self.groovy_comment_aware else lines
         )
@@ -578,6 +592,57 @@ def _gitlab_rules_if_body_lines(lines: list[str]) -> set[int]:
         # is structurally outside the block and shouldn't be masked.
         # (Harmless either way for our usage, but keeps the contract
         # tight: skip only contains lines we actively want suppressed.)
+        while j - 1 > i and lines[j - 1].strip() == "" and (j - 1) in skip:
+            skip.discard(j - 1)
+            j -= 1
+        i = j if j > i else i + 1
+    return skip
+
+
+# Matches a GitHub Actions ``with:`` or ``env:`` mapping key (optionally
+# preceded by a list marker ``- ``).  ``(?:with|env)\s*:`` matches the exact
+# keys only — ``environment:``/``env_file:``/``with-x:`` do not match.
+_GH_WITH_ENV_KEY = re.compile(r"^(?P<prefix>\s*(?:-\s+)?)(?:with|env)\s*:\s*.*$")
+
+
+def _github_with_env_body_lines(lines: list[str]) -> set[int]:
+    """Return 0-based indices of lines inside a GitHub Actions ``with:`` or
+    ``env:`` block body.
+
+    Mirrors :func:`_gitlab_rules_if_body_lines`: find the key, then mask every
+    line indented strictly deeper than the key (inline children AND block-scalar
+    continuations alike), stopping at the first non-blank line at or below the
+    key's indent.  Values interpolated inside these blocks are action inputs or
+    env-var assignments — passed to an action or set as an environment variable,
+    NOT executed by this workflow's shell (``actions/github-script``'s
+    ``script:`` is itself a ``with:`` input, so JS-context interpolations are
+    covered too).  The key line itself is not masked (the rule's single-key-value
+    exclude already covers the opener).  Blank/comment lines inside the block are
+    masked but do not terminate the run; trailing blanks are trimmed.
+    """
+    skip: set[int] = set()
+    n = len(lines)
+    i = 0
+    while i < n:
+        m = _GH_WITH_ENV_KEY.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        key_indent = len(m.group("prefix"))
+        j = i + 1
+        while j < n:
+            cont = lines[j]
+            stripped = cont.lstrip(" \t")
+            if not stripped or stripped.startswith("#"):
+                skip.add(j)
+                j += 1
+                continue
+            cont_indent = len(cont) - len(stripped)
+            if cont_indent <= key_indent:
+                break
+            skip.add(j)
+            j += 1
+        # Trim trailing blank/comment lines that don't belong to the block.
         while j - 1 > i and lines[j - 1].strip() == "" and (j - 1) in skip:
             skip.discard(j - 1)
             j -= 1
@@ -875,6 +940,20 @@ class ContextPattern:
     # than spread across the job: a sibling step's content cannot
     # influence whether the matched step is suppressed.
     anchor_step_exclude: str = ""
+    # GH-B1: route the ``requires`` match through the structural ``${{ }}``
+    # expression parser, ADDITIVELY.  When the dot-literal ``requires`` regex
+    # misses, every ``${{ }}`` body in the scoped text is parsed and each
+    # context reference normalised to a canonical lowercased dotted path, then
+    # the SAME ``requires`` regex is re-tested against that path.  This makes a
+    # rule catch the documented-equivalent obfuscations the line regex is blind
+    # to — index/bracket access (``github.event.pull_request['head']['sha']``)
+    # and context-name case (``GITHUB.event…``) — without duplicating the
+    # context list.  ONLY sound when ``requires`` is a pure GitHub-context-path
+    # matcher: a flat-string or sequence ``requires`` (e.g. ``uses: …`` text or
+    # ``A[\s\S]*?B``) will never match a single canonical path, so leave the
+    # flag off for those (they stay regex-only).  Off by default → zero change
+    # for every existing rule.
+    expr_augment_requires: bool = False
 
     def __post_init__(self):
         self._anchor_re = re.compile(self.anchor)
@@ -906,6 +985,40 @@ class ContextPattern:
             return self._check_job_scoped(lines)
         return self._check_file_scoped(content, lines)
 
+    def _requires_hit(self, text: str) -> bool:
+        """Whether ``requires`` is satisfied within ``text``.
+
+        Fast path: the dot-literal ``requires`` regex (chunk-safe for large
+        content).  When that misses AND ``expr_augment_requires`` is set, parse
+        every ``${{ }}`` body, normalise each context reference to a canonical
+        lowercased dotted path, and re-test the SAME ``requires`` regex against
+        it — so an index/bracket-encoded or context-cased attacker context
+        satisfies the same gate its canonical form already does.  Purely
+        ADDITIVE: the augmentation can only turn a miss into a hit, and a parse
+        error simply leaves the regex-only result.  Mirrors the SEC4-GH-004
+        predicate (``rules/github/sec3_sec4_supply_chain_ppe.py``) so the two
+        consumers normalise expressions identically."""
+        if _safe_search_chunked(self._requires_re, text):
+            return True
+        if self.expr_augment_requires and structural_expr_enabled():
+            try:
+                for body in iter_expression_bodies(text):
+                    for path in context_paths(body):
+                        # Test the canonical path both bare and re-wrapped in
+                        # ``${{ }}``: a ``requires`` regex may be written against
+                        # the bare context (``github\.event\.…`` — LOTP-GH-001)
+                        # OR against the full interpolation
+                        # (``\$\{\{\s*github\.…`` — AI-GH-021).  The wrapped form
+                        # satisfies both, since a bare-context regex still finds
+                        # its substring inside the wrapper.
+                        if self._requires_re.search(path) or self._requires_re.search(
+                            "${{ " + path + " }}"
+                        ):
+                            return True
+            except ExprSyntaxError:
+                return False
+        return False
+
     def _check_file_scoped(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         # File-scope requires / requires_absent: chunked-safe so
         # legitimate large workflows (>50KB) don't silently lose
@@ -925,7 +1038,7 @@ class ContextPattern:
         gated_content = (
             _strip_groovy_comments(content) if self._platform is Platform.JENKINS else content
         )
-        if not _safe_search_chunked(self._requires_re, gated_content):
+        if not self._requires_hit(gated_content):
             return []
         if self._requires_absent_re and _safe_search_chunked(
             self._requires_absent_re, gated_content
@@ -977,7 +1090,7 @@ class ContextPattern:
             # Chunked-safe: a single-job workflow over 50KB would
             # produce a >50KB segment; ``_safe_search`` returns None
             # outright in that case, silently disabling the rule.
-            if not _safe_search_chunked(self._requires_re, seg_content):
+            if not self._requires_hit(seg_content):
                 continue
             if self._requires_absent_re and _safe_search_chunked(
                 self._requires_absent_re, seg_content
@@ -1019,6 +1132,12 @@ class SequencePattern:
 
     pattern_a: str
     absent_within: str
+    # Optional "context required" gate: when set, the rule fires only if this
+    # pattern is ALSO present in the lookahead window. Scopes pattern_a to the
+    # right block — e.g. an ``include: project:`` always carries ``file:``,
+    # while a ``trigger:``/``needs: project:`` (branch-/job-pinned, legitimate)
+    # does not, so requiring ``file:`` drops those false positives.
+    requires_within: str = ""
     lookahead_lines: int = 10
     exclude: list[str] = field(default_factory=list)
     groovy_comment_aware: bool = False
@@ -1026,6 +1145,7 @@ class SequencePattern:
     def __post_init__(self):
         self._a_re = re.compile(self.pattern_a)
         self._b_re = re.compile(self.absent_within)
+        self._req_re = re.compile(self.requires_within) if self.requires_within else None
         self._excludes = [re.compile(e) for e in self.exclude]
 
     # CONTRACT: returns (line_num, snippet) where snippet is the
@@ -1042,6 +1162,8 @@ class SequencePattern:
                 continue
             if _safe_search(self._a_re, line):
                 window = "\n".join(scan_lines[i : i + self.lookahead_lines])
+                if self._req_re is not None and not _safe_search(self._req_re, window):
+                    continue
                 if not _safe_search(self._b_re, window):
                     snippet = lines[i].strip() if i < len(lines) else line.strip()
                     results.append((i + 1, snippet))

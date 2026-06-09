@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .groovy_lex import GStringSpan
+
 
 class EventKind(str, Enum):
     """Public event types yielded by :func:`walk_jenkinsfile`.
@@ -61,6 +63,19 @@ class Event:
         need the body string (shell-body grep, secret pattern) can
         use them as a coverage lift on parse-broken Jenkinsfiles.
         Default False.
+      interpolated: for LEAF events whose value came from a string, True
+        when that string is an INTERPOLATING Groovy kind (double-quoted /
+        triple-double-quoted / slashy GString — ``${...}`` / ``$ident`` are
+        expanded by Groovy) and False for a literal kind (single-quoted /
+        triple-single-quoted) or a non-string leaf.  Quote-kind-sensitive
+        rules need this: ``sh "...${params.X}..."`` is a Groovy-interpolation
+        injection, while ``sh '...${params.X}...'`` leaves the expression
+        literal (no Groovy interpolation) and is not the same finding.
+      spans: the GString interpolation spans inside this LEAF's source
+        string, when it came from an interpolating Groovy string
+        (``${...}`` / ``$ident.path``); None for a literal or non-string
+        leaf.  Finer-grained than ``interpolated``: lets a consumer reason
+        about WHICH ``${...}`` is attacker-controlled.
     """
 
     kind: EventKind
@@ -70,3 +85,5 @@ class Event:
     line: int = 0
     detail: str | None = None
     degraded: bool = False
+    interpolated: bool = False
+    spans: tuple[GStringSpan, ...] | None = None

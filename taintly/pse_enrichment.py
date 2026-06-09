@@ -1,8 +1,8 @@
-"""Permission Slip Effect — IAM-policy escalation pass (PSE-GH-002).
+"""Permission Slip Effect — IAM-policy blast-radius escalation pass.
 
 PSE-GH-001 fires at HIGH on the (fork-reachable trigger + AI agent +
 cloud-credential grant) triangle without knowing what the federated
-token actually unlocks.  PSE-GH-002 closes that loop: it walks the
+token actually unlocks.  This escalation pass closes that loop: it walks the
 repo for an IAM policy document attached to the role the workflow
 assumes (``aws-actions/configure-aws-credentials@v* with: role-to-
 assume:``) and, if the policy classifies as :class:`BlastRadius.CRITICAL`,
@@ -173,7 +173,7 @@ def find_matching_policies(role_arn: str, repo_path: str) -> list[tuple[str, str
 
     Returns an empty list if no candidates are found.  This is
     distinguishable from "candidates found but none CRITICAL" by the
-    caller (PSE-GH-002 only escalates on a CRITICAL hit).
+    caller (this pass only escalates on a CRITICAL hit).
     """
     role_name = _role_name_from_arn(role_arn)
     if not role_name:
@@ -292,7 +292,7 @@ def enrich_pse_findings(findings: list[Finding], repo_path: str) -> list[Finding
         except ValueError:
             rel_policy_path = worst_file
         footer = (
-            "\n\nPSE-GH-002 escalation — IAM blast radius: CRITICAL.\n"
+            "\n\nIAM-policy blast-radius escalation — CRITICAL.\n"
             f"Matching policy: {rel_policy_path}\n"
             "Triggering actions:\n"
             f"{_format_triggering_actions(worst_actions)}\n"

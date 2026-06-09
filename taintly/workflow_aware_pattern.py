@@ -529,6 +529,11 @@ class WorkflowAwarePattern:
     path: str | list[str]
     predicate: PredicateFn
     snippet_format: Optional[str] = None
+    # Cheap content pre-filter: when set, the (potentially expensive) structural
+    # walk is skipped entirely unless this literal substring appears in the file.
+    # Lets a rule that only fires on, e.g., ``${{ secrets.X }}`` avoid walking a
+    # secret-free (or adversarially deep) workflow. Empty = always walk.
+    requires: str = ""
     _schema_name: Optional[str] = field(default=None, init=False, repr=False)
 
     def _paths(self) -> list[str]:
@@ -541,6 +546,10 @@ class WorkflowAwarePattern:
     # result, and snippet is ``lines[line_num - 1].strip()`` (or the
     # ``snippet_format``-rendered string when provided).
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        # Cheap pre-filter: skip the structural walk when the required literal
+        # is absent (avoids walking secret-free / adversarially-deep workflows).
+        if self.requires and self.requires not in content:
+            return []
         # Pass 1: collect every LEAF_SCALAR for the predicate context.
         all_leaves: list[Event] = []
         cutoff_seen = False
