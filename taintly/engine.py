@@ -437,6 +437,31 @@ def scan_file(
                             f"attacker-reachable workflow context."
                         )
                         ctx_tags.append("severity-floor")
+                    # Severity-aware ceiling — the mirror of the floor above.
+                    # ``family`` also drives exploitability, so a coarse
+                    # OWASP→family fallback can route a LOW/INFO POSTURE rule
+                    # into a high-scoring family (credential_persistence,
+                    # identity_access, …) where ``compute_exploitability``
+                    # scores it "high" — overstating a review-posture item as
+                    # actively exploitable.  Cap the exact mismatch: a LOW/INFO
+                    # rule routed to a high-scoring family BY FALLBACK (no
+                    # explicit ``finding_family``) has "high" capped to "medium".
+                    # Explicitly-classified rules are untouched (the author
+                    # chose that family deliberately).
+                    elif (
+                        exploitability == "high"
+                        and not rule.finding_family
+                        and rule.severity in (Severity.LOW, Severity.INFO)
+                    ):
+                        exploitability = "medium"
+                        ctx_notes.append(
+                            f"Exploitability capped to medium: a "
+                            f"{rule.severity.name} rule was routed to the "
+                            f"'{family}' family by OWASP fallback, which would "
+                            f"otherwise overstate a low-severity posture item "
+                            f"as highly exploitable."
+                        )
+                        ctx_tags.append("severity-ceiling")
                     findings.append(
                         Finding(
                             rule_id=rule.id,
