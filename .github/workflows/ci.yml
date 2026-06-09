@@ -415,7 +415,12 @@ jobs:
         # the Linux jobs). This is the one runner with no harden-runner egress
         # boundary, so an unpinned/un-hashed install was the soft spot in an
         # otherwise locked-down supply chain.
-        run: pip install --require-hashes -r requirements-dev.lock
+        # ``python -m pip`` (not bare ``pip``): the lock pins ``pip`` itself and
+        # the Windows runner's pip differs, so the ``pip.exe`` launcher hits the
+        # "To modify pip, run python -m pip" self-protect guard; the module form
+        # lets pip replace itself. (Linux runners ship the lock's pip version, so
+        # bare ``pip install`` there doesn't trip it.)
+        run: python -m pip install --require-hashes -r requirements-dev.lock
 
       - name: Unit + integration + evasion tests
         # No coverage gate on Windows — the Linux job already enforces
