@@ -14,7 +14,7 @@ def test_hosts_from_run_block_package_managers():
     assert hosts_from_run_block("pip install requests") == {"pypi.org", "files.pythonhosted.org"}
     assert hosts_from_run_block("npm ci") == {"registry.npmjs.org"}
     assert hosts_from_run_block("pnpm install --frozen-lockfile") == {"registry.npmjs.org"}
-    assert "proxy.golang.org" in hosts_from_run_block("go mod download")
+    assert hosts_from_run_block("go mod download") == {"proxy.golang.org", "sum.golang.org"}
 
 
 def test_hosts_from_run_block_urls_strip_creds_and_port():
@@ -43,10 +43,10 @@ jobs:
     assert BASE_ENDPOINTS <= set(plan.allowed)
     # Mapped actions contribute their endpoints.
     assert ACTION_ENDPOINTS["actions/checkout"] <= set(plan.allowed)
-    assert "release-assets.githubusercontent.com" in plan.allowed  # setup-python
+    assert ACTION_ENDPOINTS["actions/setup-python"] <= set(plan.allowed)  # setup-python
     # run-derived hosts.
     assert {"pypi.org", "files.pythonhosted.org", "downloads.example.org"} <= set(plan.allowed)
-    assert "downloads.example.org" in plan.run_hosts
+    assert {"downloads.example.org"} <= set(plan.run_hosts)
     # All actions were known.
     assert plan.unknown_actions == ()
     # Output is sorted + deduped.
