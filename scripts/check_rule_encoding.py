@@ -91,11 +91,35 @@ def _findings() -> list[str]:
     return bad
 
 
+def _source_findings() -> list[str]:
+    """Scan rule SOURCE files (comments, any literal) for the same corruption.
+
+    The loaded-rule-text scan above only sees ``rule.title``/``description``/…;
+    a mojibake em-dash / ellipsis in a code comment (e.g. a pattern-explainer)
+    is invisible to it but still a real encoding defect.  This catches that.
+    """
+    bad: list[str] = []
+    rules_dir = ROOT / "taintly" / "rules"
+    for path in sorted(rules_dir.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            for corrupt, intended in _MOJIBAKE.items():
+                if corrupt in line:
+                    rel = path.relative_to(ROOT).as_posix()
+                    bad.append(f"  {rel}:{line_no}: found {corrupt!r} (corrupted {intended!r})")
+    return bad
+
+
 def main() -> int:
-    bad = _findings()
+    bad = _findings() + _source_findings()
     if bad:
         print(
-            "FAIL: mojibake (encoding corruption) in rule text:\n"
+            "FAIL: mojibake (encoding corruption) in rule text or source:\n"
             + "\n".join(sorted(set(bad)))
             + "\n\nThese are UTF-8 characters that were re-saved through a "
             "Windows-1252 misread.  Fix the source bytes (replace the "
@@ -104,7 +128,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"OK: no mojibake in rule text ({len(_MOJIBAKE)} corruption forms checked)")
+    print(
+        f"OK: no mojibake in rule text or source ({len(_MOJIBAKE)} corruption forms checked)"
+    )
     return 0
 
 

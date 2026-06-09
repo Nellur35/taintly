@@ -6,8 +6,17 @@ import json
 from typing import Any
 
 from taintly import __version__
+from taintly.baseline import fingerprint
 from taintly.models import AuditReport, Severity
 from taintly.reporters.text import INVENTORY_RULE_IDS
+
+
+def _finding_sort_key(f: Any) -> tuple[str, int, str, str]:
+    """Deterministic, content-derived ordering for findings in machine-readable
+    output (SARIF/JSON), so byte-identical input yields byte-identical output
+    and GHAS/GitLab dashboards don't churn on incidental reordering."""
+    return (f.file or "", f.line or 0, f.rule_id or "", (f.snippet or "")[:200])
+
 
 _LEVEL_MAP = {
     Severity.CRITICAL: "error",
@@ -22,10 +31,11 @@ _TOOL_URI = "https://github.com/Nellur35/taintly"
 _TOOL_VERSION = __version__
 
 
-def _build_rules(report: AuditReport) -> list[dict[str, Any]]:
-    """Build the SARIF rules array from unique findings."""
+def _build_rules(findings: list[Any]) -> list[dict[str, Any]]:
+    """Build the SARIF rules array from unique findings (caller passes a
+    deterministically-sorted list so the rules array order is stable)."""
     seen: dict[str, dict[str, Any]] = {}
-    for f in report.findings:
+    for f in findings:
         if f.rule_id in seen:
             continue
         rule = {
@@ -66,7 +76,7 @@ def _build_notifications(report: AuditReport) -> list[dict[str, Any]]:
     working.
     """
     out: list[dict[str, Any]] = []
-    for f in report.engine_errors():
+    for f in sorted(report.engine_errors(), key=_finding_sort_key):
         out.append(
             {
                 "level": _LEVEL_MAP.get(f.severity, "warning"),
@@ -90,11 +100,13 @@ def _build_notifications(report: AuditReport) -> list[dict[str, Any]]:
 
 
 def format_sarif(report: AuditReport) -> str:
-    rules = _build_rules(report)
-    # rule_ids = {r["id"] for r in rules}  # reserved for dedup
+    # Sort once up front so the rules array, results, and artifacts are all
+    # emitted in a stable, content-derived order — byte-identical across runs.
+    findings = sorted(report.findings, key=_finding_sort_key)
+    rules = _build_rules(findings)
 
     results = []
-    for f in report.findings:
+    for f in findings:
         # v2 reporting metadata travels in SARIF "properties" — GitHub and
         # GitLab both preserve unknown properties and surface them in
         # their dashboards so integrations can filter/group on these
@@ -150,6 +162,10 @@ def format_sarif(report: AuditReport) -> str:
                 }
             ],
         }
+        # Stable cross-run identity for GHAS / GitLab dashboard dedup; the
+        # line number is excluded by design (see baseline.fingerprint), so a
+        # finding that drifts lines keeps the same fingerprint.
+        result["partialFingerprints"] = {"taintlyFingerprintV1": fingerprint(f, report.repo_path)}
         if is_inventory:
             result["kind"] = "review"
         if f.snippet:
@@ -185,7 +201,7 @@ def format_sarif(report: AuditReport) -> str:
                 "artifacts": list(
                     {
                         f.file: {"location": {"uri": f.file, "uriBaseId": "%SRCROOT%"}}
-                        for f in report.findings
+                        for f in findings
                     }.values()
                 ),
                 "invocations": [

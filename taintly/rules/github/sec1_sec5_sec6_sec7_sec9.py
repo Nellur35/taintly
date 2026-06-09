@@ -1997,9 +1997,9 @@ RULES: list[Rule] = [
             "the workflow invokes."
         ),
         pattern=RegexPattern(
-            # Five idiomatic shapes: curl|sh, wget|sh, bash <(curlâ€¦),
-            # iex(Invoke-WebRequestâ€¦) or iex(iwrâ€¦), and the bare
-            # ``... | python -c 'â€¦'`` shape that downloads then evals.
+            # Five idiomatic shapes: curl|sh, wget|sh, bash <(curl…),
+            # iex(Invoke-WebRequest…) or iex(iwr…), and the bare
+            # ``... | python -c '…'`` shape that downloads then evals.
             match=(
                 r"(?:curl|wget)\s+[^|\n#]*\|\s*(?:bash|sh|zsh|fish|python|perl|ruby|node)"
                 r"|bash\s*<\s*\(\s*(?:curl|wget)"
@@ -3006,6 +3006,45 @@ RULES: list[Rule] = [
             "and push a backdoored artifact to the package registry. "
             "The environment approval gate is the last human checkpoint "
             "between automated CI and a published release."
+        ),
+    ),
+    # =========================================================================
+    # SEC6-GH-014: world-writable permissions (chmod 777) in a run: step
+    # =========================================================================
+    Rule(
+        id="SEC6-GH-014",
+        title="chmod 777 (world-writable permissions) in a run: step",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-6",
+        description=(
+            "A ``run:`` step sets world-writable permissions (``chmod 777`` / "
+            "``chmod -R 777`` / ``chmod a+rwx``). Any process — including other "
+            "jobs on a shared or self-hosted runner — can then modify the file. "
+            "Cross-platform sibling of SEC6-GL-005 (GitLab) and SEC6-JK-010 "
+            "(Jenkins)."
+        ),
+        pattern=RegexPattern(
+            match=r"chmod\s+(-R\s+)?(0?777|a\+rwx)",
+            exclude=[r"^\s*#"],
+        ),
+        remediation="Use minimal permissions: chmod 755 for executables, chmod 644 for files.",
+        reference="https://owasp.org/www-project-top-10-ci-cd-security-risks/",
+        test_positive=[
+            "        run: chmod 777 /app/deploy.sh",
+            "        run: chmod -R 777 .",
+        ],
+        test_negative=[
+            "        run: chmod 755 /app/deploy.sh",
+            "        run: chmod +x tool.bin",
+            "        # run: chmod 777 /app",
+        ],
+        stride=["E"],
+        threat_narrative=(
+            "World-writable files on a runner can be modified by any concurrent "
+            "job or, on a self-hosted runner, by an attacker who achieved initial "
+            "execution — a common persistence mechanism where a modified script "
+            "survives across jobs."
         ),
     ),
 ]

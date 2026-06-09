@@ -647,12 +647,14 @@ RULES: list[Rule] = [
         owasp_cicd="CICD-SEC-6",
         description="World-writable permissions set on files. Any process can modify them.",
         pattern=RegexPattern(
-            match=r"chmod\s+777",
+            # Also catch `chmod -R 777` (recursive) and `chmod a+rwx` (symbolic
+            # world-writable) — the recursive form is the dominant real shape.
+            match=r"chmod\s+(-R\s+)?(0?777|a\+rwx)",
             exclude=[r"^\s*#"],
         ),
         remediation="Use minimal permissions: chmod 755 for executables, chmod 644 for files.",
         reference="https://owasp.org/www-project-top-10-ci-cd-security-risks/",
-        test_positive=["    - chmod 777 /app/deploy.sh"],
+        test_positive=["    - chmod 777 /app/deploy.sh", "    - chmod -R 777 ."],
         test_negative=["    - chmod 755 /app/deploy.sh", "    # chmod 777"],
         stride=["E"],
         threat_narrative=(

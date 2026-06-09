@@ -971,7 +971,13 @@ RULES: list[Rule] = [
             # / change-request env var.  Reuse of _JK_PR_CONTEXT keeps
             # the trigger-detection logic in one place — aligned with
             # LOTP-JK-001 / AI-JK-005 / AI-JK-006.
-            requires=r"(?=[\s\S]*?" + _JK_PR_CONTEXT + r")",
+            # ``\A`` anchors the lookahead at offset 0: a presence-anywhere
+            # check needs only one start position, so re.search doesn't retry
+            # at every offset.  Without it the unbounded ``[\s\S]*?`` lookahead
+            # is O(n^2) when the PR context is absent in a large file (a
+            # 1000-step input scanned in ~9s; with ``\A``, in milliseconds).
+            # Mirrors AI-JK-001's anchored requires.
+            requires=r"\A(?=[\s\S]*?" + _JK_PR_CONTEXT + r")",
             scope="file",
             exclude=[r"^\s*//", r"^\s*\*", r"^\s*#"],
         ),

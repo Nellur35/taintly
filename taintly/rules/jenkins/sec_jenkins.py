@@ -3828,4 +3828,44 @@ RULES: list[Rule] = [
             "do not produce false positives."
         ),
     ),
+    # =========================================================================
+    # SEC6-JK-010: world-writable permissions (chmod 777) in a sh step
+    # =========================================================================
+    Rule(
+        id="SEC6-JK-010",
+        title="chmod 777 (world-writable permissions) in a Jenkins sh step",
+        severity=Severity.MEDIUM,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-6",
+        description=(
+            "A Jenkins ``sh`` step sets world-writable permissions "
+            "(``chmod 777`` / ``chmod -R 777`` / ``chmod a+rwx``). On the "
+            "self-hosted agents Jenkins typically runs on, a world-writable "
+            "file is a persistence vector: any process — or an attacker who "
+            "achieved initial execution — can modify it, and the change "
+            "survives across builds on the same agent. Cross-platform sibling "
+            "of SEC6-GL-005 (GitLab) and SEC6-GH-014 (GitHub)."
+        ),
+        pattern=RegexPattern(
+            match=r"chmod\s+(-R\s+)?(0?777|a\+rwx)",
+            exclude=[r"^\s*#", r"^\s*//"],
+        ),
+        remediation="Use minimal permissions: chmod 755 for executables, chmod 644 for files.",
+        reference="https://owasp.org/www-project-top-10-ci-cd-security-risks/",
+        test_positive=[
+            '                sh "chmod -R 777 ."',
+            "                sh 'chmod 777 /var/jenkins_home/workspace'",
+        ],
+        test_negative=[
+            '                sh "chmod 755 deploy.sh"',
+            "                // chmod 777 is bad practice",
+        ],
+        stride=["E"],
+        threat_narrative=(
+            "World-writable files on a self-hosted Jenkins agent persist across "
+            "builds and can be modified by any concurrent job or a foothold "
+            "attacker — a classic post-exploitation persistence mechanism where "
+            "a modified build script survives to the next pipeline run."
+        ),
+    ),
 ]
