@@ -411,9 +411,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install deps
-        # hypothesis pulled at the same pin as the Linux unit-test job to
-        # keep the property-based test suite reproducible across OSes.
-        run: pip install pytest pytest-timeout hypothesis==6.152.1
+        # Install the hash-pinned dev lock (same --require-hashes discipline as
+        # the Linux jobs). This is the one runner with no harden-runner egress
+        # boundary, so an unpinned/un-hashed install was the soft spot in an
+        # otherwise locked-down supply chain.
+        run: pip install --require-hashes -r requirements-dev.lock
 
       - name: Unit + integration + evasion tests
         # No coverage gate on Windows — the Linux job already enforces

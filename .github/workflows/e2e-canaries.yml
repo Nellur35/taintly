@@ -71,7 +71,17 @@ jobs:
 
       - name: Clone canary at pinned SHA
         run: |
-          git clone --filter=blob:none --no-checkout "$CANARY_REPO" /tmp/canary
+          # Retry the live clone: a transient network blip / rate-limit must not
+          # fail the gate for reasons unrelated to the code under review. The
+          # assertion stays deterministic — the checkout is pinned to CANARY_SHA.
+          for attempt in 1 2 3; do
+            rm -rf /tmp/canary
+            if git clone --filter=blob:none --no-checkout "$CANARY_REPO" /tmp/canary; then
+              break
+            fi
+            echo "clone attempt $attempt failed; retrying in $((attempt * 5))s" >&2
+            sleep "$((attempt * 5))"
+          done
           cd /tmp/canary
           git checkout "$CANARY_SHA"
 
@@ -133,7 +143,17 @@ jobs:
 
       - name: Clone canary at pinned SHA
         run: |
-          git clone --filter=blob:none --no-checkout "$CANARY_REPO" /tmp/canary
+          # Retry the live clone: a transient network blip / rate-limit must not
+          # fail the gate for reasons unrelated to the code under review. The
+          # assertion stays deterministic — the checkout is pinned to CANARY_SHA.
+          for attempt in 1 2 3; do
+            rm -rf /tmp/canary
+            if git clone --filter=blob:none --no-checkout "$CANARY_REPO" /tmp/canary; then
+              break
+            fi
+            echo "clone attempt $attempt failed; retrying in $((attempt * 5))s" >&2
+            sleep "$((attempt * 5))"
+          done
           cd /tmp/canary
           git checkout "$CANARY_SHA"
 
@@ -191,7 +211,17 @@ jobs:
 
       - name: Clone canary at pinned SHA
         run: |
-          git clone --filter=blob:none --no-checkout "$CANARY_REPO" /tmp/canary
+          # Retry the live clone: a transient network blip / rate-limit must not
+          # fail the gate for reasons unrelated to the code under review. The
+          # assertion stays deterministic — the checkout is pinned to CANARY_SHA.
+          for attempt in 1 2 3; do
+            rm -rf /tmp/canary
+            if git clone --filter=blob:none --no-checkout "$CANARY_REPO" /tmp/canary; then
+              break
+            fi
+            echo "clone attempt $attempt failed; retrying in $((attempt * 5))s" >&2
+            sleep "$((attempt * 5))"
+          done
           cd /tmp/canary
           git checkout "$CANARY_SHA"
 

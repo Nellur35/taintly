@@ -26,6 +26,11 @@ updates:
       time: "09:00"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 5
+    # Wait a few days before opening an update PR so a compromised release
+    # (the SEC8-GH-005 dogfood: a malicious version published then yanked)
+    # ages out of its exploitation window before we adopt it.
+    cooldown:
+      default-days: 5
     labels:
       - "dependencies"
       - "github-actions"
@@ -41,6 +46,9 @@ updates:
       time: "09:00"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 5
+    # See the github-actions cooldown above — age out compromised releases.
+    cooldown:
+      default-days: 5
     labels:
       - "dependencies"
       - "python"
