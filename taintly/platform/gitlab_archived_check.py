@@ -12,11 +12,10 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable
-from typing import Optional
 
 _ENABLED: bool = False
 _CACHE: dict[str, bool] = {}
-_OVERRIDE: Optional[Callable[[str], Optional[bool]]] = None
+_OVERRIDE: Callable[[str], bool | None] | None = None
 
 
 def set_enabled(enabled: bool) -> None:
@@ -33,13 +32,13 @@ def reset_cache() -> None:
 
 
 def set_archived_check_override(
-    fn: Optional[Callable[[str], Optional[bool]]],
+    fn: Callable[[str], bool | None] | None,
 ) -> None:
     global _OVERRIDE
     _OVERRIDE = fn
 
 
-def is_archived(project_path: str) -> Optional[bool]:
+def is_archived(project_path: str) -> bool | None:
     """Return ``True`` if the GitLab project is archived, ``False`` if
     not, ``None`` on rate limit / transport failure / missing auth.
 

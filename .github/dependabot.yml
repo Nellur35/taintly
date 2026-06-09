@@ -1,10 +1,11 @@
 # Dependabot — automated dep version updates (PSE Domain 8.x / 3.5).
 #
 # Motivation: our CI pins GitHub Actions by SHA (per our own SEC3-GH-001
-# rule) and tool versions by strict pin (ruff==0.9.0, bandit==1.8.3,
-# mypy==1.14.1, etc.). Without Dependabot those pins silently rot —
-# unpatched CVEs in bandit/mypy, deprecated Action APIs, stale ruff
-# rules — and the maintainer has to manually chase each one.
+# rule) and dev-tool versions by strict pin in requirements-dev.in (the
+# single source; the hash-pinned requirements-dev.lock is regenerated from
+# it). Without Dependabot those pins silently rot — unpatched CVEs in
+# bandit/mypy, deprecated Action APIs, stale ruff rules — and the
+# maintainer has to manually chase each one.
 #
 # Configuration:
 # - `pip` ecosystem watches both the project's own deps (there are

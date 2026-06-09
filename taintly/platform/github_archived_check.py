@@ -28,11 +28,10 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable
-from typing import Optional
 
 _ENABLED: bool = False
 _CACHE: dict[tuple[str, str], bool] = {}
-_OVERRIDE: Optional[Callable[[str, str], Optional[bool]]] = None
+_OVERRIDE: Callable[[str, str], bool | None] | None = None
 
 
 def set_enabled(enabled: bool) -> None:
@@ -51,7 +50,7 @@ def reset_cache() -> None:
 
 
 def set_archived_check_override(
-    fn: Optional[Callable[[str, str], Optional[bool]]],
+    fn: Callable[[str, str], bool | None] | None,
 ) -> None:
     """Inject (or clear) a stub.  Tests use this to avoid real
     network calls.  Pass ``None`` to restore real behaviour."""
@@ -59,7 +58,7 @@ def set_archived_check_override(
     _OVERRIDE = fn
 
 
-def is_archived(owner: str, repo: str) -> Optional[bool]:
+def is_archived(owner: str, repo: str) -> bool | None:
     """Return ``True`` if the repo is archived, ``False`` if not,
     ``None`` on rate limit / transport failure / missing auth.
 
