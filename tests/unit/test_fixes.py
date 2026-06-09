@@ -613,6 +613,47 @@ def test_remove_insecure_commands_dry_run_preserves_file(tmp_path):
     assert _read(path) == content
 
 
+def test_remove_insecure_commands_strips_emptied_env(tmp_path):
+    # The toggle is the only key under the step's env: — the now-childless
+    # env: mapping must be stripped too (it would otherwise read as env: null).
+    path = _write(
+        tmp_path,
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+        "        env:\n"
+        "          ACTIONS_ALLOW_UNSECURE_COMMANDS: true\n"
+        "      - run: echo bye\n",
+    )
+    results = fix_remove_insecure_commands(path, dry_run=False)
+    assert len(results) == 1
+    out = _read(path)
+    assert "ACTIONS_ALLOW_UNSECURE_COMMANDS" not in out
+    assert "env:" not in out  # dangling env: removed
+    assert "- run: echo bye" in out
+
+
+def test_remove_insecure_commands_keeps_env_with_surviving_key(tmp_path):
+    # A sibling key under the same env: keeps the mapping alive.
+    path = _write(
+        tmp_path,
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+        "        env:\n"
+        "          ACTIONS_ALLOW_UNSECURE_COMMANDS: true\n"
+        "          KEEP: me\n",
+    )
+    results = fix_remove_insecure_commands(path, dry_run=False)
+    assert len(results) == 1
+    out = _read(path)
+    assert "ACTIONS_ALLOW_UNSECURE_COMMANDS" not in out
+    assert "env:" in out
+    assert "KEEP: me" in out
+
+
 # ---------------------------------------------------------------------------
 # fix_remove_debug_logging  (SEC10-GH-003)
 # ---------------------------------------------------------------------------
@@ -644,6 +685,45 @@ def test_remove_debug_logging_does_not_touch_similar_vars(tmp_path):
     results = fix_remove_debug_logging(path, dry_run=False)
     assert results == []
     assert "MY_DEBUG: true" in _read(path)
+
+
+def test_remove_debug_logging_strips_emptied_env(tmp_path):
+    # Sole key under the step's env: — strip the now-childless env: too.
+    path = _write(
+        tmp_path,
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+        "        env:\n"
+        "          ACTIONS_STEP_DEBUG: true\n"
+        "      - run: echo bye\n",
+    )
+    results = fix_remove_debug_logging(path, dry_run=False)
+    assert len(results) == 1
+    out = _read(path)
+    assert "ACTIONS_STEP_DEBUG" not in out
+    assert "env:" not in out
+    assert "- run: echo bye" in out
+
+
+def test_remove_debug_logging_keeps_env_with_surviving_key(tmp_path):
+    path = _write(
+        tmp_path,
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+        "        env:\n"
+        "          FOO: bar\n"
+        "          ACTIONS_STEP_DEBUG: true\n",
+    )
+    results = fix_remove_debug_logging(path, dry_run=False)
+    assert len(results) == 1
+    out = _read(path)
+    assert "ACTIONS_STEP_DEBUG" not in out
+    assert "env:" in out
+    assert "FOO: bar" in out
 
 
 # ---------------------------------------------------------------------------
