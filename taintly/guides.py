@@ -109,13 +109,22 @@ STEP-BY-STEP REMEDIATION (AWS):
        Audience: sts.amazonaws.com
 
   2. CREATE AN IAM ROLE
-     Trust policy restricted to your repo:
+     Trust policy restricted to your repo AND a specific ref or environment.
+     For privileged / production roles prefer an EXACT match (StringEquals) —
+     a wildcard subject `repo:<ORG>/<REPO>:*` lets ANY branch, PR, tag, or
+     environment in the repo assume the role (the classic OIDC footgun: a fork
+     PR or an unprotected branch can mint production credentials):
        "Condition": {
-         "StringLike": {
-           "token.actions.githubusercontent.com:sub": "repo:<ORG>/<REPO>:*"
+         "StringEquals": {
+           "token.actions.githubusercontent.com:sub":
+             "repo:<ORG>/<REPO>:ref:refs/heads/main"
+           // or scope to a protected environment instead:
+           //   "repo:<ORG>/<REPO>:environment:production"
          }
        }
-     Attach ONLY the minimum permissions the workflow needs.
+     Use a `StringLike` wildcard (`:*`) ONLY for low-privilege roles where any
+     ref legitimately needs it. Attach ONLY the minimum permissions the
+     workflow needs.
 
   3. UPDATE THE WORKFLOW
      # Before
@@ -1148,7 +1157,7 @@ STEP-BY-STEP REMEDIATION:
        - name: Deploy
          run: deploy.sh ${{ github.event.inputs.environment }}
 
-       # AFTER — Groovy/Actions interpolation is confined to env:
+       # AFTER — Actions ${{ }} interpolation is confined to env:
        - name: Deploy
          env:
            DEPLOY_ENV: ${{ github.event.inputs.environment }}
