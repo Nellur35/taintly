@@ -22,6 +22,7 @@ from .jenkinsguard import (
     is_jenkinsfile_whole_dead,
 )
 from .models import (
+    _CHUNK_COVERAGE_CEILING,
     _MAX_SAFE_TEXT_LEN,
     AuditReport,
     Finding,
@@ -229,14 +230,40 @@ def scan_file(
     # context-aware exploitability tier for each finding.  The analyzer is
     # pure-regex (see workflow_context.py) so the cost is a few hundred
     # microseconds per file — comfortably below the per-rule scan budget.
-    # Surface silent coverage loss: the ReDoS length cap in _safe_search
-    # skips regex evaluation on text > _MAX_SAFE_TEXT_LEN. Full-content
-    # patterns (AbsencePattern, ContextPattern requires) on oversize files
-    # return no matches regardless of what's inside. Emit a single
-    # informational finding so "scan clean" can be distinguished from
-    # "scan skipped". Per-line regex continues to work because individual
-    # YAML lines fit comfortably under the cap.
-    if len(content) > _MAX_SAFE_TEXT_LEN:
+    # Surface coverage loss — but distinguish "scanned in chunks (coverage
+    # preserved)" from genuine loss. The ReDoS length cap in _safe_search
+    # skips regex on text > _MAX_SAFE_TEXT_LEN, so file-scope patterns
+    # (AbsencePattern, ContextPattern requires) route through
+    # _safe_search_chunked, which windows oversize content and keeps FULL
+    # coverage up to _CHUNK_COVERAGE_CEILING (_MAX_CHUNKS x _MAX_SAFE_TEXT_LEN,
+    # ~1.31 MB). Past that ceiling the chunked search gives up — so the
+    # "coverage preserved" notice must NOT be stated there. Two tiers:
+    # past the ceiling => degraded; in the chunked band => benign notice.
+    # Per-line regex always works (individual YAML lines fit under the cap).
+    if len(content) > _CHUNK_COVERAGE_CEILING:
+        findings.append(
+            Finding(
+                rule_id="ENGINE-ERR",
+                severity=Severity.LOW,
+                title=(
+                    f"File size {len(content)} bytes exceeds the chunked-"
+                    f"coverage ceiling ({_CHUNK_COVERAGE_CEILING}); file-scope "
+                    "rule coverage degraded"
+                ),
+                description=(
+                    "taintly scans oversize files in "
+                    f"{_MAX_SAFE_TEXT_LEN}-byte windows up to "
+                    f"{_CHUNK_COVERAGE_CEILING} bytes. Beyond that ceiling the "
+                    "chunked search stops, so file-scope patterns "
+                    "(ContextPattern requires / AbsencePattern) will not "
+                    "report matches on this file. Per-line rules still run. "
+                    "If this is a legitimate large CI config, split it via "
+                    "includes / reusable workflows."
+                ),
+                file=filepath,
+            )
+        )
+    elif len(content) > _MAX_SAFE_TEXT_LEN:
         findings.append(
             Finding(
                 rule_id="ENGINE-ERR",
@@ -251,7 +278,8 @@ def scan_file(
                     f"{_MAX_SAFE_TEXT_LEN}-byte length cap. A chunked-search "
                     "path lets file-scope rules (ContextPattern requires / "
                     "AbsencePattern) still scan large workflows in "
-                    "line-windowed chunks with overlap. Coverage is "
+                    "line-windowed chunks with overlap, up to "
+                    f"{_CHUNK_COVERAGE_CEILING} bytes. Coverage is "
                     "preserved; this notice surfaces "
                     "only because the file is unusually large for a CI "
                     "config. If you suspect a regex match that spans a "
