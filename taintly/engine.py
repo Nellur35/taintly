@@ -1219,7 +1219,7 @@ def _discover_gitlab_entry_files(repo_path: str) -> list[str]:
     return files
 
 
-def _discover_gitlab_files(repo_path: str) -> list[str]:
+def _discover_gitlab_files(repo_path: str) -> tuple[list[str], int]:
     """Find GitLab CI entry files plus local include candidates.
 
     Entry files and explicit ``ci/`` includes are strong signals, admitted
@@ -1227,6 +1227,12 @@ def _discover_gitlab_files(repo_path: str) -> list[str]:
     holds non-CI tool configs (GitLab Duo, issue templates), so those pickups
     are content-gated via :func:`_gitlab_yaml_looks_like_ci`.  Entry files are
     never gated, so an ``include:``-only fragment can never be dropped.
+
+    Returns ``(files, n_dynamic)`` where ``n_dynamic`` counts ``include:
+    local:`` refs that interpolate a runtime variable and so could not be
+    resolved statically — surfaced by :func:`scan_repo` as a coverage
+    disclosure so "scan clean" isn't overstated when there is pipeline behind
+    an unresolvable include.
     """
     entry_files = _discover_gitlab_entry_files(repo_path)
     files = list(entry_files)
@@ -1254,9 +1260,9 @@ def _discover_gitlab_files(repo_path: str) -> list[str]:
     # scanned too. An explicit include is authoritative CI, so these skip the
     # content-shape gate.
     seen = {os.path.normpath(p) for p in files}
-    include_files, _n_dynamic = _discover_gitlab_include_graph(repo_path, list(files), seen)
+    include_files, n_dynamic = _discover_gitlab_include_graph(repo_path, list(files), seen)
     files.extend(include_files)
-    return files
+    return files, n_dynamic
 
 
 def _discovery_confidence(repo_path: str, platform: Platform, files: list[str]) -> dict[str, str]:
@@ -1435,7 +1441,8 @@ def discover_files(repo_path: str, platform: Platform) -> list[str]:
                 files.append(dep)
 
     elif platform == Platform.GITLAB:
-        files.extend(_discover_gitlab_files(repo_path))
+        gl_files, _n_dynamic = _discover_gitlab_files(repo_path)
+        files.extend(gl_files)
 
     elif platform == Platform.JENKINS:
         # ``glob.glob(recursive=True)`` SKIPS hidden directories by
@@ -1544,12 +1551,18 @@ def scan_repo(
     for plat in platforms_to_scan:
         report = AuditReport(repo_path=repo_path, platform=plat.value)
         platform_rules = [r for r in rules if r.platform == plat]
+        n_dynamic_includes = 0
         if explicit_files:
             # Scoped mode: caller named specific files; scan ONLY those
             # (and only the ones that match this platform).  The repo
             # root is still used so platform-aware context (path-based
             # rules, etc.) sees the file in its real location.
             files = [ef for ef in explicit_files if _file_matches_platform(ef, plat)]
+        elif plat == Platform.GITLAB:
+            # Call the GitLab discoverer directly (not the generic
+            # ``discover_files``) so the dynamic-include count is captured
+            # for the coverage disclosure below.
+            files, n_dynamic_includes = _discover_gitlab_files(repo_path)
         else:
             files = discover_files(repo_path, plat)
         report.files_scanned = len(files)
@@ -1559,6 +1572,35 @@ def scan_repo(
         discovery_conf = _discovery_confidence(repo_path, plat, files)
 
         all_findings: list[Finding] = []
+        if n_dynamic_includes and files:
+            # Coverage disclosure: GitLab ``include: local:`` refs that
+            # interpolate a runtime variable resolve only at pipeline-run
+            # time, so their target is unknowable from static bytes. We
+            # scanned every statically-reachable file but could not reach
+            # the config behind these includes — surface it so "scan clean"
+            # isn't overstated. Attached to the primary entry file.
+            all_findings.append(
+                Finding(
+                    rule_id="ENGINE-ERR",
+                    severity=Severity.LOW,
+                    title=(
+                        f"{n_dynamic_includes} GitLab include(s) interpolate a "
+                        "runtime variable and could not be resolved statically; "
+                        "pipeline behind them was not scanned"
+                    ),
+                    description=(
+                        "An ``include: local:`` path containing a CI/CD variable "
+                        "or spec input ($VAR / ${VAR} / $[[ inputs.x ]]) only "
+                        "resolves at pipeline-run time, so its target file is "
+                        "unknowable from static bytes. taintly scanned every "
+                        "statically-reachable file but could not reach the "
+                        "configuration behind these dynamic includes. If they "
+                        "pull in security-relevant jobs, review those targets "
+                        "manually or pin the include to a static path."
+                    ),
+                    file=files[0],
+                )
+            )
         if plat == Platform.GITHUB:
             if explicit_github_repoctx is not None:
                 repoctx = explicit_github_repoctx

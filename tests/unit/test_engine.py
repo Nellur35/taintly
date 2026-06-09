@@ -139,6 +139,49 @@ def test_oversize_past_chunk_ceiling_states_degraded_not_preserved(tmp_path):
     assert "scanned in chunks" not in f.title
 
 
+def test_gitlab_dynamic_include_emits_coverage_disclosure(tmp_path):
+    """A GitLab ``include: local:`` whose path interpolates a runtime variable
+    resolves only at pipeline-run time, so its target can't be scanned. The
+    engine must surface a coverage-disclosure ENGINE-ERR so 'scan clean' isn't
+    overstated about pipeline behind the unresolvable include."""
+    from taintly.engine import scan_repo
+    from taintly.models import Platform
+
+    (tmp_path / ".gitlab-ci.yml").write_text(
+        "include:\n"
+        "  - local: 'ci/$CI_COMMIT_BRANCH.yml'\n"
+        "build:\n"
+        "  script:\n"
+        "    - make\n"
+    )
+    reports = scan_repo(str(tmp_path), [], platform=Platform.GITLAB)
+    findings = [f for r in reports for f in r.findings]
+    assert any(
+        f.rule_id == "ENGINE-ERR" and "interpolate a runtime variable" in f.title
+        for f in findings
+    ), "dynamic include must surface a coverage disclosure"
+
+
+def test_gitlab_static_include_no_coverage_disclosure(tmp_path):
+    """A repo whose ``include: local:`` refs are all statically resolvable must
+    NOT emit the dynamic-include coverage disclosure."""
+    from taintly.engine import scan_repo
+    from taintly.models import Platform
+
+    (tmp_path / ".gitlab-ci.yml").write_text(
+        "include:\n  - local: 'ci/build.yml'\nbuild:\n  script:\n    - make\n"
+    )
+    (tmp_path / "ci").mkdir()
+    (tmp_path / "ci" / "build.yml").write_text("job:\n  script:\n    - echo hi\n")
+
+    reports = scan_repo(str(tmp_path), [], platform=Platform.GITLAB)
+    findings = [f for r in reports for f in r.findings]
+    assert not any(
+        f.rule_id == "ENGINE-ERR" and "interpolate a runtime variable" in f.title
+        for f in findings
+    )
+
+
 def test_engine_err_on_crashing_rule(tmp_path):
     """A rule whose pattern.check() raises must produce ENGINE-ERR, not propagate."""
     import taintly.models as models_module
