@@ -32,25 +32,23 @@ jobs:
     permissions:
       contents: read
     steps:
-      # step-security/harden-runner establishes an AUDITED EGRESS
+      # step-security/harden-runner establishes a BLOCKED EGRESS
       # BOUNDARY on the runner — the one runtime control this CI didn't
       # yet model, on-brand for a tool whose thesis is that pipelines
-      # can't be turned against their owners. Started in `audit` mode to
-      # learn the legitimate outbound set; once the run summaries confirm
-      # it (expected: pypi.org:443, files.pythonhosted.org:443,
-      # github.com:443, codeload.github.com:443) flip to:
-      #     egress-policy: block
-      #     allowed-endpoints: >
-      #       pypi.org:443
-      #       files.pythonhosted.org:443
-      #       github.com:443
-      #       codeload.github.com:443
-      # MUST be the first step so it can monitor every later step's
-      # egress. Linux-only — deliberately NOT added to the windows-test
-      # job (harden-runner supports Ubuntu runners only).
+      # can't be turned against their owners. The allow-list below is the
+      # legitimate outbound set learned in `audit` mode: pip install
+      # (pypi.org, files.pythonhosted.org) and checkout (github.com,
+      # codeload.github.com). MUST be the first step so it can monitor
+      # every later step's egress. Linux-only — deliberately NOT added to
+      # the windows-test job (harden-runner supports Ubuntu runners only).
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            pypi.org:443
+            files.pythonhosted.org:443
+            github.com:443
+            codeload.github.com:443
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -138,7 +136,12 @@ jobs:
       # baseline). See the lint job for the full rationale. First step.
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            pypi.org:443
+            files.pythonhosted.org:443
+            github.com:443
+            codeload.github.com:443
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -174,7 +177,12 @@ jobs:
       # baseline). See the lint job for the full rationale. First step.
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            pypi.org:443
+            files.pythonhosted.org:443
+            github.com:443
+            codeload.github.com:443
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -244,7 +252,12 @@ jobs:
       # baseline). See the lint job for the full rationale. First step.
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            pypi.org:443
+            files.pythonhosted.org:443
+            github.com:443
+            codeload.github.com:443
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -314,7 +327,12 @@ jobs:
       # baseline). See the lint job for the full rationale. First step.
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            pypi.org:443
+            files.pythonhosted.org:443
+            github.com:443
+            codeload.github.com:443
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -350,7 +368,12 @@ jobs:
       # baseline). See the lint job for the full rationale. First step.
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            pypi.org:443
+            files.pythonhosted.org:443
+            github.com:443
+            codeload.github.com:443
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
