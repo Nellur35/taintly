@@ -36,7 +36,6 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 from .tokenizer import Token, TokenizerError, TokenKind, tokenize
 
@@ -62,9 +61,9 @@ class Event:
     path: tuple[object, ...]
     line: int
     column: int
-    value: Optional[str] = None
-    value_kind: Optional[str] = None
-    message: Optional[str] = None
+    value: str | None = None
+    value_kind: str | None = None
+    message: str | None = None
     # For block-scalar leaves only: a per-body-line breakdown so
     # consumers can land findings at the specific line containing
     # a match rather than at the block-scalar header.  Tuple of
@@ -72,7 +71,7 @@ class Event:
     # non-block-scalar events; defaulted so existing call sites
     # (scalar emitter, flow handler, merge-key replay, error path)
     # continue to construct events without modification.
-    block_lines: Optional[tuple[tuple[int, str], ...]] = None
+    block_lines: tuple[tuple[int, str], ...] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +158,7 @@ class _Anchor:
 def walk(
     content: str,
     *,
-    query: Optional[str] = None,
+    query: str | None = None,
     recover: bool = True,
     include_keys: bool = False,
 ) -> Iterator[Event]:
@@ -200,7 +199,7 @@ class _Walker:
         self._recover = recover
         self._include_keys = include_keys
         self._stack: list[_Frame] = [_Frame(key=None, indent=-1, container="mapping")]
-        self._open_key: Optional[Token] = None
+        self._open_key: Token | None = None
         # Block-scalar state.  Each buffer entry is
         # ``(source_line_number, body_text)`` so the flushed
         # Event can carry a per-line breakdown via
@@ -208,12 +207,12 @@ class _Walker:
         # StructuralPattern's per-line emission for SEC4-GH-004)
         # can land findings at the specific source line a match
         # comes from rather than at the block-scalar header.
-        self._block_buffer: Optional[list[tuple[int, str]]] = None
+        self._block_buffer: list[tuple[int, str]] | None = None
         self._block_anchor_line = 0
         self._block_path: tuple[object, ...] = ()
         # Anchor capture.
         self._anchors: dict[str, _Anchor] = {}
-        self._capturing: Optional[str] = None
+        self._capturing: str | None = None
         self._capture_root_path_len = 0
         # Set immediately after a SEQUENCE_DASH: the next KEY (on
         # the same line as the dash) attaches to the element frame
@@ -259,7 +258,7 @@ class _Walker:
                 # sequence frame should be popped (next is non-DASH
                 # → the sequence is done) or kept (next is DASH →
                 # sequence continues with another element).
-                next_kind: Optional[TokenKind] = None
+                next_kind: TokenKind | None = None
                 for la in tokens[i + 1 :]:
                     if la.kind in (TokenKind.INDENT, TokenKind.COMMENT):
                         continue
@@ -407,7 +406,7 @@ class _Walker:
                 out.append(f.key)
         return tuple(out)
 
-    def _adjust_to_indent(self, indent: int, *, next_kind: Optional[TokenKind] = None) -> None:
+    def _adjust_to_indent(self, indent: int, *, next_kind: TokenKind | None = None) -> None:
         # Pop frames whose indent is STRICTLY DEEPER than the new
         # one.  A frame at indent N holds keys at indent N (its
         # children); a sibling KEY at the same indent stays inside
@@ -541,7 +540,7 @@ class _Walker:
         self._stack.append(_Frame(key=idx, indent=indent + 1, container="mapping"))
         self._post_dash_attach = True
 
-    def _emit_value(self, tok: Token, value: str, value_kind: str) -> Optional[Event]:
+    def _emit_value(self, tok: Token, value: str, value_kind: str) -> Event | None:
         # Sequence-element scalar: when there's no open key and the
         # top frame is a mapping that was just opened at a sequence
         # element index whose body is a single bare scalar (e.g.,
@@ -654,7 +653,7 @@ class _Walker:
         tokens: list[Token],
         start: int,
         *,
-        pre_key: Optional[object] = None,
+        pre_key: object | None = None,
     ) -> Iterator[Event]:
         """Consume one flow sequence or mapping starting at
         ``tokens[start]`` (FLOW_OPEN_SEQ or FLOW_OPEN_MAP).
@@ -690,7 +689,7 @@ class _Walker:
         self._stack.append(_Frame(key=base_key, indent=first.indent, container=container))
         my_frame = self._stack[-1]
         i = start + 1
-        flow_pending_key: Optional[str] = None
+        flow_pending_key: str | None = None
 
         while i < len(tokens):
             t = tokens[i]
@@ -723,7 +722,7 @@ class _Walker:
                 # recursive call pushes and pops its own frame and
                 # advances ``self._flow_end_idx`` past the
                 # matching close.
-                inner_pre_key: Optional[object]
+                inner_pre_key: object | None
                 if container == "sequence":
                     inner_pre_key = my_frame.next_index
                     my_frame.next_index += 1

@@ -23,7 +23,6 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Optional
 
 from .schemas import detect_schema_for_path
 from .walker import Event, EventKind
@@ -59,9 +58,9 @@ def clear_walk_cache() -> None:
 def walk_workflow(
     filepath: str,
     *,
-    query: Optional[str] = None,
-    schema: Optional[str] = None,
-    content: Optional[str] = None,
+    query: str | None = None,
+    schema: str | None = None,
+    content: str | None = None,
     recover: bool = True,
     include_keys: bool = False,
 ) -> Iterator[Event]:

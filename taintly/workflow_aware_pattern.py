@@ -39,7 +39,6 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from .parsers.structural import Event, EventKind, walk_workflow
 
@@ -56,13 +55,13 @@ from .parsers.structural import Event, EventKind, walk_workflow
 # need updating).
 # ---------------------------------------------------------------------------
 
-_current_filepath: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+_current_filepath: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "taintly_pattern_filepath", default=None
 )
 
 
 @contextmanager
-def set_pattern_filepath_context(filepath: Optional[str]):
+def set_pattern_filepath_context(filepath: str | None):
     """Bind ``filepath`` for the duration of this with-block so any
     ``WorkflowAwarePattern`` predicate dispatched inside the block
     can read it via :attr:`PredicateContext.filepath`.
@@ -97,7 +96,7 @@ class PredicateContext:
     """
 
     leaves: tuple[Event, ...]
-    filepath: Optional[str] = None
+    filepath: str | None = None
     """Absolute or relative path of the file being scanned, populated
     by :func:`set_pattern_filepath_context` during the engine's per-
     file pass.  ``None`` when the pattern is invoked outside an
@@ -107,10 +106,8 @@ class PredicateContext:
     _by_path_cache: dict[tuple[object, ...], Event] = field(
         default_factory=dict, init=False, repr=False
     )
-    _is_reusable: Optional[bool] = field(default=None, init=False, repr=False)
-    _caller_graph_cache: Optional[tuple[CallerInfo, ...]] = field(
-        default=None, init=False, repr=False
-    )
+    _is_reusable: bool | None = field(default=None, init=False, repr=False)
+    _caller_graph_cache: tuple[CallerInfo, ...] | None = field(default=None, init=False, repr=False)
     # Sentinel object used to distinguish "cache miss" from "cached
     # None result" for ``repo_root``.  ``None`` is a valid cached
     # return (no repo found / no filepath); without the sentinel a
@@ -122,14 +119,14 @@ class PredicateContext:
     # Direct lookups
     # ------------------------------------------------------------------
 
-    def get_leaf(self, target_path: tuple[object, ...]) -> Optional[Event]:
+    def get_leaf(self, target_path: tuple[object, ...]) -> Event | None:
         """Return the leaf event at ``target_path``, or None if absent."""
         if not self._by_path_cache and self.leaves:
             for ev in self.leaves:
                 self._by_path_cache.setdefault(ev.path, ev)
         return self._by_path_cache.get(target_path)
 
-    def get_value(self, target_path: tuple[object, ...]) -> Optional[str]:
+    def get_value(self, target_path: tuple[object, ...]) -> str | None:
         """Return the scalar value at ``target_path``, or None if absent."""
         ev = self.get_leaf(target_path)
         return ev.value if ev else None
@@ -165,7 +162,7 @@ class PredicateContext:
     # GitHub-Actions step helpers
     # ------------------------------------------------------------------
 
-    def step_index(self, path: tuple[object, ...]) -> Optional[tuple[str, int]]:
+    def step_index(self, path: tuple[object, ...]) -> tuple[str, int] | None:
         """Return ``(job_id, step_idx)`` if ``path`` is inside a step.
 
         ``path`` is considered "inside a step" when its prefix is
@@ -183,7 +180,7 @@ class PredicateContext:
             return (path[1], path[3])
         return None
 
-    def step_uses(self, path: tuple[object, ...]) -> Optional[str]:
+    def step_uses(self, path: tuple[object, ...]) -> str | None:
         """Return the ``uses:`` value of the step containing ``path``.
 
         ``None`` if ``path`` is not inside a step or the step has no
@@ -217,7 +214,7 @@ class PredicateContext:
     # File-shape helpers
     # ------------------------------------------------------------------
 
-    def repo_root(self) -> Optional[Path]:
+    def repo_root(self) -> Path | None:
         """Walk up from ``self.filepath`` looking for a directory that
         contains ``.git/`` or ``.github/``.  Returns the first match or
         ``None`` if not found within 10 levels (defensive cap).
@@ -528,13 +525,13 @@ class WorkflowAwarePattern:
 
     path: str | list[str]
     predicate: PredicateFn
-    snippet_format: Optional[str] = None
+    snippet_format: str | None = None
     # Cheap content pre-filter: when set, the (potentially expensive) structural
     # walk is skipped entirely unless this literal substring appears in the file.
     # Lets a rule that only fires on, e.g., ``${{ secrets.X }}`` avoid walking a
     # secret-free (or adversarially deep) workflow. Empty = always walk.
     requires: str = ""
-    _schema_name: Optional[str] = field(default=None, init=False, repr=False)
+    _schema_name: str | None = field(default=None, init=False, repr=False)
 
     def _paths(self) -> list[str]:
         if isinstance(self.path, str):

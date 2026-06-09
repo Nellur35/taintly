@@ -42,7 +42,6 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable
-from typing import Optional
 
 # Module-level enable flag.  CLI flips this when
 # ``--check-imposter-commits`` is passed; the rule's pattern reads it
@@ -58,7 +57,7 @@ _CACHE: dict[tuple[str, str, str], bool] = {}
 # Test-time hook.  When set, replaces the real network call with the
 # given callable.  ``None`` clears the override.  Signature:
 # ``fn(owner: str, repo: str, sha: str) -> Optional[bool]``.
-_VERIFIER_OVERRIDE: Optional[Callable[[str, str, str], Optional[bool]]] = None
+_VERIFIER_OVERRIDE: Callable[[str, str, str], bool | None] | None = None
 
 
 def set_enabled(enabled: bool) -> None:
@@ -81,7 +80,7 @@ def reset_cache() -> None:
 
 
 def set_verifier_override(
-    fn: Optional[Callable[[str, str, str], Optional[bool]]],
+    fn: Callable[[str, str, str], bool | None] | None,
 ) -> None:
     """Inject (or clear) a stub verifier.  Tests use this to avoid
     real network calls.  Pass ``None`` to restore the real
@@ -91,7 +90,7 @@ def set_verifier_override(
     _VERIFIER_OVERRIDE = fn
 
 
-def is_sha_reachable(owner: str, repo: str, sha: str) -> Optional[bool]:
+def is_sha_reachable(owner: str, repo: str, sha: str) -> bool | None:
     """Return ``True`` if the SHA is reachable in the repo,
     ``False`` if GitHub returns 404 (orphan), ``None`` on rate limit
     or transport failure.
@@ -127,7 +126,7 @@ def _warn_once(message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def _network_check(owner: str, repo: str, sha: str) -> Optional[bool]:
+def _network_check(owner: str, repo: str, sha: str) -> bool | None:
     """Real network implementation.  Hits
     ``GET /repos/{owner}/{repo}/commits/{sha}`` via the existing
     GitHub client; the 404→None mapping the client already

@@ -23,7 +23,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .parsers.structural import EventKind, walk_workflow
 
@@ -51,7 +50,7 @@ class StructuralPattern:
 
     path: str | list[str]
     predicate: Callable[[str, str, tuple[object, ...]], bool]
-    snippet_format: Optional[str] = None
+    snippet_format: str | None = None
     # When True, MAP_KEY events are also matched against the predicate
     # (``value`` = the key name, ``value_kind`` = "key"), so a rule can fire on
     # a mapping key whose value is empty/null/nested — e.g. a trigger declared
@@ -59,7 +58,7 @@ class StructuralPattern:
     # which produce no LEAF_SCALAR. Default False keeps every existing pattern's
     # walk leaf-only and byte-identical.
     include_keys: bool = False
-    _schema_name: Optional[str] = field(default=None, init=False, repr=False)
+    _schema_name: str | None = field(default=None, init=False, repr=False)
 
     def _paths(self) -> list[str]:
         if isinstance(self.path, str):
