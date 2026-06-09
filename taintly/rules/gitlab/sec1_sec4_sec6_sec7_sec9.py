@@ -4,6 +4,8 @@ Covers OWASP CICD-SEC-1, SEC-2, SEC-4, SEC-5, SEC-6 (extended), SEC-7, SEC-9.
 These were entirely missing or undercovered in the initial implementation.
 """
 
+import re
+
 from taintly.models import (
     ContextPattern,
     PathPattern,
@@ -13,6 +15,84 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+
+# Identity-gate shape shared by SEC4-GL-007: ``$GITLAB_USER_*`` compared against
+# a literal / slash-regex / bareword — the spoofable access-control match.
+_GITLAB_USER_GATE_RE = re.compile(
+    r"\$\{?GITLAB_USER_(?:LOGIN|NAME|ID|EMAIL)\}?"
+    r"\s*(?:==|!=|=~|!~)\s*"
+    r"(?:['\"][^'\"]+['\"]|/[^/\n]+/|[@\w.+-]+)"
+)
+_WHEN_NEVER_RE = re.compile(r"^\s*when\s*:\s*never\b")
+_RULES_ITEM_RE = re.compile(r"^(\s*)-\s")
+
+
+class GitlabIdentityGatePattern:
+    """SEC4-GL-007: a pipeline ``rules:if:`` access-control gate keyed on the
+    spoofable ``$GITLAB_USER_*`` trigger identity.
+
+    Fires on GRANT rules (``when: on_success`` / default) but NOT on
+    ``when: never`` DENY rules.  A deny gate keyed on the identity withholds
+    execution — it grants nothing to a spoofed actor — so flagging it as a
+    confused-deputy access grant is a logic-direction false positive.  Replaces
+    a bare :class:`RegexPattern`, which was blind to the rule's ``when:``
+    direction.
+    """
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            if line.lstrip(" \t").startswith("#"):
+                continue
+            if not _GITLAB_USER_GATE_RE.search(line):
+                continue
+            if self._rule_is_deny_gate(lines, i):
+                continue
+            results.append((i + 1, line.strip()))
+        return results
+
+    @staticmethod
+    def _rule_is_deny_gate(lines: list[str], idx: int) -> bool:
+        """True when the matched ``if:`` at ``idx`` belongs to a ``rules:``
+        list item whose ``when:`` is ``never`` (a defensive deny gate)."""
+        marker = _RULES_ITEM_RE.match(lines[idx])
+        if marker:
+            marker_indent = len(marker.group(1))
+            start = idx
+        else:
+            # Block-scalar / continuation ``if:`` — walk back to the list-item
+            # marker that owns this condition line.
+            marker_indent = None
+            start = idx
+            for j in range(idx - 1, -1, -1):
+                s = lines[j].lstrip(" \t")
+                if not s or s.startswith("#"):
+                    continue
+                back = _RULES_ITEM_RE.match(lines[j])
+                if back:
+                    marker_indent = len(back.group(1))
+                    start = j
+                    break
+                if len(lines[j]) - len(s) == 0:
+                    break  # reached a top-level key without finding a marker
+            if marker_indent is None:
+                return False
+        # ``marker_indent`` is an int on both paths here (a marker was found,
+        # or we returned above); this guard narrows the type for mypy without
+        # an ``assert`` (bandit B101 flags asserts in non-test code).
+        if marker_indent is None:
+            return False
+        # Scan the item body (lines indented deeper than the marker) up to the
+        # next sibling item / dedent, looking for ``when: never``.
+        for j in range(start + 1, len(lines)):
+            s = lines[j].lstrip(" \t")
+            if not s or s.startswith("#"):
+                continue
+            if len(lines[j]) - len(s) <= marker_indent:
+                break  # next sibling rule item or dedent out of rules:
+            if _WHEN_NEVER_RE.match(lines[j]):
+                return True
+        return False
 
 
 class DotenvReportPattern:
@@ -1115,17 +1195,7 @@ RULES: list[Rule] = [
             "author / committer identity instead, or gate on a ref "
             "that only the intended actor can push."
         ),
-        pattern=RegexPattern(
-            match=(
-                r"\$\{?GITLAB_USER_(?:LOGIN|NAME|ID|EMAIL)\}?"
-                r"\s*(?:==|!=|=~|!~)\s*"
-                # Literal string (quoted or unquoted) OR a slash-
-                # delimited regex (GitLab's ``=~`` operator).  Both
-                # shapes are the insecure string-match gate.
-                r"(?:['\"][^'\"]+['\"]|/[^/\n]+/|[@\w.+-]+)"
-            ),
-            exclude=[r"^\s*#"],
-        ),
+        pattern=GitlabIdentityGatePattern(),
         remediation=(
             "Use the MR author / source-project identity rather than "
             "the trigger actor.  ``$CI_MERGE_REQUEST_AUTHOR`` (GitLab "
@@ -1154,11 +1224,18 @@ RULES: list[Rule] = [
             "  rules:\n    - if: $GITLAB_USER_NAME == 'renovate-bot'",
             "    - if: '$GITLAB_USER_ID == 42'",
             "    - if: '$GITLAB_USER_EMAIL =~ /bot@/'",
+            # GRANT rule (explicit when: on_success) keyed on the spoofable
+            # identity is still the confused-deputy vector — must fire.
+            "  rules:\n    - if: '$GITLAB_USER_LOGIN == \"trusted-bot\"'\n      when: on_success",
         ],
         test_negative=[
             "    - if: '$CI_MERGE_REQUEST_AUTHOR == \"dependabot\"'",
             "    - if: $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID",
             "    # - if: '$GITLAB_USER_LOGIN == \"bot\"'",
+            # DENY gate (when: never) keyed on the identity is DEFENSIVE — it
+            # withholds execution and grants nothing to a spoofed actor, so it
+            # must NOT fire.
+            "  rules:\n    - if: '$GITLAB_USER_LOGIN == \"release-bot\"'\n      when: never",
         ],
         stride=["S", "E"],
         threat_narrative=(
