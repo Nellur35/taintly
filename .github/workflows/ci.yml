@@ -205,6 +205,7 @@ jobs:
         # 2026-05-05 e2e session.
         run: |
           pytest tests/unit/ tests/integration/ tests/evasion/ tests/playground/ \
+            -n auto \
             --tb=short -q \
             --cov=taintly \
             --cov-branch \
@@ -330,7 +331,7 @@ jobs:
         run: pip install --require-hashes -r requirements-dev.lock
 
       - name: Fuzz tests
-        run: pytest tests/fuzz/ --tb=short -q
+        run: pytest -n auto tests/fuzz/ --tb=short -q
         # Per-case timeout guards are enforced inside tests/fuzz/test_fuzz_yaml.py.
 
   # ---------------------------------------------------------------------------
@@ -437,5 +438,5 @@ jobs:
         # the 78% floor; the Windows job's purpose is OS-portability,
         # not coverage.  If a test fails ONLY on Windows, that's a
         # path / line-ending / case-sensitivity bug worth fixing.
-        run: pytest tests/unit/ tests/integration/ tests/evasion/ tests/playground/ --tb=short -q
+        run: pytest -n auto tests/unit/ tests/integration/ tests/evasion/ tests/playground/ --tb=short -q
 
