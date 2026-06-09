@@ -67,6 +67,8 @@ jobs:
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.12"
+          cache: 'pip'
+          cache-dependency-path: requirements-dev.lock
 
       - name: Run public-repo FP budget (strict on skips)
         # taintly has zero runtime deps, so it runs straight from the
