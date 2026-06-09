@@ -444,8 +444,21 @@ def test_groovy_gstring_does_not_double_rewrite(tmp_path):
     assert fix_unquote_groovy_gstring_with_params(str(p), dry_run=False) == []
 
 
-def test_groovy_gstring_registered_in_all_fixers():
-    assert "unquote_groovy_gstring_with_params" in ALL_FIXERS
+def test_groovy_gstring_is_opt_in_not_default():
+    """The GString unquote leaves a literal ``${params.X}`` bash can't resolve
+    (``bad substitution``) — it changes build semantics, so it must be OPT-IN,
+    never a default ``--fix``."""
+    assert "unquote_groovy_gstring_with_params" not in ALL_FIXERS
+    assert "unquote_groovy_gstring_with_params" in OPT_IN_FIXERS
+
+
+def test_groovy_gstring_unquote_not_run_by_default(tmp_path):
+    """A bare --fix must NOT apply the build-breaking GString unquote."""
+    path = _write(
+        tmp_path, 'pipeline {\n  stages {\n    stage("s") {\n      steps { sh "echo ${params.X}" }\n    }\n  }\n}\n'
+    )
+    results = apply_fixes(path, dry_run=True)
+    assert all(r.fix_type != "unquote_groovy_gstring_with_params" for r in results)
 
 
 # ---------------------------------------------------------------------------
