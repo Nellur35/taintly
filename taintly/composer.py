@@ -28,7 +28,7 @@ machinery actually earn its keep on this layer of the system.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from taintly.taint_facts.closure import solve
@@ -59,6 +59,12 @@ class FindingFact:
     job: str | None
     line: int
     severity_value: str  # Severity.value (string) — keeps Fact hashable
+    # The source finding's snippet (e.g. TAINT-GH-001's rendered
+    # source→hop→sink path). Payload only — ``compare=False`` keeps it
+    # out of the Fact's identity so the datalog joins/dedup (which key on
+    # ``fact_key``) are unaffected; composer rules can surface the path
+    # on the upgraded finding so triage sees WHY it chained.
+    snippet: str = field(default="", compare=False)
 
     def fact_key(self):
         return (self.rule_id, self.file, self.job, self.line)
@@ -196,6 +202,7 @@ def _seed_findings(
                 job=job,
                 line=line,
                 severity_value=f.severity.value if f.severity else "info",
+                snippet=getattr(f, "snippet", "") or "",
             ),
         )
 

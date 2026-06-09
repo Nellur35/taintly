@@ -243,11 +243,15 @@ def _compose_chain_gh_103(db: Database) -> Iterable[tuple[str, Fact]]:
             continue
         if ctx.trusted_bot_gate:
             continue
+        # Surface the constituent TAINT-GH-001 finding's rendered
+        # source→hop→sink path (its snippet) so the upgraded finding shows
+        # WHY it chained, not just the conclusion.
+        path_note = f" Taint path: {f.snippet}" if f.snippet else ""
         snippet = (
             "CHAIN: tainted value reaches a shell run: in a fork-"
             "reachable workflow. TAINT-GH-001 by itself flagged the "
             "flow; the fork-reachable trigger upgrades that to a "
-            "concrete external-attacker-injectable shell."
+            "concrete external-attacker-injectable shell." + path_note
         )
         yield (
             "composite",
