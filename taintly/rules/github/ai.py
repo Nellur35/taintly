@@ -1354,6 +1354,9 @@ RULES: list[Rule] = [
                 r")"
             ),
             scope="file",
+            # GH-B1: pure attacker-context requires — gha_expr-augmented (catches
+            # index/bracket access + context-name case of the same contexts).
+            expr_augment_requires=True,
             exclude=[
                 r"^\s*#",
                 # FP-audit class E: ``\b(?:open_?ai|anthropic)\s*[.(]``
@@ -1747,6 +1750,9 @@ RULES: list[Rule] = [
             ),
             scope="job",
             exclude=[r"^\s*#"],
+            # GH-B1: pure attacker-context requires (same shape as LOTP-GH-001)
+            # — gha_expr-augmented for obfuscated PR-head checkout refs.
+            expr_augment_requires=True,
         ),
         remediation=(
             "Either check out a trusted ref (the base SHA, a pinned "
@@ -3142,6 +3148,10 @@ RULES: list[Rule] = [
             ),
             scope="file",
             exclude=[r"^\s*#"],
+            # GH-B1: ${{ }}-wrapped attacker-context requires — gha_expr-augmented
+            # (the canonical path is re-wrapped in ${{ }} before re-testing, so
+            # bracket/index/case obfuscations gate the rule like the literal form).
+            expr_augment_requires=True,
         ),
         remediation=(
             "Three options, in order of preference:\n\n"
@@ -4117,6 +4127,9 @@ RULES: list[Rule] = [
             ),
             scope="file",
             exclude=[r"^\s*#"],
+            # GH-B1: ${{ }}-wrapped attacker-context requires — gha_expr-augmented
+            # (see AI-GH-021).
+            expr_augment_requires=True,
         ),
         remediation=(
             "Don't let the PR head choose your MCP server fleet.\n"
@@ -4975,6 +4988,9 @@ RULES: list[Rule] = [
             ),
             scope="file",
             exclude=[r"^\s*#"],
+            # GH-B1: ${{ }}-wrapped attacker-context requires — gha_expr-augmented
+            # (catches bracket/index access of github.event AND inputs contexts).
+            expr_augment_requires=True,
         ),
         remediation=(
             "Pin the reward source to a CODEOWNERS-protected path or\n"

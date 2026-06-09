@@ -1085,6 +1085,9 @@ RULES: list[Rule] = [
             anchor=r"pull_request_target",
             requires=r"github\.event\.pull_request\.head\.(sha|ref)",
             exclude=[r"^\s*#"],
+            # GH-B1: pure attacker-context requires — gha_expr-augmented so an
+            # index/bracket-encoded or context-cased head ref gates the rule.
+            expr_augment_requires=True,
         ),
         remediation=(
             "Use 'pull_request' trigger instead. If secrets are required, use a two-workflow "
@@ -1718,5 +1721,152 @@ RULES: list[Rule] = [
             "off archived dependencies is the cheapest mitigation."
         ),
         finding_family="action_pin_drift",
+    ),
+    # =========================================================================
+    # SEC3-GH-013: Privileged/release job restores a poisonable build cache
+    # =========================================================================
+    # The CONSUME/sink side of cache poisoning.  (The WRITE/poison side --
+    # granting ``actions: write`` so a step can mutate caches -- is AI-GH-023's
+    # job; this rule is its complement and the two can co-occur.)  A job that
+    # restores a build cache AND holds release/write privilege trusts bytes that
+    # a separate, less-trusted workflow run (a fork PR build, a branch a
+    # contributor can push) could have written under the same cache key.  GitHub
+    # Actions caches are shared across a repository's workflows with only
+    # branch-scoped read restrictions, so a cache populated by an attacker-
+    # influenced run can be restored into a privileged build and execute under
+    # the production trigger's permissions and secrets.  The malicious bytes
+    # live in a cache blob, not in git, so the attack survives PR review.
+    # Field grounding: Cacheract (Adnan Khan, Dec 2024); Angular dev-infra
+    # compromise (Dec 2025).  Whether an untrusted ref can actually reach the
+    # same cache key is NOT statically decidable, so this is MEDIUM + review-
+    # needed: it surfaces the cache-into-privileged-build shape for a human to
+    # confirm the key scoping, rather than asserting a confident finding.
+    Rule(
+        id="SEC3-GH-013",
+        title="Privileged or release job restores a build cache that a less-trusted workflow can poison",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-3",
+        description=(
+            "A job restores a build cache (``actions/cache``, or a setup / "
+            "build action that caches -- ``setup-go``, ``Swatinem/rust-cache``, "
+            "``gradle-build-action``, or any ``setup-*`` with ``cache:`` "
+            "enabled) AND that same job holds an exfil/release privilege "
+            "(``id-token: write``, ``contents`` / ``packages`` / "
+            "``deployments: write``, ``write-all``, or a publish step -- "
+            "``npm publish``, ``goreleaser``, ``docker push``, "
+            "``gh release``, a PyPI/release action). GitHub Actions caches are "
+            "shared across a repository's workflows; a cache key populated by a "
+            "less-trusted run (a fork pull-request build, or any workflow a "
+            "contributor can trigger) is restored verbatim into this privileged "
+            "build, so attacker-controlled cache bytes execute with the "
+            "production job's token and secrets. Because the payload lives in a "
+            "cache blob rather than in the repository, it is invisible to anyone "
+            "reviewing the pull request. This is the cache-poisoning sink that "
+            "Cacheract (Dec 2024) and the Angular dev-infra compromise "
+            "(Dec 2025) weaponised."
+        ),
+        pattern=ContextPattern(
+            # Anchor: genuine cache usage in the job.  ``setup-go`` and the
+            # rust/gradle cache actions cache by default; ``setup-node`` /
+            # ``setup-python`` / ``setup-java`` only cache when ``cache:`` is
+            # set, so those are matched via the ``cache:`` key, not the bare
+            # ``uses:`` line (which would over-fire on every repo).
+            anchor=(
+                r"uses:\s*actions/cache(?:/restore)?@"
+                r"|uses:\s*actions/setup-go@"
+                r"|uses:\s*Swatinem/rust-cache@"
+                r"|uses:\s*gradle/(?:gradle-build-action|actions/setup-gradle)@"
+                r"|^\s*cache:\s*['\"]?(?:true|npm|yarn|pip|pnpm|gradle|maven|sbt|poetry|gomod)\b"
+            ),
+            # Requires (same job): a release / write privilege.  Permissions can
+            # sit at job level (in the segment) or workflow level (folded into
+            # the first job's segment); the publish-step signals are always
+            # job-local.
+            requires=(
+                r"id-token:\s*write"
+                r"|(?:contents|packages|deployments)\s*:\s*write"
+                r"|permissions:\s*write-all"
+                r"|\b(?:npm\s+publish|twine\s+upload|goreleaser|docker\s+push"
+                r"|gh\s+release\s+(?:create|upload))\b"
+                r"|uses:\s*(?:softprops/action-gh-release|docker/build-push-action"
+                r"|actions/deploy-pages|pypa/gh-action-pypi-publish"
+                r"|ncipollo/release-action|goreleaser/goreleaser-action)@"
+            ),
+            scope="job",
+            exclude=[r"^\s*#"],
+        ),
+        remediation=(
+            "Treat a restored cache as untrusted input to a privileged build:\n"
+            "\n"
+            "1. Scope cache keys so a less-trusted run cannot populate the key "
+            "   a privileged build restores. Include a trusted discriminator in "
+            "   the key (e.g. the protected ref / a content hash of vetted "
+            "   inputs), and avoid broad ``restore-keys:`` prefixes that fall "
+            "   back to a fork-populated entry.\n"
+            "2. Split the pipeline: build/cache untrusted code in a job with no "
+            "   secrets and no write token, and do the privileged release in a "
+            "   separate job that does NOT restore that cache (or restores only "
+            "   a cache it produced itself in the same run).\n"
+            "3. Verify integrity before use -- restore into a scratch dir and "
+            "   validate a signed manifest of the cached contents.\n"
+            "4. Minimise the blast radius: keep ``actions: write`` off the "
+            "   workflow (see AI-GH-023) so no step can mutate caches via the "
+            "   GitHub API in the first place."
+        ),
+        reference="https://adnanthekhan.com/2024/12/21/cacheract-the-monster-in-your-actions-cache/",
+        test_positive=[
+            # goreleaser release job: setup-go (default cache) + contents:write
+            # + a release action.
+            "jobs:\n  goreleaser:\n    runs-on: ubuntu-latest\n"
+            "    permissions:\n      contents: write\n"
+            "    steps:\n      - uses: actions/setup-go@v5\n"
+            "      - uses: goreleaser/goreleaser-action@v6\n",
+            # explicit actions/cache restore + id-token:write + npm publish.
+            "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+            "    permissions:\n      id-token: write\n"
+            "    steps:\n      - uses: actions/cache@v4\n"
+            "        with:\n          path: ~/.npm\n          key: npm-cache\n"
+            "      - run: npm publish\n",
+            # setup-node with cache: enabled + packages:write + docker push.
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+            "    permissions:\n      packages: write\n"
+            "    steps:\n      - uses: actions/setup-node@v4\n"
+            "        with:\n          node-version: 20\n          cache: npm\n"
+            "      - run: docker push ghcr.io/org/app:latest\n",
+        ],
+        test_negative=[
+            # Cache in a plain test job with no privilege -- not a sink.
+            "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+            "    permissions:\n      contents: read\n"
+            "    steps:\n      - uses: actions/setup-go@v5\n"
+            "      - run: go test ./...\n",
+            # Privileged publish job with NO cache -- nothing to poison.
+            "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+            "    permissions:\n      id-token: write\n"
+            "    steps:\n      - run: npm publish\n",
+            # setup-node WITHOUT caching (no cache: key) in a release job.
+            "jobs:\n  publish:\n    runs-on: ubuntu-latest\n"
+            "    permissions:\n      contents: write\n"
+            "    steps:\n      - uses: actions/setup-node@v4\n"
+            "        with:\n          node-version: 20\n      - run: npm publish\n",
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "An attacker opens a fork pull request whose build job populates a "
+            "shared cache key (lockfile-hash keys collide across the fork and "
+            "the base repo). Later, a privileged release workflow on the "
+            "default branch restores that key, and the attacker's cached "
+            "build artefact -- a poisoned ``node_modules``, a tampered Go "
+            "module cache, a swapped compiler plugin -- executes with the "
+            "release job's ``id-token``/write token and secrets. The repo "
+            "owner sees only innocent YAML in the PR; the payload is in the "
+            "cache blob."
+        ),
+        confidence="medium",
+        review_needed=True,
+        incidents=[
+            "https://adnanthekhan.com/2024/12/21/cacheract-the-monster-in-your-actions-cache/"
+        ],
     ),
 ]
