@@ -195,6 +195,14 @@ _CHUNK_OVERLAP_LINES = 50
 _MAX_CHUNKS = 20
 _CHUNKED_WALLCLOCK_BUDGET_S = 3.0
 
+# The byte size beyond which ``_safe_search_chunked`` gives up (it returns
+# ``None`` once ``chunks_scanned >= _MAX_CHUNKS``).  Below this ceiling a file
+# that is over ``_MAX_SAFE_TEXT_LEN`` is still fully scanned window-by-window,
+# so file-scope patterns keep full coverage; only PAST it is coverage actually
+# degraded.  The engine uses this to decide when a large file is "scanned in
+# chunks, coverage preserved" versus genuinely "coverage degraded".
+_CHUNK_COVERAGE_CEILING = _MAX_CHUNKS * _MAX_SAFE_TEXT_LEN
+
 
 def _safe_search(compiled_pattern, text: str):
     """Run a compiled regex search with ReDoS / CPU-exhaustion protection.

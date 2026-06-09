@@ -112,6 +112,33 @@ def test_oversize_file_emits_engine_err_and_appears_in_text_banner(tmp_path):
     )
 
 
+def test_oversize_past_chunk_ceiling_states_degraded_not_preserved(tmp_path):
+    """Past the chunked-coverage ceiling (_MAX_CHUNKS x _MAX_SAFE_TEXT_LEN,
+    ~1.31 MB) the chunked search gives up, so the notice must say coverage is
+    DEGRADED — not the benign 'content scanned in chunks / coverage preserved'
+    message that applies in the chunked band below the ceiling."""
+    from taintly.models import _CHUNK_COVERAGE_CEILING
+
+    big_file = tmp_path / "huge.yml"
+    filler = "  comment: " + "x" * 50 + "\n"
+    n = _CHUNK_COVERAGE_CEILING // len(filler) + 2
+    content = "on: push\njobs:\n" + filler * n
+    assert len(content) > _CHUNK_COVERAGE_CEILING
+    big_file.write_text(content)
+
+    findings = scan_file(str(big_file), rules=[])
+    degraded = [
+        f
+        for f in findings
+        if f.rule_id == "ENGINE-ERR" and "chunked-coverage ceiling" in f.title
+    ]
+    assert degraded, "expected a degraded-coverage ENGINE-ERR past the ceiling"
+    f = degraded[0]
+    assert "coverage degraded" in f.title
+    assert "Coverage is preserved" not in f.description
+    assert "scanned in chunks" not in f.title
+
+
 def test_engine_err_on_crashing_rule(tmp_path):
     """A rule whose pattern.check() raises must produce ENGINE-ERR, not propagate."""
     import taintly.models as models_module
