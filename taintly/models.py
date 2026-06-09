@@ -192,7 +192,11 @@ def _safe_search_chunked(compiled_pattern, content: str):
 # every realistic CI config fits.
 _CHUNK_LINES = 2000
 _CHUNK_OVERLAP_LINES = 50
-_MAX_CHUNKS = 20
+# Bumped 20 -> 36 so a full ~2 MB file's file-scope rules are scanned
+# window-by-window rather than truncated: 36 * _MAX_SAFE_TEXT_LEN (64 KiB)
+# = ~2.36 MB coverage ceiling (_CHUNK_COVERAGE_CEILING tracks it). The new
+# per-file wall-clock budget in engine.scan_file is the real worst-case cap.
+_MAX_CHUNKS = 36
 _CHUNKED_WALLCLOCK_BUDGET_S = 3.0
 
 # The byte size beyond which ``_safe_search_chunked`` gives up (it returns

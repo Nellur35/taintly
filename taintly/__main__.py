@@ -89,6 +89,16 @@ def main():
         "--min-severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"], default=None
     )
     parser.add_argument(
+        "--max-scan-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Per-file rule-loop wall-clock budget in seconds (default 30). On "
+            "exceed, remaining rules are skipped and an ENGINE-ERR notice is "
+            "emitted. Raise for large generated / monorepo CI files."
+        ),
+    )
+    parser.add_argument(
         "--fix",
         action="store_true",
         help="Level 1: Apply deterministic auto-fixes (pin SHAs, add persist-credentials, add permissions)",
@@ -810,7 +820,12 @@ def main():
         report.files_scanned = len(workflow_files)
 
         for virtual_path, content in workflow_files:
-            for finding in scan_file(virtual_path, platform_rules, _content=content):
+            for finding in scan_file(
+                virtual_path,
+                platform_rules,
+                _content=content,
+                max_scan_seconds=args.max_scan_seconds,
+            ):
                 report.add(finding)
 
         # --- Platform posture checks across all repos in the org ---
@@ -888,7 +903,12 @@ def main():
         report.files_scanned = len(pipeline_files)
 
         for virtual_path, content in pipeline_files:
-            for finding in scan_file(virtual_path, platform_rules, _content=content):
+            for finding in scan_file(
+                virtual_path,
+                platform_rules,
+                _content=content,
+                max_scan_seconds=args.max_scan_seconds,
+            ):
                 report.add(finding)
 
         # --- Platform posture checks across all projects in the group ---
@@ -1045,6 +1065,7 @@ def main():
         all_rules,
         platform,
         explicit_github_repoctx=explicit_repoctx,
+        max_scan_seconds=args.max_scan_seconds,
     )
 
     # Surface config-driven exclusions on every report so the summary

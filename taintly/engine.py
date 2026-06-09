@@ -5,6 +5,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -191,6 +192,15 @@ def _is_suppressed(line: str, rule_id: str) -> bool:
 # break suppression on stacked-merge workflows.
 _ANCHOR_EXPANSION_LINE_TOLERANCE = 30
 
+# Total wall-clock budget (seconds) for the per-rule scan loop of a SINGLE file.
+# Distinct from models._CHUNKED_WALLCLOCK_BUDGET_S, which bounds ONE
+# _safe_search_chunked call: this bounds the WHOLE file's rule loop, so a file
+# that is individually-cheap-per-rule but expensive in aggregate (O(rules x size)
+# on a multi-MB generated pipeline, or a taint-sink-dense file) still terminates.
+# Measured worst case at 200 KB is ~7 s for the full GitHub pack, so 30 s only
+# trips on genuinely large / pathological input. Overridable via --max-scan-seconds.
+_FILE_SCAN_WALLCLOCK_BUDGET_S = 30.0
+
 
 def scan_file(
     filepath: str,
@@ -199,6 +209,7 @@ def scan_file(
     repoctx: StaticGuardContext | None = None,
     gitlabctx: GitLabContext | None = None,
     jenkinsctx: JenkinsContext | None = None,
+    max_scan_seconds: float | None = None,
 ) -> list[Finding]:
     """Scan a single file against a list of rules.
 
@@ -362,8 +373,14 @@ def scan_file(
     # caller-graph / repo-root resolution — see TAINT-GH-007).
     from taintly.workflow_aware_pattern import set_pattern_filepath_context
 
+    budget = max_scan_seconds if max_scan_seconds is not None else _FILE_SCAN_WALLCLOCK_BUDGET_S
+    deadline = time.monotonic() + budget
+    unevaluated = 0
     with scan_session(), set_pattern_filepath_context(filepath):
-        for rule in rules:
+        for idx, rule in enumerate(rules):
+            if time.monotonic() >= deadline:
+                unevaluated = len(rules) - idx
+                break
             try:
                 matches = rule.pattern.check(content, lines)
                 # Anchor-aware suppression: if the rule opts in and an
@@ -495,6 +512,29 @@ def scan_file(
                         file=filepath,
                     )
                 )
+
+    if unevaluated:
+        findings.append(
+            Finding(
+                rule_id="ENGINE-ERR",
+                severity=Severity.LOW,
+                title=(
+                    f"File scan time-boxed at {budget:g} s; "
+                    f"{unevaluated} of {len(rules)} rules not evaluated"
+                ),
+                description=(
+                    "To bound total CPU on large or pathological CI configs, "
+                    f"taintly caps the per-file rule loop at {budget:g} s. The "
+                    f"budget was reached after evaluating "
+                    f"{len(rules) - unevaluated} of {len(rules)} rules; the "
+                    "remaining rules did not run on this file. Rules already "
+                    "evaluated reported normally. If this is a legitimate large "
+                    "config, split it via includes / reusable workflows, or raise "
+                    "the budget with --max-scan-seconds."
+                ),
+                file=filepath,
+            )
+        )
 
     _run_post_processors(
         findings,
@@ -1531,6 +1571,7 @@ def scan_repo(
     platform: Platform | None = None,
     *,
     explicit_github_repoctx: StaticGuardContext | None = None,
+    max_scan_seconds: float | None = None,
 ) -> list[AuditReport]:
     """Scan an entire repository. Returns one report per platform detected.
 
@@ -1694,6 +1735,7 @@ def scan_repo(
                     repoctx=repoctx,
                     gitlabctx=gitlabctx,
                     jenkinsctx=jenkinsctx,
+                    max_scan_seconds=max_scan_seconds,
                 )
             )
             # Surface-evaluation pass (reusing the content read above): a
