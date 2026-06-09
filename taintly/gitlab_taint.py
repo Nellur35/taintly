@@ -1107,13 +1107,18 @@ def _iter_script_lines(seg_lines: list[str], seg_start: int) -> list[tuple[int, 
                 j += 1
                 continue
             child_indent = len(child) - len(stripped)
-            if child_indent <= header_indent:
+            # A ``- cmd`` list item AT header_indent is a valid same-indent
+            # YAML block sequence (``script:`` then ``- cmd`` at the same
+            # column) and must NOT end the block.  Only a dedent, or a
+            # sibling key sitting at the header indent, terminates it.
+            is_list_item = stripped.startswith("- ") or stripped.startswith("-\t")
+            if child_indent < header_indent or (child_indent == header_indent and not is_list_item):
                 break
             # The script value is typically a YAML list item: ``- cmd``.
             # Strip the leading ``- `` so the snippet shows the command,
             # not the YAML decoration.
             text = stripped
-            if text.startswith("- ") or text.startswith("-\t"):
+            if is_list_item:
                 text = text[2:].strip()
             out.append((seg_start + j + 1, text))
             j += 1

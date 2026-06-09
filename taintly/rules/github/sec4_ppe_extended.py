@@ -346,16 +346,43 @@ class ReusableWorkflowSecretsInheritPattern:
     """
 
     _SECRETS_INHERIT_RE = re.compile(r"^\s*secrets:\s*inherit\s*(#.*)?$")
+    # Block form: ``secrets:`` on its own line, ``inherit`` on the next.
+    _SECRETS_BLOCK_RE = re.compile(r"^(\s*)secrets:\s*(#.*)?$")
+    _INHERIT_ONLY_RE = re.compile(r"^\s*inherit\s*(#.*)?$")
     _USES_RE = re.compile(r"^\s*uses\s*:\s*(.+?)\s*(#.*)?$")
 
     def __init__(self, *, local: bool) -> None:
         self.local = local
 
+    def _is_inherit_at(self, lines: list[str], i: int) -> bool:
+        """True if line ``i`` is ``secrets: inherit`` inline, OR the
+        ``secrets:`` line of a YAML block form (``secrets:`` then an
+        indented ``inherit`` on the next meaningful line). The block form
+        is valid YAML the inline-only regex missed — a
+        reformatting-evadable recall gap."""
+        line = lines[i]
+        if self._SECRETS_INHERIT_RE.match(line):
+            return True
+        m = self._SECRETS_BLOCK_RE.match(line)
+        if not m:
+            return False
+        sec_indent = len(m.group(1))
+        for j in range(i + 1, len(lines)):
+            nxt = lines[j]
+            ns = nxt.lstrip(" \t")
+            if not ns or ns.startswith("#"):
+                continue
+            nindent = len(nxt) - len(ns)
+            # First meaningful child must be an indented bare ``inherit``;
+            # a ``secrets:`` introducing an explicit map is correctly ignored.
+            return nindent > sec_indent and bool(self._INHERIT_ONLY_RE.match(nxt))
+        return False
+
     def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
         results: list[tuple[int, str]] = []
         for i, line in enumerate(lines):
             stripped = line.lstrip(" \t")
-            if stripped.startswith("#") or not self._SECRETS_INHERIT_RE.match(line):
+            if stripped.startswith("#") or not self._is_inherit_at(lines, i):
                 continue
             callee = self._find_sibling_uses(lines, i)
             is_local = callee.startswith("./")
@@ -995,6 +1022,7 @@ RULES: list[Rule] = [
             "jobs:\n  call:\n    uses: owner/repo/.github/workflows/deploy.yml@v1\n    secrets: inherit",
             "jobs:\n  call:\n    uses: 'owner/repo/.github/workflows/deploy.yml@v1'\n    secrets: inherit",
             "jobs:\n  call:\n    uses: owner/repo/.github/workflows/deploy.yml@v1\n    secrets: inherit  # pass all",
+            "jobs:\n  call:\n    uses: owner/repo/.github/workflows/deploy.yml@v1\n    secrets:\n      inherit",
         ],
         test_negative=[
             "jobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    secrets: inherit",
@@ -2110,6 +2138,7 @@ RULES: list[Rule] = [
         test_positive=[
             "jobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    secrets: inherit",
             "jobs:\n  call:\n    uses: './.github/workflows/reusable.yml'\n    secrets: inherit",
+            "jobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    secrets:\n      inherit",
         ],
         test_negative=[
             "jobs:\n  call:\n    uses: owner/repo/.github/workflows/reusable.yml@v1\n    secrets: inherit",
