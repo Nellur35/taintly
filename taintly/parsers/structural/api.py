@@ -25,18 +25,20 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from .schemas import detect_schema_for_path
-from .walker import Event, EventKind
+from .walker import Event, EventKind, _glob_to_segments, _path_matches
 from .walker import walk as _walk
 
 # ---------------------------------------------------------------------------
 # Parse memoization.
 #
-# The walk is a PURE function of (content, query, recover, include_keys) — the
-# schema lookup is not consumed and the filepath only feeds it.  A single
-# ``scan_file`` calls ``walk_workflow`` hundreds-to-tens-of-thousands of times
-# on the SAME content (one call per structural rule / query / taint fact-build);
-# every one re-tokenizes and re-walks from scratch.  Materialising the event
-# stream once per distinct key and replaying it collapses that to one walk.
+# The FULL walk is a PURE function of (content, recover, include_keys) — the
+# schema lookup is not consumed and the filepath only feeds it, and ``query`` is
+# just a post-filter over the yielded events (see ``walk()``).  A single
+# ``scan_file`` calls ``walk_workflow`` hundreds-to-tens-of-thousands of times on
+# the SAME content (one call per structural rule / query / taint fact-build).
+# Keying the cache by (content, recover, include_keys) and applying ``query`` as
+# an in-memory filter means all those distinct-query calls share ONE walk
+# (≤4 per file, the recover/include_keys combos) instead of re-walking per query.
 #
 # Bounded LRU: the dominant redundancy is *within* one file's scan (same
 # content, a handful of query/flag variants), so a small cap captures nearly all
@@ -53,6 +55,26 @@ def clear_walk_cache() -> None:
     the LRU bounds memory and the walk is content-keyed so stale hits are
     impossible)."""
     _walk_cache.clear()
+
+
+def _full_walk(content: str, recover: bool, include_keys: bool) -> tuple[Event, ...]:
+    """One materialised FULL (``query=None``) walk per (content, recover,
+    include_keys), so the many distinct-query calls on one file share a single
+    walk.  ``query`` is applied as a cheap in-memory post-filter in
+    :func:`walk_workflow`; ``walk()`` already treats the query as a pure
+    post-filter, so filtering the full stream is byte-identical to a per-query
+    walk."""
+    key = (content, recover, include_keys)
+    cached = _walk_cache.get(key)
+    if cached is not None:
+        _walk_cache.move_to_end(key)
+        return cached
+    events = tuple(_walk(content, query=None, recover=recover, include_keys=include_keys))
+    _walk_cache[key] = events
+    _walk_cache.move_to_end(key)
+    if len(_walk_cache) > _WALK_CACHE_MAXSIZE:
+        _walk_cache.popitem(last=False)
+    return events
 
 
 def walk_workflow(
@@ -96,20 +118,27 @@ def walk_workflow(
     # is preserved so a future schema-consultation hook wires in
     # here without touching the call sites.
     _ = schema or detect_schema_for_path(filepath)
-    # Memoised replay: the walk is a pure function of these four args (see the
-    # cache note above), so materialise once per key and replay.  filepath /
+    # Walk ONCE per (content, recover, include_keys) — cached full event stream —
+    # then apply ``query`` as a cheap in-memory post-filter.  ``walk()`` already
+    # treats query as a pure post-filter over LEAF_SCALAR/MAP_KEY events
+    # (CUTOFF/ERROR always pass through), so this is byte-identical to a per-query
+    # walk while collapsing the many distinct-query walks/file to ≤4.  filepath /
     # schema do not affect the event stream.
-    key = (content, query, recover, include_keys)
-    cached = _walk_cache.get(key)
-    if cached is not None:
-        _walk_cache.move_to_end(key)
-        return iter(cached)
-    events = tuple(_walk(content, query=query, recover=recover, include_keys=include_keys))
-    _walk_cache[key] = events
-    _walk_cache.move_to_end(key)
-    if len(_walk_cache) > _WALK_CACHE_MAXSIZE:
-        _walk_cache.popitem(last=False)
-    return iter(events)
+    events = _full_walk(content, recover, include_keys)
+    if query is None:
+        return iter(events)
+    segments = _glob_to_segments(query)
+
+    def _filtered() -> Iterator[Event]:
+        for ev in events:
+            # CUTOFF/ERROR (non-addressable) always pass; LEAF_SCALAR/MAP_KEY
+            # pass only on a path match — identical to ``walk()``'s filter.
+            if ev.kind not in (EventKind.LEAF_SCALAR, EventKind.MAP_KEY) or _path_matches(
+                ev.path, segments
+            ):
+                yield ev
+
+    return _filtered()
 
 
 __all__ = ["Event", "EventKind", "clear_walk_cache", "walk_workflow"]

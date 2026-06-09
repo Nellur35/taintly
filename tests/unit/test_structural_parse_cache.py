@@ -8,10 +8,60 @@ same events (no stale/corrupt state).
 
 from __future__ import annotations
 
+import itertools
+
 from taintly.parsers.structural import walk_workflow
 from taintly.parsers.structural.api import _WALK_CACHE_MAXSIZE, _walk_cache, clear_walk_cache
+from taintly.parsers.structural.walker import walk as _walk_direct
 
 _WF = "on: push\njobs:\n  build:\n    steps:\n      - run: echo hi\n"
+
+_WF_RICH = (
+    "on: pull_request_target\n"
+    "permissions: write-all\n"
+    "jobs:\n"
+    "  build:\n"
+    "    runs-on: ubuntu-latest\n"
+    "    steps:\n"
+    "      - uses: actions/checkout@v4\n"
+    "      - run: echo hi\n"
+    "        env:\n"
+    "          FOO: bar\n"
+)
+
+
+def test_walk_once_filter_is_byte_identical_to_per_query_walk():
+    """The walk-once cache + in-memory query filter must equal a direct
+    per-query ``walk()`` exactly, across queries x recover x include_keys.
+
+    This is the load-bearing correctness guard for the walk-once optimisation:
+    ``walk_workflow`` now walks the full tree once (cached by content) and
+    post-filters by ``query`` in memory, so it must reproduce ``walk()``'s
+    per-query output bit-for-bit.
+    """
+    queries = [
+        None,
+        "**",
+        "jobs.*.steps[*].uses",
+        "jobs.*.steps[*].run",
+        "permissions",
+        "jobs.*.steps[*].env.*",
+    ]
+    for q, recover, include_keys in itertools.product(queries, (True, False), (True, False)):
+        clear_walk_cache()
+        via_api = list(
+            walk_workflow(
+                "x.yml",
+                content=_WF_RICH,
+                query=q,
+                recover=recover,
+                include_keys=include_keys,
+            )
+        )
+        direct = list(_walk_direct(_WF_RICH, query=q, recover=recover, include_keys=include_keys))
+        assert via_api == direct, (
+            f"walk-once mismatch: query={q!r} recover={recover} include_keys={include_keys}"
+        )
 
 
 def test_cache_replays_identical_events():
