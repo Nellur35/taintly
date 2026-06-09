@@ -405,6 +405,47 @@ _ACTIONS_UNSECURE_CMDS = re.compile(
     r"(?:#.*)?$"
 )
 
+# Block-form ``env:`` mapping key with nothing meaningful after the colon
+# (an inline ``env: {…}`` or ``env: VALUE`` has children on the same line and
+# is never left dangling by a line deletion, so it is excluded here).
+_ENV_BLOCK_KEY = re.compile(r"^(?P<indent>[ \t]*)env:[ \t]*(?:#.*)?$")
+
+
+def _emptied_env_block_indices(lines: list[str], removed: set[int]) -> set[int]:
+    """Indices of block-form ``env:`` keys whose every child is in ``removed``.
+
+    A deletion fixer that strips the only var under a step's ``env:`` would
+    otherwise leave a dangling ``env:`` mapping (which YAML reads as
+    ``env: null``). This finds those now-childless ``env:`` lines so the caller
+    can drop them in the same write. An ``env:`` with any surviving child — or a
+    pre-existing empty ``env:`` we did not touch — is left alone.
+    """
+    extra: set[int] = set()
+    for idx, line in enumerate(lines):
+        m = _ENV_BLOCK_KEY.match(line)
+        if m is None:
+            continue
+        env_indent = len(m.group("indent"))
+        has_child = False
+        all_children_removed = True
+        j = idx + 1
+        while j < len(lines):
+            child = lines[j]
+            if child.strip() == "":
+                j += 1
+                continue
+            child_indent = len(child) - len(child.lstrip())
+            if child_indent <= env_indent:
+                break  # dedented to a sibling/parent — end of this env: block
+            has_child = True
+            if j not in removed:
+                all_children_removed = False
+                break  # a surviving child keeps the env: block alive
+            j += 1
+        if has_child and all_children_removed:
+            extra.add(idx)
+    return extra
+
 
 def fix_remove_insecure_commands(filepath: str, dry_run: bool = False) -> list[FixResult]:
     """Delete any `ACTIONS_ALLOW_UNSECURE_COMMANDS: true` line.
@@ -419,8 +460,7 @@ def fix_remove_insecure_commands(filepath: str, dry_run: bool = False) -> list[F
         content = f.read()
 
     lines = content.splitlines(keepends=True)
-    new_lines: list[str] = []
-    modified = False
+    removed: set[int] = set()
     for i, line in enumerate(lines):
         if _ACTIONS_UNSECURE_CMDS.match(line):
             results.append(
@@ -433,11 +473,11 @@ def fix_remove_insecure_commands(filepath: str, dry_run: bool = False) -> list[F
                     applied=not dry_run,
                 )
             )
-            modified = True
-            continue
-        new_lines.append(line)
+            removed.add(i)
 
-    if modified and not dry_run:
+    if removed and not dry_run:
+        removed |= _emptied_env_block_indices(lines, removed)
+        new_lines = [ln for i, ln in enumerate(lines) if i not in removed]
         with open(filepath, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
 
@@ -474,8 +514,7 @@ def fix_remove_debug_logging(filepath: str, dry_run: bool = False) -> list[FixRe
         content = f.read()
 
     lines = content.splitlines(keepends=True)
-    new_lines: list[str] = []
-    modified = False
+    removed: set[int] = set()
     for i, line in enumerate(lines):
         if _DEBUG_LOG_TOGGLE.match(line):
             results.append(
@@ -488,11 +527,11 @@ def fix_remove_debug_logging(filepath: str, dry_run: bool = False) -> list[FixRe
                     applied=not dry_run,
                 )
             )
-            modified = True
-            continue
-        new_lines.append(line)
+            removed.add(i)
 
-    if modified and not dry_run:
+    if removed and not dry_run:
+        removed |= _emptied_env_block_indices(lines, removed)
+        new_lines = [ln for i, ln in enumerate(lines) if i not in removed]
         with open(filepath, "w", encoding="utf-8") as f:
             f.writelines(new_lines)
 
