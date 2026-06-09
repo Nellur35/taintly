@@ -159,6 +159,18 @@ def main():
         ),
     )
     parser.add_argument(
+        "--fix-egress-allowlist-scaffold",
+        action="store_true",
+        help=(
+            "Opt-in: inject a step-security/harden-runner egress allow-list "
+            "scaffold as the first step of each GitHub-workflow job, in 'audit' "
+            "mode, with allowed-endpoints derived from the workflow's actions and "
+            "run-steps.  Review-first: SHA-pin the action and switch to 'block' "
+            "after an audit run confirms the list.  Combine with --fix or "
+            "--fix-dry-run."
+        ),
+    )
+    parser.add_argument(
         "--suggest",
         action="store_true",
         help="Level 2: Generate suggested patches for findings that need human review",
@@ -480,6 +492,7 @@ def main():
         ("fix_jenkins_cap_add_hint", "--fix-jenkins-cap-add-hint"),
         ("fix_github_ai_allowed_tools_scaffold", "--fix-github-ai-allowed-tools-scaffold"),
         ("fix_hoist_service_credentials", "--fix-hoist-service-credentials"),
+        ("fix_egress_allowlist_scaffold", "--fix-egress-allowlist-scaffold"),
     ]
     for _attr, _flag in _OPT_IN_FLAGS:
         if getattr(args, _attr, False) and not (args.fix or args.fix_dry_run):
@@ -684,6 +697,8 @@ def main():
             extra_fix_types.append("github_ai_allowed_tools_scaffold")
         if args.fix_hoist_service_credentials:
             extra_fix_types.append("hoist_service_credentials")
+        if args.fix_egress_allowlist_scaffold:
+            extra_fix_types.append("egress_allowlist_scaffold")
 
         files: list[str] = []
         for plat in platforms_to_fix:

@@ -1296,6 +1296,106 @@ def fix_hoist_service_credentials(filepath: str, dry_run: bool = False) -> list[
 # Main fix orchestrator
 # =============================================================================
 
+# =============================================================================
+# Opt-in scaffold: a step-security/harden-runner egress allow-list (feature A)
+# =============================================================================
+#
+# Inject, as the FIRST step of each GitHub-workflow job, a harden-runner step in
+# ``audit`` mode whose ``allowed-endpoints`` is the egress computed from the
+# workflow's actions + run-steps (taintly.egress_endpoints). Review-first by
+# construction: ``audit`` not ``block``, an unpinned ref the user must SHA-pin,
+# and UNRECOGNIZED-egress comments — taintly drafts the list, never enforces it.
+_HARDEN_RUNNER_PRESENT = re.compile(r"step-security/harden-runner", re.IGNORECASE)
+_EGRESS_STEPS_LINE = re.compile(r"^(?P<indent>[ ]*)steps:[ ]*(?:#.*)?$")
+
+
+def fix_egress_allowlist_scaffold(filepath: str, dry_run: bool = False) -> list[FixResult]:
+    """Inject a review-first harden-runner egress allow-list scaffold as the
+    first step of each GitHub-workflow job.  OPT-IN: it adds a new step (in
+    ``audit`` mode, not ``block``) for the user to review, SHA-pin, and enforce.
+    No-op if harden-runner is already configured, or the file has no ``steps:``."""
+    from .egress_endpoints import compute_egress
+
+    results: list[FixResult] = []
+    if not filepath.lower().endswith((".yml", ".yaml")):
+        return results
+    with open(filepath, encoding="utf-8") as f:
+        content = f.read()
+    if _HARDEN_RUNNER_PRESENT.search(content) or "steps:" not in content:
+        return results
+
+    plan = compute_egress(content)
+    lines = content.splitlines(keepends=True)
+    new_lines: list[str] = []
+    modified = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = _EGRESS_STEPS_LINE.match(line.rstrip("\n"))
+        if not m:
+            new_lines.append(line)
+            i += 1
+            continue
+        new_lines.append(line)
+        steps_indent = len(m.group("indent"))
+        # Match the existing first step's indentation (default steps_indent + 2).
+        item_indent = steps_indent + 2
+        peek = i + 1
+        while peek < min(i + 9, len(lines)):
+            stripped = lines[peek].strip()
+            if not stripped:
+                peek += 1
+                continue
+            ind = len(lines[peek]) - len(lines[peek].lstrip())
+            if ind > steps_indent and lines[peek].lstrip().startswith("-"):
+                item_indent = ind
+            break
+        pad = " " * item_indent
+        key = " " * (item_indent + 2)
+        win = " " * (item_indent + 4)
+        end = " " * (item_indent + 6)
+        block_lines = [
+            f"{pad}# taintly: REVIEW BEFORE ENFORCING. Generated egress allow-list from the",
+            f"{pad}# actions / run-steps detected in this workflow. Confirm completeness in",
+            f"{pad}# 'audit' mode first; unrecognized egress is listed (as comments), not allowed.",
+        ]
+        # UNRECOGNIZED notes are real YAML comments BEFORE the step — never inside
+        # the ``allowed-endpoints: >`` folded scalar, where ``#`` would be literal text.
+        block_lines += [
+            f"{pad}# UNRECOGNIZED (review, line {ln}): uses {ref} — no endpoint map entry"
+            for ln, ref in plan.unknown_actions
+        ]
+        block_lines += [
+            f"{pad}- name: Harden runner (taintly egress scaffold)",
+            f"{key}uses: step-security/harden-runner@v2  # taintly: pin to a SHA before use",
+            f"{key}with:",
+            f"{win}egress-policy: audit  # taintly: switch to 'block' after an audit run confirms this",
+            f"{win}allowed-endpoints: >",
+        ]
+        block_lines += [f"{end}{host}:443" for host in plan.allowed]
+        new_lines.append("\n".join(block_lines) + "\n")
+        results.append(
+            FixResult(
+                file=filepath,
+                line=i + 1,
+                original=line.rstrip(),
+                fixed=(
+                    f"{line.rstrip()}  + step-security/harden-runner egress scaffold "
+                    f"({len(plan.allowed)} endpoints, audit mode)"
+                ),
+                fix_type="egress_allowlist_scaffold",
+                applied=not dry_run,
+            )
+        )
+        modified = True
+        i += 1
+
+    if modified and not dry_run:
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+    return results
+
+
 # Safe, semantics-preserving fixes — run by default on ``--fix``.
 ALL_FIXERS = {
     "pin_sha": fix_pin_actions,
@@ -1325,6 +1425,7 @@ OPT_IN_FIXERS = {
     "jenkins_cap_add_hint": fix_jenkins_cap_add_hint,
     "github_ai_allowed_tools_scaffold": fix_github_ai_allowed_tools_scaffold,
     "hoist_service_credentials": fix_hoist_service_credentials,
+    "egress_allowlist_scaffold": fix_egress_allowlist_scaffold,
 }
 
 

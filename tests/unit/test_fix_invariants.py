@@ -302,6 +302,22 @@ _FIXER_INPUTS: dict[str, list[tuple[str, str]]] = {
                   - run: echo hi
         """),
     )],
+    "egress_allowlist_scaffold": [
+        ("hardened", _HARDENED),
+        ("vulnerable_egress", textwrap.dedent("""\
+            name: CI
+            on: push
+            permissions:
+              contents: read
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - uses: actions/checkout@v4
+                  - uses: some-org/unmapped-action@v1
+                  - run: pip install build
+        """)),
+    ],
 }
 
 
