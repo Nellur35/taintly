@@ -891,6 +891,13 @@ def fix_unquote_groovy_gstring_with_params(filepath: str, dry_run: bool = False)
     by SEC4-JK-001 and SEC4-JK-002.  Triple-quoted and multi-line forms are
     left alone; use the guide for those.  Skips bodies that already contain
     a single quote (which would require escaping).
+
+    OPT-IN (see :data:`OPT_IN_FIXERS`), NOT a default ``--fix``: single-quoting
+    stops Groovy interpolating the attacker value but leaves a literal
+    ``${params.X}`` that bash can't resolve (``bad substitution``) — under
+    ``sh -e`` that breaks the build. The complete fix is env-wiring, which a
+    quote-swap can't do; this transform is the partial security step a user
+    can opt into knowingly.
     """
     results: list[FixResult] = []
     with open(filepath, encoding="utf-8") as f:
@@ -1261,12 +1268,20 @@ ALL_FIXERS = {
     "quote_github_refs": fix_quote_github_refs,
     "quote_gitlab_refs": fix_quote_gitlab_refs,
     "quote_gitlab_ci_vars": fix_quote_gitlab_ci_vars,
-    "unquote_groovy_gstring_with_params": fix_unquote_groovy_gstring_with_params,
 }
 
 # Opt-in fixes that change build semantics — run only when the user
 # explicitly requests them via a dedicated CLI flag.
 OPT_IN_FIXERS = {
+    # Swapping a GString ``sh`` body to single quotes stops Groovy from
+    # interpolating the attacker-controlled value (the right security intent),
+    # BUT it leaves a literal ``${params.X}`` that bash cannot resolve
+    # (``bad substitution``) — under Jenkins' default ``sh -e`` that FAILS the
+    # build, clearing the SEC4-JK finding by breaking the pipeline. The complete
+    # remediation needs env-wiring (``environment {}`` / ``withEnv`` +
+    # ``sh 'echo "$X"'``), which a quote-swap can't do — so this is opt-in, not
+    # a default ``--fix``. The guide carries the full env-wired pattern.
+    "unquote_groovy_gstring_with_params": fix_unquote_groovy_gstring_with_params,
     "npm_ignore_scripts": fix_npm_ignore_scripts,
     "jenkins_cap_add_hint": fix_jenkins_cap_add_hint,
     "github_ai_allowed_tools_scaffold": fix_github_ai_allowed_tools_scaffold,
