@@ -43,6 +43,14 @@ from .workflow_context import HARDEN_RUNNER_TEMPERED_FAMILIES, compute_exploitab
 from .workflow_context import analyze as analyze_workflow
 from .workflow_corpus import CorpusPattern, build_corpus, is_fork_reachable
 
+# Hygiene families that ``classify_rule`` falls back to from broad OWASP
+# categories (CICD-SEC-1 → resource_controls, CICD-SEC-10 → logging_visibility).
+# ``compute_exploitability`` scores these "low" unconditionally, so a
+# CRITICAL/HIGH rule with no explicit ``finding_family`` that lands here by
+# fallback gets its exploitability silently rewritten to a hygiene tier — the
+# severity-floor below guards exactly that mismatch.
+_HYGIENE_FALLBACK_FAMILIES = frozenset({"resource_controls", "logging_visibility"})
+
 # ---------------------------------------------------------------------------
 # Inline suppression
 # ---------------------------------------------------------------------------
@@ -373,6 +381,34 @@ def scan_file(
                             "outbound exfil / C2 path is blocked)."
                         )
                         ctx_tags.append("harden-runner-egress-block")
+                    # Severity-aware floor.  ``family`` drives BOTH clustering
+                    # and exploitability, so a coarse OWASP→family fallback can
+                    # route a CRITICAL/HIGH rule into a hygiene family and let
+                    # ``compute_exploitability`` silently score it "low",
+                    # discarding the rule's policy severity.  Guard the exact
+                    # mismatch — a CRITICAL/HIGH rule routed to a hygiene family
+                    # BY FALLBACK (no explicit ``finding_family``) in an
+                    # attacker-reachable workflow — and refuse "low".  (e.g.
+                    # PSE-GH-006, a fork-RCE chain tagged CICD-SEC-1 →
+                    # resource_controls.)  Correctly-classified findings are
+                    # untouched: they carry an explicit family, land in a
+                    # non-hygiene branch, or aren't attacker-reachable.
+                    if (
+                        exploitability == "low"
+                        and not rule.finding_family
+                        and family in _HYGIENE_FALLBACK_FAMILIES
+                        and rule.severity in (Severity.CRITICAL, Severity.HIGH)
+                        and (wf_ctx.has_fork_triggered or wf_ctx.is_privileged)
+                    ):
+                        exploitability = "medium"
+                        ctx_notes.append(
+                            f"Exploitability floored to medium: a "
+                            f"{rule.severity.name} rule was routed to the "
+                            f"'{family}' hygiene family by OWASP fallback, which "
+                            f"would otherwise score it low despite an "
+                            f"attacker-reachable workflow context."
+                        )
+                        ctx_tags.append("severity-floor")
                     findings.append(
                         Finding(
                             rule_id=rule.id,
