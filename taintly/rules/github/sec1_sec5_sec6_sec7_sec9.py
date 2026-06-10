@@ -1122,7 +1122,7 @@ RULES: list[Rule] = [
                 # the corpus baseline; no neighboring TPs are at
                 # risk because real shell-injection contexts always
                 # carry other tokens on the same line.
-                r"""^\s*-?\s*["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
+                r"""^\s*(?:-\s*)?["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
                 # Exclude env-block assignments where the secret is
                 # embedded in a larger value.  The risk this rule
                 # owns is literal secret interpolation into

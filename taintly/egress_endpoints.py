@@ -106,7 +106,7 @@ _URL_RE = re.compile(r"""\b(?:curl|wget|git\s+clone)\b[^\n]*?(https?://[^\s'"|;&
 
 # ``uses: owner/repo[/subpath]@ref`` on a step. Local (``./``) and ``docker://``
 # refs have no ``@``-pinned ``owner/repo`` and are skipped by the consumer.
-_USES_RE = re.compile(r"""^\s*-?\s*uses:\s*['"]?([^@'"\n]+)@""", re.MULTILINE)
+_USES_RE = re.compile(r"""^\s*(?:-\s*)?uses:\s*['"]?([^@'"\n]+)@""", re.MULTILINE)
 
 
 def hosts_from_run_block(body: str) -> set[str]:

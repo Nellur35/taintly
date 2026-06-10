@@ -83,7 +83,7 @@ def resolve_action_sha(action: str, ref: str) -> str | None:
 # Fix: Pin Actions to SHA
 # =============================================================================
 
-_uses_pattern = re.compile(r"^(\s*-?\s*uses:\s*)([^@\s]+)@(?!([a-f0-9]{40}))(\S+)(.*)$")
+_uses_pattern = re.compile(r"^(\s*(?:-\s*)?uses:\s*)([^@\s]+)@(?!([a-f0-9]{40}))(\S+)(.*)$")
 
 
 def fix_pin_actions(filepath: str, dry_run: bool = False) -> list[FixResult]:
@@ -153,7 +153,7 @@ def fix_pin_actions(filepath: str, dry_run: bool = False) -> list[FixResult]:
 # Fix: Add persist-credentials: false
 # =============================================================================
 
-_checkout_pattern = re.compile(r"^(\s*)-?\s*uses:\s*actions/checkout@")
+_checkout_pattern = re.compile(r"^(\s*)(?:-\s*)?uses:\s*actions/checkout@")
 
 
 def fix_persist_credentials(filepath: str, dry_run: bool = False) -> list[FixResult]:
@@ -711,7 +711,7 @@ _GITHUB_REF_VAR_RE = re.compile(r"\$\{?(?:" + "|".join(_GITHUB_REF_VARS) + r")\}
 _GITHUB_REF_SKIP_RES = (
     re.compile(r"^\s*#"),
     re.compile(r"^\s*[\w_]+:\s*\$\{?GITHUB_"),
-    re.compile(r"^\s*-?\s*if:"),
+    re.compile(r"^\s*(?:-\s*)?if:"),
 )
 
 
@@ -775,7 +775,7 @@ _GITLAB_REF_VAR_RE = re.compile(r"\$\{?(?:" + "|".join(_GITLAB_REF_VARS) + r")\}
 _GITLAB_REF_SKIP_RES = (
     re.compile(r"^\s*#"),
     re.compile(r"^\s*[\w_]+:\s*\$\{?CI_"),
-    re.compile(r"^\s*-?\s*if:"),
+    re.compile(r"^\s*(?:-\s*)?if:"),
     # Bash `[[ ... ]]` conditional — word splitting disabled per Bash §3.2.5.2,
     # so the variable is safe even unquoted. Skip to preserve the author's form.
     re.compile(r"\[\[[^\n]*\$\{?(?:" + "|".join(_GITLAB_REF_VARS) + r")\}?[^\n]*\]\]"),
@@ -845,7 +845,7 @@ _GITLAB_CI_VAR_RE = re.compile(r"\$\{?(?:" + "|".join(_GITLAB_CI_VARS) + r")\}?"
 _GITLAB_CI_SKIP_RES = (
     re.compile(r"^\s*#"),
     re.compile(r"^\s*[\w_]+:\s*\$\{?CI_"),
-    re.compile(r"^\s*-?\s*if:"),
+    re.compile(r"^\s*(?:-\s*)?if:"),
     # Bash `[[ ... ]]` — word splitting disabled per Bash §3.2.5.2, safe
     # even unquoted.  Mirror SEC4-GL-003's same exclude.
     re.compile(r"\[\[[^\n]*\$\{?(?:" + "|".join(_GITLAB_CI_VARS) + r")\}?[^\n]*\]\]"),

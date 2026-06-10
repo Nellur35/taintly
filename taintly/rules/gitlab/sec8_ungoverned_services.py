@@ -127,7 +127,7 @@ RULES: list[Rule] = [
         pattern=SequencePattern(
             # Fires when `project:` appears in an include block but is NOT followed
             # by a `ref:` containing a full 40-char commit SHA within the next 4 lines.
-            pattern_a=r"^\s+-?\s*project:\s+['\"]?[a-zA-Z0-9]",
+            pattern_a=r"^\s+(?:-\s*)?project:\s+['\"]?[a-zA-Z0-9]",
             absent_within=r"ref:\s+['\"]?[a-f0-9]{40}['\"]?",
             # Scope to `include: project:` only. An include item ALWAYS carries
             # `file:`; a `trigger: project:` (branch-pinned downstream pipeline)

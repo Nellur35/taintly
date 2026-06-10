@@ -363,7 +363,7 @@ def _walk_includes(
 # (a mapping under the include item) so they're not matched by these
 # string regexes.
 _INCLUDE_STRING_LINE_RE = re.compile(
-    r"^\s*-?\s*include\s*:\s*(?P<rest>.+)$",
+    r"^\s*(?:-\s*)?include\s*:\s*(?P<rest>.+)$",
 )
 
 # A `local:` key inside a block include item.

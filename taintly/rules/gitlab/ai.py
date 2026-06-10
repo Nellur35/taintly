@@ -933,7 +933,7 @@ RULES: list[Rule] = [
                 # Package-install lines — LOTP-GL / package-install rule
                 # catches the install; this rule concentrates on the
                 # invocation form (same split as AI-GH-018).
-                r"^\s*-?\s*script:.*\b(?:npm|pip|pipx|apt|yum|dnf)\s+install\b",
+                r"^\s*(?:-\s*)?script:.*\b(?:npm|pip|pipx|apt|yum|dnf)\s+install\b",
                 r"^\s*-\s*(?:npm|pip|pipx|apt|yum|dnf)\s+install\b",
             ],
         ),

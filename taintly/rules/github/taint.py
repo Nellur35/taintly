@@ -2321,7 +2321,7 @@ RULES = [
             # The block opens at the ``- uses: actions/github-script@``
             # line; matched lines extend through the step body until
             # indent drops back to the step level.
-            block_anchor=r"^\s*-?\s*uses:\s*actions/github-script@",
+            block_anchor=r"^\s*(?:-\s*)?uses:\s*actions/github-script@",
             # Narrow match: only ``${{ ... }}`` interpolations that
             # reference an attacker-controllable token (not pure
             # system contexts like ``${{ github.repository }}`` or
