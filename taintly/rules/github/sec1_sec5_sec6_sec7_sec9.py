@@ -17,6 +17,7 @@ from taintly.models import (
     Rule,
     SequencePattern,
     Severity,
+    _safe_search,
 )
 from taintly.parsers.segmentation import for_each_step
 from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
@@ -115,7 +116,7 @@ class _JobScopedSequencePattern:
             if self._pattern_a_re.search(line):
                 window = "\n".join(lines[i : i + self._lookahead])
                 job_block = self._job_block(lines, i)
-                if any(ex.search(line) for ex in self._excludes):
+                if any(_safe_search(ex, line) for ex in self._excludes):
                     continue
                 if any(
                     line_re.search(line) and not keep_re.search(job_block)

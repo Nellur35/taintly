@@ -393,7 +393,7 @@ class RegexPattern:
         for i, line in enumerate(scan_lines):
             if i in skip:
                 continue
-            if any(ex.search(line) for ex in self._excludes):
+            if any(_safe_search(ex, line) for ex in self._excludes):
                 continue
             if _safe_search(self._compiled, line):
                 snippet = lines[i].strip() if i < len(lines) else line.strip()
@@ -1077,7 +1077,7 @@ class ContextPattern:
 
         results = []
         for i, line in enumerate(lines):
-            if any(ex.search(line) for ex in self._excludes):
+            if any(_safe_search(ex, line) for ex in self._excludes):
                 continue
             if _safe_search(self._anchor_re, line):
                 if self._anchor_job_exclude_re:
@@ -1109,7 +1109,7 @@ class ContextPattern:
             ):
                 continue
             for j, line in enumerate(seg_lines):
-                if any(ex.search(line) for ex in self._excludes):
+                if any(_safe_search(ex, line) for ex in self._excludes):
                     continue
                 if _safe_search(self._anchor_re, line):
                     results.append((seg_start + j + 1, line.strip()))
@@ -1170,7 +1170,7 @@ class SequencePattern:
         )
         results = []
         for i, line in enumerate(scan_lines):
-            if any(ex.search(line) for ex in self._excludes):
+            if any(_safe_search(ex, line) for ex in self._excludes):
                 continue
             if _safe_search(self._a_re, line):
                 window = "\n".join(scan_lines[i : i + self.lookahead_lines])
@@ -1203,7 +1203,7 @@ class BlockPattern:
         in_block = False
         block_indent = 0
         for i, line in enumerate(lines):
-            if any(ex.search(line) for ex in self._excludes):
+            if any(_safe_search(ex, line) for ex in self._excludes):
                 continue
             stripped = line.lstrip()
             current_indent = len(line) - len(stripped)
@@ -1277,7 +1277,7 @@ class PathPattern:
                 continue
 
             source_line = lines[lineno - 1] if 0 < lineno <= len(lines) else ""
-            if any(ex.search(source_line) for ex in self._excludes):
+            if any(_safe_search(ex, source_line) for ex in self._excludes):
                 continue
 
             # sibling_absent: fire only when the sibling key does NOT exist
@@ -1357,7 +1357,7 @@ class CompromisedActionPattern:
         for i, line in enumerate(lines):
             if _USES_COMMENT_RE.match(line):
                 continue
-            if any(ex.search(line) for ex in self._excludes):
+            if any(_safe_search(ex, line) for ex in self._excludes):
                 continue
             m = _USES_REF_RE.search(line)
             if not m:
