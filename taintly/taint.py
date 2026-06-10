@@ -152,6 +152,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from .models import _split_into_job_segments
@@ -1617,7 +1618,43 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
 # ---------------------------------------------------------------------------
 
 
+_ANALYZE_CACHE_MAXSIZE = 64
+# Content-keyed LRU so all callers (the 12 GitHub TaintPattern rules + the
+# combination / cross-workflow fact builders) share ONE taint fixpoint per file
+# instead of recomputing it once per rule. Mirrors
+# ``parsers.structural.api._full_walk`` (walk-once, #163). The result is a pure
+# function of (content, backend); ``lines`` is derived from ``content`` by every
+# caller, so it is NOT part of the key. Callers treat the result as read-only.
+_analyze_cache: OrderedDict[tuple[str, str], list[TaintPath]] = OrderedDict()
+
+
+def clear_analyze_cache() -> None:
+    """Clear the per-content taint-analysis cache (test isolation)."""
+    _analyze_cache.clear()
+
+
 def analyze(content: str, lines: list[str]) -> list[TaintPath]:
+    """Cached entry point — return every env-mediated taint flow in ``content``.
+
+    A thin content-keyed LRU over :func:`_analyze_uncached`, so the (expensive,
+    super-linear) fixpoint is computed once per file and shared across every
+    taint rule rather than re-run per rule. Callers MUST treat the returned list
+    and its ``TaintPath`` items as read-only.
+    """
+    key = (content, _taint_backend())
+    cached = _analyze_cache.get(key)
+    if cached is not None:
+        _analyze_cache.move_to_end(key)
+        return cached
+    result = _analyze_uncached(content, lines)
+    _analyze_cache[key] = result
+    _analyze_cache.move_to_end(key)
+    if len(_analyze_cache) > _ANALYZE_CACHE_MAXSIZE:
+        _analyze_cache.popitem(last=False)
+    return result
+
+
+def _analyze_uncached(content: str, lines: list[str]) -> list[TaintPath]:
     """Return every env-mediated taint flow found in ``content``.
 
     Each returned path carries ``kind``:
