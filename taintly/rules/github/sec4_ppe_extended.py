@@ -218,7 +218,7 @@ class GithubScriptDangerousContextPattern:
     controllable in a github-script context.
     """
 
-    _USES_RE = re.compile(r"^\s*-?\s*uses\s*:\s*actions/github-script[@/]")
+    _USES_RE = re.compile(r"^\s*(?:-\s*)?uses\s*:\s*actions/github-script[@/]")
     _WITH_LINE_RE = re.compile(r"^\s*with\s*:\s*(?:#.*)?$")
     _SCRIPT_LINE_RE = re.compile(r"^\s*script\s*:\s*(.*)$")
     _DANGEROUS_RE = re.compile(
@@ -1338,7 +1338,7 @@ RULES: list[Rule] = [
                 r"^\s*[\w_]+:\s*\$\{?GITHUB_",  # YAML key-value assignment
                 r"^\s*[\w_]+:\s*'[^']*\$",  # YAML value in single-quoted string
                 r'^\s*[\w_]+:\s*"[^"]*\$',  # YAML value in double-quoted string
-                r"^\s*-?\s*if:",  # if: expressions evaluated by GH engine
+                r"^\s*(?:-\s*)?if:",  # if: expressions evaluated by GH engine
                 # Double-quoted shell context anywhere on the line — `"$VAR"`
                 # preserves word boundaries when passed to echo/printf.
                 r'"[^"]*\$\{?(GITHUB_REF_NAME|GITHUB_HEAD_REF|GITHUB_ACTOR)\}?[^"]*"',
@@ -1427,7 +1427,7 @@ RULES: list[Rule] = [
                 r"^\s*[\w_]+:\s*\$\{?GITHUB_",
                 r"^\s*[\w_]+:\s*'[^']*\$",
                 r'^\s*[\w_]+:\s*"[^"]*\$',
-                r"^\s*-?\s*if:",
+                r"^\s*(?:-\s*)?if:",
                 r'"[^"]*\$\{?(GITHUB_BASE_REF|GITHUB_REPOSITORY_OWNER|'
                 r"GITHUB_REPOSITORY|GITHUB_WORKFLOW|GITHUB_JOB)\}?[^\"]*\"",
                 r"'[^']*\$\{?(GITHUB_BASE_REF|GITHUB_REPOSITORY_OWNER|"

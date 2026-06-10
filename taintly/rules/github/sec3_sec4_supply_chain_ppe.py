@@ -979,7 +979,7 @@ RULES: list[Rule] = [
             # — match orgs OTHER than actions/ and github/.
             # Negative lookahead anchors on the slash to prevent
             # matching ``actions-foundation/`` etc. as also-trusted.
-            match=r"^\s*-?\s*uses:\s*(?!actions/)(?!github/)(?!\./)(?!\.\./)(?!docker://)([\w.-]+/[\w./-]+)@(\S+)",
+            match=r"^\s*(?:-\s*)?uses:\s*(?!actions/)(?!github/)(?!\./)(?!\.\./)(?!docker://)([\w.-]+/[\w./-]+)@(\S+)",
             exclude=[
                 r"^\s*#",
             ],

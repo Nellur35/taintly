@@ -424,7 +424,7 @@ RULES: list[Rule] = [
                 # `description:` / `title:` keys.  Allow optional
                 # `- ` list-item marker before the key (steps use
                 # `      - name: Foo` inline).
-                r"^\s*-?\s*(?:name|description|title):",
+                r"^\s*(?:-\s*)?(?:name|description|title):",
                 # Exclude package-manager self-bootstraps
                 # (``npm install -g npm@x``, ``npm install -g
                 # pnpm`` etc.). These install the package manager

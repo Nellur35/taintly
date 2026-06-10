@@ -205,7 +205,7 @@ RULES: list[Rule] = [
                 r"^\s*[\w_]+:\s*\$\{?CI_",  # YAML key-value assignment starting with $CI_
                 r"^\s*[\w_]+:\s*'[^']*\$",  # YAML key-value where value is a single-quoted string (variable inside string literal, not in shell)
                 r"^\s*[\w_]+:\s*\"[^\"]*\$",  # YAML key-value where value is a double-quoted string
-                r"^\s*-?\s*if:",  # rules:if blocks — evaluated by GitLab engine, not shell
+                r"^\s*(?:-\s*)?if:",  # rules:if blocks — evaluated by GitLab engine, not shell
                 # Variable wrapped DIRECTLY in double quotes: `"$VAR"` /
                 # `"${VAR}"` — bash word-splitting / glob suppressed.
                 r'"\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?"',
@@ -255,7 +255,7 @@ RULES: list[Rule] = [
             # by the GitLab CI engine, NOT a shell.  Multi-line ``if: |``
             # block scalars (common in gitlabhq/.gitlab/ci/rules.gitlab-ci.yml)
             # have continuation lines like ``$CI_COMMIT_REF_NAME == ...``
-            # that the same-line ``^\s*-?\s*if:`` exclude misses.  Mask
+            # that the same-line ``^\s*(?:-\s*)?if:`` exclude misses.  Mask
             # them too.  (FP-audit class C, 2026-05-17.)
             gitlab_if_block_aware=True,
         ),
@@ -860,7 +860,7 @@ RULES: list[Rule] = [
                 r"^\s*[\w_]+:\s*'[^']*\$",  # YAML key-value with single-quoted string value
                 r'^\s*[\w_]+:\s*"[^"]*\$',  # YAML key-value with double-quoted string value
                 r"^\s*[\w_]+:\s+\S",  # YAML key-value with any unquoted value (not a shell list item)
-                r"^\s*-?\s*if:",  # rules:if — GitLab engine evaluates, not shell
+                r"^\s*(?:-\s*)?if:",  # rules:if — GitLab engine evaluates, not shell
                 # Double-quoted shell context anywhere on the line.
                 r'"[^"]*\$\{?(CI_COMMIT_REF_NAME|CI_COMMIT_TAG|CI_BUILD_REF_NAME)\}?[^"]*"',
                 # Single-quoted shell context anywhere on the line — `$VAR`
@@ -883,7 +883,7 @@ RULES: list[Rule] = [
             # produced 7 of this rule's 7 FPs in the May-17 audit because
             # continuation lines like ``$CI_COMMIT_REF_NAME == ...`` sit
             # below an ``if: |`` opener that the same-line
-            # ``^\s*-?\s*if:`` exclude cannot reach.  Mask the body.
+            # ``^\s*(?:-\s*)?if:`` exclude cannot reach.  Mask the body.
             gitlab_if_block_aware=True,
         ),
         remediation=(

@@ -598,7 +598,7 @@ _CACHE_USES_RE = re.compile(
 # Single-line uses: form (the dominant shape) — keep separate from the
 # combined regex above for simpler line-driven walking.
 _CACHE_USES_LINE_RE = re.compile(
-    r"^(?P<indent>\s*)-?\s*uses\s*:\s*['\"]?actions/cache(?P<sub>(?:/(?:save|restore))?)@[^\s'\"#]+",
+    r"^(?P<indent>\s*)(?:-\s*)?uses\s*:\s*['\"]?actions/cache(?P<sub>(?:/(?:save|restore))?)@[^\s'\"#]+",
 )
 
 

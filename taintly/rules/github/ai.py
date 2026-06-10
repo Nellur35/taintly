@@ -2979,7 +2979,7 @@ RULES: list[Rule] = [
                 # those and this rule should concentrate on invocation
                 # lines.  Excluding install lines from the anchor keeps
                 # the double-fire from being noise.
-                r"^\s*-?\s*run:.*\b(?:npm|pip|pipx|brew|apt|yum|dnf)\s+install\b",
+                r"^\s*(?:-\s*)?run:.*\b(?:npm|pip|pipx|brew|apt|yum|dnf)\s+install\b",
                 # FP-audit class E: action ``with:`` inputs whose values
                 # legitimately carry agent-CLI flags as a string the
                 # action parses internally — NOT a shell invocation.

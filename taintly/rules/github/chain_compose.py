@@ -357,7 +357,7 @@ def _compose_chain_gh_104(db: Database) -> Iterable[tuple[str, Fact]]:
 _STEP_LINE_WINDOW = 15
 
 
-_USES_LINE_RE = re.compile(r"^\s*-?\s*uses\s*:")
+_USES_LINE_RE = re.compile(r"^\s*(?:-\s*)?uses\s*:")
 
 
 def _step_uses_line(file: str, target_line: int) -> int:

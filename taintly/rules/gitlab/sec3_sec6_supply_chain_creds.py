@@ -214,10 +214,10 @@ RULES: list[Rule] = [
             # Local includes (`local:`) and remote-URL includes
             # (`remote:`) are handled by SEC3-GL-001 with stricter
             # severity, so excluded here.
-            match=r"^\s*-?\s*(?:project|component):\s*['\"]?(\S+)",
+            match=r"^\s*(?:-\s*)?(?:project|component):\s*['\"]?(\S+)",
             exclude=[
                 r"^\s*#",
-                r"^\s*-?\s*(?:local|remote|file|inputs):",
+                r"^\s*(?:-\s*)?(?:local|remote|file|inputs):",
             ],
         ),
         remediation=(
@@ -356,7 +356,7 @@ RULES: list[Rule] = [
             # `@v1.2`) and 40-char SHAs fall through.  `~?latest` covers
             # both `@latest` and GitLab's special `@~latest`.
             match=(
-                r"^\s*-?\s*component:\s*['\"]?"
+                r"^\s*(?:-\s*)?component:\s*['\"]?"
                 r"[^\s'\"]+@(?:main|master|develop|trunk|HEAD|~?latest)\b"
             ),
             exclude=[r"^\s*#"],
@@ -617,7 +617,7 @@ RULES: list[Rule] = [
             # dynamic-string eval. The old ``eval\s+`` fired on ``eval  ``
             # (trailing-whitespace-only) — a latent false positive. The
             # tightened pattern is invariant to trailing-whitespace reformatting.
-            match=r"^\s*-?\s*eval\s+\S",
+            match=r"^\s*(?:-\s*)?eval\s+\S",
             exclude=[r"^\s*#", r"echo", r"do not"],
         ),
         remediation="Replace eval with direct command execution. Avoid evaluating dynamic strings.",
