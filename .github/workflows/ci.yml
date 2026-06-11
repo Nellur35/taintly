@@ -98,6 +98,9 @@ jobs:
       - name: Metadata-drift gate (rule definitions stable)
         run: python scripts/no_rules_metadata_drift.py --check
 
+      - name: Relation-vocabulary gate (no closure relation consumed but never produced)
+        run: python scripts/check_relation_vocabulary.py
+
       - name: No-leaks gate (public repo allow-list)
         # Second-tier defence against private R&D artifacts leaking
         # from the lab. The first tier is the lab's publish manifest;
