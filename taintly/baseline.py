@@ -73,6 +73,13 @@ class Baseline:
     can recognise SHA bumps on previously-baselined ``uses:`` references.
     Older baseline files lack this field; the classifier degrades to
     ``new_finding`` rather than crashing in that case."""
+    resolved_refs: dict[str, str] = field(default_factory=dict)
+    """``"owner/repo@ref"`` -> resolved upstream SHA at baseline time. Populated
+    only under ``--check-ref-drift``; lets a later scan detect a mutable ref that
+    was repointed upstream with NO local YAML change (the tj-actions
+    CVE-2025-30066 class — see ``classify_diff_kind`` for why ``sha_bump``, which
+    keys on a *local* snippet change, cannot see this). Older baselines lack the
+    field; the drift check is simply skipped."""
 
 
 # ---------------------------------------------------------------------------
@@ -80,12 +87,23 @@ class Baseline:
 # ---------------------------------------------------------------------------
 
 
-def save_baseline(findings: list[Any], repo_path: str, output_path: str) -> Baseline:
+def save_baseline(
+    findings: list[Any],
+    repo_path: str,
+    output_path: str,
+    resolved_refs: dict[str, str] | None = None,
+) -> Baseline:
     """Compute fingerprints for findings and write a baseline JSON file.
+
+    ``resolved_refs`` (``"owner/repo@ref"`` -> SHA) is persisted only when the
+    caller resolved them under ``--check-ref-drift``; ``None`` writes an empty
+    map, leaving older-style baselines unchanged.
 
     Returns the Baseline that was written.
     """
     import datetime
+
+    resolved_refs = dict(resolved_refs or {})
 
     snippets: dict[str, str] = {}
     for f in findings:
@@ -104,6 +122,9 @@ def save_baseline(findings: list[Any], repo_path: str, output_path: str) -> Base
         # previously-baselined ``uses:`` references; absence is
         # tolerated by the loader.
         "snippets": {fp: snippets[fp] for fp in sorted(snippets)},
+        # Resolved mutable-ref SHAs for --check-ref-drift; empty unless the
+        # caller resolved them. Absence is tolerated by the loader.
+        "resolved_refs": dict(sorted(resolved_refs.items())),
     }
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -117,6 +138,7 @@ def save_baseline(findings: list[Any], repo_path: str, output_path: str) -> Base
         fingerprints=fps,
         finding_count=len(findings),
         snippets=snippets,
+        resolved_refs=resolved_refs,
     )
 
 
@@ -179,6 +201,17 @@ def load_baseline(path: str) -> Baseline:
             if isinstance(k, str) and len(k) == 64 and isinstance(v, str)
         }
 
+    # Resolved-ref map is optional (only present under --check-ref-drift); older
+    # baselines won't have it and the drift check is simply skipped.
+    refs_raw = data.get("resolved_refs", {})
+    resolved_refs: dict[str, str] = {}
+    if isinstance(refs_raw, dict):
+        resolved_refs = {
+            k: v
+            for k, v in refs_raw.items()
+            if isinstance(k, str) and "@" in k and isinstance(v, str) and len(v) == 40
+        }
+
     return Baseline(
         version=BASELINE_VERSION,
         repo_path=data.get("repo_path", ""),
@@ -186,6 +219,7 @@ def load_baseline(path: str) -> Baseline:
         fingerprints=fps,
         finding_count=data.get("finding_count", len(fps)),
         snippets=snippets,
+        resolved_refs=resolved_refs,
     )
 
 
@@ -294,3 +328,61 @@ def classify_diff_kind(
             pass
         return "sha_bump"
     return "new_dependency"
+
+
+# ---------------------------------------------------------------------------
+# Mutable-ref drift (the tj-actions/changed-files CVE-2025-30066 class)
+# ---------------------------------------------------------------------------
+
+# A 40-hex commit SHA — an immutable pin that cannot be repointed upstream.
+_SHA_RE = re.compile(r"\A[0-9a-fA-F]{40}\Z")
+
+
+def _is_mutable_ref(ref: str) -> bool:
+    """True if ``ref`` is a tag/branch (repointable), False if a full SHA pin."""
+    return _SHA_RE.match(ref) is None
+
+
+def ref_key(owner: str, repo: str, ref: str) -> str:
+    """Canonical key for the resolved-ref map: ``"owner/repo@ref"``."""
+    return f"{owner}/{repo}@{ref}"
+
+
+def iter_action_refs(findings: list[Any]) -> list[tuple[str, str, str]]:
+    """Return de-duplicated ``(owner, repo, ref)`` for each MUTABLE
+    ``uses: owner/repo@ref`` reference in the findings' snippets.
+
+    Sourced from finding snippets on purpose: the drift-relevant refs are exactly
+    the unpinned/mutable ones the static rules (SEC3-GH-001/003) already surface —
+    a SHA-pinned ``uses:`` cannot drift and isn't flagged, so it is naturally
+    excluded (the 0-FP control). Subpath actions (``owner/repo/path@ref``)
+    collapse to ``owner/repo``."""
+    seen: set[tuple[str, str, str]] = set()
+    out: list[tuple[str, str, str]] = []
+    for f in findings:
+        snippet = getattr(f, "snippet", "") or ""
+        for m in _USES_REF_FOR_DIFF.finditer(snippet):
+            pkg, ref = m.group(1), m.group(2)
+            if "/" not in pkg or not _is_mutable_ref(ref):
+                continue
+            parts = pkg.split("/")
+            owner, repo = parts[0], parts[1]
+            key = (owner, repo, ref)
+            if key not in seen:
+                seen.add(key)
+                out.append((owner, repo, ref))
+    return out
+
+
+def detect_ref_drift(
+    current_resolved: dict[str, str], baseline_resolved: dict[str, str]
+) -> list[tuple[str, str, str]]:
+    """Return ``(ref_key, old_sha, new_sha)`` for every ref present in BOTH maps
+    whose resolved SHA changed — the repoint signal (the YAML ref is unchanged,
+    only the upstream resolution moved). Sorted for deterministic output."""
+    drift: list[tuple[str, str, str]] = []
+    for key, old_sha in baseline_resolved.items():
+        new_sha = current_resolved.get(key)
+        if new_sha is not None and new_sha != old_sha:
+            drift.append((key, old_sha, new_sha))
+    return sorted(drift)
