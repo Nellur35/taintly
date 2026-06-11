@@ -256,6 +256,14 @@ class TaintHop:
     detail: str  # human-readable description
 
 
+def _hop_rank(hops: list[TaintHop]) -> tuple:
+    """Deterministic, total tie-break over a hop chain so the witness kept on a
+    ``fact_rank`` tie is canonical (shortest proof, then the lexicographically
+    smallest chain), not insertion-order dependent. Mirrors ``taint._hop_rank``
+    for the GitLab provenance facts — see that helper for the rationale."""
+    return tuple((h.kind or "", h.line or 0, h.name or "", h.detail or "") for h in hops)
+
+
 @dataclass
 class TaintPath:
     """A detected end-to-end taint flow from a tainted GitLab CI
@@ -414,7 +422,7 @@ class _TaintedVar:
         return (self.scope, self.name)
 
     def fact_rank(self):
-        return (len(self.hops), self.source_line)
+        return (len(self.hops), self.source_line, _hop_rank(self.hops))
 
 
 @dataclass
@@ -434,7 +442,7 @@ class _VisibleVar:
         return (self.job, self.name)
 
     def fact_rank(self):
-        return (self.cls, len(self.hops), self.source_line)
+        return (self.cls, len(self.hops), self.source_line, _hop_rank(self.hops))
 
 
 @dataclass
@@ -453,7 +461,7 @@ class _TaintedDotenv:
         return (self.producer, self.name)
 
     def fact_rank(self):
-        return (-self.seq, len(self.hops))
+        return (-self.seq, len(self.hops), _hop_rank(self.hops))
 
 
 @dataclass
@@ -471,7 +479,7 @@ class _InheritedVar:
         return (self.job, self.name)
 
     def fact_rank(self):
-        return (len(self.hops), self.source_line)
+        return (len(self.hops), self.source_line, _hop_rank(self.hops))
 
 
 @dataclass
