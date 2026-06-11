@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from typing import Any
 
 from . import __version__
 from .baseline import (
@@ -14,9 +15,12 @@ from .baseline import (
     BaselineError,
     apply_diff,
     classify_diff_kind,
+    detect_ref_drift,
     format_baseline_summary,
     format_diff_summary,
+    iter_action_refs,
     load_baseline,
+    ref_key,
     save_baseline,
 )
 from .config import (
@@ -63,6 +67,70 @@ def _platforms_for_reports(*reports) -> set[Platform]:
         plat = _PLATFORM_LOOKUP.get(getattr(r, "platform", ""))
         if plat is not None:
             out.add(plat)
+    return out
+
+
+def _resolve_current_refs(findings: list[Any]) -> dict[str, str]:
+    """Resolve every mutable ``uses:`` ref in ``findings`` to its current
+    upstream SHA -> ``{"owner/repo@ref": sha}``. Returns ``{}`` (no network)
+    when --check-ref-drift is disabled; skips refs that don't resolve."""
+    from taintly.platform import github_ref_resolve
+
+    if not github_ref_resolve.is_enabled():
+        return {}
+    resolved: dict[str, str] = {}
+    for owner, repo, ref in iter_action_refs(findings):
+        sha = github_ref_resolve.resolve_ref_to_sha(owner, repo, ref)
+        if sha:
+            resolved[ref_key(owner, repo, ref)] = sha
+    return resolved
+
+
+def _find_ref_source(findings: list[Any], key: str) -> Any:
+    """First finding whose snippet contains ``key`` (``owner/repo@ref``), to
+    anchor a drift finding to a file/line. Returns None if none match."""
+    for f in findings:
+        if key in (getattr(f, "snippet", "") or ""):
+            return f
+    return None
+
+
+def _build_drift_findings(drift: list[tuple[str, str, str]], findings: list[Any]) -> list[Any]:
+    """Turn ``(ref_key, old_sha, new_sha)`` drift tuples into CRITICAL
+    SEC3-GH-T02 findings, anchored to the ``uses:`` line that drifted."""
+    from .models import Finding, Severity
+
+    out: list[Any] = []
+    for key, old_sha, new_sha in drift:
+        src = _find_ref_source(findings, key)
+        out.append(
+            Finding(
+                rule_id="SEC3-GH-T02",
+                severity=Severity.CRITICAL,
+                title="Mutable action ref repointed to a new upstream SHA (no local change)",
+                description=(
+                    f"`{key}` resolved to commit {old_sha[:12]} at baseline time "
+                    f"but now resolves to {new_sha[:12]}, with no change to the "
+                    f"local workflow. A mutable tag/branch silently repointed to a "
+                    f"new commit is the tj-actions/changed-files (CVE-2025-30066) "
+                    f"supply-chain pattern: the ref in your YAML is unchanged, but "
+                    f"the code it runs has changed upstream."
+                ),
+                file=(getattr(src, "file", "") if src else ""),
+                line=(getattr(src, "line", 0) if src else 0),
+                snippet=(getattr(src, "snippet", "") if src else f"uses: {key}"),
+                remediation=(
+                    "Verify the upstream change is legitimate, then pin to a full "
+                    "40-char commit SHA you have reviewed: "
+                    "`uses: owner/repo@<40-char-sha>`. If the repoint is "
+                    "unexpected, treat it as a potential upstream compromise."
+                ),
+                reference=(
+                    "https://www.cisa.gov/news-events/alerts — tj-actions/"
+                    "changed-files CVE-2025-30066"
+                ),
+            )
+        )
     return out
 
 
@@ -404,6 +472,19 @@ def main():
         ),
     )
     parser.add_argument(
+        "--check-ref-drift",
+        action="store_true",
+        help=(
+            "Enable SEC3-GH-T02: mutable-ref-repoint detection (the "
+            "tj-actions/changed-files CVE-2025-30066 class). Records the "
+            "resolved upstream SHA of each ``uses: owner/repo@<mutable-ref>`` in "
+            "the --baseline, and on a later --diff scan flags any ref that now "
+            "resolves to a DIFFERENT SHA with no local YAML change as CRITICAL. "
+            "Requires GITHUB_TOKEN; use with --baseline then --diff on a cron. "
+            "Cannot fire on a cold-start first scan (no prior resolution)."
+        ),
+    )
+    parser.add_argument(
         "--check-archived-actions",
         action="store_true",
         help=(
@@ -450,6 +531,11 @@ def main():
         from taintly.platform import github_sha_verify
 
         github_sha_verify.set_enabled(True)
+
+    if args.check_ref_drift:
+        from taintly.platform import github_ref_resolve
+
+        github_ref_resolve.set_enabled(True)
 
     if args.check_archived_actions:
         from taintly.platform import github_archived_check
@@ -1106,7 +1192,9 @@ def main():
     # --baseline: write fingerprints and exit
     if args.baseline:
         baseline_path = args.baseline
-        bl = save_baseline(all_findings, args.path, baseline_path)
+        bl = save_baseline(
+            all_findings, args.path, baseline_path, _resolve_current_refs(all_findings)
+        )
         print(format_baseline_summary(bl, baseline_path))
         # Still output the full report so the user can review what was baselined
         for report in reports:
@@ -1153,6 +1241,13 @@ def main():
     # --diff: suppress known findings, show only new ones
     total_suppressed = 0
     if baseline is not None:
+        # Mutable-ref-repoint (SEC3-GH-T02): resolve refs from the FULL pre-diff
+        # finding set — a drifted ref's static finding is "unchanged" and gets
+        # suppressed below, so it must be captured before apply_diff filters it.
+        pre_diff_findings = [f for report in reports for f in report.findings]
+        drift = detect_ref_drift(_resolve_current_refs(pre_diff_findings), baseline.resolved_refs)
+        drift_findings = _build_drift_findings(drift, pre_diff_findings)
+
         filtered = []
         for report in reports:
             new_findings, suppressed = apply_diff(report.findings, baseline, args.path)
@@ -1169,6 +1264,21 @@ def main():
                     f.title = "[NEW DEPENDENCY] " + f.title
             report.findings = new_findings
             filtered.extend(new_findings)
+
+        # Inject mutable-ref-repoint findings: genuinely new signal even though
+        # the YAML is unchanged (the upstream code moved out from under the ref).
+        if drift_findings:
+            gh_report = next((r for r in reports if r.platform == "github"), None)
+            if gh_report is None:
+                from .models import AuditReport
+
+                gh_report = AuditReport(repo_path=args.path, platform="github")
+                reports.append(gh_report)
+            for f in drift_findings:
+                gh_report.add(f)
+            gh_report.summarize()
+            filtered.extend(drift_findings)
+
         all_findings = filtered
         print(
             format_diff_summary(total_suppressed, len(all_findings), args.diff),
