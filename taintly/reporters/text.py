@@ -9,6 +9,7 @@ from taintly.families import cluster_findings
 from taintly.models import AuditReport, Finding, Severity
 
 from ._encoding import arrow_char, check_char, sep_char, to_ascii
+from ._encoding import strip_terminal_controls as _safe
 
 if TYPE_CHECKING:
     from taintly.scorer import ScoreReport
@@ -352,7 +353,7 @@ def _format_executive_summary(
         out.append(
             f"  {c[risk.severity]}[{risk.severity.value}]{r} {b}{risk.rule_id}{r}: {risk.title}"
         )
-        out.append(f"  {dim}{risk.file}:{risk.line}{r}")
+        out.append(f"  {dim}{_safe(risk.file)}:{risk.line}{r}")
         out.append("")
 
     win = _quick_win(report.findings)
@@ -362,7 +363,7 @@ def _format_executive_summary(
         out.append(
             f"  {c[win.severity]}[{win.severity.value}]{r} {b}{win.rule_id}{r}: {win.title}{auto}"
         )
-        out.append(f"  {dim}{win.file}:{win.line}{r}")
+        out.append(f"  {dim}{_safe(win.file)}:{win.line}{r}")
         if win.remediation:
             out.append(f"  Fix: {win.remediation.splitlines()[0]}")
         out.append("")
@@ -410,7 +411,7 @@ def format_text(
         warn_color = c.get(Severity.HIGH, "") if use_color else ""
         out.append(f"{warn_color}{b}! Coverage degraded on {len(engine_errors)} file(s){r}")
         for f in engine_errors[:5]:
-            out.append(f"  {arrow_char()} {f.file}: {f.title}")
+            out.append(f"  {arrow_char()} {_safe(f.file)}: {f.title}")
         if len(engine_errors) > 5:
             out.append(f"  {arrow_char()} ... and {len(engine_errors) - 5} more")
         out.append(
@@ -490,10 +491,10 @@ def _format_finding(f: Finding, c: dict[Severity, str], r: str, b: str, dim: str
     suffix = f" {dim}[{', '.join(markers)}]{r}" if markers else ""
     out = [
         f"  {c[f.severity]}[{f.severity.value}]{r} {b}{f.rule_id}{r}: {f.title}{suffix}",
-        f"    File: {f.file}:{f.line}",
+        f"    File: {_safe(f.file)}:{f.line}",
     ]
     if f.snippet:
-        out.append(f"    Code: {f.snippet[:120]}")
+        out.append(f"    Code: {_safe(f.snippet[:120])}")
     out.append(f"    {f.description[:200]}")
     if f.threat_narrative:
         out.append(f"    Threat: {f.threat_narrative}")

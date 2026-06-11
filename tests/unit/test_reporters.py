@@ -1461,3 +1461,43 @@ def test_single_platform_json_output_unchanged(tmp_path):
     assert parsed.get("platform") == "github"
     assert "findings" in parsed
     assert "summary" in parsed
+
+
+# =============================================================================
+# Terminal-control sanitisation (untrusted file-derived strings)
+# =============================================================================
+
+
+def test_strip_terminal_controls_removes_ansi_and_controls():
+    from taintly.reporters._encoding import strip_terminal_controls as strip
+
+    # CSI clear-screen + colour, BEL, and an OSC title-set sequence all go.
+    assert strip("echo \x1b[2J\x1b[31mX\x07\x1b]0;title\x07ok") == "echo Xok"
+    assert strip("a\x1b[0mb") == "ab"
+    # Embedded newlines/tabs/CR are stripped — blocks forged report lines.
+    assert strip("line1\nline2\ttab\rcr") == "line1line2tabcr"
+    # Benign text is untouched.
+    assert strip(".github/workflows/ci.yml") == ".github/workflows/ci.yml"
+    assert strip("") == ""
+
+
+def test_text_report_sanitises_attacker_snippet():
+    """A workflow snippet carrying ANSI escapes must not reach the terminal raw."""
+    f = Finding(
+        rule_id="TAINT-GH-001",
+        severity=Severity.HIGH,
+        title="Untrusted input to shell",
+        description="d",
+        file="wf.yml",
+        line=3,
+        snippet="run: echo \x1b[2J\x1b[31mPWNED\x07 done",
+    )
+    rep = AuditReport(repo_path=".", platform="github", findings=[f])
+    out = format_text(rep, use_color=False, verbose=True)
+    # No terminal escapes survive (use_color=False ⇒ the reporter emits none of
+    # its own, so any ESC/BEL here would be the unsanitised snippet).
+    assert "\x1b" not in out
+    assert "\x07" not in out
+    # The visible text is preserved — sanitisation, not redaction.
+    assert "PWNED" in out
+    assert "done" in out
