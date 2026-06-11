@@ -34,6 +34,7 @@ console-code-page switch (case 1), the stdout/stderr reconfigure, and the
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 # Module-level flag, set by ensure_utf8_stdout().  The per-char helpers below
@@ -276,3 +277,42 @@ def to_ascii(s: str) -> str:
         else:
             out.append(_ASCII_MAP.get(ch, "?"))
     return "".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Terminal-control sanitisation for UNTRUSTED, file-derived strings
+# ---------------------------------------------------------------------------
+#
+# ``to_ascii`` only rewrites code points >= 128, so an ESC (0x1b) and the rest
+# of an ANSI escape sequence pass straight through it.  Strings that originate
+# from the *scanned repository* — a workflow ``run:`` line rendered as a
+# finding snippet, or a maliciously named file path — can therefore embed
+# CSI / OSC escapes that hijack the terminal when taintly prints them: clear
+# the screen, reposition the cursor, write the clipboard via OSC 52, or smuggle
+# fake report lines through an embedded newline.  The HTML reporter already
+# escapes its output; the terminal reporters did not.
+#
+# This sanitiser is applied to the UNTRUSTED field values only (file paths,
+# code snippets) — never to the reporter's own colour codes, which are added
+# separately and must survive — so coloring is preserved while attacker-
+# controlled bytes are neutralised.
+_TERMINAL_CONTROL_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC <text> terminated by BEL or ST
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"  # CSI <params> <intermediates> <final>
+    r"|\x1b[@-_]"  # other two-character (Fe) escapes
+    r"|[\x00-\x1f\x7f-\x9f]"  # stray C0/C1 controls (bare ESC, DEL, CR/LF, tab, …)
+)
+
+
+def strip_terminal_controls(s: str) -> str:
+    """Remove ANSI escape sequences and C0/C1 control characters from an
+    untrusted string so it cannot hijack the terminal when rendered.
+
+    Apply to file-derived values (snippets, paths) at the text-reporter
+    boundary.  Stripping embedded newlines is deliberate: it stops an attacker
+    snippet from injecting additional, forged report lines.  Returns pure
+    printable text (still possibly non-ASCII — pair with :func:`to_ascii` at
+    the output boundary for the Windows-encoding flatten)."""
+    if not s:
+        return s
+    return _TERMINAL_CONTROL_RE.sub("", str(s))
