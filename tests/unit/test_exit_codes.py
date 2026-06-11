@@ -194,6 +194,30 @@ def test_coverage_warning_exits_eleven(tmp_path: Path):
     )
 
 
+def test_timeout_scan_exits_eleven_not_clean(tmp_path: Path):
+    """A clock-truncated scan must be distinguishable from a clean run at the
+    exit-code layer — the bounded "scan incomplete" contract.
+
+    ``--max-scan-seconds`` expires the per-file rule budget immediately, so
+    every rule goes unevaluated and an ENGINE-ERR ("time-boxed") finding is
+    emitted. With no real HIGH/CRITICAL, the exit code must fall through to the
+    coverage-warning branch (11), never 0 — otherwise a timed-out scan would
+    silently read as clean to a CI gate.
+    """
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "x.yml").write_text(
+        "on: push\n"
+        "jobs:\n"
+        "  noop:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo hi\n"
+    )
+    code = _run([str(tmp_path), "--max-scan-seconds", "0.0001"])
+    assert code == 11, f"expected 11 (scan incomplete via time-box), got {code}"
+
+
 @pytest.mark.timeout(120)
 def test_self_test_mutation_failure_exits_twelve(tmp_path: Path):
     """--self-test --mutate with an injected surviving mutation → exit 12.
