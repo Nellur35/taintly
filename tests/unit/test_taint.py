@@ -1545,3 +1545,34 @@ def test_provenance_witness_is_canonical_regardless_of_insertion_order():
     d_ba.add("tainted_env", a)
     assert d_ab.all("tainted_env")[0].hops[0].name == "A"
     assert d_ba.all("tainted_env")[0].hops[0].name == "A"
+
+
+# --- provenance-as-oracle: every produced chain must be well-formed ---------
+
+
+def test_every_taint_chain_is_wellformed():
+    """Provenance-as-oracle: every TaintPath the analyzer derives from a
+    TAINT-GH rule's own positive sample must have a well-formed hop chain —
+    non-empty, ending at exactly one terminal ``sink`` hop, starting before that
+    terminal, with real 1-indexed line numbers. Asserts the *derivation*, not
+    just the conclusion. Driven off the rule pack so it stays in sync."""
+    from taintly.rules import registry
+    from taintly.taint import analyze
+
+    paths = []
+    for r in registry.load_all_rules():
+        if not str(r.id).startswith("TAINT-GH"):
+            continue
+        tp = getattr(r, "test_positive", None) or []
+        for s in [tp] if isinstance(tp, str) else list(tp):
+            if isinstance(s, str) and s.strip():
+                paths.extend(analyze(s, s.splitlines()))
+
+    assert paths, "expected the TAINT-GH positive samples to produce taint paths"
+    for p in paths:
+        kinds = [h.kind for h in p.hops]
+        assert kinds, f"empty hop chain for {p.env_var} @ line {p.sink_line}"
+        assert kinds[-1] == "sink", f"chain must terminate at a sink hop: {kinds}"
+        assert kinds.count("sink") == 1, f"exactly one terminal sink hop expected: {kinds}"
+        assert kinds[0] != "sink", f"chain must start before the terminal sink: {kinds}"
+        assert all(h.line > 0 for h in p.hops), f"every hop needs a 1-indexed line: {p.hops}"

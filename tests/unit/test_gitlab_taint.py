@@ -794,3 +794,34 @@ def test_taint_gl_001_002_do_not_fire_on_dotenv_bridge():
     for rid in ("TAINT-GL-001", "TAINT-GL-002"):
         rule = next(r for r in rules if r.id == rid)
         assert rule.pattern.check(src, src.splitlines()) == [], rid
+
+
+# --- provenance-as-oracle: every GitLab chain must be well-formed ----------
+
+
+def test_every_gitlab_taint_chain_is_wellformed():
+    """Provenance-as-oracle (GitLab): every TaintPath the analyzer derives from a
+    TAINT-GL rule's own positive sample must have a well-formed hop chain —
+    non-empty, ending at exactly one terminal ``sink`` hop, starting before that
+    terminal, with real 1-indexed line numbers. Asserts the derivation, not just
+    the conclusion. Driven off the rule pack so it stays in sync."""
+    from taintly.gitlab_taint import analyze as gl_analyze
+    from taintly.rules import registry
+
+    paths = []
+    for r in registry.load_all_rules():
+        if not str(r.id).startswith("TAINT-GL"):
+            continue
+        tp = getattr(r, "test_positive", None) or []
+        for s in [tp] if isinstance(tp, str) else list(tp):
+            if isinstance(s, str) and s.strip():
+                paths.extend(gl_analyze(s, s.splitlines()))
+
+    assert paths, "expected the TAINT-GL positive samples to produce taint paths"
+    for p in paths:
+        kinds = [h.kind for h in p.hops]
+        assert kinds, f"empty hop chain @ line {p.sink_line}"
+        assert kinds[-1] == "sink", f"chain must terminate at a sink hop: {kinds}"
+        assert kinds.count("sink") == 1, f"exactly one terminal sink hop expected: {kinds}"
+        assert kinds[0] != "sink", f"chain must start before the terminal sink: {kinds}"
+        assert all(h.line > 0 for h in p.hops), f"every hop needs a 1-indexed line: {p.hops}"
