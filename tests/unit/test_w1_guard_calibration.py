@@ -13,6 +13,7 @@ from taintly.engine import (
     _annotate_guarded_findings,
     _detect_github_guards,
     _detect_gitlab_guards,
+    _propagate_guard_calibration_to_composites,
 )
 from taintly.models import Finding, Severity
 
@@ -181,3 +182,88 @@ def test_gitlab_fork_reachable_with_spoofable_gate_is_untouched():
     _annotate_guarded_findings([f], content)
     assert f.exploitability == "medium"
     assert f.calibration_reason == ""
+
+
+# --- A0: a CHAIN composite inherits the guard calibration of its leg ---
+# The composer (_seed_findings) drops exploitability/calibration_reason, so without
+# this a CRITICAL composite contradicts the per-file "low — guard present" verdict.
+# Fix PROPAGATES (never suppresses): severity unchanged, composite gains low + caveat.
+
+
+def _leg(
+    line: int = 8,
+    exploitability: str = "low",
+    calibration_reason: str = (
+        "This job is fork-reachable but declares a guard (author-association check); "
+        "verify it dominates this finding's step before treating it as exploitable."
+    ),
+) -> Finding:
+    return Finding(
+        rule_id="SEC4-GH-005",
+        severity=Severity.MEDIUM,
+        title="t",
+        description="d",
+        file="wf.yml",
+        line=line,
+        origin="file",
+        exploitability=exploitability,
+        calibration_reason=calibration_reason,
+        finding_family="credential_persistence",
+    )
+
+
+def _composite(line: int = 8) -> Finding:
+    return Finding(
+        rule_id="CHAIN-GH-101",
+        severity=Severity.CRITICAL,
+        title="t",
+        description="d",
+        file="wf.yml",
+        line=line,
+        origin="cross-workflow",
+        exploitability="medium",
+        finding_family="chain-composition",
+    )
+
+
+def test_a0_composite_inherits_calibrated_leg():
+    leg, comp = _leg(), _composite()
+    _propagate_guard_calibration_to_composites([leg, comp])
+    assert comp.exploitability == "low"
+    assert "guard-calibration flagged" in comp.calibration_reason
+    assert "author-association" in comp.calibration_reason
+    # PROPAGATE, not suppress — severity untouched, finding still present.
+    assert comp.severity == Severity.CRITICAL
+
+
+def test_a0_composite_on_uncalibrated_leg_untouched():
+    leg = _leg(exploitability="high", calibration_reason="")  # no guard on the leg
+    comp = _composite()
+    _propagate_guard_calibration_to_composites([leg, comp])
+    assert comp.exploitability == "medium"
+    assert comp.calibration_reason == ""
+
+
+def test_a0_composite_at_different_line_untouched():
+    leg, comp = _leg(line=8), _composite(line=99)  # composite not anchored on the leg
+    _propagate_guard_calibration_to_composites([leg, comp])
+    assert comp.exploitability == "medium"
+
+
+def test_a0_non_composite_chain_finding_untouched():
+    # CHAIN-GH-001 is a single-file ContextPattern (family privileged_pr_trigger),
+    # already calibrated in scan_file — the family check must exclude it here.
+    leg = _leg()
+    other = Finding(
+        rule_id="CHAIN-GH-001",
+        severity=Severity.CRITICAL,
+        title="t",
+        description="d",
+        file="wf.yml",
+        line=8,
+        origin="file",
+        exploitability="medium",
+        finding_family="privileged_pr_trigger",
+    )
+    _propagate_guard_calibration_to_composites([leg, other])
+    assert other.exploitability == "medium"

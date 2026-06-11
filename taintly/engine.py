@@ -740,6 +740,55 @@ def _annotate_guarded_findings(findings: list[Finding], content: str) -> None:
         )
 
 
+def _propagate_guard_calibration_to_composites(findings: list[Finding]) -> None:
+    """A0 fix: make a CHAIN composite inherit the guard calibration of the
+    leg it was built on.
+
+    ``_annotate_guarded_findings`` runs per FILE and only annotates
+    ``origin == "file"`` findings; the CHAIN composer
+    (``composer._seed_findings``) carries only rule/location/severity into
+    its database, so a composite is built with no knowledge that its anchor
+    leg sits behind a strong guard.  A CRITICAL composite then contradicts
+    the engine's own per-file verdict ("low — a guard is present, verify it
+    dominates").
+
+    We PROPAGATE, we do NOT suppress: severity is unchanged, but the
+    composite's exploitability becomes ``"low"`` and carries the leg's guard
+    note, so the finding stays visible *and* consistent.  The per-file guard
+    signal is presence-only (not a dominance proof), so suppressing the
+    composite would risk a false negative when the guard does not actually
+    dominate the sink — the conservative direction for a security finding.
+
+    Matches the composite to its leg by ``(file, line)``: the composer anchors
+    each ``CompositeFact`` at its leg finding's line, so the composite and the
+    calibrated leg share an exact ``(file, line)``.
+    """
+    calibrated_legs = {
+        (f.file, f.line): f
+        for f in findings
+        if f.origin == "file" and f.exploitability == "low" and f.calibration_reason
+    }
+    if not calibrated_legs:
+        return
+    for c in findings:
+        # CHAIN-GH-1xx are the composer (chain-composition) family; CHAIN-GH-001
+        # is a per-file ContextPattern (already calibrated in scan_file) and is
+        # deliberately excluded by the family check.
+        if c.finding_family != "chain-composition" or c.exploitability == "low":
+            continue
+        leg = calibrated_legs.get((c.file, c.line))
+        if leg is None:
+            continue
+        note = (
+            "Composed from a leg that guard-calibration flagged low-exploitability: "
+            f"{leg.calibration_reason}"
+        )
+        c.exploitability = "low"
+        c.calibration_reason = (
+            f"{c.calibration_reason} {note}".strip() if c.calibration_reason else note
+        )
+
+
 def _guard_calibration_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
     if not any(rule.platform in (Platform.GITHUB, Platform.GITLAB) for rule in ctx.rules):
         return
@@ -1781,6 +1830,10 @@ def scan_repo(
                     composer_only=True,
                 )
             )
+            # A0: a composite must not silently outrank the per-file guard
+            # calibration of the leg it was built on — propagate the leg's
+            # low-exploitability + caveat onto the composite (never suppress).
+            _propagate_guard_calibration_to_composites(all_findings)
         if plat == Platform.GITLAB:
             # GitLab CHAIN composer pass: build the GitLabWorkflowCorpus
             # (entry file + resolved local includes) once per scan and
