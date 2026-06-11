@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from taintly.parsers.gha_expr import (
     ExprSyntaxError,
@@ -87,3 +89,60 @@ def test_iter_expression_bodies() -> None:
 def test_secrets_and_inputs_paths() -> None:
     assert context_paths("secrets.GH_TOKEN") == ["secrets.gh_token"]
     assert context_paths("inputs['my-input']") == ["inputs.my-input"]
+
+
+# --- resource bounds: adversarial expressions must not blow the stack -------
+#
+# A ``${{ }}`` body is attacker-controlled. The recursive-descent parser must
+# turn pathological nesting into a clean ``ExprSyntaxError`` (which callers
+# already handle as "couldn't parse"), never an unguarded ``RecursionError``
+# that could crash a scan. See ``gha_expr._MAX_PARSE_DEPTH``.
+
+
+@pytest.mark.parametrize(
+    ("opener", "closer", "tail"),
+    [
+        ("fromJSON(", ")", "github.event"),  # nested function calls
+        ("(", ")", "github.sha"),  # nested parentheses
+        ("!", "", "github.event_name"),  # unary-not chain
+    ],
+    ids=["nested-func", "nested-parens", "not-chain"],
+)
+def test_deeply_nested_expression_raises_syntax_error_not_recursion(
+    opener: str, closer: str, tail: str
+) -> None:
+    # Build the adversarial expression inside the test so the 45 KB string never
+    # lands in a parametrize id (a Windows env-var limit, and unreadable output).
+    expr = opener * 5000 + tail + closer * 5000
+    with pytest.raises(ExprSyntaxError):
+        parse(expr)
+
+
+def test_legitimately_nested_expression_still_parses() -> None:
+    # Real expressions nest only a handful of levels — well under the bound.
+    parse("toJSON(fromJSON(inputs.config))")
+    parse("github.event_name == 'push' && contains(github.ref, 'main') || false")
+
+
+@settings(max_examples=300, deadline=None)
+@given(st.text(max_size=300))
+def test_parse_never_recurses_on_arbitrary_input(s: str) -> None:
+    # The parser may accept or reject arbitrary bytes; it must never crash the
+    # interpreter with a RecursionError on attacker-controlled input.
+    try:
+        parse(s)
+    except RecursionError:  # pragma: no cover - the bug this guards against
+        raise AssertionError("parse() raised RecursionError on fuzzed input")
+    except Exception:
+        pass  # any clean rejection is acceptable; we only guard stack safety
+
+
+@settings(max_examples=80, deadline=None)
+@given(st.integers(min_value=0, max_value=5000))
+def test_parse_bounds_arbitrary_paren_depth(n: int) -> None:
+    try:
+        parse("(" * n + "x" + ")" * n)
+    except RecursionError:  # pragma: no cover
+        raise AssertionError(f"parse() raised RecursionError at paren depth {n}")
+    except Exception:
+        pass

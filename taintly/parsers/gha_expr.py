@@ -206,10 +206,21 @@ _KEYWORD_LITERALS = {
 # ---------------------------------------------------------------------------
 
 
+# Maximum expression nesting depth. Real GitHub ``${{ }}`` expressions are
+# shallow (< 10 levels); this bound is ~10x generous yet well under CPython's
+# recursion limit (each nesting level costs several parser frames). It turns an
+# adversarial deeply-nested expression from an attacker-controlled workflow —
+# e.g. ``fromJSON(fromJSON(...))`` x1000, or ``!!!!...`` — into a clean
+# ``ExprSyntaxError`` (which callers already handle as "couldn't parse") instead
+# of an unguarded ``RecursionError`` that could crash the scan.
+_MAX_PARSE_DEPTH = 100
+
+
 class _Parser:
     def __init__(self, toks: list[_Token]) -> None:
         self._toks = toks
         self._i = 0
+        self._depth = 0
 
     def _peek(self) -> _Token:
         return self._toks[self._i]
@@ -231,11 +242,19 @@ class _Parser:
         return node
 
     def _or(self) -> object:
-        node = self._and()
-        while self._peek().kind == "OP" and self._peek().value == "||":
-            self._next()
-            node = Binary("||", node, self._and())
-        return node
+        # The recursion re-entry point for every nested sub-expression (parens,
+        # brackets, function arguments all descend through here). Bound it.
+        self._depth += 1
+        if self._depth > _MAX_PARSE_DEPTH:
+            raise ExprSyntaxError("expression nesting exceeds the supported depth")
+        try:
+            node = self._and()
+            while self._peek().kind == "OP" and self._peek().value == "||":
+                self._next()
+                node = Binary("||", node, self._and())
+            return node
+        finally:
+            self._depth -= 1
 
     def _and(self) -> object:
         node = self._compare()
@@ -253,8 +272,15 @@ class _Parser:
 
     def _unary(self) -> object:
         if self._peek().kind == "OP" and self._peek().value == "!":
+            # A ``!!!!...`` chain recurses here without passing through _or().
+            self._depth += 1
+            if self._depth > _MAX_PARSE_DEPTH:
+                raise ExprSyntaxError("expression nesting exceeds the supported depth")
             self._next()
-            return Unary("!", self._unary())
+            try:
+                return Unary("!", self._unary())
+            finally:
+                self._depth -= 1
         return self._postfix()
 
     def _postfix(self) -> object:
