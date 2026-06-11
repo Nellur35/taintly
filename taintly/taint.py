@@ -371,6 +371,19 @@ class TaintHop:
     detail: str  # human-readable description
 
 
+def _hop_rank(hops: list[TaintHop]) -> tuple:
+    """Deterministic, total tie-break over a hop chain.
+
+    ``Database.add`` keeps the first-inserted fact on a ``fact_rank`` tie, so a
+    rank that is not a *total* order yields an insertion-order-dependent (i.e.
+    non-confluent) provenance witness.  Appending this to a provenance fact's
+    rank makes the kept witness canonical — shortest proof first, then the
+    lexicographically smallest chain — independent of rule evaluation order.
+    That determinism is the prerequisite for asserting on hop chains in tests
+    without flakiness (see the provenance-as-oracle work)."""
+    return tuple((h.kind or "", h.line or 0, h.name or "", h.detail or "") for h in hops)
+
+
 @dataclass
 class TaintPath:
     """A detected end-to-end taint flow from an attacker-controlled
@@ -646,8 +659,8 @@ class _TaintedEnv:
         return (self.scope, self.name)
 
     def fact_rank(self):
-        # Keep the shortest proof; tie-break deterministically.
-        return (len(self.hops), self.source_line)
+        # Keep the shortest proof; tie-break deterministically (total order).
+        return (len(self.hops), self.source_line, _hop_rank(self.hops))
 
 
 @dataclass
@@ -677,7 +690,7 @@ class _VisibleEnv:
         return (self.job, self.idx, self.name)
 
     def fact_rank(self):
-        return (self.cls, -self.writer_idx, len(self.hops), self.source_line)
+        return (self.cls, -self.writer_idx, len(self.hops), self.source_line, _hop_rank(self.hops))
 
 
 @dataclass
@@ -699,7 +712,7 @@ class _TaintedDynEnv:
     def fact_rank(self):
         # Last write in source order wins (matches dict-update order
         # of the old ``dynamic_env`` running state).
-        return (-self.seq, len(self.hops))
+        return (-self.seq, len(self.hops), _hop_rank(self.hops))
 
 
 @dataclass
@@ -725,7 +738,7 @@ class _TaintedOutput:
         return (self.step_id, self.name)
 
     def fact_rank(self):
-        return (-self.seq, len(self.hops))
+        return (-self.seq, len(self.hops), _hop_rank(self.hops))
 
 
 @dataclass
@@ -742,7 +755,7 @@ class _TaintedJobOutput:
         return (self.job, self.name)
 
     def fact_rank(self):
-        return (len(self.hops), self.source_line)
+        return (len(self.hops), self.source_line, _hop_rank(self.hops))
 
 
 @dataclass
@@ -767,7 +780,7 @@ class _TaintedFile:
         return (self.job, self.path)
 
     def fact_rank(self):
-        return (-self.seq, len(self.hops))
+        return (-self.seq, len(self.hops), _hop_rank(self.hops))
 
 
 # --- Job / step structure (the spine the EDB extractor walks) --------------

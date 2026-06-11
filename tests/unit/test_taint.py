@@ -1505,3 +1505,43 @@ def test_cross_job_output_via_env_ref():
     )
     assert len(paths) == 1
     assert paths[0].kind == "cross_job"
+
+
+# --- canonical provenance witness (deterministic on rank ties) -------------
+
+
+def test_provenance_witness_is_canonical_regardless_of_insertion_order():
+    """On a ``fact_rank`` tie (equal hop-count + source_line, different chains),
+    ``Database.add`` must keep the lexicographically-smallest chain regardless of
+    which derivation was inserted first — so the provenance witness is confluent.
+    Before the ``_hop_rank`` tie-break this resolved by insertion order (the
+    evaluator's accident), which would make hop-chain assertions flaky."""
+    from taintly.taint import TaintHop, _hop_rank, _TaintedEnv
+    from taintly.taint_facts.relations import Database
+
+    a = _TaintedEnv(
+        scope=("job", "j"),
+        name="V",
+        source_expr="x",
+        source_line=5,
+        hops=[TaintHop("env_static", 5, "A", "a"), TaintHop("sink", 9, "V", "s")],
+    )
+    b = _TaintedEnv(
+        scope=("job", "j"),
+        name="V",
+        source_expr="x",
+        source_line=5,
+        hops=[TaintHop("env_static", 5, "B", "b"), TaintHop("sink", 9, "V", "s")],
+    )
+    assert a.fact_key() == b.fact_key()
+    assert a.fact_rank()[:2] == b.fact_rank()[:2]
+    assert _hop_rank(a.hops) < _hop_rank(b.hops)
+
+    d_ab = Database()
+    d_ab.add("tainted_env", a)
+    d_ab.add("tainted_env", b)
+    d_ba = Database()
+    d_ba.add("tainted_env", b)
+    d_ba.add("tainted_env", a)
+    assert d_ab.all("tainted_env")[0].hops[0].name == "A"
+    assert d_ba.all("tainted_env")[0].hops[0].name == "A"
