@@ -65,7 +65,15 @@ def _collect_anchor_bodies(lines: list[str]) -> dict[str, list[str]]:
                 # Re-indent relative to root for inlining.
                 body.append(line[body_indent:])
                 j += 1
-            if name in bodies:
+            # Decline (leave the reference untouched) when the anchor is
+            # ambiguous (defined twice) OR recursive (its body references its
+            # own name). Inlining a recursive anchor once would PARTIALLY
+            # expand it — leaving the inner ``*name`` alias dangling — which is
+            # strictly worse than not expanding at all.
+            self_referential = re.search(
+                r"\*" + re.escape(name) + r"(?![A-Za-z0-9_-])", "\n".join(body)
+            )
+            if name in bodies or self_referential:
                 seen_twice.add(name)
             else:
                 bodies[name] = body
