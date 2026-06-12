@@ -137,6 +137,68 @@ class _IncludeProjectMutableRefPattern:
         return results
 
 
+class _PoisonableCacheKeyPattern:
+    """SEC3-GL-009 walker — a cache key predictable across a trust boundary.
+
+    Fires when a ``cache:`` block's ``key:`` is a scalar built only from
+    predictable, branch/project-scoped variables (``$CI_COMMIT_REF_SLUG``,
+    ``$CI_COMMIT_REF_NAME``, ``$CI_PROJECT_*`` …) WITHOUT a per-commit/job/
+    pipeline uniqueness component (``$CI_COMMIT_SHA``, ``$CI_JOB_ID``,
+    ``$CI_RUNNER_ID``, ``$CI_PIPELINE_ID``). Such a key is shared across every
+    MR / fork pipeline on the same branch name, so a malicious MR can populate a
+    cache that a later trusted pipeline restores — the cache-poisoning shape of
+    gitlab-org/gitlab#330047.
+
+    Does NOT fire on a key that includes a uniqueness component, on the
+    content-hash ``key: { files: [...] }`` form (the documented safe pattern,
+    which has no inline scalar), or on a purely static literal key (a different,
+    intentional shared-cache concern — kept out to hold FP near zero).
+    """
+
+    _PREDICTABLE = re.compile(
+        r"CI_COMMIT_REF_SLUG|CI_COMMIT_REF_NAME|CI_COMMIT_BRANCH|"
+        r"CI_DEFAULT_BRANCH|CI_PROJECT_(?:NAME|PATH|PATH_SLUG|ID|NAMESPACE|TITLE)|"
+        r"CI_MERGE_REQUEST_(?:SOURCE|TARGET)_BRANCH_NAME"
+    )
+    _UNIQUE = re.compile(
+        r"CI_COMMIT_SHA|CI_COMMIT_SHORT_SHA|CI_JOB_ID|CI_RUNNER_ID|"
+        r"CI_PIPELINE_ID|CI_PIPELINE_IID"
+    )
+    _CACHE_HEADER_RE = re.compile(r"^(\s*)-?\s*cache:\s*(?:#.*)?$")
+    _KEY_RE = re.compile(r"^\s*-?\s*key:\s*(\S.*?)\s*(?:#.*)?$")
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        i, n = 0, len(lines)
+        while i < n:
+            m = self._CACHE_HEADER_RE.match(lines[i])
+            if not m:
+                i += 1
+                continue
+            indent = len(m.group(1))
+            j = i + 1
+            while j < n:
+                line = lines[j]
+                stripped = line.lstrip(" \t")
+                if not stripped or stripped.startswith("#"):
+                    j += 1
+                    continue
+                if (len(line) - len(stripped)) <= indent:
+                    break  # cache block ended (dedented to a sibling/parent key)
+                km = self._KEY_RE.match(line)
+                if km:
+                    val = km.group(1).strip().strip("'\"")
+                    if (
+                        "$" in val
+                        and self._PREDICTABLE.search(val)
+                        and not self._UNIQUE.search(val)
+                    ):
+                        results.append((j + 1, line.strip()))
+                j += 1
+            i = j
+        return results
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # CICD-SEC-3: Dependency Chain Abuse (GitLab)
@@ -762,5 +824,65 @@ RULES: list[Rule] = [
             "archived project leaks straight through."
         ),
         finding_family="action_pin_drift",
+    ),
+    # =========================================================================
+    # SEC3-GL-009 — predictable cache key poisonable across a trust boundary
+    # (gitlab-org/gitlab#330047).
+    # =========================================================================
+    Rule(
+        id="SEC3-GL-009",
+        title="Predictable cache key poisonable across a trust boundary",
+        severity=Severity.MEDIUM,
+        platform=Platform.GITLAB,
+        owasp_cicd="CICD-SEC-3",
+        description=(
+            "A cache:key built only from predictable branch/project-scoped "
+            "variables (e.g. $CI_COMMIT_REF_SLUG) with no per-commit/job/pipeline "
+            "uniqueness component is shared across every merge-request and fork "
+            "pipeline on the same branch name. A malicious MR can populate that "
+            "cache with poisoned contents that a later trusted pipeline restores "
+            "and trusts — the cache-poisoning shape of gitlab-org/gitlab#330047."
+        ),
+        pattern=_PoisonableCacheKeyPattern(),
+        remediation=(
+            "Add a uniqueness component to the cache key so MR/fork pipelines "
+            "cannot share a trusted pipeline's cache, or key on content:\n"
+            "\n"
+            "  cache:\n"
+            '    key: "$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHA"   # per-commit\n'
+            "    paths: [vendor/]\n"
+            "\n"
+            "or the content-hash form (rebuilds only when inputs change):\n"
+            "\n"
+            "  cache:\n"
+            "    key:\n"
+            "      files: [Gemfile.lock]\n"
+            "    paths: [vendor/]"
+        ),
+        reference="https://docs.gitlab.com/ci/caching/#cache-key-names",
+        test_positive=[
+            'build:\n  cache:\n    key: "$CI_COMMIT_REF_SLUG"\n    paths:\n      - vendor/',
+            "cache:\n  key: $CI_COMMIT_REF_NAME\n  paths:\n    - node_modules/",
+            'test:\n  cache:\n    key: "deps-$CI_PROJECT_PATH_SLUG"\n    paths:\n      - .cache/',
+        ],
+        test_negative=[
+            # uniqueness component -> not shareable across MRs/forks
+            'build:\n  cache:\n    key: "$CI_COMMIT_SHA"\n    paths:\n      - vendor/',
+            'build:\n  cache:\n    key: "$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHA"\n    paths:\n      - vendor/',
+            # content-hash key form (the documented safe pattern; no inline scalar)
+            "build:\n  cache:\n    key:\n      files:\n        - Gemfile.lock\n    paths:\n      - vendor/",
+            # static literal key (intentional shared cache; out of scope)
+            'build:\n  cache:\n    key: "static-build-cache"\n    paths:\n      - vendor/',
+        ],
+        stride=["T"],
+        threat_narrative=(
+            "GitLab CI caches are restored before a job runs. When the cache key "
+            "is predictable and shared across trust boundaries, an attacker who "
+            "can open a merge request or fork pipeline writes the cache that the "
+            "next trusted (default-branch or maintainer) pipeline restores, "
+            "smuggling poisoned dependencies or build artifacts into a privileged "
+            "run. A per-commit/job uniqueness component, or a content-hash key, "
+            "removes the shared-key window."
+        ),
     ),
 ]

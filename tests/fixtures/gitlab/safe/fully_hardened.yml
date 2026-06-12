@@ -5,6 +5,7 @@
 #   - No unquoted CI variables in script
 #   - Protected variables used correctly
 #   - No privileged Docker in untrusted context
+#   - Cache keyed on file content, not a poisonable branch ref
 
 variables:
   DOCKER_DRIVER: overlay2
@@ -15,7 +16,12 @@ stages:
   - lint
 
 cache:
-  key: $CI_COMMIT_REF_SLUG
+  # Keyed on dependency-manifest CONTENT, not a predictable branch ref: a bare
+  # $CI_COMMIT_REF_SLUG key is shared across MR/fork pipelines on the same branch
+  # name and is poisonable across the trust boundary (SEC3-GL-009 / gitlab#330047).
+  key:
+    files:
+      - pyproject.toml
   paths:
     - .pip/
 
