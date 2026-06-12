@@ -426,6 +426,44 @@ def _sec9_jk_004_predicate(shell_body: str, _interpolated: bool = False) -> bool
     return False
 
 
+class _GrabSandboxEscapePattern:
+    """SEC4-JK-011 — an ``@Grab`` annotation paired with a process-execution
+    class is a Groovy Script-Security **sandbox escape** (CVE-2019-1003000 /
+    SECURITY-1538 family).
+
+    ``@Grab`` is resolved and executed by Groovy Grape at *compile time*,
+    before the Jenkins Script Security sandbox engages. A pipeline — or a
+    sandboxed shared-library / job-DSL script — that ``@Grab``s a dependency
+    and then drives a process-execution class (``ProcBuilder`` /
+    ``Runtime.getRuntime`` / ``new ProcessBuilder``) reaches arbitrary OS
+    command execution that the sandbox cannot intercept.
+
+    Distinct from SEC3-JK-002 (unversioned ``@Grab`` = dependency *float*):
+    the escape does not depend on the version, so this fires on *any* ``@Grab``
+    — including a pinned ``@Grab('g:a:1.2.3')`` — but **only** when an in-file
+    process-execution escape co-occurs. A bare versioned ``@Grab`` with no
+    execution sink does not fire, keeping legitimate pinned Grape usage clean.
+    """
+
+    _GRAB_RE = re.compile(r"@Grab\s*\(")
+    _COMMENT_RE = re.compile(r"^\s*(?://|\*|/\*)")
+    _EXEC_RE = re.compile(r"\bProcBuilder\b|\bRuntime\s*\.\s*getRuntime\b|\bnew\s+ProcessBuilder\b")
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if not self._EXEC_RE.search(content):
+            return []
+        out: list[tuple[int, str]] = []
+        for i, line in enumerate(lines, 1):
+            if self._COMMENT_RE.match(line):
+                continue
+            if self._GRAB_RE.search(line):
+                # Snippet must be the actual source line (Pattern.check contract):
+                # the @Grab annotation is the evidence; the sandbox-escape rationale
+                # lives in the rule description / threat_narrative.
+                out.append((i, line.strip()))
+        return out
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # SEC3-JK-001: Shared library loaded without SHA pinning
@@ -677,6 +715,81 @@ RULES: list[Rule] = [
             "path from ``env.CHANGE_*`` lets a PR steer it. Either way the "
             "attacker's Groovy executes on the controller with the "
             "pipeline's full privilege."
+        ),
+    ),
+    # =========================================================================
+    # SEC4-JK-011 — @Grab + process-execution class = Groovy sandbox escape.
+    # @Grab resolves at compile time, BEFORE the Script Security sandbox, so a
+    # pipeline that grabs a dependency and drives ProcBuilder / Runtime /
+    # ProcessBuilder achieves arbitrary command execution the sandbox cannot
+    # stop (CVE-2019-1003000). Distinct from SEC3-JK-002 (unversioned float):
+    # fires on ANY @Grab, but only when the in-file execution escape co-occurs.
+    # =========================================================================
+    Rule(
+        id="SEC4-JK-011",
+        title="@Grab dependency combined with a process-execution class (sandbox escape)",
+        severity=Severity.HIGH,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A Jenkinsfile or sandboxed Groovy script uses an ``@Grab`` "
+            "annotation to pull a dependency and also drives a "
+            "process-execution class (``ProcBuilder``, ``Runtime.getRuntime``, "
+            "``new ProcessBuilder``). ``@Grab`` is resolved and executed by "
+            "Grape at *compile time*, before the Jenkins Script Security "
+            "sandbox is applied, so the combination reaches arbitrary OS "
+            "command execution the sandbox cannot intercept — the "
+            "CVE-2019-1003000 / SECURITY-1538 sandbox-escape shape. Unlike "
+            "SEC3-JK-002 (which flags only *unversioned* @Grab as a dependency "
+            "float risk), this fires on any @Grab — including a pinned "
+            "version — because the escape does not depend on the version."
+        ),
+        pattern=_GrabSandboxEscapePattern(),
+        remediation=(
+            "Do not load Grape dependencies from a pipeline or untrusted "
+            "Groovy script. Disable @Grab in the Script Security sandbox, "
+            "declare dependencies as reviewed Jenkins plugins or in a build "
+            "tool (Maven/Gradle) run inside an agent step, and never combine "
+            "ad-hoc dependency loading with process-execution classes:\n\n"
+            "// BAD — @Grab runs before the sandbox, then escapes to a shell\n"
+            "@Grab('org.buildobjects:jproc:2.2.3')\n"
+            "import org.buildobjects.process.ProcBuilder\n"
+            "new ProcBuilder('/bin/bash').withArgs('-c','id').run()\n\n"
+            "// GOOD — run tools via a normal agent step, no Grape\n"
+            "sh 'id'"
+        ),
+        reference="https://www.jenkins.io/security/advisory/2019-01-08/",
+        test_positive=[
+            (
+                "@Grab('org.buildobjects:jproc:2.2.3')\n"
+                "import org.buildobjects.process.ProcBuilder\n"
+                "new ProcBuilder('/bin/bash').withArgs('-c','id').run()"
+            ),
+            (
+                "@Grab('commons-io:commons-io:2.11.0')\n"
+                "def out = Runtime.getRuntime().exec('whoami')"
+            ),
+        ],
+        test_negative=[
+            # Pinned @Grab with NO execution sink — legitimate Grape usage.
+            (
+                "@Grab('org.apache.commons:commons-lang3:3.12.0')\n"
+                "import org.apache.commons.lang3.StringUtils\n"
+                "echo StringUtils.upperCase('x')"
+            ),
+            # Process execution but NO @Grab — ordinary pipeline, not a Grape escape.
+            "new ProcBuilder('/bin/echo').withArgs('hi').run()",
+            # Commented-out @Grab next to exec — not live code.
+            ("// @Grab('g:a:1.0')\nnew ProcessBuilder('id').start()"),
+        ],
+        stride=["E", "T"],
+        threat_narrative=(
+            "@Grab is a compile-time code-loading primitive that runs before "
+            "the Script Security sandbox engages. Paired with a "
+            "process-execution class it is a documented sandbox escape "
+            "(CVE-2019-1003000): an attacker who controls the pipeline text "
+            "achieves arbitrary command execution on the Jenkins controller "
+            "with the pipeline's full trust."
         ),
     ),
     # =========================================================================
