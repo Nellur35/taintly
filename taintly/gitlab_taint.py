@@ -64,6 +64,25 @@ Scope — three rules shipped:
    This is the closest GitLab analog of the GitHub
    ``$GITHUB_ENV`` bridge caught by TAINT-GH-003.
 
+4. **AI coding-agent output capture** (TAINT-GL-009, ``kind="agent_output"``):
+
+       review:
+         script:
+           - SUMMARY=$(claude -p "review this MR")
+           - eval "$SUMMARY"
+
+   GitLab has no ``uses:`` action model, so unlike the GitHub
+   ``agent_output`` source (TAINT-GH-005, keyed on
+   ``steps.<id>.outputs.*``) the GitLab agent runs as a shell CLI inside
+   a ``script:`` line and its stdout is captured via command
+   substitution (``VAR=$(...)`` or the backtick form).  The model is
+   steerable by prompt injection (the attacker controls the MR / commit
+   text the agent reads via its own tools), so the captured output is
+   attacker-shaped.  When a strictly-later script line in the same job
+   shell-expands ``$VAR`` the attacker's bytes reach the runner with the
+   job's full ``CI_JOB_TOKEN`` and masked variables.  This is the
+   GitLab analog of the GitHub agent-output taint source.
+
 Still out of scope (future deep-taint work, listed here so the gap stays
 visible):
 
@@ -204,6 +223,42 @@ _ECHO_ASSIGN_TO_FILE_RE = re.compile(
 # Extract NAME=VALUE from an already-dequoted echo body.
 _NAME_VALUE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
 
+# AI coding-agent CLI alternation.  GitLab has no ``uses:`` action model
+# (the GitHub analog that TAINT-GH-005 keys on); on GitLab the agent runs
+# as a shell CLI inside a ``script:`` line, so the GitLab agent-output
+# source is a command-substitution *capture* of an agent CLI's stdout.
+# Keyword set is kept aligned with the GitLab AI-GL-* family
+# (rules/gitlab/ai.py — AI-GL-008/010 CLI anchors): the same coding
+# agents whose output is steered by prompt-injection.  Each entry is a
+# CLI binary invocation, not a substring, so ``\b`` anchors and a flag /
+# argument context keep it from matching unrelated words.
+_AGENT_CLI_PATTERN = (
+    r"(?:"
+    r"claude\s+(?:-p\b|--print\b|-p=|chat\b|--dangerously-skip-permissions\b)"
+    r"|aider\b"
+    r"|openhands\b"
+    r"|swe-agent\b"
+    r"|cursor-(?:agent|cli)\b"
+    r"|codex\s+(?:exec|chat|complete)\b"
+    r"|gemini\s+(?:--yolo\b|-p\b|--prompt\b|chat\b)"
+    r"|llm\s+(?:-m\b|-p\b|prompt\b|chat\b)"
+    r")"
+)
+
+# Shell command-substitution that captures an agent CLI's stdout into a
+# variable: ``VAR=$(claude -p ...)`` or the POSIX-equivalent backtick
+# form ``VAR=`aider ...```.  ``var`` is the captured variable name;
+# ``agent`` is the matched CLI head (for the provenance detail).  The
+# agent CLI is required inside the substitution body.  ReDoS-safe: the
+# substitution body uses a negated character class, not a greedy ``.*``.
+_AGENT_CAPTURE_RE = re.compile(
+    r"\b(?P<var>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"(?:"
+    r"\$\(\s*(?P<agent_p>" + _AGENT_CLI_PATTERN + r")[^)]*\)"
+    r"|`\s*(?P<agent_b>" + _AGENT_CLI_PATTERN + r")[^`]*`"
+    r")"
+)
+
 # Top-level job name — a key at column 0 that is NOT a reserved GitLab
 # keyword.  The reserved set mirrors ``_GITLAB_KEYWORDS`` in
 # ``taintly.models`` (kept here to avoid circular import).
@@ -246,11 +301,16 @@ class TaintHop:
       the writing job declares as an ``artifacts.reports.dotenv``
       artefact.  Consumer jobs that ``needs:`` the writer inherit
       ``NAME`` as a real environment variable.
+    * ``"agent_output"`` — a shell command-substitution capture of an
+      AI coding-agent CLI's stdout into a variable
+      (``VAR=$(claude -p ...)``).  The model is steerable by
+      prompt-injection, so its captured output is attacker-shaped — the
+      GitLab analog of the GitHub ``agent_output`` source (TAINT-GH-005).
     * ``"sink"`` — the script-line where the tainted variable is
       shell-expanded.
     """
 
-    kind: str  # "var_static" | "var_indirect" | "dotenv" | "sink"
+    kind: str  # "var_static" | "var_indirect" | "dotenv" | "agent_output" | "sink"
     line: int  # 1-indexed line in the source file
     name: str  # variable name at this hop
     detail: str  # human-readable description
@@ -309,10 +369,12 @@ _R_SCRIPT_LINE = "script_line"  # EDB
 _R_DOTENV_WRITE = "dotenv_write"  # EDB
 _R_NEEDS_EDGE = "needs_edge"  # EDB
 _R_SINK_SITE = "sink_site"  # EDB  (non-script: sinks — image:, services:, tags:)
+_R_AGENT_CAPTURE = "agent_capture"  # EDB  (VAR=$(claude -p ...) command-sub capture)
 _R_TAINTED_VAR = "tainted_var"  # IDB
 _R_VISIBLE_VAR = "visible_var"  # IDB
 _R_TAINTED_DOTENV = "tainted_dotenv"  # IDB
 _R_INHERITED_VAR = "inherited_var"  # IDB
+_R_TAINTED_CAPTURE = "tainted_capture"  # IDB  (a captured var carries agent output)
 
 
 @dataclass
@@ -368,6 +430,28 @@ class _SinkSite:
 
     def fact_key(self):
         return (self.job, self.kind, self.line, self.value)
+
+    def fact_rank(self):
+        return ()
+
+
+@dataclass
+class _AgentCapture:
+    """EDB: a shell command-substitution that captures an AI coding-agent
+    CLI's stdout into ``name`` inside ``job``'s script body
+    (``name=$(claude -p ...)``).  ``agent`` is the matched CLI text (for
+    the provenance detail); ``seq`` preserves program order so the
+    projection only taints references that come strictly *after* the
+    capture line."""
+
+    job: str
+    name: str
+    agent: str
+    line: int
+    seq: int
+
+    def fact_key(self):
+        return (self.job, self.name, self.seq)
 
     def fact_rank(self):
         return ()
@@ -483,6 +567,27 @@ class _InheritedVar:
 
 
 @dataclass
+class _TaintedCapture:
+    """IDB: ``job``'s shell variable ``name`` carries AI-agent output
+    (attacker-shaped) from the command-substitution capture at
+    ``source_line``.  ``seq`` is the capture's program-order index so the
+    projection only taints script references on a strictly later line."""
+
+    job: str
+    name: str
+    seq: int
+    source_var: str
+    source_line: int
+    hops: list[TaintHop]
+
+    def fact_key(self):
+        return (self.job, self.name)
+
+    def fact_rank(self):
+        return (-self.seq, len(self.hops), _hop_rank(self.hops))
+
+
+@dataclass
 class _Job:
     """The per-job spine the projection walks."""
 
@@ -511,6 +616,7 @@ def _build_facts(lines: list[str]) -> tuple[Database, list[_Job]]:
             db.add(_R_VAR_ASSIGN, _VarAssign(("job", name), vname, raw, line))
 
         dotenv_file = _extract_dotenv_filename(seg_lines)
+        _cap_seq = 0
         for sink_line, sink_snippet in _iter_script_lines(seg_lines, seg_start):
             db.add(_R_SCRIPT_LINE, _ScriptLine(name, sink_line, sink_snippet))
             if dotenv_file is not None:
@@ -523,6 +629,13 @@ def _build_facts(lines: list[str]) -> tuple[Database, list[_Job]]:
                             _DotenvWrite(name, wname, value, sink_line, qs, _seq),
                         )
                         _seq += 1
+            for cm in _AGENT_CAPTURE_RE.finditer(sink_snippet):
+                agent = cm.group("agent_p") or cm.group("agent_b") or ""
+                db.add(
+                    _R_AGENT_CAPTURE,
+                    _AgentCapture(name, cm.group("var"), agent.strip(), sink_line, _cap_seq),
+                )
+                _cap_seq += 1
 
         for producer, artifacts in _extract_needs(seg_lines):
             db.add(_R_NEEDS_EDGE, _NeedsEdge(name, producer, artifacts))
@@ -681,6 +794,7 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
     _seq = 0
     for job in job_order:
         dotenv_file = dotenv_files.get(job)
+        _cap_seq = 0
         for line, text in script_lines[job]:
             db.add(_R_SCRIPT_LINE, _ScriptLine(job, line, text))
             if dotenv_file is not None:
@@ -693,6 +807,13 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
                             _DotenvWrite(job, wname, value, line, qs, _seq),
                         )
                         _seq += 1
+            for cm in _AGENT_CAPTURE_RE.finditer(text):
+                agent = cm.group("agent_p") or cm.group("agent_b") or ""
+                db.add(
+                    _R_AGENT_CAPTURE,
+                    _AgentCapture(job, cm.group("var"), agent.strip(), line, _cap_seq),
+                )
+                _cap_seq += 1
         jobs.append(_Job(job, -1, [], dotenv_file))
     for (job, _i), (producer, artifacts) in needs_raw.items():
         if producer:
@@ -873,11 +994,40 @@ def _gitlab_rules(jobs: list[_Job]):
                         _InheritedVar(ne.job, td.name, td.source_var, td.source_line, td.hops),
                     )
 
+    def rule_tainted_capture(db: Database):
+        # A shell command-substitution capture of an AI coding-agent CLI
+        # (``VAR=$(claude -p ...)``) taints VAR with agent output.  The
+        # ``source_var`` is the synthesized ``agent:<cli>`` token (the
+        # GitLab analog of the GitHub ``agent:<action>`` source), so the
+        # rendered chain starts at the agent rather than at an unknown
+        # shell var.  No fixed-point dependency — it's a direct source —
+        # but it lives in the closure so the projection stays uniform.
+        for ac in db.all(_R_AGENT_CAPTURE):
+            yield (
+                _R_TAINTED_CAPTURE,
+                _TaintedCapture(
+                    ac.job,
+                    ac.name,
+                    ac.seq,
+                    f"agent:{ac.agent}",
+                    ac.line,
+                    [
+                        TaintHop(
+                            kind="agent_output",
+                            line=ac.line,
+                            name=ac.name,
+                            detail=f"{ac.name} := $({ac.agent}) agent-output capture",
+                        )
+                    ],
+                ),
+            )
+
     return [
         rule_tainted_var,
         rule_visible_var,
         rule_tainted_dotenv,
         rule_inherited_var,
+        rule_tainted_capture,
     ]
 
 
@@ -898,6 +1048,9 @@ def analyze(content: str, lines: list[str]) -> list[TaintPath]:
     * ``"dotenv"`` — a writer job's ``artifacts.reports.dotenv``
       propagates attacker-controlled bytes to a consumer job that
       ``needs:`` it (TAINT-GL-003).
+    * ``"agent_output"`` — an AI coding-agent CLI's stdout is captured
+      via command substitution (``VAR=$(claude -p ...)``) and a later
+      script line in the same job shell-expands ``$VAR`` (TAINT-GL-009).
 
     Rules filter on ``kind`` to attribute each finding to the right
     TAINT-GL-XXX rule.
@@ -923,7 +1076,20 @@ def analyze(content: str, lines: list[str]) -> list[TaintPath]:
         for iv in db.all(_R_INHERITED_VAR):
             if iv.job == job.name:
                 visible[iv.name] = _TaintInfo(iv.source_var, iv.source_line, iv.hops)
-        if not visible:
+
+        # Agent-output captures (``VAR=$(claude -p ...)``) are line-scoped
+        # shell variables — visible only to a strictly later script line
+        # in the SAME job (the runner concatenates a job's script blocks
+        # into one shell, so a captured var persists for the rest of the
+        # job but not across jobs).  Keep them separate from ``visible``
+        # so the per-line projection can enforce the ``> capture_line``
+        # ordering, mirroring the GitHub ``agent_output`` "strictly later
+        # step" rule.
+        captures: dict[str, _TaintInfo] = {}
+        for tc in db.all(_R_TAINTED_CAPTURE):
+            if tc.job == job.name:
+                captures[tc.name] = _TaintInfo(tc.source_var, tc.source_line, tc.hops)
+        if not visible and not captures:
             continue
 
         script_lines = [sl for sl in db.all(_R_SCRIPT_LINE) if sl.job == job.name]
@@ -937,6 +1103,12 @@ def analyze(content: str, lines: list[str]) -> list[TaintPath]:
                 continue
             for var, tinfo in visible.items():
                 if _references_var(sl.text, var):
+                    out.append(_make_path(tinfo, var, sl.line, sl.text))
+            for var, tinfo in captures.items():
+                # Only a script line strictly after the capture sees the
+                # captured shell var; the capture line itself is the
+                # source, not a sink.
+                if sl.line > tinfo.source_line and _references_var(sl.text, var):
                     out.append(_make_path(tinfo, var, sl.line, sl.text))
 
         # Non-script: sink sites — a tainted variable expanded into a
@@ -1152,14 +1324,20 @@ def _references_var(line: str, var: str) -> bool:
 def _classify_kind(hops: list[TaintHop]) -> str:
     """Pick the ``TaintPath.kind`` label from the chain's hop kinds.
 
-    Priority (highest -> lowest): ``dotenv`` > ``multi_hop`` >
-    ``shallow``.  A chain containing *any* ``dotenv`` hop is reported
-    as ``"dotenv"`` — the cross-job bridge is the most damning
-    transition and is what TAINT-GL-003 needs to surface.  Any
-    ``var_indirect`` hop (a ``B: $A`` laundering step) upgrades
-    ``"shallow"`` to ``"multi_hop"``.  A chain of only ``var_static``
-    hops is the original ``"shallow"`` flow handled by TAINT-GL-001.
+    Priority (highest -> lowest): ``agent_output`` > ``dotenv`` >
+    ``multi_hop`` > ``shallow``.  A chain containing *any*
+    ``agent_output`` hop is reported as ``"agent_output"`` — the source
+    is a prompt-injectable model, the most semantically distinct origin,
+    and it is what TAINT-GL-009 filters on.  A chain containing *any*
+    ``dotenv`` hop is reported as ``"dotenv"`` — the cross-job bridge is
+    the most damning *transition* and is what TAINT-GL-003 needs to
+    surface.  Any ``var_indirect`` hop (a ``B: $A`` laundering step)
+    upgrades ``"shallow"`` to ``"multi_hop"``.  A chain of only
+    ``var_static`` hops is the original ``"shallow"`` flow handled by
+    TAINT-GL-001.
     """
+    if any(h.kind == "agent_output" for h in hops):
+        return "agent_output"
     if any(h.kind == "dotenv" for h in hops):
         return "dotenv"
     if any(h.kind == "var_indirect" for h in hops):
