@@ -72,7 +72,13 @@ _PER_PREFIX_BASELINE: dict[str, int] = {
     "SEC9-JK": 1,
     "TAINT-GH": 27,
     "TAINT-GL": 11,
-    "TAINT-JK": 1,
+    # 1 -> 2: TAINT-JK-003 quote_swap gap documented (Phase-3 multi-hop port).
+    # The rule fires only on a DOUBLE-quoted Groovy GString sink/RHS (Groovy
+    # interpolates before the shell runs); quote_swap flips both the sink and
+    # the assignment RHS to single quotes, which legitimately stops Groovy
+    # interpolating, so the resolver correctly stops matching — the same
+    # framework-limitation gap class as TAINT-JK-001 quote_swap.
+    "TAINT-JK": 2,
 }
 
 

@@ -1,5 +1,5 @@
 {
-  "count": 247,
+  "count": 248,
   "rule_ids": [
     "AI-GH-001",
     "AI-GH-002",
@@ -247,6 +247,7 @@
     "TAINT-GL-008",
     "TAINT-GL-009",
     "TAINT-JK-001",
-    "TAINT-JK-002"
+    "TAINT-JK-002",
+    "TAINT-JK-003"
   ]
 }

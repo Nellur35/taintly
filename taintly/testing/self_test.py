@@ -569,6 +569,17 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "the literal text to the shell and is a different, weaker vector "
         "tracked for a follow-up rule). quote_swap genuinely flips safety."
     ),
+    ("TAINT-JK-003", "quote_swap"): (
+        "Multi-hop companion of TAINT-JK-001 — same Groovy GString "
+        "limitation.  The rule fires only when the source reaches a "
+        "DOUBLE-quoted sh/bat/powershell body through a variable (Groovy "
+        "interpolates before the shell runs); quote_swap flips every "
+        "double-quoted sink AND every double-quoted assignment RHS to "
+        "single quotes, which legitimately makes Groovy stop interpolating "
+        "(both the def-time GString and the sink-time one go literal), so "
+        "the resolver correctly stops propagating / matching.  quote_swap "
+        "genuinely flips safety here, identical to TAINT-JK-001."
+    ),
     ("SEC4-GH-017", "quote_swap"): (
         "SEC4-GH-017 deliberately matches PowerShell double-quoted strings "
         "(which interpolate) and not single-quoted ones (which don't). "
