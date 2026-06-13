@@ -55,11 +55,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      # No external clone in this job, so egress can stay fully blocked
-      # (no allow-list). harden-runner first, as in the other jobs.
+      # This job does no EXTERNAL clone, but actions/checkout + the pinned
+      # action downloads still need github.com / codeload egress, so block
+      # all egress EXCEPT those (tighter than the live-canary jobs, which
+      # additionally allow gitlab.com for their external clones).
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            codeload.github.com:443
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
