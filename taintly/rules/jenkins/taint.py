@@ -150,6 +150,19 @@ _GWT_NAMES = (
 _TAINTED_REF = r"\$\{(?:" + _TAINTED_NAMES + r"|" + _GWT_NAMES + r")\}"
 _TAINT_JK_001_BODY_RE = re.compile(_TAINTED_REF)
 
+# Source-reference regex for the multi-hop resolver (TAINT-JK-003).  Matches
+# an attacker-controlled source the way it appears on the RIGHT-HAND SIDE of a
+# Groovy binding or inside a GString span — i.e. the bare reference form
+# (``params.FOO``, ``env.CHANGE_BRANCH``, ``GERRIT_CHANGE_SUBJECT``) with NO
+# ``${...}`` wrapper, because that's how a source flows into a local:
+# ``def t = params.FOO`` / ``def u = "${env.CHANGE_BRANCH}"``.  Reuses the
+# exact ``_TAINTED_NAMES`` vocabulary so the source set never drifts between
+# the single-hop (TAINT-JK-001) and multi-hop (TAINT-JK-003) rules.  The GWT
+# names are matched too (they appear as bare span identifiers
+# ``"${pull_request_title}"`` on the RHS, the same well-namespaced set
+# TAINT-JK-001 trusts not to collide with Groovy locals).
+_TAINT_JK_003_SOURCE_RE = re.compile(r"(?:" + _TAINTED_NAMES + r")|(?:" + _GWT_NAMES + r")")
+
 
 def _taint_jk_001_predicate(shell_body: str, interpolated: bool) -> bool:
     """TAINT-JK-001 (structural): an attacker-controlled binding
@@ -172,6 +185,54 @@ def _taint_jk_001_predicate(shell_body: str, interpolated: bool) -> bool:
 # classic _TAINTED_NAMES are matched here; GWT names are too easy to
 # confuse with Groovy locals.
 _TAINTED_BARE_OR_INTERP = r"(?:" + _TAINTED_REF + r"|\b(?:" + _TAINTED_NAMES + r")\b)"
+
+
+class _JenkinsfileMultiHopPattern:
+    """TAINT-JK-003 — attacker-controlled source reaching a shell sink
+    through **N≥1** Groovy local-variable hops within one file.
+
+    Delegates to :func:`taintly.parsers.jenkinsfile.multihop.resolve_multihop_flows`,
+    which runs a within-file fixed point over value-preserving Groovy
+    bindings (the Jenkins analogue of the GitHub ``TAINT-GH-002`` multi-hop
+    engine).  One finding per (tainted local → shell sink) flow; the snippet
+    renders the ordered provenance hop chain
+    (``env.CHANGE_BRANCH -> version -> sh``) so a reviewer sees the path
+    without re-deriving it.
+
+    Recall-safety: this rule is ADDITIVE.  The direct source-in-sink case
+    (zero hops) is excluded by the resolver, so TAINT-JK-003 never co-fires
+    with TAINT-JK-001 on the same body — TAINT-JK-001's single-hop behaviour
+    is untouched.
+
+    Failure-soft: the resolver consumes the zero-dependency ``groovy_lex``
+    tokenizer (no optional extra), so this works on every install.  Any
+    walker exception is swallowed to ``[]`` (a scan must never crash on an
+    unexpected Groovy shape), matching ``_JenkinsfileShellLeafPattern``.
+    """
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        try:
+            from taintly.parsers.jenkinsfile.multihop import resolve_multihop_flows
+        except ImportError:  # pragma: no cover - module ships in-tree
+            return []
+        results: list[tuple[int, str]] = []
+        seen: set[tuple[int, str]] = set()
+        try:
+            flows = resolve_multihop_flows(content, _TAINT_JK_003_SOURCE_RE)
+        except Exception:  # nosec B110 - a scan must never crash on an unmodelled Groovy shape
+            return []
+        for flow in flows:
+            if not (0 < flow.sink_line <= len(lines)):
+                continue
+            call_line = lines[flow.sink_line - 1].strip()
+            chain = " -> ".join(flow.hops)
+            snippet = f"{call_line}    [taint: {chain}]"
+            key = (flow.sink_line, snippet)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(key)
+        return results
 
 
 RULES: list[Rule] = [
@@ -488,5 +549,151 @@ RULES: list[Rule] = [
         ),
         confidence="medium",
         incidents=[],
+    ),
+    # =========================================================================
+    # TAINT-JK-003 — multi-hop: attacker-controlled source reaches a shell
+    # sink through N>=1 Groovy local-variable hops within one file.
+    # =========================================================================
+    #
+    # TAINT-JK-001 is single-body: it fires only when the source is
+    # interpolated DIRECTLY into the sink.  Any one hop of Groovy
+    # indirection is a false negative there:
+    #
+    #     def t = params.FOO            // source -> local
+    #     sh "deploy ${t}"              // sink via the local, not direct
+    #
+    #     def url = "${env.CHANGE_BRANCH}/x"   // source -> GString local
+    #     def cmd = "curl ${url}"              // local -> local
+    #     sh "${cmd}"                          // sink at hop 3
+    #
+    # This rule closes that gap with the Jenkins analogue of TAINT-GH-002's
+    # multi-hop fixed point, scoped to WITHIN ONE FILE (cross-file /
+    # shared-library taint is the measured-deferred #19).  Soundness rule
+    # (established verify-first on the corpus): taint propagates only through
+    # value-preserving RHS shapes — a bare reference to a tainted name/var or
+    # a GString interpolating one — NOT through a method-call return where the
+    # tainted value is merely an argument (``def x = lookup(env.CHANGE_ID)``
+    # returns lookup's value, not the attacker bytes).  The naive heuristic
+    # over-fired 3:1 on the corpus; the scoped propagation kept the one real
+    # flow and dropped all three false positives.
+    Rule(
+        id="TAINT-JK-003",
+        title=(
+            "Attacker-controlled pipeline context reaches a "
+            "double-quoted sh/bat/powershell/pwsh step through a "
+            "Groovy variable (multi-hop)"
+        ),
+        severity=Severity.CRITICAL,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "An attacker-controlled binding — ``params.X``, "
+            "``env.CHANGE_TITLE``, ``env.CHANGE_BRANCH``, "
+            "``env.BRANCH_NAME``, ``${ghprbPullTitle}``, "
+            "``${GERRIT_CHANGE_SUBJECT}``, a well-namespaced Generic "
+            "Webhook Trigger field, and so on — is first assigned to a "
+            "Groovy local variable and then, possibly after further "
+            "value-preserving hops (``def u = t``, "
+            '``def cmd = "...${t}..."``), interpolated into a '
+            "double-quoted ``sh`` / ``bat`` / ``powershell`` / ``pwsh`` "
+            "step.  Groovy substitutes the attacker bytes into the "
+            "command string before the shell runs, exactly as in the "
+            "single-hop TAINT-JK-001 case — the intermediate variable "
+            "changes nothing about exploitability, it only hides the "
+            "flow from a line-local scan.  The finding reports the full "
+            "provenance hop chain (``env.CHANGE_BRANCH -> version -> "
+            "sh``) so a reviewer can confirm the path."
+        ),
+        pattern=_JenkinsfileMultiHopPattern(),
+        remediation=(
+            "Same fix as TAINT-JK-001 — the intermediate variable does\n"
+            "not help.  Route the tainted value through ``withEnv`` and\n"
+            "read it from a SINGLE-quoted shell step so Groovy never\n"
+            "substitutes it:\n"
+            "\n"
+            '    withEnv(["REF=${env.CHANGE_BRANCH}"]) {\n'
+            "        sh 'git checkout \"$REF\"'    // single-quoted\n"
+            "    }\n"
+            "\n"
+            "or pass the value as a list-form argument where the runtime\n"
+            "separates args from the command, or validate + allowlist the\n"
+            "value before it is ever assigned to the variable.  Never let\n"
+            "an attacker-controlled binding — directly or through any\n"
+            "chain of Groovy locals — reach a double-quoted shell body."
+        ),
+        reference=(
+            "https://www.jenkins.io/doc/book/pipeline/syntax/"
+            "#shell-script-with-a-variable-from-the-shell; "
+            "https://www.jenkins.io/doc/book/pipeline/jenkinsfile/"
+            "#string-interpolation"
+        ),
+        test_positive=[
+            # Canonical one-hop: params -> local -> sh.
+            'script {\n    def t = params.FOO\n    sh "deploy ${t}"\n}',
+            # SCM branch source -> local -> bat.
+            'script {\n    def ref = env.CHANGE_BRANCH\n    bat "build ${ref}"\n}',
+            # Two-hop GString chain: source -> GString local -> GString local -> sh.
+            'def url = "${env.CHANGE_BRANCH}/build"\ndef cmd = "curl ${url}"\nsh "${cmd}"',
+            # Transform of a tainted local stays tainted (.trim()).
+            'script {\n    def t = params.TARGET\n    sh "echo ${t.trim()}"\n}',
+            # Elvis default still carries the source on the truthy path.
+            "def b = env.CHANGE_BRANCH ?: 'main'\nsh \"git checkout ${b}\"",
+            # ghprb legacy source through a local into powershell.
+            'script {\n    def title = env.ghprbPullTitle\n    powershell "Write-Host ${title}"\n}',
+            # Corpus-derived shape (fabric8 goCI.groovy): a GString built from
+            # env.BRANCH_NAME assigned to `version`, then used in a sh docker
+            # build/push.  This is the real multi-hop FN single-hop missed.
+            'def version = "SNAPSHOT-${env.BRANCH_NAME}-${env.BUILD_NUMBER}"\n'
+            'sh "docker build -t img:${version} ."',
+        ],
+        test_negative=[
+            # Single-quoted sink — Groovy doesn't interpolate; not this finding
+            # (and the shell-env vector is a separate follow-up, as in JK-001).
+            "def t = params.FOO\nsh 'echo ${t}'",
+            # The DIRECT source-in-sink case is TAINT-JK-001's, not this rule's
+            # — the resolver excludes it so the two never co-fire.
+            'sh "echo ${env.CHANGE_TITLE}"',
+            # Local assigned from a NON-source — no taint to propagate.
+            'def t = config.foo\nsh "echo ${t}"',
+            # Method-call return: the source is only an ARGUMENT, so its taint
+            # does NOT flow to the local (the verify-first soundness rule).
+            'def t = sanitize(env.CHANGE_ID)\nsh "echo ${t}"',
+            # Tainted local that never reaches a shell sink.
+            'def t = params.FOO\necho "title is ${t}"',
+            # Commented-out chain — the tokenizer masks comments, so the sink
+            # body is never seen as a real sink.
+            '// def t = params.FOO\n// sh "deploy ${t}"',
+        ],
+        # TAINT-JK-003 is the multi-hop (N>=1) analogue of TAINT-JK-001's
+        # single-body (N==0) detection; the resolver excludes the direct case
+        # so they never co-fire on one body.  The SEC4-JK-{002,005,008}
+        # catch-alls are line-local and cannot see the multi-hop flow, so no
+        # supersedes relationship applies here.
+        stride=["T", "E"],
+        threat_narrative=(
+            "Any attacker who can open a PR, push a branch, create a "
+            "merge request, or set a build parameter can put a shell-"
+            "injection payload in the title / branch name / parameter "
+            "value.  A Jenkinsfile that assigns that binding to a Groovy "
+            "variable — perhaps reformatting or concatenating it across "
+            "several intermediate locals — and later interpolates the "
+            "variable into a double-quoted ``sh`` step still hands the "
+            "payload to the shell verbatim.  The indirection only hides "
+            "the flow from a line-by-line scan; the RCE runs with the "
+            "build agent's credentials, the SCM deploy key, and the "
+            "active ``withCredentials`` scope, exactly as in the direct "
+            "single-hop case."
+        ),
+        confidence="high",
+        incidents=[
+            # Stawinski "Playing with Fire" — CI/CD shell-injection via build
+            # context (Jenkins multi-hop analog).  Structured URL so the
+            # reference doesn't rot as the headline ages.
+            "https://johnstawinski.com/2024/01/11/playing-with-fire-how-we-executed-a-critical-supply-chain-attack-on-pytorch/",
+            # CVE-2025-53652 (Git Parameter plugin) — a git-branch build
+            # parameter flows unsanitized into the git CLI; the realistic
+            # Jenkinsfile shape routes it through a local first (multi-hop).
+            "CVE-2025-53652 (Git Parameter plugin) — branch-param flows into git CLI (multi-hop shape)",
+        ],
     ),
 ]

