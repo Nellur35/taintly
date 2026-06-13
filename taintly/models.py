@@ -1000,6 +1000,16 @@ class ContextPattern:
     # flag off for those (they stay regex-only).  Off by default → zero change
     # for every existing rule.
     expr_augment_requires: bool = False
+    # Emit AT MOST ONE finding per file (the first anchor match that
+    # survives the excludes/scope gates).  Use for rules whose verdict is
+    # a single FILE-SCOPED fact rather than a per-occurrence one — e.g.
+    # TAINT-GL-004 ("this CI Component takes caller-controlled inputs;
+    # review every caller") repeats the identical advisory once per
+    # ``$[[ inputs.X ]]`` reference, so a component template with 270 input
+    # references emitted 270 byte-identical findings.  Collapsing to one
+    # per file removes that noise with zero detection loss (the file is
+    # still flagged).  Off by default → zero change for every existing rule.
+    first_match_only: bool = False
 
     def __post_init__(self):
         self._anchor_re = re.compile(self.anchor)
@@ -1141,6 +1151,8 @@ class ContextPattern:
                     ):
                         continue
                 results.append((i + 1, line.strip()))
+                if self.first_match_only:
+                    break
         return results
 
     def _check_job_scoped(self, lines: list[str]) -> list[tuple[int, str]]:
@@ -1162,6 +1174,8 @@ class ContextPattern:
                     continue
                 if _safe_search(self._anchor_re, line):
                     results.append((seg_start + j + 1, line.strip()))
+                    if self.first_match_only:
+                        return results
         return results
 
     def count_anchor_matches(self, content: str, lines: list[str]) -> int:
