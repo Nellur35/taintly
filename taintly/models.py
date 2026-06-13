@@ -1408,7 +1408,21 @@ class Rule:
     falls back to an OWASP-derived default so the reporter can still group
     related findings. Set this explicitly on rules whose default grouping
     would be misleading (e.g., a logging rule whose real root cause is
-    credential hygiene)."""
+    credential hygiene).
+
+    REPORTING ONLY. This field drives :func:`taintly.families.cluster_findings`
+    and the maintainer-downgrade table — never composer routing.  Renaming a
+    family here is a presentation change and must not change which rules the
+    composer pass runs; that lives on ``composition_tags`` (below)."""
+    composition_tags: frozenset[str] = frozenset()
+    """Composer-routing tags, decoupled from the reporting ``finding_family``.
+
+    The engine's cross-file composer pass (``_run_corpus_rules`` with
+    ``composer_only=True``) selects rules by membership in this set, not by
+    their reporting family.  Composer rules tag themselves with
+    ``"chain-composition"`` so a reporting-family rename can never silently
+    re-route (or de-route) the composer.  Empty for every non-composer rule
+    (the overwhelming majority)."""
     confidence: str = "high"
     """Rule precision hint: "high" (default), "medium", or "low". Rules with
     a known false-positive profile — shallow taint analysis, secret-string
@@ -1484,7 +1498,14 @@ class Finding:
     """Root-cause cluster ID (e.g. "supply_chain_immutability"). Populated
     by the engine from the originating rule or via families.classify() so
     the reporter can present one cluster in place of N correlated findings.
+    REPORTING ONLY — composer-output identification reads ``composition_tags``.
     """
+    composition_tags: frozenset[str] = frozenset()
+    """Composer-routing tags copied from the originating rule's
+    ``Rule.composition_tags``.  The engine's post-composition steps (e.g.
+    guard-calibration propagation onto composites) identify composer output
+    by membership here rather than by the reporting ``finding_family`` string,
+    so a family rename can't silently change post-processing behaviour."""
     confidence: str = "high"
     """Rule precision hint: "high", "medium", or "low". Drives display
     ordering and scoring weight."""
@@ -1546,6 +1567,7 @@ class Finding:
             "incidents": self.incidents,
             "origin": self.origin,
             "finding_family": self.finding_family,
+            "composition_tags": sorted(self.composition_tags),
             "confidence": self.confidence,
             "exploitability": self.exploitability,
             "review_needed": self.review_needed,

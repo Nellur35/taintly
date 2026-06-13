@@ -596,6 +596,7 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC6-GL-002",
+        finding_family="untrusted_code_execution",
         title="curl piped to shell in script block",
         severity=Severity.HIGH,
         platform=Platform.GITLAB,
@@ -634,6 +635,7 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC6-GL-003",
+        finding_family="insecure_transport",
         title="TLS verification disabled",
         severity=Severity.HIGH,
         platform=Platform.GITLAB,
@@ -665,6 +667,7 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC6-GL-004",
+        finding_family="untrusted_code_execution",
         title="eval usage in script block",
         severity=Severity.HIGH,
         platform=Platform.GITLAB,

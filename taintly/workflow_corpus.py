@@ -40,8 +40,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .models import _split_into_job_segments
-
 # ---------------------------------------------------------------------------
 # Trigger family
 # ---------------------------------------------------------------------------
@@ -1268,22 +1266,6 @@ def _parse_permission_block(lines: list[str], i: int, scope_what: str) -> Permis
         grants=grants,
         line=i + 1,
     )
-
-
-# ---------------------------------------------------------------------------
-# Helpers shared by extractors
-# ---------------------------------------------------------------------------
-
-
-def _job_segments(lines: list[str]) -> list[tuple[int, list[str]]]:
-    """Adapter over :func:`taintly.models._split_into_job_segments`.
-
-    Re-exposed at module level so the extractors don't carry their own
-    job-boundary heuristic — the corpus and per-file rules MUST agree
-    on what a job is, otherwise cross-file findings will cite line
-    ranges that disagree with single-file findings on the same file.
-    """
-    return _split_into_job_segments(lines)
 
 
 # ---------------------------------------------------------------------------

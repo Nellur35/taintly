@@ -152,25 +152,6 @@ _TRUSTED_BOT_PATTERNS: tuple[str, ...] = (
 )
 
 
-def _job_has_trusted_bot_gate(job_if: str | None) -> bool:
-    """Return True when ``job.if`` restricts execution to a trusted bot.
-
-    Matches forms:
-      * ``github.event.pull_request.user.login == 'dependabot[bot]'``
-      * ``github.actor == 'renovate[bot]'``
-      * ``github.triggering_actor == 'github-actions[bot]'``
-
-    Conservatively: any bot pattern's presence in the if-expr suppresses
-    the chain. False positives here (a job that mentions dependabot but
-    doesn't really gate on it) yield only missed CHAIN findings, never
-    extra ones — the trade-off is precision over recall.
-    """
-    if not job_if:
-        return False
-    low = job_if.lower()
-    return any(pat.lower() in low for pat in _TRUSTED_BOT_PATTERNS)
-
-
 # ---------------------------------------------------------------------------
 # EDB seeding
 # ---------------------------------------------------------------------------
@@ -247,8 +228,26 @@ def _seed_job_contexts(db: Database, corpus: WorkflowCorpus) -> None:
         # block is implicit fall back to workflow-level state under
         # the same (file, "*") key.
         for jb in wf.job_permissions:
-            job_name = getattr(jb, "job", None) or getattr(jb, "name", None)
-            if not job_name:
+            # ``PermissionBlock`` carries the owning job name in
+            # ``scope_what`` (job-level blocks) — see
+            # :class:`taintly.workflow_corpus.PermissionBlock`. The
+            # legacy ``job`` / ``name`` attrs never existed on that
+            # dataclass, so the old lookup silently produced ZERO
+            # per-job contexts and every composer rule fell back to
+            # the ``(file, "*")`` workflow wildcard. Reading
+            # ``scope_what`` restores genuine per-job write-token
+            # resolution, which the cross-job privilege-escalation
+            # rule (CHAIN-GH-105) depends on to tell a read-only
+            # producer apart from a write-capable consumer.
+            job_name = (
+                getattr(jb, "scope_what", None)
+                or getattr(jb, "job", None)
+                or getattr(jb, "name", None)
+            )
+            # The workflow-level block also lands in job_permissions in
+            # some shapes; its scope_what is "workflow", which is not a
+            # job — skip it (the wildcard below carries workflow state).
+            if not job_name or job_name == "workflow":
                 continue
             db.add(
                 "job_context",

@@ -771,10 +771,13 @@ def _propagate_guard_calibration_to_composites(findings: list[Finding]) -> None:
     if not calibrated_legs:
         return
     for c in findings:
-        # CHAIN-GH-1xx are the composer (chain-composition) family; CHAIN-GH-001
+        # CHAIN-GH-1xx are the composer (chain-composition) output; CHAIN-GH-001
         # is a per-file ContextPattern (already calibrated in scan_file) and is
-        # deliberately excluded by the family check.
-        if c.finding_family != "chain-composition" or c.exploitability == "low":
+        # deliberately excluded — it carries no composer routing tag.
+        # Identify composer output by ``composition_tags`` (the routing field),
+        # NOT the reporting ``finding_family`` string, so a family rename can't
+        # silently change which composites get calibrated (R5/P3.1a).
+        if "chain-composition" not in c.composition_tags or c.exploitability == "low":
             continue
         leg = calibrated_legs.get((c.file, c.line))
         if leg is None:
@@ -973,7 +976,11 @@ _MAINTAINER_DOWNGRADE_PATTERNS: tuple[_DowngradePattern, ...] = (
     # fire the job.
     _DowngradePattern(
         rule_id="LOTP-GH-001",
-        family="script_injection",
+        # P1.2 (targeted) re-homed LOTP-GH-001 from ``script_injection`` to
+        # ``pipeline_tool_execution`` (build-tool execution is a distinct root
+        # cause from PR-title-into-shell injection). The downgrade table keys
+        # on the reporting family, so it follows the rule to its new family.
+        family="pipeline_tool_execution",
         content_regex=_LOTP_PR_HEAD_IN_FALLBACK_RE,
     ),
 )
@@ -1076,6 +1083,12 @@ def _matches_maintainer_downgrade_pattern(finding: Finding, content: str) -> boo
     for entry in _MAINTAINER_DOWNGRADE_PATTERNS:
         if entry.rule_id is not None and finding.rule_id != entry.rule_id:
             continue
+        # Stays on the REPORTING family (``finding_family``), not
+        # ``composition_tags``: the downgrade table keys on reporting
+        # families (e.g. "script_injection") to scope which findings a
+        # maintainer-gated calibration applies to.  This is a
+        # presentation/calibration concern about finding *kind*, not
+        # composer routing — see R5/P3.1a.
         if getattr(finding, "finding_family", "") != entry.family:
             continue
         if entry.snippet_regex is not None:
@@ -1870,20 +1883,24 @@ def _run_corpus_rules(
     the corpus build is then skipped entirely so non-cross-file users
     don't pay the walk cost.
 
-    Composer pass: when ``composer_only=True`` we ONLY run rules whose
-    ``finding_family == "chain-composition"`` (the CHAIN-GH-1xx
+    Composer pass: when ``composer_only=True`` we ONLY run rules tagged
+    ``"chain-composition"`` in ``Rule.composition_tags`` (the CHAIN-GH-1xx
     composer family).  Their callbacks read ``corpus._prior_findings``
     to compose new findings from existing ones; we smuggle the prior
     list onto the corpus object so the regular CorpusPattern contract
     stays unchanged.
+
+    Routing is keyed on ``composition_tags`` — NOT the reporting
+    ``finding_family`` — so a family rename for presentation can never
+    silently re-route the composer (R5/P3.1a decoupling).
     """
     corpus_rules = [r for r in rules if isinstance(r.pattern, CorpusPattern)]
     if composer_only:
-        corpus_rules = [r for r in corpus_rules if r.finding_family == "chain-composition"]
+        corpus_rules = [r for r in corpus_rules if "chain-composition" in r.composition_tags]
     else:
         # Non-composer pass: exclude composer rules so they only fire
         # in the dedicated post-pass with the seeded findings list.
-        corpus_rules = [r for r in corpus_rules if r.finding_family != "chain-composition"]
+        corpus_rules = [r for r in corpus_rules if "chain-composition" not in r.composition_tags]
     if not corpus_rules:
         return []
 
@@ -1946,6 +1963,7 @@ def _run_corpus_rules(
                         incidents=rule.incidents,
                         origin="cross-workflow",
                         finding_family=family,
+                        composition_tags=rule.composition_tags,
                         confidence=confidence,
                         exploitability="medium",
                         review_needed=review_needed,
@@ -2008,6 +2026,7 @@ def _run_gitlab_corpus_rules(repo_path: str, rules: list[Rule]) -> list[Finding]
                         incidents=rule.incidents,
                         origin="cross-workflow",
                         finding_family=family,
+                        composition_tags=rule.composition_tags,
                         confidence=confidence,
                         exploitability="medium",
                         review_needed=review_needed,

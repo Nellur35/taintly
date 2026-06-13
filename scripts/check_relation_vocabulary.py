@@ -17,12 +17,23 @@ resolving relations through module-level ``NAME = "literal"`` constants (the
 ``_R_*`` convention) and bare string literals.  Exit non-zero — naming the orphan
 relation and the line that consumes it — on any violation.
 
+It ALSO reports the inverse: a relation *produced but never consumed* (a dead
+extraction).  Unlike a consumed-but-unproduced orphan — which is a silent dead
+rule and a hard failure — a produced-unconsumed relation is not a correctness
+bug.  It is wasted ``solve()`` work (facts asserted that nothing joins on) and is
+often intentional or transitional: a documented EDB relation modelling part of
+the schema before the joining rule lands.  So dead extractions are a REPORTED
+WARNING, not a build failure; the exit code is governed solely by the
+consumed-⊆-produced direction.  Known-intentional dead extractions are recorded
+in ``_KNOWN_DEAD_EXTRACTIONS`` so the warning highlights only NEW ones; a stale
+allowlist entry (now consumed) is surfaced for pruning.
+
 Usage:  python scripts/check_relation_vocabulary.py
 """
+
 from __future__ import annotations
 
 import ast
-import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -44,6 +55,21 @@ _CONSUME_METHODS = {"all", "get", "has"}
 _PRODUCE_METHODS = {"add"}
 # The conventional name the Database instance is bound to in every closure module.
 _DB_RECEIVERS = {"db"}
+
+# (module_path, relation) -> rationale.  A relation produced but never consumed
+# is wasted solve() work, but some are deliberate: an EDB relation that models
+# part of the relational schema (and is documented as such) before the rule that
+# joins on it lands.  Recording it here keeps the dead-extraction WARNING signal
+# clean — only NEW, unexplained dead extractions are flagged for review.  Remove
+# an entry once the relation is consumed (the gate will tell you it's stale).
+#
+# Public-repo note: the only allowlisted entry upstream is for
+# ``taintly/cross_workflow_facts.py`` (``call_edge``), a closure module the
+# public repo does not ship.  Listing an entry for an absent module would emit a
+# spurious "stale — prune it" NOTE on every run (the module is skipped, so its
+# dead extraction is never observed), so the allowlist is intentionally empty
+# here.  Add an entry only for a module that is actually present in this repo.
+_KNOWN_DEAD_EXTRACTIONS: dict[tuple[str, str], str] = {}
 
 
 def _string_consts(tree: ast.Module) -> dict[str, str]:
@@ -110,8 +136,17 @@ def check_module(path: str) -> tuple[dict[str, int], set[str], dict[str, int]]:
     return check_source((_ROOT / path).read_text(encoding="utf-8"))
 
 
+def dead_extractions(produced: set[str], consumed: dict[str, int]) -> set[str]:
+    """Relations PRODUCED (db.add / yield) but never CONSUMED (db.all/get/has) —
+    a dead extraction: facts asserted that no rule joins on, wasting solve()
+    cycles.  The inverse of the orphan (consumed-but-unproduced) check."""
+    return produced - set(consumed)
+
+
 def main() -> int:
     violations = 0
+    # (module_path, relation) for every dead extraction found this run.
+    found_dead: list[tuple[str, str]] = []
     print("relation-vocabulary lint (consumed ⊆ produced, per closure module):\n")
     for path in _MODULES:
         # The public repo ships a curated subset of the closure modules; skip any
@@ -120,11 +155,42 @@ def main() -> int:
             print(f"  {path:38s} (absent — skipped)")
             continue
         orphans, produced, consumed = check_module(path)
+        dead = dead_extractions(produced, consumed)
         flag = "OK" if not orphans else "ORPHAN"
+        if dead:
+            flag = f"{flag} (+{len(dead)} dead)"
         print(f"  {path:38s} consumed={len(consumed):2d} produced={len(produced):2d}  {flag}")
         for rel, ln in sorted(orphans.items()):
             print(f"      consumed but never produced: {rel!r} (line {ln})")
             violations += 1
+        for rel in sorted(dead):
+            found_dead.append((path, rel))
+
+    # Inverse direction — a REPORTED WARNING, never a hard failure (the exit
+    # code is governed solely by the consumed-⊆-produced orphans above). A
+    # produced-unconsumed relation is wasted solve() work, often intentional
+    # or transitional, so we surface it for review rather than block the build.
+    new_dead = [(p, r) for (p, r) in found_dead if (p, r) not in _KNOWN_DEAD_EXTRACTIONS]
+    known_dead = [(p, r) for (p, r) in found_dead if (p, r) in _KNOWN_DEAD_EXTRACTIONS]
+    stale_allowlist = sorted(set(_KNOWN_DEAD_EXTRACTIONS) - set(found_dead))
+    if new_dead or known_dead or stale_allowlist:
+        print("\ndead-extraction report (produced but never consumed — advisory):")
+        for path, rel in new_dead:
+            print(f"  WARNING {path}: {rel!r} produced but never consumed (new — review).")
+        for path, rel in known_dead:
+            print(f"  known   {path}: {rel!r} produced but never consumed (allowlisted).")
+        for path, rel in stale_allowlist:
+            print(
+                f"  NOTE    {path}: {rel!r} is now consumed — "
+                "prune it from _KNOWN_DEAD_EXTRACTIONS."
+            )
+        if new_dead:
+            print(
+                f"\n  {len(new_dead)} NEW dead extraction(s) — either consume the "
+                "relation, drop the producer, or (if intentional/transitional) add "
+                "it to _KNOWN_DEAD_EXTRACTIONS with a rationale. Advisory only."
+            )
+
     if violations:
         print(f"\nFAIL: {violations} relation(s) consumed but never produced — a silent dead rule.")
         return 1

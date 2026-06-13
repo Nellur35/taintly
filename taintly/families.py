@@ -36,7 +36,9 @@ the escape hatch; this module provides the defaults.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from taintly.models import Confidence, Finding
@@ -113,6 +115,11 @@ _FAMILIES: tuple[FindingFamily, ...] = (
             "attacker gets arbitrary code execution with the workflow's "
             "full permissions."
         ),
+        # NB: the LOTP-GH-* rules used to live here.  P1.2 (targeted) moved
+        # them to ``pipeline_tool_execution`` after the corpus measurement
+        # showed build-tool / lifecycle-script execution genuinely collapsing
+        # into this family even though its remediation (--ignore-scripts / drop
+        # the PR checkout) is unrelated to input sanitization.
         members=frozenset(
             {
                 "SEC4-GH-004",
@@ -120,9 +127,6 @@ _FAMILIES: tuple[FindingFamily, ...] = (
                 "SEC4-GH-007",
                 "SEC4-GH-008",
                 "SEC4-GH-011",
-                "LOTP-GH-001",
-                "LOTP-GH-003",
-                "LOTP-GH-005",
                 "TAINT-GH-001",
             }
         ),
@@ -136,6 +140,10 @@ _FAMILIES: tuple[FindingFamily, ...] = (
             "compromise pivot into repository write or package publish "
             "without needing to escalate privileges."
         ),
+        # NB: SEC6-GL-002 (curl piped to shell) used to live here.  P1.2
+        # (targeted) moved it to ``untrusted_code_execution`` — a curl|bash
+        # primitive is remote code execution, not credential persistence, and
+        # the corpus showed it collapsing this family's deduction.
         members=frozenset(
             {
                 "SEC4-GH-005",  # checkout persists credentials — classic pivot surface
@@ -143,7 +151,6 @@ _FAMILIES: tuple[FindingFamily, ...] = (
                 "SEC6-GH-001",
                 "SEC6-GH-003",
                 "SEC6-GL-001",
-                "SEC6-GL-002",
                 "PLAT-GH-013",  # Webhooks without HTTPS or secret
                 "PLAT-GH-016",  # Secret scanning disabled/incomplete
                 "PLAT-GL-010",  # GitLab webhooks insecure
@@ -346,6 +353,86 @@ _FAMILIES: tuple[FindingFamily, ...] = (
             }
         ),
     ),
+    FindingFamily(
+        id="pipeline_tool_execution",
+        title="Build-tool / package-manager execution in untrusted context",
+        why=(
+            "A build tool, test runner, or package-manager install that runs "
+            "in a fork-reachable job executes attacker-supplied lifecycle "
+            "scripts (npm/yarn/pnpm postinstall, a malicious setup.py, a "
+            "Gradle/Maven plugin) WITHOUT any attacker-controlled string ever "
+            "reaching a shell. The remediation is unrelated to input "
+            "sanitization — pass --ignore-scripts, pin the toolchain, or drop "
+            "the PR-head checkout — so this is a distinct root cause from the "
+            "PR-title-into-run: script injection it used to be folded under "
+            "(CICD-SEC-4)."
+        ),
+        # Living-off-the-pipeline rules + the SEC4 npm-lifecycle sibling.  Split
+        # out of ``script_injection`` by P1.2 after the corpus measurement
+        # showed them collapsing that family's per-cluster deduction.
+        members=frozenset(
+            {
+                "LOTP-GH-001",
+                "LOTP-GH-003",
+                "LOTP-GH-004",
+                "LOTP-GH-005",
+                "LOTP-GL-001",
+                "LOTP-GL-003",
+                "LOTP-GL-005",
+                "LOTP-JK-001",
+                "LOTP-JK-003",
+                "LOTP-JK-005",
+                "SEC4-GH-011A",  # npm install in pull_request_target without --ignore-scripts
+            }
+        ),
+    ),
+    FindingFamily(
+        id="untrusted_code_execution",
+        title="Remote / encoded code fetched and executed in the pipeline",
+        why=(
+            "curl|bash, wget|sh, base64-decode-then-exec, eval on a variable, "
+            "and remote-Groovy load are all ways the pipeline runs code that "
+            "was never reviewed in the repository. The fix is to fetch to a "
+            "file, verify a checksum or signature, and run the pinned artifact "
+            "— a supply-chain integrity control, not the credential-hygiene "
+            "remediation of the CICD-SEC-6 family these rules used to fold "
+            "into."
+        ),
+        # curl|bash / eval / base64-exec / remote-Groovy primitives split out
+        # of ``credential_persistence`` (and one SEC8 Jenkins sibling) by P1.2.
+        members=frozenset(
+            {
+                "SEC6-GH-006",  # base64-decoded payload executed
+                "SEC6-GH-007",  # curl/wget piped to shell
+                "SEC6-GL-002",  # curl piped to shell
+                "SEC6-GL-004",  # eval in script block
+                "SEC6-GL-006",  # wget|bash / curl-subshell
+                "SEC8-JK-002",  # remote Groovy script fetched from URL and executed
+            }
+        ),
+    ),
+    FindingFamily(
+        id="insecure_transport",
+        title="Disabled TLS / cleartext transport",
+        why=(
+            "Disabling certificate verification (curl -k, "
+            "GIT_SSL_NO_VERIFY, an HTTP Request step with TLS validation off) "
+            "or pulling over cleartext HTTP lets a network attacker MITM the "
+            "fetched bytes. The remediation — re-enable verification, use "
+            "HTTPS, pin a CA — is independent of the secret-handling fixes in "
+            "the CICD-SEC-6 family these rules used to fold into."
+        ),
+        # TLS-verification-disabled / cleartext rules split out of
+        # ``credential_persistence`` (+ one SEC7 Jenkins sibling) by P1.2.
+        members=frozenset(
+            {
+                "SEC6-GL-003",  # TLS verification disabled
+                "SEC6-JK-004",  # TLS certificate verification disabled in shell step
+                "SEC6-JK-009",  # HTTP Request step disables TLS verification
+                "SEC7-JK-004",  # Docker registry over cleartext HTTP
+            }
+        ),
+    ),
 )
 
 
@@ -382,6 +469,49 @@ _CONFIDENCE_OVERRIDES: dict[str, str] = {
     # Secret-string heuristics — pattern-based, not context-aware.
     "SEC6-GL-002": Confidence.MEDIUM.value,
 }
+
+# ---------------------------------------------------------------------------
+# Grandfather baseline — rules validated-at-HIGH (P3.6)
+# ---------------------------------------------------------------------------
+#
+# Historically ``default_confidence`` returned HIGH for every un-overridden
+# rule, so a brand-new rule scored at full weight (1.0) the moment it was
+# added — before any precision validation. P3.6 splits that:
+#
+#   * the rules that already existed when this baseline was frozen are
+#     GRANDFATHERED at HIGH (zero retroactive score shift), and
+#   * a NEW / unmapped rule id defaults to MEDIUM until someone validates it
+#     by adding its id to this baseline (or sets an explicit ``confidence=``
+#     on the Rule definition).
+#
+# The committed list lives beside the tests so a rule author edits it in the
+# same review that adds the rule — making "I validated this at HIGH" an
+# explicit, diff-visible decision rather than a silent default. The file is
+# the sorted set of every registered rule id NOT in ``_CONFIDENCE_OVERRIDES``
+# at freeze time; regenerate it with ``scripts/check_confidence_grandfather.py
+# --update`` when a rule is validated.
+_GRANDFATHER_BASELINE_PATH = (
+    Path(__file__).resolve().parent.parent / "tests" / "_confidence_grandfather_baseline.json"
+)
+
+
+def _load_grandfather_baseline() -> frozenset[str]:
+    """Load the validated-at-HIGH rule-id set from the committed baseline.
+
+    A missing or unreadable baseline is treated as empty: that makes every
+    un-overridden rule default MEDIUM rather than silently HIGH, which is the
+    safe direction (under-stating confidence never inflates a grade).
+    """
+    try:
+        data = json.loads(_GRANDFATHER_BASELINE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return frozenset()
+    if not isinstance(data, list):
+        return frozenset()
+    return frozenset(str(rid) for rid in data)
+
+
+_GRANDFATHERED_HIGH: frozenset[str] = _load_grandfather_baseline()
 
 # Rules that should be flagged as "review needed" rather than confirmed risk
 # unless elevated by additional context (checkout, secrets, write perms, ...).
@@ -430,17 +560,33 @@ def classify_rule(rule_id: str, owasp_cicd: str = "") -> str:
 
 
 def default_confidence(rule_id: str) -> str:
-    """Return the default confidence for a rule, or "high" if unknown."""
-    return _CONFIDENCE_OVERRIDES.get(rule_id, Confidence.HIGH.value)
+    """Return the default confidence for a rule.
+
+    Resolution order (P3.6 grandfather mechanism):
+
+      1. An explicit ``_CONFIDENCE_OVERRIDES`` entry always wins.
+      2. A rule id in the committed grandfather baseline — i.e. one that
+         already existed and was validated-at-HIGH when the baseline was
+         frozen — defaults to HIGH.
+      3. Anything else (a new / unmapped rule id) defaults to MEDIUM, so an
+         un-validated detector cannot score at full weight before it earns
+         it. Validate it (add the id to the baseline) or set an explicit
+         ``confidence=`` on the Rule to promote it.
+
+    Note this governs only the DEFAULT; a Rule that carries its own
+    ``confidence=`` bypasses this entirely (the engine resolves
+    ``rule.confidence or default_confidence(rule.id)``).
+    """
+    if rule_id in _CONFIDENCE_OVERRIDES:
+        return _CONFIDENCE_OVERRIDES[rule_id]
+    if rule_id in _GRANDFATHERED_HIGH:
+        return Confidence.HIGH.value
+    return Confidence.MEDIUM.value
 
 
 def default_review_needed(rule_id: str) -> bool:
     """Return whether a rule should default to the review-needed bucket."""
     return rule_id in _REVIEW_NEEDED_RULES
-
-
-def get_family(family_id: str) -> FindingFamily | None:
-    return _BY_ID.get(family_id)
 
 
 def iter_families() -> tuple[FindingFamily, ...]:

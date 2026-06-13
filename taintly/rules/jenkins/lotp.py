@@ -48,6 +48,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="LOTP-JK-001",
+        finding_family="pipeline_tool_execution",
         title="Build tool invoked in Jenkinsfile that references PR-context variables (LOTP)",
         severity=Severity.HIGH,
         platform=Platform.JENKINS,
@@ -201,6 +202,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="LOTP-JK-005",
+        finding_family="pipeline_tool_execution",
         title=(
             "npm/yarn/pnpm install in a Jenkinsfile that binds an "
             "npm publishing credential (Shai-Hulud class)"
@@ -418,6 +420,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="LOTP-JK-003",
+        finding_family="pipeline_tool_execution",
         title=("npm / yarn / pnpm install without --ignore-scripts in a PR-reachable Jenkinsfile"),
         severity=Severity.HIGH,
         platform=Platform.JENKINS,
