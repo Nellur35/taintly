@@ -917,17 +917,21 @@ def test_text_collapse_hint_printed():
 # =============================================================================
 
 
-def test_project_scope_rules_deduped_in_scan_repo(tmp_path):
-    """SEC10-GL-002 should fire once per scan, not once per CI file.
+def test_sec10_gl_002_quiet_on_trivial_gitlab_repo(tmp_path):
+    """SEC10-GL-002 was rescoped: it must NOT fire on plain build configs.
 
-    Drives the engine end-to-end so the dedup actually takes effect
-    where it matters (scan_repo), not just in isolation.
+    It used to fire once per project on every GitLab repo as an
+    always-on "verify your visibility settings" reminder, which the v2
+    field benchmark labelled a misfire (noise on every file).  After the
+    rescope it fires only on the OIDC-id_token-logged shape (an
+    ``id_tokens:`` block plus a script that prints/decodes the token),
+    so a repo of trivial build jobs produces zero SEC10-GL-002 findings.
     """
     from taintly.engine import scan_repo
     from taintly.models import Platform
     from taintly.rules.registry import load_all_rules
 
-    # Build a fake GitLab repo with three CI files
+    # A repo of plain build/lint jobs — no id_tokens, no token logging.
     (tmp_path / ".gitlab-ci.yml").write_text("stages:\n  - build\n", encoding="utf-8")
     (tmp_path / "ci").mkdir()
     (tmp_path / "ci" / "lint.yml").write_text("lint:\n  script: echo lint\n", encoding="utf-8")
@@ -939,9 +943,46 @@ def test_project_scope_rules_deduped_in_scan_repo(tmp_path):
     sec10_count = sum(
         1 for report in reports for f in report.findings if f.rule_id == "SEC10-GL-002"
     )
-    assert sec10_count == 1, (
-        f"SEC10-GL-002 should fire once per project, got {sec10_count} instances"
+    assert sec10_count == 0, (
+        f"SEC10-GL-002 should not fire on a trivial build repo, got {sec10_count}"
     )
+
+
+def test_project_scope_dedup_mechanism_collapses_per_rule():
+    """The project-scope dedup helper keeps one finding per scoped rule_id.
+
+    SEC10-GL-002 was rescoped off ``_PROJECT_SCOPE_RULES`` (it is now a
+    per-job pattern, so each finding is a distinct in-YAML leak), so this
+    exercises the dedup mechanism directly against a seeded scoped id to
+    keep it regression-covered independent of which rule_ids the live
+    frozenset happens to hold.
+    """
+    from taintly import engine
+    from taintly.engine import _dedupe_project_scope
+    from taintly.models import Finding, Severity
+
+    def _f(rule_id: str, line: int) -> Finding:
+        return Finding(
+            rule_id=rule_id,
+            severity=Severity.MEDIUM,
+            title="t",
+            description="d",
+            file="/repo/.gitlab-ci.yml",
+            line=line,
+            snippet="x",
+        )
+
+    findings = [_f("SCOPED-RULE", 1), _f("SCOPED-RULE", 9), _f("OTHER-RULE", 3)]
+    original = engine._PROJECT_SCOPE_RULES
+    try:
+        engine._PROJECT_SCOPE_RULES = frozenset({"SCOPED-RULE"})
+        out = _dedupe_project_scope(findings)
+    finally:
+        engine._PROJECT_SCOPE_RULES = original
+    scoped = [f for f in out if f.rule_id == "SCOPED-RULE"]
+    other = [f for f in out if f.rule_id == "OTHER-RULE"]
+    assert len(scoped) == 1, "scoped rule must collapse to one finding"
+    assert len(other) == 1, "non-scoped rule must pass through untouched"
 
 
 def test_sarif_review_needed_flag_surfaces_when_set():

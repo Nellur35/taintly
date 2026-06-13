@@ -3,7 +3,7 @@
 import re
 
 from taintly.models import (
-    AbsencePattern,
+    ContextPattern,
     Platform,
     RegexPattern,
     Rule,
@@ -735,48 +735,77 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC10-GL-002",
-        title="Public pipelines may expose job logs",
+        title="OIDC id_token printed or decoded to the job log",
         severity=Severity.MEDIUM,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-10",
         description=(
-            "In public (and internal) GitLab projects, pipeline and job log visibility "
-            "is controlled by the CI/CD feature visibility setting, not by the pipeline "
-            "YAML. Logs may contain sensitive output (dependency versions, internal "
-            "hostnames, non-masked environment values) and be readable by unauthenticated "
-            "users. This is a GitLab project setting, not a pipeline config — the rule is "
-            "a reminder to verify the project configuration outside the repository."
+            "A job declares an OIDC ``id_tokens:`` block AND a script step prints or "
+            "decodes a token-shaped value to the job log (``echo``/``printf``/``cat`` of "
+            "a ``$``-variable, or a ``base64 -d`` / ``cut`` pipeline over one). In public "
+            "and internal GitLab projects job logs are readable by anyone with pipeline "
+            "access, so a short-lived id_token written to the trace can be lifted and "
+            "replayed before it expires. This complements SEC10-GL-001 (which catches the "
+            "built-in ``CI_JOB_TOKEN`` / ``CI_JOB_JWT``); this rule covers the "
+            "user-named id_token case (e.g. ``AWS_TOKEN``, ``VAULT_ID_TOKEN``) declared "
+            "via the ``id_tokens:`` keyword that SEC10-GL-001's fixed variable list "
+            "cannot see."
         ),
-        pattern=AbsencePattern(
-            absent=r"THIS_RULE_NEVER_MATCHES_INTENTIONALLY_DISABLED",
+        # Scoped fix (was an always-firing reminder placeholder that misfired on
+        # every GitLab file). Fire only on the real log-exposure shape: an OIDC
+        # id_token is declared AND a script step echoes/decodes a value to the
+        # log. Anchored on ``id_tokens:`` so trivial build configs (the prior
+        # every-file false positives) stay quiet; the ``requires`` print/decode
+        # signal keeps the OIDC-token-logged incident (``echo "$TOKEN" | base64
+        # -d``) firing, including for user-named tokens SEC10-GL-001 misses.
+        pattern=ContextPattern(
+            anchor=r"^\s*id_tokens\s*:",
+            requires=(
+                r"(?:echo|printf|print|cat)\b[^\n]*\$\{?[A-Za-z_]"
+                r"|base64\s+(?:-d|--decode)\b"
+            ),
+            exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Pipeline/log visibility is governed by two GitLab project settings, both "
-            "outside the YAML:\n"
+            "Never write an id_token to the job log. Pass it directly to the consuming "
+            "command instead of echoing or decoding it:\n"
             "\n"
-            "1. Primary control — Settings > General > Visibility, project features, "
-            "permissions > 'CI/CD': set to 'Only Project Members' if non-members should "
-            "not see pipelines or logs. This applies regardless of project visibility.\n"
+            "# BAD — token lands in the publicly-readable trace\n"
+            '- echo "$AWS_TOKEN" | cut -d. -f2 | base64 -d\n'
             "\n"
-            "2. Secondary control — Settings > CI/CD > General pipelines > "
-            "'Project-based pipeline visibility' (formerly labelled 'Public pipelines'). "
-            "Clear this checkbox to further restrict pipeline viewing beyond what the "
-            "feature-visibility dropdown allows.\n"
+            "# GOOD — hand the token to the command without printing it\n"
+            '- aws sts assume-role-with-web-identity --web-identity-token "$AWS_TOKEN" ...\n'
             "\n"
-            "If the project does not need to be public, lowering project visibility to "
-            "Internal or Private under Settings > General > Visibility is the most "
-            "effective mitigation."
+            "Also verify project log visibility outside the YAML: Settings > CI/CD > "
+            "General pipelines > 'Project-based pipeline visibility', and Settings > "
+            "General > Visibility (set CI/CD to 'Only Project Members' if non-members "
+            "should not read pipelines/logs)."
         ),
         reference="https://docs.gitlab.com/ci/pipelines/settings/#change-pipeline-visibility-for-non-project-members",
-        test_positive=[],  # This is a reminder rule, not a pattern match
-        test_negative=[],
+        test_positive=[
+            # OIDC token declared then decoded to the log (the incident shape).
+            "assume-role:\n  id_tokens:\n    AWS_TOKEN:\n      aud: https://gitlab.com\n"
+            '  script:\n    - echo "$AWS_TOKEN" | cut -d. -f2 | base64 -d',
+            # Declared token echoed straight to the log.
+            "deploy:\n  id_tokens:\n    VAULT_ID_TOKEN:\n      aud: https://vault\n"
+            "  script:\n    - echo $VAULT_ID_TOKEN",
+        ],
+        test_negative=[
+            # No id_tokens block — a plain build is not in scope.
+            "build:\n  script:\n    - make build",
+            # id_tokens declared but the token is consumed, never printed/decoded.
+            "deploy:\n  id_tokens:\n    AWS_TOKEN:\n      aud: https://gitlab.com\n"
+            "  script:\n    - aws sts assume-role-with-web-identity "
+            '--web-identity-token "$AWS_TOKEN" --role-arn "$ROLE_ARN"',
+        ],
         stride=["I", "R"],
         threat_narrative=(
-            "In public GitLab projects, job logs are accessible to unauthenticated users, "
-            "meaning any CI/CD variable value printed to a log — even non-masked ones — is "
-            "publicly readable. Verbose build output, dependency resolution logs, and "
-            "environment dumps can all expose internal paths, package versions, and "
-            "configuration values useful for targeted attacks."
+            "In public and internal GitLab projects, job logs are accessible to anyone "
+            "with pipeline read access. A short-lived OIDC id_token written to the trace "
+            "— echoed for debugging or piped through base64 to inspect its claims — can "
+            "be copied and replayed against the cloud or secrets backend it authenticates "
+            "to, for the remainder of its (often multi-minute) validity window, before it "
+            "expires."
         ),
     ),
     # =========================================================================

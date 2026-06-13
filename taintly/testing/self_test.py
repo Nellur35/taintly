@@ -263,6 +263,23 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "fragility-trade. Documented as a known gap in the same "
         "spirit as SEC10-GH-004 / AI-GH-019 / TAINT-GH-010."
     ),
+    ("AI-GH-018", "whitespace_pad"): (
+        "Identical mechanism to SEC6-GH-010: AI-GH-018's "
+        "``anchor_step_exclude=^\\s*(?:-\\s*)?uses\\s*:`` suppresses an "
+        "agent-CLI flag (``--allowedTools``) that lands on a continuation "
+        "line of a ``claude_args: |`` block scalar inside a ``uses:`` "
+        "ACTION step (an action input, not shell).  That suppression "
+        "depends on the structural step-segmentation, which needs a space "
+        "after ``:`` to recognise YAML mappings.  whitespace_pad's "
+        "``': ' -> ':'`` collapse turns the whole sample into a single "
+        "malformed scalar line (``jobs:fix:runs-on:...``) with zero step "
+        "segments, so the step-exclude lookup returns empty and the flag "
+        "line fires.  The mutant is not a runnable workflow; real "
+        "workflows are valid YAML with a space after ``:``.  Broadening "
+        "the structural reader to accept ``key:value`` would change "
+        "parsing semantics across every step/job-scope rule.  Same spirit "
+        "as SEC6-GH-010 / AI-GH-019."
+    ),
     ("SEC8-GH-004", "comment_inject"): (
         "Inline `# comment` trailing a `services:` line prevents match; "
         "rule doesn't strip trailing comments before anchoring."
