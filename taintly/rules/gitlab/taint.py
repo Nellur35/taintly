@@ -868,6 +868,13 @@ RULES = [
                 r"^\s*#",
             ],
             scope="file",
+            # The verdict is one FILE-SCOPED fact ("this component takes
+            # caller-controlled inputs; review every caller"), not a
+            # per-reference one.  A component template references its
+            # inputs many times (opentofu: up to 270 ``$[[ inputs.X ]]``
+            # in one file → 1548 byte-identical findings across the repo),
+            # so emit a single representative finding per file.
+            first_match_only=True,
         ),
         remediation=(
             "Do one of:\n"
