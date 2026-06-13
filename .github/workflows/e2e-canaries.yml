@@ -1,26 +1,33 @@
 name: E2E canaries
 
 # Layer 3 of the "don't ship broken rules" enforcement.  The
-# in-repo corpus is a fixed set; this workflow scans three
-# outside-corpus canary repos (one per platform) on every PR so a
-# scanner regression that only surfaces on real-world repos gets
-# caught before merge, not after.
+# in-repo corpus is a fixed set; this workflow defends recall against the
+# specific failure mode where a parser/engine refactor silently zeroes a
+# whole rule family: every per-rule unit test still passes in isolation
+# and recall on real configs drops to zero with no CI signal.
 #
-# Gates (v1, smoke test):
-#   * taintly itself exits cleanly (no scanner crash, no Python
-#     exception bubbling out).
-#   * Findings JSON parses (output is valid).
+# Two complementary gates (both BLOCKING):
 #
-# Surfaces (notices, not blockers):
-#   * Total finding count per canary.
-#   * ENGINE-ERR count per canary (structural-coverage drift signal —
-#     LOW-severity, expected on repos with complex YAML extends/anchors;
-#     a future v2 will gate on count <= baseline).
+#   1. Locked-fixture detection gate (canary-fixtures job).  The reliable
+#      core.  A small set of committed, public-safe vulnerable CI configs
+#      under tests/canaries/ (reconstructed from public CVE/advisory
+#      shapes) with a committed snapshot of the exact rule-IDs that must
+#      fire (tests/canaries/expected_detections.json).
+#      scripts/check_canary_detections.py FAILS if any locked rule-ID
+#      stops firing.  Deterministic; no network; the true barrier.
 #
-# Future v2:
-#   * Baseline-vs-current drift gate on findings count and ENGINE-ERR
-#     count, baselines in .github/canary-baselines/, auto-updated on
-#     main merge, fail PRs that drift > 20%.
+#   2. Live-repo drift guard (canary-github/gitlab/jenkins jobs).  The
+#      secondary, coarser net.  Each job clones one outside-corpus repo at
+#      a pinned SHA and scans it; scripts/check_canary_drift.py fails the
+#      build if the finding count drops >20% below the committed baseline
+#      (.github/canary-baselines/) or hits zero.  Rule-IDs on whole real
+#      repos are too churny to lock, so this guards counts only.  A
+#      baseline of `findings: null` means "not yet baselined" — the check
+#      emits a notice instead of failing, so the maintainer can adopt the
+#      real count from the first green run, then commit it to enforce.
+#
+# Each live job still smoke-checks that taintly exits cleanly (0/1/2/11)
+# and emits parseable JSON before the drift guard runs.
 
 on:
   push:
@@ -41,6 +48,36 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  canary-fixtures:
+    name: Locked-fixture detection gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # No external clone in this job, so egress can stay fully blocked
+      # (no allow-list). harden-runner first, as in the other jobs.
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: block
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Detection-regression gate (locked vulnerable fixtures)
+        # Scans the committed tests/canaries/ fixtures and FAILS if any
+        # locked rule-ID stops firing or the per-fixture finding count
+        # drops below its floor. This is the deterministic recall barrier;
+        # it needs no network and no external clone.
+        env:
+          PYTHONUTF8: "1"
+        run: python scripts/check_canary_detections.py
+
   canary-github:
     name: E2E canary (GitHub Actions — astral-sh/uv)
     runs-on: ubuntu-latest
@@ -119,6 +156,21 @@ jobs:
           print(f"::notice::{os.environ['CANARY_NAME']} @ {os.environ['CANARY_SHA'][:7]}: {len(findings)} findings, {len(err)} ENGINE-ERR")
           PY
 
+      - name: Drift guard (fail on large finding-count drop vs baseline)
+        # Blocking. Compares the live finding count against the committed
+        # baseline in .github/canary-baselines/. Fails on a >20% drop or a
+        # drop to zero (scanner went dark on this real repo). A baseline of
+        # `findings: null` is treated as "not yet baselined": the check
+        # emits a notice and passes, so the first green run establishes the
+        # number, which the maintainer then commits to start enforcing.
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          python scripts/check_canary_drift.py \
+            --canary "$CANARY_NAME" \
+            --sha "$CANARY_SHA" \
+            --count-file canary.json
+
   canary-gitlab:
     name: E2E canary (GitLab CI — gitlab-org/gitlab-runner)
     runs-on: ubuntu-latest
@@ -191,6 +243,21 @@ jobs:
           print(f"::notice::{os.environ['CANARY_NAME']} @ {os.environ['CANARY_SHA'][:7]}: {len(findings)} findings, {len(err)} ENGINE-ERR")
           PY
 
+      - name: Drift guard (fail on large finding-count drop vs baseline)
+        # Blocking. Compares the live finding count against the committed
+        # baseline in .github/canary-baselines/. Fails on a >20% drop or a
+        # drop to zero (scanner went dark on this real repo). A baseline of
+        # `findings: null` is treated as "not yet baselined": the check
+        # emits a notice and passes, so the first green run establishes the
+        # number, which the maintainer then commits to start enforcing.
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          python scripts/check_canary_drift.py \
+            --canary "$CANARY_NAME" \
+            --sha "$CANARY_SHA" \
+            --count-file canary.json
+
   canary-jenkins:
     name: E2E canary (Jenkins — jenkinsci/plugin-installation-manager-tool)
     runs-on: ubuntu-latest
@@ -262,3 +329,18 @@ jobs:
           err = [f for f in findings if f.get('rule_id','').startswith('ENGINE-ERR')]
           print(f"::notice::{os.environ['CANARY_NAME']} @ {os.environ['CANARY_SHA'][:7]}: {len(findings)} findings, {len(err)} ENGINE-ERR")
           PY
+
+      - name: Drift guard (fail on large finding-count drop vs baseline)
+        # Blocking. Compares the live finding count against the committed
+        # baseline in .github/canary-baselines/. Fails on a >20% drop or a
+        # drop to zero (scanner went dark on this real repo). A baseline of
+        # `findings: null` is treated as "not yet baselined": the check
+        # emits a notice and passes, so the first green run establishes the
+        # number, which the maintainer then commits to start enforcing.
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          python scripts/check_canary_drift.py \
+            --canary "$CANARY_NAME" \
+            --sha "$CANARY_SHA" \
+            --count-file canary.json

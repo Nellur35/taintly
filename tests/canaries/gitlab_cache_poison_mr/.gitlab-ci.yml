@@ -1,0 +1,38 @@
+# Detection canary — DO NOT "fix" this file.
+#
+# Reconstructed GitLab cache-poisoning shape: a job that runs on merge-
+# request pipelines (untrusted contributor pipeline source) writes a
+# cache under a predictable, non-isolated static key, so a fork MR can
+# poison the cache that a later trusted pipeline restores and executes.
+# The deploy job also leaks CI_JOB_TOKEN to the log.  The shapes taintly
+# must keep detecting: static cross-boundary cache key + token-in-log +
+# build-tool / install-script execution in an MR pipeline.
+#
+# This is a LOCKED canary: scripts/check_canary_detections.py asserts the
+# rule-IDs in tests/canaries/expected_detections.json keep firing here.
+stages:
+  - build
+  - deploy
+
+build:
+  stage: build
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  cache:
+    key: build-cache
+    paths:
+      - node_modules/
+      - .npm/
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - ./node_modules/.bin/build
+
+deploy:
+  stage: deploy
+  cache:
+    key: build-cache
+    paths:
+      - node_modules/
+  script:
+    - echo "Deploying with token $CI_JOB_TOKEN"
+    - ./node_modules/.bin/deploy --token "$DEPLOY_TOKEN"

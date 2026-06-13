@@ -1,0 +1,30 @@
+# Detection canary — DO NOT "fix" this file.
+#
+# Reconstructed "Pwn Request" shape (GitHub Security Lab vulnerability
+# class): a pull_request_target workflow carrying a write-able token
+# checks out the untrusted PR head and interpolates attacker-controlled
+# PR title/body directly into a run: block.  This is the canonical
+# privileged-checkout + script-injection combination behind many real
+# GitHub Actions disclosures.
+#
+# This is a LOCKED canary: scripts/check_canary_detections.py asserts the
+# rule-IDs in tests/canaries/expected_detections.json keep firing here.
+name: PR triage
+on:
+  pull_request_target:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Greet
+        run: |
+          echo "Thanks for the PR titled ${{ github.event.pull_request.title }}"
+          echo "Body: ${{ github.event.pull_request.body }}"

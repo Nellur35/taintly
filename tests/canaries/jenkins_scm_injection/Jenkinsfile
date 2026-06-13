@@ -1,0 +1,26 @@
+// Detection canary — DO NOT "fix" this file.
+//
+// Reconstructed Jenkins injection shape: attacker-controlled SCM context
+// (branch name / change author) and a user-supplied build parameter are
+// interpolated into double-quoted sh steps, and a remotely-fetched
+// script is piped to a shell.  These are the canonical Jenkins
+// script-injection + living-off-the-pipeline classes.
+//
+// This is a LOCKED canary: scripts/check_canary_detections.py asserts the
+// rule-IDs in tests/canaries/expected_detections.json keep firing here.
+pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+                sh "echo Building branch ${env.BRANCH_NAME} by ${env.CHANGE_AUTHOR}"
+                sh "git checkout ${params.TARGET_BRANCH} && make build"
+            }
+        }
+        stage('Deploy') {
+            steps {
+                sh 'curl -sL https://deploy.example.com/install.sh | bash'
+            }
+        }
+    }
+}
