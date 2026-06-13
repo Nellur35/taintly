@@ -1,0 +1,63 @@
+{
+  "_comment": "LOCKED detection snapshot for the canary gate. Regenerate with `python scripts/check_canary_detections.py --update` ONLY when a detection change is intended, and commit the diff alongside it.",
+  "fixtures": {
+    "github_tj_actions_changed_files": {
+      "platform": "github",
+      "dir": "github_tj_actions_changed_files",
+      "cve": "CVE-2025-30066 (tj-actions/changed-files compromise)",
+      "expected_rule_ids": [
+        "SEC10-GH-001",
+        "SEC3-GH-001",
+        "SEC3-GH-003",
+        "SEC3-GH-004",
+        "SEC3-GH-006",
+        "SEC4-GH-005B",
+        "SEC4-GH-021"
+      ],
+      "min_total_findings": 7
+    },
+    "github_pwn_request_script_injection": {
+      "platform": "github",
+      "dir": "github_pwn_request_script_injection",
+      "cve": "Pwn Request class (pull_request_target + privileged checkout + script injection)",
+      "expected_rule_ids": [
+        "SEC10-GH-001",
+        "SEC4-GH-001",
+        "SEC4-GH-002",
+        "SEC4-GH-004",
+        "SEC4-GH-005B"
+      ],
+      "min_total_findings": 6
+    },
+    "gitlab_cache_poison_mr": {
+      "platform": "gitlab",
+      "dir": "gitlab_cache_poison_mr",
+      "cve": "GitLab cache-poisoning class (static cross-boundary cache key in MR pipeline)",
+      "expected_rule_ids": [
+        "LOTP-GL-001",
+        "LOTP-GL-003",
+        "SEC10-GL-001",
+        "SEC10-GL-002",
+        "SEC10-GL-003",
+        "SEC9-GL-005"
+      ],
+      "min_total_findings": 8
+    },
+    "jenkins_scm_injection": {
+      "platform": "jenkins",
+      "dir": "jenkins_scm_injection",
+      "cve": "Jenkins SCM/param script-injection + LOTP class",
+      "expected_rule_ids": [
+        "LOTP-JK-001",
+        "SEC1-JK-002",
+        "SEC10-JK-001",
+        "SEC4-JK-001",
+        "SEC5-JK-001",
+        "SEC7-JK-001",
+        "SEC9-JK-001",
+        "TAINT-JK-001"
+      ],
+      "min_total_findings": 9
+    }
+  }
+}

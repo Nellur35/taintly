@@ -1,0 +1,29 @@
+# Detection canary — DO NOT "fix" this file.
+#
+# Reconstructed from the public tj-actions/changed-files compromise
+# (CVE-2025-30066): a widely-used third-party action pinned to a mutable
+# tag whose tag was repointed to a malicious commit that dumped runner
+# memory / CI secrets to the build log.  The shape that taintly must keep
+# detecting is: third-party action at a mutable tag + the action being a
+# known-compromised / known-vulnerable one + its tainted output flowing
+# into a shell step.
+#
+# This is a LOCKED canary: scripts/check_canary_detections.py asserts the
+# rule-IDs in tests/canaries/expected_detections.json keep firing here.
+name: CI
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  changed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get changed files
+        id: changed
+        uses: tj-actions/changed-files@v35
+      - name: Use output
+        run: echo "changed=${{ steps.changed.outputs.all_changed_files }}"
