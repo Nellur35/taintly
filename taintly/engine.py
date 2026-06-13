@@ -67,9 +67,14 @@ _SUPPRESS_SPECIFIC = re.compile(r"#\s*taintly:\s*ignore\[([^\]]+)\]", re.IGNOREC
 # of how many YAML files exist.  ``_dedupe_project_scope`` keeps only
 # the first occurrence (lowest file path) per scan so the report
 # surfaces the issue exactly once.
+#
+# SEC10-GL-002 was removed from this set: it was rescoped from an
+# always-firing "verify your project visibility" reminder (which misfired
+# on every GitLab file) to a per-job OIDC-token-logged pattern, so each
+# finding is now a distinct in-YAML leak — not one shared project setting —
+# and must NOT be collapsed.
 _PROJECT_SCOPE_RULES: frozenset[str] = frozenset(
     {
-        "SEC10-GL-002",  # Public-pipelines visibility — a GitLab project setting
         # AI-GH-036 fires per workflow file when the repo contains an
         # agent-instruction file (CLAUDE.md, .cursorrules, AGENTS.md, …).
         # The presence is a repo-root property, not a workflow property,

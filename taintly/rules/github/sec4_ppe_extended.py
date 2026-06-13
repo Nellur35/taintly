@@ -447,6 +447,52 @@ _IGNORE_SCRIPTS_INSTALL_LINE_RE = (
 )
 
 
+# Non-injectable GitHub context fields: server-minted IDs/hashes whose values
+# are integers or [0-9a-f] hex — they cannot carry shell metacharacters, a
+# quote, or a newline, so interpolating them into a shell / JS / reusable-
+# workflow input is NOT script injection regardless of who triggered the run.
+# Distinct from the attacker-controllable free-text fields (PR title / body /
+# branch name / comment) the script-injection rules target.  These are the
+# fields the v2 field-precision sample repeatedly flagged as FP sources
+# (``github.event.number``, ``github.run_id``, ``github.sha``).  Anchored on a
+# trailing word boundary so ``number`` does not also swallow a hypothetical
+# ``number_label`` free-text field.
+_NONINJECTABLE_CONTEXT_FIELD_RE = (
+    r"github\.("
+    r"sha|run_id|run_number|run_attempt|job|workflow_sha"
+    r"|event\.(number|"
+    r"(pull_request|issue|discussion|review|comment)\.(number|id)"
+    r"|installation\.id|sender\.id"
+    r")"
+    r")\b"
+)
+
+# A line whose ONLY ``github.event.*`` (or top-level ``github.*``) interpolation
+# is a non-injectable numeric/hex ID: the line interpolates such a field AND
+# contains no OTHER ``github.*`` reference whose tail is a free-text field.  Used
+# as a line-level exclude on rules that anchor broadly on ``github.event.*`` —
+# it suppresses the numeric-ID FP without touching the free-text TP path (a line
+# mixing ``github.event.number`` with ``github.event.pull_request.title`` still
+# fires because the title reference is not covered by the non-injectable set).
+_NONINJECTABLE_ONLY_LINE_RE = (
+    # Anchor both zero-width assertions at the START of the line so ``re.search``
+    # cannot slide ``.*`` past a free-text ``github.*`` reference and still
+    # satisfy the negative lookahead at a later position.
+    r"^"
+    # Has at least one non-injectable github field …
+    r"(?=.*" + _NONINJECTABLE_CONTEXT_FIELD_RE + r")"
+    # … and no github reference that is NOT in the non-injectable set.  A
+    # ``github.<x>`` whose continuation is not one of the non-injectable tails
+    # is treated as potentially injectable, so the line is left to fire.
+    r"(?!.*github\.(?!"
+    r"sha\b|run_id\b|run_number\b|run_attempt\b|job\b|workflow_sha\b"
+    r"|event\.number\b"
+    r"|event\.(?:pull_request|issue|discussion|review|comment)\.(?:number|id)\b"
+    r"|event\.installation\.id\b|event\.sender\.id\b"
+    r"))"
+)
+
+
 class GithubScriptStepOutputPattern(GithubScriptDangerousContextPattern):
     """SEC4-GH-024: opaque step output interpolated into github-script.
 
@@ -743,16 +789,23 @@ RULES: list[Rule] = [
                 # interpolations or interleaved literal text (e.g.
                 # ``name: ${{ matrix.os }}-${{ inputs.suite }}``,
                 # ``group: deploy-${{ inputs.env }}``).  The allowed body
-                # alphabet is intentionally narrow: word chars, slashes,
-                # dots, dashes, underscores, plus interpolations — no
-                # shell metacharacters (`;`, `&`, `|`, `$()`, backticks,
-                # `<`, `>`).  An attacker-controlled value with shell
-                # metacharacters in a metadata field is still benign as
-                # long as the field itself isn't executed; the allowlist
-                # of keys below is the audited "not executed" set.
+                # alphabet covers prose punctuation that appears in display
+                # labels — word chars, slashes, dots, dashes, underscores,
+                # spaces, parens/brackets, AND quotes/colons/commas/``#`` —
+                # but still excludes the shell metacharacters that would make
+                # the value executable if it ever reached a shell (`;`, `&`,
+                # `|`, `$(`, backticks, `<`, `>`, `{`, `}` outside the
+                # interpolation).  A step ``name:`` with an embedded
+                # ``'${{ inputs.x }}'`` (quotes for readability) is a pure
+                # display string GitHub never executes — field-precision FP
+                # S056 (aws/karpenter e2e-cleanup.yaml step name).  Quotes are
+                # added to the body alphabet so prose-with-quotes labels are
+                # recognised; the key allowlist below is the audited
+                # "not executed" set.
                 r"""^\s*(?:-\s+)?(?:name|group|title|body|tag_name|commit-message"""
                 r"""|repository|ref|branch|head|base)\s*:\s*['"]?"""
-                r"""(?:[\w./_\- ()\[\]]*\$\{\{[^}]+\}\})+[\w./_\- ()\[\]]*['"]?\s*(#.*)?$""",
+                r"""(?:[\w./_\- ()\[\]'":,#!?@%+=]*\$\{\{[^}]+\}\})+"""
+                r"""[\w./_\- ()\[\]'":,#!?@%+=]*['"]?\s*(#.*)?$""",
             ],
         ),
         remediation=(
@@ -779,6 +832,11 @@ RULES: list[Rule] = [
             "      - uses: some/action@v1\n        with:\n          output: ${{ inputs.target }}",
             # env: block scalar — an environment assignment, not shell.
             "      - uses: some/action@v1\n        env:\n          OUT: |\n            ${{ inputs.target }}",
+            # FP S056: an interpolation embedded (with readability quotes) in a
+            # step ``name:`` display label is not a shell sink — the metadata-key
+            # allowlist must recognise the quotes around the interpolation.
+            "      - name: cleanup cluster '${{ inputs.cluster_name }}' resources\n"
+            "        uses: ./.github/actions/cleanup\n",
         ],
         stride=["T", "E"],
         threat_narrative=(
@@ -1262,7 +1320,16 @@ RULES: list[Rule] = [
             # github.event.<field> is the payload (attacker-controlled)
             anchor=r"\$\{\{.*github\.event\.[a-zA-Z]",
             requires=r"uses:\s+[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+/\.github/workflows/",
-            exclude=[r"^\s*#"],
+            exclude=[
+                r"^\s*#",
+                # A reusable-workflow input whose ONLY event source is a
+                # server-minted numeric/hex ID (``github.event.number`` — the
+                # PR number, ``github.run_id``, etc.) is not injectable: an
+                # integer cannot carry a shell metacharacter or break out of a
+                # downstream command.  Field-precision FP S040
+                # (``pull_request_number: ${{ github.event.number || 0 }}``).
+                _NONINJECTABLE_ONLY_LINE_RE,
+            ],
             scope="job",
         ),
         remediation=(
@@ -1291,6 +1358,15 @@ RULES: list[Rule] = [
                 "      env: staging"
             ),
             "      env: ${{ inputs.environment }}",
+            # FP S040: the only event source is a server-minted numeric ID
+            # (the PR number) — an integer cannot inject into a downstream
+            # command, so passing it as a reusable-workflow input is benign.
+            (
+                "jobs:\n  call:\n"
+                "    uses: org/repo/.github/workflows/build.yml@abc123\n"
+                "    with:\n"
+                "      pull_request_number: ${{ github.event.number || 0 }}"
+            ),
         ],
         stride=["T", "E"],
         threat_narrative=(
@@ -1498,6 +1574,14 @@ RULES: list[Rule] = [
             ),
             exclude=[r"^\s*#"],
             heredoc_aware=True,
+            # SINK calibration: ``iex`` is a PowerShell shell-execution sink
+            # only inside a ``run:`` shell.  An ``iex`` string sitting inside an
+            # action's ``with:`` input body (e.g. the markdown ``message:`` of
+            # ``mshick/add-pr-comment`` — install instructions posted as a PR
+            # comment, never executed by the runner) is data, not a sink.  Mask
+            # ``with:``/``env:`` block bodies so the rule fires only on real
+            # runner shell.  Field-precision FP S041 (Azure/bicep build.yml).
+            github_with_env_block_aware=True,
         ),
         remediation=(
             "Don't use iex on interpolated strings. If you need to execute a "
@@ -1518,6 +1602,14 @@ RULES: list[Rule] = [
             "      - run: pwsh -c 'iex (Get-Content ./local.ps1)'",
             "      - run: pwsh -c 'iex \"literal command\"'",
             "      # - run: pwsh -c 'iex \"$($X)\"'  (commented out)",
+            # FP S041: an ``iex`` string that lives inside an action's ``with:``
+            # input body (here a markdown ``message:`` posted as a PR comment by
+            # mshick/add-pr-comment) is install-instruction DATA, never executed
+            # by the runner — not a PowerShell shell sink.
+            "      - uses: mshick/add-pr-comment@v3\n"
+            "        with:\n"
+            "          message: |\n"
+            '            iex "& { $(irm https://example/x.ps1) } -RunId 1"\n',
         ],
         stride=["T", "E"],
         threat_narrative=(

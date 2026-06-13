@@ -624,6 +624,15 @@ RULES: list[Rule] = [
         pattern=SequencePattern(
             pattern_a=r"^\s*cache:\s*$",
             absent_within=r"\bkey\s*:",
+            # When the cache block is supplied by a ``!reference [job, key]``
+            # tag or a YAML alias (``*anchor`` / ``<<: *anchor``), the ``key:``
+            # may be defined in the referenced/anchored block rather than
+            # inline.  The literal lookahead cannot see it, so judging the key
+            # "absent" is a false positive (observed in gitlab-org/gitlab's
+            # frontend.gitlab-ci.yml ``!reference [.frontend-test-base, cache]``
+            # and global.gitlab-ci.yml ``<<: *qa-ruby-orchestrator-gems-cache``).
+            # Suppress when reference/alias supplies the block.
+            suppress_if_within=r"!reference\b|(?:^|[:\-]\s*)\*[A-Za-z0-9_.-]+",
             lookahead_lines=10,
             exclude=[r"^\s*#"],
         ),
@@ -645,6 +654,11 @@ RULES: list[Rule] = [
         test_negative=[
             "build:\n  cache:\n    key: $CI_COMMIT_REF_SLUG\n    paths:\n      - dist/",
             'test:\n  cache:\n    key: "$CI_JOB_NAME-$CI_COMMIT_REF_SLUG"\n    paths:\n      - .cache/',
+            # Cache supplied by !reference — the key lives in the referenced
+            # block, so absence is unknowable here (not a finding).
+            "fixtures:\n  cache:\n    - !reference [.frontend-test-base, cache]\n  script:\n    - yarn jest",
+            # Cache supplied by a YAML merge alias — key defined in the anchor.
+            ".qa-cache:\n  cache:\n    <<: *qa-ruby-orchestrator-gems-cache\n  script:\n    - bundle exec rspec",
         ],
         stride=["T"],
         threat_narrative=(

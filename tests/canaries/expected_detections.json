@@ -37,11 +37,10 @@
         "LOTP-GL-001",
         "LOTP-GL-003",
         "SEC10-GL-001",
-        "SEC10-GL-002",
         "SEC10-GL-003",
         "SEC9-GL-005"
       ],
-      "min_total_findings": 8
+      "min_total_findings": 7
     },
     "jenkins_scm_injection": {
       "platform": "jenkins",

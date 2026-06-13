@@ -918,7 +918,30 @@ def _split_into_step_segments(content: str) -> list[tuple[int, list[str]]]:
     for (_job_id, _step_idx), (start_1b, end_1b) in sorted(step_bounds.items()):
         start_0b = max(0, start_1b - 1)
         end_0b_inclusive = max(start_0b, end_1b - 1)
-        segments.append((start_0b, lines[start_0b : end_0b_inclusive + 1]))
+        # Absorb trailing block-scalar body lines.  The structural reader
+        # reports a ``key: |`` / ``key: >`` leaf at the KEY line, but the
+        # scalar's value text lives on the following MORE-indented lines
+        # (e.g. ``claude_args: |`` on one line, ``--allowedTools "…"`` on
+        # the next).  Those continuation lines belong to the step, so a
+        # step-scope co-location / suppression check (``anchor_step_*``)
+        # can see them: extend the segment past the last leaf to include
+        # every following line that is blank or indented strictly deeper
+        # than the step's first content line, stopping at the next line
+        # that dedents to the step marker or shallower.
+        step_indent = len(lines[start_0b]) - len(lines[start_0b].lstrip())
+        ext = end_0b_inclusive
+        j = end_0b_inclusive + 1
+        while j < len(lines):
+            ln = lines[j]
+            if ln.strip() == "":
+                j += 1
+                continue
+            indent = len(ln) - len(ln.lstrip())
+            if indent <= step_indent:
+                break
+            ext = j
+            j += 1
+        segments.append((start_0b, lines[start_0b : ext + 1]))
     return segments
 
 
@@ -952,6 +975,17 @@ class ContextPattern:
     # than spread across the job: a sibling step's content cannot
     # influence whether the matched step is suppressed.
     anchor_step_exclude: str = ""
+    # If set, KEEP an anchor match only when the step containing it ALSO
+    # matches this pattern.  The positive counterpart of
+    # ``anchor_step_exclude``: the corroborating signal must be co-located
+    # in the SAME step as the anchor, so a sibling step in the same job
+    # can't satisfy it.  Use when ``scope="job"`` is too coarse — e.g. an
+    # AI-agent step must carry ``continue-on-error: true`` on ITS OWN step,
+    # not on an unrelated sibling step in the same job.  Anchor matches in
+    # a file with no resolvable steps (no ``jobs:``/``steps:``) are dropped
+    # when this is set, since the co-location requirement cannot be met.
+    # Off by default → zero change for every existing rule.
+    anchor_step_require: str = ""
     # GH-B1: route the ``requires`` match through the structural ``${{ }}``
     # expression parser, ADDITIVELY.  When the dot-literal ``requires`` regex
     # misses, every ``${{ }}`` body in the scoped text is parsed and each
@@ -979,6 +1013,9 @@ class ContextPattern:
         )
         self._anchor_step_exclude_re = (
             re.compile(self.anchor_step_exclude) if self.anchor_step_exclude else None
+        )
+        self._anchor_step_require_re = (
+            re.compile(self.anchor_step_require) if self.anchor_step_require else None
         )
         # Platform of the owning rule.  Set by :meth:`Rule.__post_init__`
         # so platform-specific gating (the Groovy comment-strip in
@@ -1066,10 +1103,10 @@ class ContextPattern:
                     job_content_by_line[seg_start + j] = seg_content
 
         # Build per-line step-segment content map for step-scope
-        # suppression.  Built lazily; rules without
-        # ``anchor_step_exclude`` pay zero cost.
+        # suppression / co-location.  Built lazily; rules without
+        # ``anchor_step_exclude`` or ``anchor_step_require`` pay zero cost.
         step_content_by_line: dict[int, str] = {}
-        if self._anchor_step_exclude_re:
+        if self._anchor_step_exclude_re or self._anchor_step_require_re:
             for seg_start, seg_lines in _split_into_step_segments(content):
                 seg_content = "\n".join(seg_lines)
                 for j in range(len(seg_lines)):
@@ -1090,6 +1127,18 @@ class ContextPattern:
                 if self._anchor_step_exclude_re:
                     seg_content = step_content_by_line.get(i, "")
                     if seg_content and _safe_search(self._anchor_step_exclude_re, seg_content):
+                        continue
+                # Step-scope co-location requirement: keep the anchor
+                # match only when its OWN step also carries the required
+                # signal.  A miss (no step segment for this line, or the
+                # segment doesn't match) drops the match — the
+                # corroborating signal must be in the same step, never a
+                # sibling step.
+                if self._anchor_step_require_re:
+                    seg_content = step_content_by_line.get(i, "")
+                    if not (
+                        seg_content and _safe_search(self._anchor_step_require_re, seg_content)
+                    ):
                         continue
                 results.append((i + 1, line.strip()))
         return results
@@ -1150,6 +1199,16 @@ class SequencePattern:
     # while a ``trigger:``/``needs: project:`` (branch-/job-pinned, legitimate)
     # does not, so requiring ``file:`` drops those false positives.
     requires_within: str = ""
+    # Optional "absence is unknowable" suppressor: when set, a match is DROPPED
+    # if this pattern appears in the lookahead window.  Unlike ``absent_within``
+    # (which asks "is the expected key textually present here?"), this asks "is
+    # the block's content supplied by reference, so its absence cannot be judged
+    # from this text?".  GitLab ``!reference [job, key]`` tags and YAML aliases
+    # (``*anchor`` / ``<<: *anchor``) inline a block defined elsewhere — the key
+    # the rule looks for may live in that other block, so reporting it absent is
+    # a false positive.  Off by default (empty) → zero change for every existing
+    # rule.
+    suppress_if_within: str = ""
     lookahead_lines: int = 10
     exclude: list[str] = field(default_factory=list)
     groovy_comment_aware: bool = False
@@ -1158,6 +1217,7 @@ class SequencePattern:
         self._a_re = re.compile(self.pattern_a)
         self._b_re = re.compile(self.absent_within)
         self._req_re = re.compile(self.requires_within) if self.requires_within else None
+        self._suppress_re = re.compile(self.suppress_if_within) if self.suppress_if_within else None
         self._excludes = [re.compile(e) for e in self.exclude]
 
     # CONTRACT: returns (line_num, snippet) where snippet is the
@@ -1175,6 +1235,11 @@ class SequencePattern:
             if _safe_search(self._a_re, line):
                 window = "\n".join(scan_lines[i : i + self.lookahead_lines])
                 if self._req_re is not None and not _safe_search(self._req_re, window):
+                    continue
+                # Absence is unknowable when the block is supplied by reference
+                # (``!reference``) or YAML alias (``*anchor``): the expected key
+                # may be defined in the referenced block, not inline here.
+                if self._suppress_re is not None and _safe_search(self._suppress_re, window):
                     continue
                 if not _safe_search(self._b_re, window):
                     snippet = lines[i].strip() if i < len(lines) else line.strip()

@@ -49,6 +49,49 @@ from taintly.workflow_aware_pattern import (
 )
 
 # ---------------------------------------------------------------------------
+# Neutralizing fork-trust guard — shared suppression arm for the
+# fork-reachable AI-agent rules (AI-GH-006/012/013/015/019/020).
+# ---------------------------------------------------------------------------
+#
+# Two canonical idioms make a fork-reachable AI-agent workflow benign by
+# preventing an OUTSIDE attacker from reaching the agent at all:
+#
+#   1. Fork-identity guard — the Anthropic Cookbook / claude-code-action
+#      shape ``github.event.pull_request.head.repo.full_name ==
+#      github.repository`` (same idiom as ``workflow_context.
+#      _RE_FORK_IDENTITY_GUARD``, which already de-escalates AI
+#      exploitability to LOW; this string additionally SUPPRESSES the
+#      finding so a guarded workflow doesn't alarm at all).
+#
+#   2. Actor allowlist — an ``if:`` that requires the triggering actor's
+#      ``author_association`` to be ``OWNER`` / ``MEMBER`` /
+#      ``COLLABORATOR`` (the AutoGPT / many-agent-workflow shape), or a
+#      ``contains(fromJSON('["OWNER",...]'), …author_association)`` form.
+#      A fork PR from an outside contributor is ``CONTRIBUTOR`` /
+#      ``NONE`` / ``FIRST_TIME_CONTRIBUTOR``, so the job is skipped.
+#
+# This is a SUPPRESSION (``requires_absent``) arm, not a de-escalation:
+# when one of these guards governs the workflow, the outside-attacker
+# precondition the rule asserts is false.  A ``@claude`` text-trigger gate
+# WITHOUT an identity/actor check (browser-use's claude.yml) is NOT a
+# neutralizer — anyone can type ``@claude`` from a fork — so it is
+# deliberately excluded and those workflows still fire (recall held).
+# File-scoped, mirroring the existing ``has_fork_identity_guard`` file-
+# level convention: presence anywhere suppresses for the file (imprecise
+# when one job guards and a sibling doesn't, but strictly more accurate
+# than firing on every guarded workflow).
+_NEUTRALIZING_FORK_GUARD = (
+    # Fork-identity: head.repo.full_name (== | !=) github.repository.
+    r"github\.event\.pull_request\.head\.repo\.full_name\s*"
+    r"(?:==|!=)\s*github\.repository"
+    # Actor allowlist: <ctx>.author_association == 'OWNER'|'MEMBER'|'COLLABORATOR'.
+    r"|\.author_association\s*==\s*['\"]?(?:OWNER|MEMBER|COLLABORATOR)\b"
+    # fromJSON-style actor allowlist:
+    #   contains(fromJSON('["OWNER","MEMBER"]'), …author_association)
+    r"|fromJSON\(\s*['\"]\s*\[\s*['\"]?(?:OWNER|MEMBER|COLLABORATOR)\b"
+)
+
+# ---------------------------------------------------------------------------
 # AI-GH-036 — agent-instruction-file inventory.
 #
 # Files like ``CLAUDE.md`` and ``.cursorrules`` are auto-loaded by AI
@@ -1495,6 +1538,10 @@ RULES: list[Rule] = [
                 r"|\[\s*[^\]]*"
                 r"(?:pull_request|issue_comment|issues|discussion|workflow_run)[^\]]*\])"
             ),
+            # A fork-identity / actor-allowlist guard makes the
+            # outside-attacker precondition false — suppress.  See
+            # ``_NEUTRALIZING_FORK_GUARD``.
+            requires_absent=_NEUTRALIZING_FORK_GUARD,
             scope="file",
             exclude=[r"^\s*#"],
         ),
@@ -1568,6 +1615,23 @@ RULES: list[Rule] = [
                 "jobs:\n  triage:\n    runs-on: ubuntu-latest\n    steps:\n"
                 "      # - uses: anthropics/claude-code-action@v1\n"
                 "      - run: echo hi"
+            ),
+            # Fork-identity guard neutralises the outside-attacker reach —
+            # suppressed by ``_NEUTRALIZING_FORK_GUARD``.
+            (
+                "on: pull_request\n"
+                "jobs:\n  review:\n"
+                "    if: github.event.pull_request.head.repo.full_name == github.repository\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: anthropics/claude-code-action@v1"
+            ),
+            # Actor-allowlist guard (author_association) — same neutraliser.
+            (
+                "on: issue_comment\n"
+                "jobs:\n  review:\n"
+                "    if: github.event.comment.author_association == 'MEMBER'\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: anthropics/claude-code-action@v1"
             ),
         ],
         stride=["T", "E"],
@@ -2149,7 +2213,19 @@ RULES: list[Rule] = [
             anchor=(
                 r"(?:"
                 # Named privileged MCP servers as npm/pypi package names.
-                r"server-(?:filesystem|github|postgres|sqlite|bash|shell"
+                # The ``server-X`` token must sit at a PACKAGE-NAME
+                # boundary — preceded by ``/`` (scoped npm path), ``@``,
+                # a quote, whitespace, ``(``/``,`` (arg list), or start —
+                # NOT a hyphen continuing an unrelated identifier.  Without
+                # this, a build-matrix target string like
+                # ``cron-github-server-docker`` substring-matched
+                # ``server-docker`` and produced a hard FP (ossf/scorecard
+                # docker.yml).  The MCP package is always
+                # ``@modelcontextprotocol/server-filesystem`` /
+                # ``mcp/server-github`` / a quoted/whitespace-delimited
+                # token, never the tail of a hyphenated word.
+                r"(?:^|[\s/@\"'(,])server-"
+                r"(?:filesystem|github|postgres|sqlite|bash|shell"
                 r"|docker|puppeteer|brave-search|slack|google-drive)"
                 # MCP tool name referenced in allowedTools.
                 r"|mcp__(?:filesystem|github|bash|shell|postgres|docker"
@@ -2163,6 +2239,9 @@ RULES: list[Rule] = [
                 r"|\[\s*[^\]]*"
                 r"(?:pull_request|issue_comment|issues|discussion|workflow_run)[^\]]*\])"
             ),
+            # A fork-identity / actor-allowlist guard neutralises the
+            # outside-attacker reach to the MCP-armed agent — suppress.
+            requires_absent=_NEUTRALIZING_FORK_GUARD,
             scope="file",
             exclude=[r"^\s*#"],
         ),
@@ -2225,6 +2304,26 @@ RULES: list[Rule] = [
                 "      # - mcp_config: server-filesystem\n"
                 "      - run: echo hi"
             ),
+            # ``server-docker`` as the TAIL of a hyphenated build-matrix
+            # target string (``cron-github-server-docker``) is NOT an MCP
+            # package — the package-name boundary in the anchor rejects it.
+            # Field FP: ossf/scorecard docker.yml.
+            (
+                "on: pull_request\n"
+                "jobs:\n  docker_matrix:\n    runs-on: ubuntu-latest\n"
+                "    strategy:\n      matrix:\n        target:\n"
+                "          - 'cron-github-server-docker'\n"
+                "    steps:\n      - run: make ${{ matrix.target }}"
+            ),
+            # Privileged MCP + fork trigger BUT fork-identity guarded.
+            (
+                "on: pull_request\n"
+                "jobs:\n  review:\n"
+                "    if: github.event.pull_request.head.repo.full_name == github.repository\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: anthropics/claude-code-action@v1\n"
+                '        with:\n          allowed_tools: "mcp__bash__exec"'
+            ),
         ],
         stride=["E", "T"],
         threat_narrative=(
@@ -2277,6 +2376,9 @@ RULES: list[Rule] = [
                 r"|\[\s*[^\]]*"
                 r"(?:pull_request|issue_comment|issues|discussion|workflow_run)[^\]]*\])"
             ),
+            # Fork-identity / actor-allowlist guard neutralises the
+            # outside-attacker reach to the CLI agent — suppress.
+            requires_absent=_NEUTRALIZING_FORK_GUARD,
             scope="file",
             exclude=[r"^\s*#"],
         ),
@@ -2534,6 +2636,9 @@ RULES: list[Rule] = [
                 r":\s*write\b"
                 r")"
             ),
+            # Fork-identity / actor-allowlist guard neutralises the
+            # outside-attacker reach even with write perms — suppress.
+            requires_absent=_NEUTRALIZING_FORK_GUARD,
             scope="file",
             exclude=[r"^\s*#"],
         ),
@@ -2608,6 +2713,17 @@ RULES: list[Rule] = [
                 "jobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n"
                 "      # - uses: anthropics/claude-code-action@v1\n"
                 "      - run: echo placeholder"
+            ),
+            # Fork-reachable + write + agent BUT fork-identity guarded —
+            # an outside attacker can't trigger it; suppressed by
+            # ``_NEUTRALIZING_FORK_GUARD``.
+            (
+                "on: pull_request\n"
+                "permissions:\n  contents: write\n  pull-requests: write\n"
+                "jobs:\n  review:\n"
+                "    if: github.event.pull_request.head.repo.full_name == github.repository\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: anthropics/claude-code-action@v1"
             ),
         ],
         stride=["E", "T", "I"],
@@ -2771,11 +2887,7 @@ RULES: list[Rule] = [
             "StarRocks/starrocks's ai-sr-skills.yml."
         ),
         pattern=ContextPattern(
-            # The agent step is the anchor (per-line match);
-            # `continue-on-error: true` must appear anywhere in the
-            # same JOB segment.  Using job scope (not file) means we
-            # don't fire on a workflow where an unrelated step has
-            # `continue-on-error: true` in a different job.
+            # The agent step is the anchor (per-line match).
             anchor=_AI_AGENT_ANCHOR,
             # `(?m)^[ \t]+continue-on-error:` anchors at a line that
             # starts with indentation followed IMMEDIATELY by the
@@ -2783,7 +2895,10 @@ RULES: list[Rule] = [
             # (commented-out) and `  # anything continue-on-error: true`
             # (comment with the key inside), both of which are false-
             # positive shapes surfaced by the self-test's commented-
-            # out negative sample.
+            # out negative sample.  Kept as a cheap FILE-LEVEL pre-filter
+            # ("a truthy continue-on-error exists somewhere"); the precise
+            # SAME-STEP co-location is enforced by ``anchor_step_require``
+            # below.
             requires=(
                 # Line starts with YAML indentation, optionally a `- `
                 # list-item marker (step's first key), then the literal
@@ -2795,7 +2910,21 @@ RULES: list[Rule] = [
                 r"(?m)^[ \t]+(?:-\s+)?continue-on-error:\s*"
                 r"(?i:true|'true'|\"true\"|yes|on|1|'1'|\"1\")\b"
             ),
-            scope="job",
+            # SAME-STEP co-location: the silencer must be on the agent's
+            # OWN step, not on an unrelated sibling step in the same job.
+            # ``scope="job"`` was too coarse — a job with a flaky-test
+            # step carrying ``continue-on-error: true`` AND a separate
+            # AI-agent step (with NO such flag) misattributed the sibling
+            # step's flag to the agent step.  Field FP:
+            # anthropics/claude-cookbooks notebook-tests.yml (the flag is
+            # on the structure-tests step; the claude-code-action step is
+            # clean).  ``anchor_step_require`` keeps the anchor only when
+            # the agent step's OWN body carries the truthy flag.
+            anchor_step_require=(
+                r"(?m)^[ \t]+(?:-\s+)?continue-on-error:\s*"
+                r"(?i:true|'true'|\"true\"|yes|on|1|'1'|\"1\")\b"
+            ),
+            scope="file",
             exclude=[r"^\s*#"],
         ),
         remediation=(
@@ -2850,6 +2979,19 @@ RULES: list[Rule] = [
                 "  flaky-test:\n    runs-on: ubuntu-latest\n    steps:\n"
                 "      - continue-on-error: true\n"
                 "        run: pytest tests/flaky/"
+            ),
+            # continue-on-error on a SIBLING step in the SAME job — the
+            # agent step itself is clean.  ``anchor_step_require`` enforces
+            # SAME-STEP co-location, so the sibling's flag isn't
+            # misattributed to the agent step.  Field FP:
+            # anthropics/claude-cookbooks notebook-tests.yml (the flag is
+            # on the structure-tests step, not the claude-code-action step).
+            (
+                "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - name: run tests\n        run: pytest\n"
+                "        continue-on-error: true\n"
+                "      - name: post results\n"
+                "        uses: anthropics/claude-code-action@v1"
             ),
             # Commented out.
             (
@@ -2989,6 +3131,20 @@ RULES: list[Rule] = [
                 # using the newer claude-code-action schema.
                 r"^\s+(?:claude_args|cli_args|extra_args|args|prompt|settings)\s*:",
             ],
+            # Step-scope suppression: an agent-CLI flag that appears
+            # inside a ``uses:`` ACTION step is an action INPUT the
+            # action parses internally (e.g. ``claude_args: |`` block
+            # scalar whose continuation lines carry
+            # ``--allowedTools "Bash(npm:*)…"``) — NOT a shell
+            # invocation.  The per-line ``exclude`` above only blanks the
+            # ``claude_args:`` KEY line; the flag itself lands on a
+            # CONTINUATION line of the block scalar, which the line
+            # exclude can't see.  Suppressing anchor matches inside any
+            # step that contains a ``uses:`` line scopes the fix to
+            # exactly the action-input shape while leaving raw ``run:``
+            # CLI invocations (which have no ``uses:`` in their step) to
+            # fire.  Field FP: Significant-Gravitas/AutoGPT claude.yml.
+            anchor_step_exclude=r"(?m)^\s*(?:-\s*)?uses\s*:",
         ),
         remediation=(
             "Raw agent CLI invocations in a workflow `run:` block mean\n"
@@ -3044,6 +3200,21 @@ RULES: list[Rule] = [
             "      - uses: some-org/claude-review-action@v1",
             # Safe long-running setup (no flag match)
             "      - run: aider",
+            # ``--allowedTools`` carried on a CONTINUATION line of a
+            # ``claude_args: |`` block scalar inside a ``uses:`` action
+            # step — an action INPUT the action parses internally, NOT a
+            # shell invocation.  Suppressed by ``anchor_step_exclude``
+            # (the anchor's step contains ``uses:``).  Field FP:
+            # Significant-Gravitas/AutoGPT claude.yml.
+            (
+                "jobs:\n  fix:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - name: Run Claude Code\n"
+                "        uses: anthropics/claude-code-action@v1\n"
+                "        with:\n          claude_args: |\n"
+                '            --allowedTools "Bash(npm:*),Edit"\n'
+                "          additional_permissions: |\n"
+                "            actions: read"
+            ),
         ],
         stride=["T", "E"],
         threat_narrative=(
@@ -3335,6 +3506,10 @@ RULES: list[Rule] = [
             # same file.  Reuse the shared _AI_AGENT_ANCHOR as the
             # file-level requirement.
             requires=_AI_AGENT_ANCHOR,
+            # A fork-identity / actor-allowlist guard means an outside
+            # attacker can't trigger the workflow, so there's no
+            # mutable-source TOCTOU window to exploit — suppress.
+            requires_absent=_NEUTRALIZING_FORK_GUARD,
             scope="file",
             exclude=[
                 r"^\s*#",
@@ -3439,6 +3614,17 @@ RULES: list[Rule] = [
             ),
             # Comment
             "# gh pr view + anthropics/claude-code-action",
+            # Fresh re-read + agent BUT fork-identity guarded — no
+            # outside-attacker TOCTOU window; suppressed by
+            # ``_NEUTRALIZING_FORK_GUARD``.
+            (
+                "on: pull_request\n"
+                "jobs:\n  review:\n"
+                "    if: github.event.pull_request.head.repo.full_name == github.repository\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                "      - run: gh pr view ${{ github.event.pull_request.number }} --json title\n"
+                "      - uses: anthropics/claude-code-action@v1"
+            ),
         ],
         stride=["T", "E"],
         threat_narrative=(
@@ -3529,12 +3715,29 @@ RULES: list[Rule] = [
                 # Explicit allow-list forms across the supported actions.
                 r"\ballowed[_-]tools\s*:"
                 r"|\ballowedTools\s*:"
+                # Gemini CLI Action declares its tool surface via
+                # ``coreTools`` (a JSON array inside the ``settings:``
+                # input), e.g.
+                #   "coreTools": ["run_shell_command(echo)",
+                #                 "run_shell_command(gh issue view)"]
+                # That IS a narrow allowlist — without this arm
+                # google-github-actions/run-gemini-cli workflows that
+                # ARE properly scoped produced a hard FP
+                # (google-gemini/gemini-cli automated-issue-dedup).
+                r"|[\"']?core[_-]?[Tt]ools[\"']?\s*[:=]"
                 # claude_args sometimes carries it inline
                 r"|--allowed-tools\b"
                 r"|--allowedTools\b"
                 # Disallow tools is also an acceptable scoping signal
                 r"|--disallowed-tools\b"
                 r"|\bdisallowed_tools\s*:"
+                # A fork-identity / actor-allowlist guard also neutralises
+                # the outside-attacker reach (shares the cluster's
+                # suppression idiom — see ``_NEUTRALIZING_FORK_GUARD``).
+                r"|github\.event\.pull_request\.head\.repo\.full_name\s*"
+                r"(?:==|!=)\s*github\.repository"
+                r"|\.author_association\s*==\s*['\"]?(?:OWNER|MEMBER|COLLABORATOR)\b"
+                r"|fromJSON\(\s*['\"]\s*\[\s*['\"]?(?:OWNER|MEMBER|COLLABORATOR)\b"
                 # Copilot's equivalent
                 r"|\btools[_-]whitelist\s*:"
                 # FP-audit class E (P5b): claude-code-action's newer
@@ -3620,6 +3823,25 @@ RULES: list[Rule] = [
             (
                 "on:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n"
                 "jobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: anthropics/claude-code-action@v1"
+            ),
+            # Gemini CLI Action scoped via a ``coreTools`` JSON allowlist
+            # inside the ``settings:`` input — a narrow tool surface, NOT
+            # the unconstrained-Bash shape this rule targets.  Field FP:
+            # google-gemini/gemini-cli automated-issue-dedup.yml.
+            (
+                "on: issues\n"
+                "jobs:\n  ai:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: google-github-actions/run-gemini-cli@v1\n"
+                "        with:\n          settings: |-\n"
+                '            { "coreTools": ["run_shell_command(echo)", "run_shell_command(gh issue view)"] }'
+            ),
+            # Fork-identity guarded — outside attacker can't reach it.
+            (
+                "on: pull_request_target\n"
+                "jobs:\n  review:\n"
+                "    if: github.event.pull_request.head.repo.full_name == github.repository\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
                 "      - uses: anthropics/claude-code-action@v1"
             ),
             # Comment
@@ -5604,8 +5826,25 @@ RULES: list[Rule] = [
         ),
         pattern=ContextPattern(
             anchor=(
+                # The agent-action ``uses:`` shape (high precision).
                 rf"{AI_AGENT_USES_PATTERN}"
-                r"|claude\s+|aider\s+|openhands\s+|cursor-agent\s+|codex\s+"
+                # …OR a raw agent-CLI INVOCATION.  The bare-word arms
+                # (``claude\s+`` / ``codex\s+`` / …) were far too loose:
+                # they matched any mention of the word followed by
+                # whitespace, so a release matrix value
+                # (``binaries: "codex codex-responses-api-proxy"``), a
+                # ``tar … codex …`` archive line, and an agent-folder env
+                # list (``.claude .codex .gemini``) all substring-matched.
+                # Field FP: openai/codex rust-release.yml (a push:tags
+                # build with NO agent at all).  Require the CLI word to be
+                # at a command boundary (start-of-token: line start, after
+                # whitespace, ``|``, ``&``, ``;``, ``$(``, or a ``run:``
+                # key) AND be followed by an agent invocation argument — a
+                # ``-``/``--`` flag or a known subcommand — so a bare
+                # filename/identifier mention doesn't fire.
+                r"|(?:(?<=^)|(?<=[\s|&;(])|run:\s*)"
+                r"(?:claude|aider|openhands|cursor-agent|codex)\s+"
+                r"(?:-{1,2}\w|exec\b|chat\b|complete\b|run\b|-p\b)"
             ),
             requires=(
                 # File must also contain an upload-artifact step.
@@ -5698,6 +5937,26 @@ RULES: list[Rule] = [
                 "      - run: echo hi\n"
                 "      - uses: actions/upload-artifact@v4\n"
                 "        with: { name: out, path: out.txt }\n"
+            ),
+            # Release build whose matrix mentions a binary literally named
+            # ``codex`` + an upload-artifact step, but NO AI agent.  The
+            # tightened anchor requires the agent CLI word at a command
+            # boundary followed by an invocation flag/subcommand, so a
+            # build-matrix value (``binaries: "codex codex-responses-api-
+            # proxy"``) and an archive line (``tar … codex …``) no longer
+            # substring-match.  Field FP: openai/codex rust-release.yml.
+            (
+                "on:\n  push:\n    tags: ['rust-v*']\n"
+                "jobs:\n"
+                "  build:\n"
+                "    runs-on: macos-15\n"
+                "    strategy:\n      matrix:\n        include:\n"
+                '          - binaries: "codex codex-responses-api-proxy"\n'
+                "    steps:\n"
+                "      - run: cargo build --release\n"
+                "      - run: tar -cf - codex codex-resources | gzip\n"
+                "      - uses: actions/upload-artifact@v4\n"
+                "        with: { name: bin, path: dist/ }\n"
             ),
         ],
         stride=["E", "T"],

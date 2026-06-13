@@ -46,7 +46,12 @@ from taintly.testing.self_test import _KNOWN_MUTATION_GAPS  # noqa: E402
 # curated subset of the lab pack, so this baseline differs from upstream — e.g.
 # SEC4-GH is 7 here, including SEC4-GH-002 whitespace_pad).
 _PER_PREFIX_BASELINE: dict[str, int] = {
-    "AI-GH": 20,
+    # 20 -> 21: AI-GH-018 whitespace_pad gap documented (phase1-aigh-forkguard).
+    # The rule's new ``anchor_step_exclude`` (suppresses agent-CLI flags that
+    # land on a ``claude_args: |`` block-scalar continuation inside a ``uses:``
+    # action step) depends on structural step-segmentation, which the
+    # ``': ' -> ':'`` collapse breaks — same documented class as SEC6-GH-010.
+    "AI-GH": 21,
     "AI-GL": 4,
     "AI-JK": 4,
     "PSE-GH": 1,
