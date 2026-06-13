@@ -43,10 +43,20 @@ from enum import Enum
 # is compared by ``action.startswith(prefix)`` — so ``iam:`` matches
 # ``iam:PassRole``, ``iam:CreateAccessKey``, etc.
 #
-# Curated for attacker-utility, not completeness.  A narrow read-only
-# like ``s3:GetObject`` on a non-secret bucket is not in this set even
-# though its prefix ``s3:`` is — the prefix check runs against the
-# wildcard ``s3:*`` form only.
+# This is a CURATED, DELIBERATELY-INCOMPLETE allowlist of high-signal
+# attacker-utility actions — NOT a complete IAM model.  It exists to
+# raise blast-radius confidence when a known pivot primitive is present;
+# its absence from this set does NOT mean an action is safe.  AWS ships
+# thousands of actions and dozens of documented privilege-escalation
+# primitives; we list only the well-established, widely-cited ones whose
+# escalation mechanism is unambiguous, and we accept that newer or more
+# obscure primitives will fall through to a lower tier rather than risk a
+# noisy, hard-to-defend list.  Membership is by exact action match (the
+# wildcard prefixes below handle the service-wildcard ``s3:*`` form).
+#
+# A narrow read-only like ``s3:GetObject`` on a non-secret bucket is not
+# in this set even though its prefix ``s3:`` is — the prefix check runs
+# against the wildcard ``s3:*`` form only.
 _CRITICAL_WILDCARD_ACTION_PREFIXES: frozenset[str] = frozenset(
     {
         # Cross-service wildcards — nothing matches ``*:*`` except *:*.
@@ -123,6 +133,61 @@ _CRITICAL_SPECIFIC_ACTIONS: frozenset[str] = frozenset(
         # alone warrants escalation).
         "lambda:UpdateFunctionCode",
         "lambda:UpdateFunctionConfiguration",
+        # lambda:AddPermission grants any principal (incl. another
+        # account) invoke rights on a function — a resource-policy
+        # rewrite that bypasses the identity-side guardrails.
+        "lambda:AddPermission",
+        # ---- Service-specific PassRole-backed code-execution pivots.
+        # Each of these runs attacker-controlled code under a role the
+        # service is configured with — the canonical "abuse a compute
+        # service to escalate via its execution role" pattern.
+        #
+        # Glue dev endpoints / notebooks execute arbitrary code as the
+        # endpoint's IAM role (Rhino/known privesc primitive).
+        "glue:CreateDevEndpoint",
+        "glue:UpdateDevEndpoint",
+        # SageMaker presigned notebook URL = authenticated browser
+        # access to a notebook running under the notebook's role; create
+        # + run a training job is the same role-execution pivot.
+        "sagemaker:CreatePresignedNotebookInstanceUrl",
+        "sagemaker:CreateTrainingJob",
+        # Data Pipeline: define then activate a pipeline that runs under
+        # a passed role — classic PassRole-backed arbitrary execution.
+        "datapipeline:PutPipelineDefinition",
+        "datapipeline:ActivatePipeline",
+        # SSM RunCommand/start-session = arbitrary command execution on
+        # any managed instance (and thus that instance's role creds).
+        "ssm:SendCommand",
+        "ssm:StartSession",
+        # ec2:RunInstances combined with iam:PassRole launches an
+        # instance with an attacker-chosen instance profile, then reads
+        # its creds from IMDS — a top-cited EC2 escalation path.
+        "ec2:RunInstances",
+        # CloudFormation/CodeBuild update or create with a passed role
+        # executes attacker-defined steps under that role.
+        "cloudformation:CreateStack",
+        "cloudformation:UpdateStack",
+        "codebuild:CreateProject",
+        "codebuild:UpdateProject",
+        "codebuild:StartBuild",
+    }
+)
+
+
+# Actions that are LEGITIMATE in a trust / resource policy statement
+# (one that carries a ``Principal``).  When the ONLY actions in a
+# Principal-bearing statement are these, the statement is a pure trust
+# policy ("who may assume this role") and must be skipped to avoid the
+# CDK/CloudFormation false positive.  An action OUTSIDE this set in a
+# Principal-bearing statement is a co-located identity grant and must
+# NOT be silently dropped (P2.7).
+_TRUST_RELATIONSHIP_ACTIONS: frozenset[str] = frozenset(
+    {
+        "sts:AssumeRole",
+        "sts:AssumeRoleWithWebIdentity",
+        "sts:AssumeRoleWithSAML",
+        "sts:TagSession",
+        "sts:SetSourceIdentity",
     }
 )
 
@@ -200,18 +265,55 @@ def classify_policy(policy_json: str) -> PolicyVerdict:
             # which is the attacker's best-case scenario and the
             # right basis for a blast-radius upper bound.
             continue
+        actions = _normalize_list(stmt.get("Action"))
+
         # A statement with ``Principal`` (or ``NotPrincipal``) is a
         # resource / trust policy statement: ``Action: "sts:AssumeRole"``
         # there describes "who may assume THIS role", not "what this
-        # role can do".  Classifying that as CRITICAL is a hard FP — it
-        # fires on every sane CloudFormation / CDK trust policy.  The
-        # classifier is scoped to identity policies; skip trust
-        # statements so they don't drive the verdict.
+        # role can do".  Classifying *that* as CRITICAL is a hard FP — it
+        # fires on every sane CloudFormation / CDK trust policy.
+        #
+        # But a Principal-bearing statement can ALSO carry a co-located
+        # IDENTITY grant — e.g. ``Action: ["sts:AssumeRole","iam:PassRole"]``
+        # in one Allow.  Skipping the *whole* statement (the old
+        # behaviour) silently dropped that grant (P2.7).  So: split the
+        # actions into the legitimate trust-relationship verbs and the
+        # rest.  If only trust verbs remain it's a PURE trust policy →
+        # skip (no FP, anti-CDK intent preserved).  Otherwise evaluate
+        # ONLY the non-trust actions, and CAP the contribution at
+        # MODERATE: the statement shape is ambiguous (we can't be sure
+        # the parser hasn't mis-read a resource policy), so we surface
+        # the grant as a low-severity note rather than letting it drive a
+        # CRITICAL/HIGH verdict and risk re-introducing the FP.
         if "Principal" in stmt or "NotPrincipal" in stmt:
+            identity_actions = [a for a in actions if a not in _TRUST_RELATIONSHIP_ACTIONS]
+            if not identity_actions:
+                # Pure trust policy — skip, as before.
+                continue
+            saw_any_allow = True
+            raw_resource = stmt.get("Resource")
+            has_wildcard_resource = _resource_is_wildcard(raw_resource)
+            resources = _normalize_list(raw_resource)
+            stmt_radius, stmt_hits = _classify_statement(
+                identity_actions, resources, has_wildcard_resource
+            )
+            # Cap at MODERATE — see comment above.  A pure-MINIMAL
+            # identity grant in a trust statement stays MINIMAL.
+            if _radius_order(stmt_radius) > _radius_order(BlastRadius.MODERATE):
+                stmt_radius = BlastRadius.MODERATE
+            stmt_hits = [
+                f"{h}  [co-located identity grant in a Principal-bearing statement]"
+                for h in stmt_hits
+            ]
+            if _radius_order(stmt_radius) > _radius_order(verdict_radius):
+                verdict_radius = stmt_radius
+                triggering = stmt_hits
+            elif stmt_radius == verdict_radius:
+                triggering.extend(stmt_hits)
             continue
+
         saw_any_allow = True
 
-        actions = _normalize_list(stmt.get("Action"))
         # Resource semantics: we need to know whether the statement is
         # scoped or wildcard-ish.  ``_resource_is_wildcard`` looks at
         # the RAW value, so a list of CloudFormation ``Fn::GetAtt``

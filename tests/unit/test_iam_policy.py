@@ -317,6 +317,161 @@ def test_empty_policy_is_minimal():
 
 
 # ---------------------------------------------------------------------------
+# P2.6 — expanded curated pivot list (service-specific escalation primitives)
+#
+# These are well-established, widely-cited privilege-escalation primitives
+# that previously fell through to MINIMAL because they were neither
+# wildcards nor in the curated set.  Each escalates to CRITICAL on a
+# wildcard Resource (a pivot primitive on Resource:* is full blast).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        # Glue dev endpoints run attacker code under the endpoint's role.
+        "glue:CreateDevEndpoint",
+        "glue:UpdateDevEndpoint",
+        # SageMaker privileged notebook / training-job execution.
+        "sagemaker:CreatePresignedNotebookInstanceUrl",
+        "sagemaker:CreateTrainingJob",
+        # Lambda resource-policy rewrite — grant any principal invoke.
+        "lambda:AddPermission",
+        # Data Pipeline PassRole-backed execution.
+        "datapipeline:PutPipelineDefinition",
+        "datapipeline:ActivatePipeline",
+        # SSM arbitrary command / session on managed instances.
+        "ssm:SendCommand",
+        "ssm:StartSession",
+        # EC2 run-instances (paired with PassRole) → IMDS cred theft.
+        "ec2:RunInstances",
+        # CloudFormation / CodeBuild attacker-defined execution.
+        "cloudformation:CreateStack",
+        "cloudformation:UpdateStack",
+        "codebuild:CreateProject",
+        "codebuild:UpdateProject",
+        "codebuild:StartBuild",
+    ],
+)
+def test_expanded_pivot_actions_escalate_on_wildcard_resource(action: str) -> None:
+    # Each new primitive must classify as a pivot (CRITICAL on Resource:*),
+    # NOT fall through to MINIMAL as it did before P2.6.
+    verdict = classify_policy(
+        '{"Statement":[{"Effect":"Allow","Action":"%s","Resource":"*"}]}' % action
+    )
+    assert verdict.radius == BlastRadius.CRITICAL, (
+        f"{action} classified {verdict.radius}; expected CRITICAL "
+        "(it is a documented privilege-escalation primitive)"
+    )
+    assert any(action in a for a in verdict.triggering_actions)
+
+
+def test_expanded_pivot_action_on_specific_resource_is_high():
+    # On a narrow resource the same primitive is HIGH (pivot, scoped),
+    # confirming it is treated as a specific pivot primitive (tier 3),
+    # not a wildcard-prefix action.
+    verdict = classify_policy(
+        '{"Statement":[{"Effect":"Allow","Action":"glue:UpdateDevEndpoint",'
+        '"Resource":"arn:aws:glue:us-east-1:123:devEndpoint/specific"}]}'
+    )
+    assert verdict.radius == BlastRadius.HIGH
+
+
+def test_uncurated_specific_action_still_minimal():
+    # Guard against padding: an action NOT in the curated set (a benign
+    # specific read) must still classify MINIMAL — the list stays curated.
+    verdict = classify_policy(
+        '{"Statement":[{"Effect":"Allow","Action":"glue:GetTable",'
+        '"Resource":"arn:aws:glue:us-east-1:123:table/db/t"}]}'
+    )
+    assert verdict.radius == BlastRadius.MINIMAL
+
+
+# ---------------------------------------------------------------------------
+# P2.7 — Principal-bearing statement: narrow the whole-statement skip so a
+# co-located identity grant is no longer hidden, while a PURE trust policy
+# is still skipped (no CDK/CloudFormation FP).
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_principal_and_identity_grant_is_not_hidden():
+    # A SINGLE Allow statement carrying both a Principal (trust shape) AND
+    # a co-located identity grant (iam:PassRole on Resource:*).  The old
+    # behaviour skipped the whole statement and silently dropped the
+    # grant (verdict MINIMAL).  After P2.7 the grant is surfaced — capped
+    # at MODERATE because the statement shape is ambiguous — and named in
+    # triggering_actions with a note.
+    verdict = classify_policy(
+        '{"Statement":[{"Effect":"Allow",'
+        '"Principal":{"Service":"ec2.amazonaws.com"},'
+        '"Action":["sts:AssumeRole","iam:PassRole"],'
+        '"Resource":"*"}]}'
+    )
+    assert verdict.radius == BlastRadius.MODERATE, (
+        f"mixed Principal+identity statement got {verdict.radius}; the "
+        "co-located iam:PassRole grant should no longer be hidden (capped "
+        "at MODERATE so the trust-policy shape can't drive a CRITICAL FP)"
+    )
+    assert any("iam:PassRole" in a for a in verdict.triggering_actions)
+    assert any("co-located identity grant" in a for a in verdict.triggering_actions)
+
+
+def test_pure_trust_policy_is_still_skipped_no_fp():
+    # Regression guard for the anti-CDK-FP intent: a PURE trust policy
+    # (Principal + only trust-relationship verbs, no other identity
+    # actions) must STILL be skipped entirely — no false positive.
+    verdict = classify_policy(
+        '{"Statement":[{"Effect":"Allow",'
+        '"Principal":{"Service":"ec2.amazonaws.com"},'
+        '"Action":"sts:AssumeRole"}]}'
+    )
+    assert verdict.radius == BlastRadius.MINIMAL, (
+        f"pure trust policy got {verdict.radius}; it must stay MINIMAL "
+        "(the Principal + trust-only actions disqualify it from scoring)"
+    )
+    assert verdict.triggering_actions == []
+
+
+def test_pure_trust_policy_multiple_trust_verbs_still_skipped():
+    # Several trust-relationship verbs (web-identity federation + session
+    # tagging) but no identity grant — still a pure trust policy → skipped.
+    verdict = classify_policy(
+        '{"Statement":[{"Effect":"Allow",'
+        '"Principal":{"Federated":"arn:aws:iam::123:oidc-provider/x"},'
+        '"Action":["sts:AssumeRoleWithWebIdentity","sts:TagSession"]}]}'
+    )
+    assert verdict.radius == BlastRadius.MINIMAL
+    assert verdict.triggering_actions == []
+
+
+def test_mixed_principal_with_narrow_identity_grant_stays_minimal():
+    # A co-located grant that is itself narrow (s3:GetObject on a specific
+    # bucket) must NOT escalate — surfacing the grant must not invent a
+    # false positive when the grant is benign.
+    verdict = classify_policy(
+        '{"Statement":[{"Effect":"Allow",'
+        '"Principal":{"Service":"ec2.amazonaws.com"},'
+        '"Action":["sts:AssumeRole","s3:GetObject"],'
+        '"Resource":"arn:aws:s3:::my-bucket/config/*"}]}'
+    )
+    assert verdict.radius == BlastRadius.MINIMAL
+
+
+def test_mixed_principal_critical_grant_is_capped_at_moderate():
+    # Even a Resource:* iam:* wildcard co-located with a Principal is
+    # capped at MODERATE (not CRITICAL): the statement shape is ambiguous,
+    # so we surface-but-cap rather than risk re-introducing the trust FP.
+    verdict = classify_policy(
+        '{"Statement":[{"Effect":"Allow",'
+        '"Principal":{"AWS":"arn:aws:iam::123:root"},'
+        '"Action":["sts:AssumeRole","iam:*"],'
+        '"Resource":"*"}]}'
+    )
+    assert verdict.radius == BlastRadius.MODERATE
+    assert any("iam:*" in a for a in verdict.triggering_actions)
+
+
+# ---------------------------------------------------------------------------
 # Ordering invariant — sanity check the BlastRadius enum order
 # ---------------------------------------------------------------------------
 

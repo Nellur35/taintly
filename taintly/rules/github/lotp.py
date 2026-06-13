@@ -75,6 +75,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="LOTP-GH-001",
+        finding_family="pipeline_tool_execution",
         title="Build tool executed in job that checks out pull-request code (LOTP)",
         severity=Severity.CRITICAL,
         platform=Platform.GITHUB,
@@ -183,6 +184,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="LOTP-GH-003",
+        finding_family="pipeline_tool_execution",
         title="npm install / npm ci without --ignore-scripts in externally-triggered workflow",
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
@@ -260,6 +262,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="LOTP-GH-004",
+        finding_family="pipeline_tool_execution",
         title="Build tool executed after actions/download-artifact (untrusted artefact LOTP)",
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
@@ -360,6 +363,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="LOTP-GH-005",
+        finding_family="pipeline_tool_execution",
         title=(
             "npm/yarn/pnpm install runs lifecycle scripts in a job "
             "holding an exfil-worthy secret (Shai-Hulud class)"

@@ -223,6 +223,10 @@ def _composite(line: int = 8) -> Finding:
         origin="cross-workflow",
         exploitability="medium",
         finding_family="chain-composition",
+        # Composer output is identified by composition_tags (the routing
+        # field), not finding_family — mirror how the engine emits it
+        # (R5/P3.1a).
+        composition_tags=frozenset({"chain-composition"}),
     )
 
 
@@ -252,7 +256,8 @@ def test_a0_composite_at_different_line_untouched():
 
 def test_a0_non_composite_chain_finding_untouched():
     # CHAIN-GH-001 is a single-file ContextPattern (family privileged_pr_trigger),
-    # already calibrated in scan_file — the family check must exclude it here.
+    # already calibrated in scan_file — it carries no composition_tags, so the
+    # composer-output routing check must exclude it here (R5/P3.1a).
     leg = _leg()
     other = Finding(
         rule_id="CHAIN-GH-001",

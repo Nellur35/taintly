@@ -340,6 +340,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC6-GL-006",
+        finding_family="untrusted_code_execution",
         title="wget/bash pattern or bash-subshell-curl in script block",
         severity=Severity.HIGH,
         platform=Platform.GITLAB,
@@ -1429,6 +1430,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="LOTP-GL-003",
+        finding_family="pipeline_tool_execution",
         title=("npm / yarn / pnpm install without --ignore-scripts in an MR pipeline"),
         severity=Severity.HIGH,
         platform=Platform.GITLAB,

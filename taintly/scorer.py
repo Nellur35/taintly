@@ -64,7 +64,12 @@ def _weight(f: Finding) -> float:
         conf = Confidence(f.confidence).weight
     except ValueError:
         conf = 1.0
-    expl = _EXPLOITABILITY_WEIGHT.get(f.exploitability or "medium", 0.8)
+    # Fail-secure on an unmapped non-empty exploitability tier: an
+    # unrecognised string falls back to 1.0 (full weight), matching the
+    # confidence fallback above, so a typo/new tier can't silently
+    # *reduce* a finding's deduction. ``None``/empty is a DEFINED medium
+    # default (not "unknown"), so ``or "medium"`` is preserved.
+    expl = _EXPLOITABILITY_WEIGHT.get(f.exploitability or "medium", 1.0)
     return conf * expl
 
 
@@ -111,6 +116,15 @@ _BONUS_NO_CRITICALS = 5
 _BONUS_NO_CRITICALS_HIGH_CAP = 2
 _BONUS_ALL_PINNED = 5  # zero pin rules fired for the platforms that were scanned
 _BONUS_ALL_PERMISSIONS = 5  # zero permission rules fired for platforms with a perms concept
+
+# Security ceilings — the granular 0-100 score stays for progress tracking, but
+# the headline grade must never present an active CRITICAL (or multiple
+# unmitigated HIGHs) as passing. Bonuses are zeroed only when their *specific*
+# rule fired, so without a ceiling a repo with CRITICAL clusters plus pinned
+# actions / a narrow permissions block could accumulate bonuses back into a
+# passing band (the +5/+10 swing that let a 5-CRITICAL repo land ~72/C).
+_CRITICAL_SCORE_CEILING = 49  # any active CRITICAL cluster -> failing grade
+_HIGH_SCORE_CEILING = 69  # more than one unmitigated HIGH -> cap at C
 
 # Per-platform rule sets the bonuses are gated on. A Jenkins-only or
 # GitLab-only scan does not earn the GitHub-permissions bonus by
@@ -406,10 +420,36 @@ def compute_score(
                 bonus_all_perms = 0
                 break
 
+    # Coverage gate: the "all pinned" / "all permissions" bonuses assert
+    # "we scanned the config and everything is pinned/permissioned" — a
+    # vacuous claim if nothing was actually scanned. A scan with zero
+    # files (e.g. the Jenkins posture audit, which produces findings via
+    # a live API but sets files_scanned=0) must not earn them. The
+    # no_criticals bonus is a property of the findings themselves, not of
+    # file coverage, so it is left untouched.
+    if files_scanned <= 0:
+        bonus_all_pinned = 0
+        bonus_all_perms = 0
+
     total_bonus = bonus_no_criticals + bonus_all_pinned + bonus_all_perms
 
     raw = 100 - cluster_ded + total_bonus
     total_score = max(0, min(100, int(raw)))
+
+    # Security ceiling (applied AFTER bonuses): an active CRITICAL can never
+    # present as a passing grade, and >1 unmitigated HIGH is capped at C, no
+    # matter how many bonuses accrued. Only ever lowers the score. Counts
+    # EXCLUDE review-needed findings — those contribute 0 to the score by
+    # design (unconfirmed until human triage), so they must not trip the
+    # ceiling either; the ceiling fires only on confirmed/active risk.
+    n_critical_active = sum(
+        1 for f in findings if f.severity == Severity.CRITICAL and not f.review_needed
+    )
+    n_high_active = sum(1 for f in findings if f.severity == Severity.HIGH and not f.review_needed)
+    if n_critical_active > 0:
+        total_score = min(total_score, _CRITICAL_SCORE_CEILING)
+    if n_high_active > 1:
+        total_score = min(total_score, _HIGH_SCORE_CEILING)
 
     deductions = {
         "CLUSTERS": -cluster_ded,

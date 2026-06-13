@@ -417,11 +417,215 @@ def _has_unpinned_in_step_window(
     return step_line in unpinned_lines
 
 
+# ---------------------------------------------------------------------------
+# CHAIN-GH-105 — cross-job privilege escalation (P1.3)
+# ---------------------------------------------------------------------------
+
+# ``${{ needs.<job>.outputs.<name> }}`` — the cross-job output reference.
+# Mirrors taint._NEEDS_OUTPUT_REF_RE but kept local so this rule does not
+# take a dependency on the taint engine's internals.
+_NEEDS_OUTPUT_REF_RE = re.compile(
+    r"\$\{\{\s*needs\.([A-Za-z_][A-Za-z0-9_-]*)"
+    r"\.outputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}"
+)
+
+
+class _CrossJobEdge:
+    """One producer→consumer cross-job output edge in a single file.
+
+    * ``producer`` — the job named in ``needs.<producer>.outputs.*``.
+    * ``consumer`` — the job whose body contains the reference.
+    * ``line`` — 1-based line of the consumer's reference (anchor).
+    * ``output`` — the referenced output name (for the snippet).
+    """
+
+    __slots__ = ("consumer", "line", "output", "producer")
+
+    def __init__(self, producer: str, consumer: str, line: int, output: str) -> None:
+        self.producer = producer
+        self.consumer = consumer
+        self.line = line
+        self.output = output
+
+
+def _producer_jobs_in_file(file: str) -> set[str]:
+    """Return the set of job names in ``file`` that declare an
+    ``outputs:`` block (the producers of cross-job output edges).
+
+    A job declares outputs when an ``outputs:`` key appears at the
+    job-body indent (one level deeper than the job key). We use the
+    shared :func:`_split_into_job_segments` so the job-boundary
+    heuristic matches the corpus and per-file rules exactly.
+    """
+    from taintly.models import _split_into_job_segments
+
+    try:
+        with open(file, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return set()
+    producers: set[str] = set()
+    for _start_idx, seg in _split_into_job_segments(lines):
+        # The first line of a job segment is the ``<jobname>:`` key
+        # (pre-job preamble lands in the first segment, whose first
+        # line is not a job key — that segment has no outputs-bearing
+        # job name to credit, so a missing match simply skips it).
+        if not seg:
+            continue
+        head = seg[0].lstrip()
+        if ":" not in head:
+            continue
+        job_name = head.split(":", 1)[0].strip()
+        if not job_name or job_name in {"jobs", "on", "name", "permissions", "env"}:
+            continue
+        # Does any line in this segment declare an ``outputs:`` block?
+        for ln in seg[1:]:
+            if re.match(r"^\s+outputs\s*:\s*(?:#.*)?$", ln):
+                producers.add(job_name)
+                break
+    return producers
+
+
+def _crossjob_edges_in_file(file: str) -> list[_CrossJobEdge]:
+    """Extract every ``needs.<producer>.outputs.<name>`` edge in
+    ``file``, attributing each reference to the consumer job whose
+    segment contains it.
+
+    Only edges whose producer actually declares an ``outputs:`` block
+    are kept: a ``needs.X.outputs.Y`` reference to a job that doesn't
+    declare outputs is a typo / dead reference, not a real data edge.
+    """
+    from taintly.models import _split_into_job_segments
+
+    try:
+        with open(file, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return []
+    producers = _producer_jobs_in_file(file)
+    if not producers:
+        return []
+    edges: list[_CrossJobEdge] = []
+    for start_idx, seg in _split_into_job_segments(lines):
+        if not seg:
+            continue
+        head = seg[0].lstrip()
+        if ":" not in head:
+            continue
+        consumer = head.split(":", 1)[0].strip()
+        if not consumer or consumer in {"jobs", "on", "name", "permissions", "env"}:
+            continue
+        for offset, ln in enumerate(seg):
+            for m in _NEEDS_OUTPUT_REF_RE.finditer(ln):
+                producer, output = m.group(1), m.group(2)
+                if producer not in producers:
+                    continue
+                if producer == consumer:
+                    continue  # a job can't ``needs`` itself; defensive
+                edges.append(
+                    _CrossJobEdge(
+                        producer=producer,
+                        consumer=consumer,
+                        line=start_idx + offset + 1,  # 1-based file line
+                        output=output,
+                    )
+                )
+    return edges
+
+
+def _files_with_contexts(db: Database) -> set[str]:
+    """The set of workflow files the composer seeded job contexts for.
+
+    CHAIN-GH-105 has no foothold finding to iterate (unlike the
+    finding-composing siblings); it joins purely on workflow
+    structure + per-job permission context. The seeded
+    :class:`JobContextFact` rows enumerate exactly the files in scope.
+    """
+    from taintly.composer import JobContextFact
+
+    files: set[str] = set()
+    for ctx in db.all("job_context"):
+        if isinstance(ctx, JobContextFact) and ctx.file:
+            files.add(ctx.file)
+    return files
+
+
+def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
+    """Cross-job privilege escalation (P1.3) → HIGH.
+
+    A LOW-privilege producer job (``has_write_token=False``) declares
+    an output that a HIGH-privilege consumer job
+    (``has_write_token=True``) reads via
+    ``${{ needs.<producer>.outputs.<name> }}``. The producer is the
+    exposed / attacker-influenceable surface; its output crossing into
+    a write-capable job is a privilege-escalation vector — the
+    write-capable job acts on data shaped in a context that was never
+    granted that authority.
+
+    Distinct from TAINT-GH-009 (cross-job output → *shell* sink) and
+    from the severity-escalation / id-token co-occurrence rules: the
+    sink here is the *privilege boundary itself*, not a shell or a
+    specific dangerous statement. The composite fires only when the
+    privilege GRADIENT exists (read producer → write consumer); a
+    same-tier or high→low edge is benign data flow and is suppressed.
+
+    Per-job write-token resolution relies on each job declaring its
+    own ``permissions:`` block (the only way the corpus can attribute
+    a job-specific :class:`JobContextFact`). When both jobs fall back
+    to the workflow-default wildcard, no gradient is observable and
+    the rule conservatively does NOT fire — favouring precision, the
+    whole point of the composer family.
+    """
+    files = _files_with_contexts(db)
+    for file in sorted(files):
+        edges = _crossjob_edges_in_file(file)
+        if not edges:
+            continue
+        for edge in edges:
+            producer_ctx = context_for(db, file, edge.producer)
+            consumer_ctx = context_for(db, file, edge.consumer)
+            if producer_ctx is None or consumer_ctx is None:
+                continue
+            # Suppress when a trusted-bot gate restricts the workflow:
+            # the producer surface isn't externally attacker-controlled.
+            if consumer_ctx.trusted_bot_gate or producer_ctx.trusted_bot_gate:
+                continue
+            # The privilege GRADIENT: read-only producer → write consumer.
+            if producer_ctx.has_write_token:
+                continue
+            if not consumer_ctx.has_write_token:
+                continue
+            snippet = (
+                "CHAIN: cross-job privilege escalation. Low-privilege "
+                f"producer job `{edge.producer}` (read-only token) "
+                f"declares output `{edge.output}`, which the "
+                f"write-capable consumer job `{edge.consumer}` reads "
+                f"via `${{{{ needs.{edge.producer}.outputs.{edge.output} }}}}`. "
+                "The producer is the exposed, attacker-influenceable "
+                "surface; its output crossing into a job that holds a "
+                "write-capable token (contents/id-token/packages write) "
+                "lets a value shaped under low authority drive an action "
+                "under high authority — a privilege-escalation gradient "
+                f"({edge.producer} → {edge.consumer})."
+            )
+            yield (
+                "composite",
+                CompositeFact(
+                    chain_id="CHAIN-GH-105",
+                    file=file,
+                    job=edge.consumer,
+                    anchor_line=edge.line,
+                    snippet=snippet,
+                ),
+            )
+
+
 COMPOSER_RULES = [
     _compose_chain_gh_101,
     _compose_chain_gh_102,
     _compose_chain_gh_103,
     _compose_chain_gh_104,
+    _compose_chain_gh_105,
 ]
 
 
@@ -506,6 +710,7 @@ RULES: list[Rule] = [
         confidence="high",
         review_needed=False,
         finding_family="chain-composition",
+        composition_tags=frozenset({"chain-composition"}),
     ),
     Rule(
         id="CHAIN-GH-102",
@@ -548,6 +753,7 @@ RULES: list[Rule] = [
         confidence="high",
         review_needed=False,
         finding_family="chain-composition",
+        composition_tags=frozenset({"chain-composition"}),
     ),
     Rule(
         id="CHAIN-GH-104",
@@ -608,6 +814,7 @@ RULES: list[Rule] = [
         confidence="high",
         review_needed=False,
         finding_family="chain-composition",
+        composition_tags=frozenset({"chain-composition"}),
     ),
     Rule(
         id="CHAIN-GH-103",
@@ -650,5 +857,78 @@ RULES: list[Rule] = [
         confidence="high",
         review_needed=False,
         finding_family="chain-composition",
+        composition_tags=frozenset({"chain-composition"}),
+    ),
+    Rule(
+        id="CHAIN-GH-105",
+        title=(
+            "Composite: cross-job privilege escalation — low-privilege "
+            "producer output flows into a write-capable consumer job "
+            "(needs.*.outputs + privilege gradient)"
+        ),
+        severity=Severity.MEDIUM,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-2",
+        description=(
+            "CHAIN-GH-105 composes workflow structure with per-job "
+            "permission context: (1) a producer job declares an "
+            "`outputs:` value and holds only a read-scope GITHUB_TOKEN; "
+            "(2) a consumer job reads that value via "
+            "`${{ needs.<producer>.outputs.<name> }}`; (3) the consumer "
+            "job holds a write-capable token (e.g. `contents: write`, "
+            "`id-token: write`).\n\n"
+            "The producer is the lower-privilege, attacker-influenceable "
+            "surface; its output crossing the job boundary into a "
+            "write-capable consumer is a privilege-escalation vector — a "
+            "value shaped under low authority drives an action under "
+            "high authority.\n\n"
+            "This is DISTINCT from TAINT-GH-009 (cross-job output "
+            "reaching a *shell* sink): the boundary crossed here is the "
+            "privilege gradient itself, not a specific dangerous "
+            "statement. The composite fires only when the gradient is "
+            "observable (read producer → write consumer); same-tier or "
+            "high→low edges are benign data flow and are suppressed. "
+            "Per-job permission attribution requires each job to declare "
+            "its own `permissions:` block; when both jobs inherit the "
+            "workflow default, no gradient is observable and the rule "
+            "conservatively does not fire."
+        ),
+        pattern=CorpusPattern(callback=_make_chain_callback("CHAIN-GH-105")),
+        remediation=(
+            "Break the gradient or harden the boundary:\n"
+            "  1. Treat `${{ needs.*.outputs.* }}` from a lower-privilege "
+            "job as untrusted in the write-capable consumer — validate / "
+            "allowlist it before it drives any write, publish, or "
+            "deploy action;\n"
+            "  2. Drop the consumer job's permissions to the minimum it "
+            "actually needs (`permissions: contents: read`) so the "
+            "escalation surface disappears;\n"
+            "  3. If the producer genuinely needs to feed a privileged "
+            "step, move the value through an explicitly validated "
+            "intermediate (e.g. a checksum / enum check) rather than "
+            "consuming it raw."
+        ),
+        reference=(
+            "https://owasp.org/www-project-top-10-ci-cd-security-risks/CICD-SEC-02-Inadequate-Identity-And-Access-Management"
+        ),
+        test_positive=[],
+        test_negative=[],
+        stride=["E", "T"],
+        threat_narrative=(
+            "A repository runs a two-job workflow: a read-only "
+            "`validate` job (its `permissions:` block grants only "
+            "`contents: read`) computes an output from data an external "
+            "contributor can influence, and a `publish` job declares "
+            "`contents: write` / `id-token: write` and consumes "
+            "`${{ needs.validate.outputs.tag }}`. An attacker who can "
+            "shape the producer's output — without ever obtaining "
+            "write authority directly — steers what the write-capable "
+            "job does, escalating from the low-privilege surface into "
+            "the privileged one across the job boundary."
+        ),
+        confidence="medium",
+        review_needed=True,
+        finding_family="chain-composition",
+        composition_tags=frozenset({"chain-composition"}),
     ),
 ]

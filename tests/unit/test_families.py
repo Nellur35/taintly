@@ -93,6 +93,56 @@ def test_taint_rule_defaults_to_medium_confidence():
     assert default_confidence("TAINT-GH-001") == "medium"
 
 
+# ---------------------------------------------------------------------------
+# Grandfather mechanism (P3.6)
+# ---------------------------------------------------------------------------
+
+
+def test_new_unmapped_rule_defaults_to_medium():
+    """A brand-new rule id — not overridden, not in the grandfather baseline —
+    defaults to MEDIUM so an un-validated detector cannot score at full weight
+    before it earns it.
+    """
+    assert default_confidence("BRAND-NEW-GH-99999") == "medium"
+
+
+def test_existing_grandfathered_rule_stays_high():
+    """An existing rule frozen into the grandfather baseline keeps HIGH — no
+    retroactive score shift from the P3.6 split.
+    """
+    assert default_confidence("SEC3-GH-001") == "high"
+
+
+def test_explicit_override_wins_over_grandfather():
+    """An explicit _CONFIDENCE_OVERRIDES entry beats the grandfather baseline."""
+    assert default_confidence("SEC4-GH-002") == "medium"
+
+
+def test_every_registered_rule_keeps_its_resolved_confidence():
+    """The P3.6 default change must be a ZERO retroactive score shift: every
+    rule that exists today must resolve to exactly the confidence it had
+    before, via ``rule.confidence or default_confidence(rule.id)`` (the engine
+    resolution). New-rule MEDIUM only applies to ids not yet registered.
+    """
+    from taintly.families import _CONFIDENCE_OVERRIDES, _GRANDFATHERED_HIGH
+    from taintly.rules.registry import load_all_rules
+
+    for rule in load_all_rules():
+        resolved = rule.confidence or default_confidence(rule.id)
+        if rule.confidence:
+            expected = rule.confidence
+        elif rule.id in _CONFIDENCE_OVERRIDES:
+            expected = _CONFIDENCE_OVERRIDES[rule.id]
+        else:
+            # Every registered un-overridden rule must be grandfathered.
+            assert rule.id in _GRANDFATHERED_HIGH, (
+                f"{rule.id} is registered but missing from the grandfather "
+                f"baseline — it would silently drop to MEDIUM"
+            )
+            expected = "high"
+        assert resolved == expected, f"{rule.id}: resolved {resolved!r} != expected {expected!r}"
+
+
 def test_pull_request_target_is_review_needed_by_default():
     """pull_request_target is safe-or-dangerous by design.  The
     improvement report specifically calls this out."""

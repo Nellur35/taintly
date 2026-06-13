@@ -42,6 +42,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="LOTP-GL-001",
+        finding_family="pipeline_tool_execution",
         title="Build tool executed in GitLab merge-request pipeline (LOTP)",
         severity=Severity.HIGH,
         platform=Platform.GITLAB,
@@ -165,6 +166,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="LOTP-GL-005",
+        finding_family="pipeline_tool_execution",
         title=(
             "npm/yarn/pnpm install runs lifecycle scripts in a GitLab "
             "job holding an exfil-worthy secret (Shai-Hulud class)"

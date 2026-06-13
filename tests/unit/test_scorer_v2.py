@@ -56,7 +56,10 @@ def test_low_confidence_finding_deducts_less_than_high():
 
     high_conf = compute_score(findings_high)
     low_conf = compute_score(findings_low)
-    assert low_conf.total_score > high_conf.total_score
+    # These inputs carry an active CRITICAL, so the security ceiling clamps
+    # total_score to F for both. Assert the weighting on the cluster deduction
+    # it actually drives: lower confidence -> smaller deduction (less negative).
+    assert low_conf.deductions["CLUSTERS"] > high_conf.deductions["CLUSTERS"]
 
 
 def test_review_needed_finding_does_not_deduct():
@@ -70,6 +73,48 @@ def test_review_needed_finding_does_not_deduct():
     assert only_review.total_score == 100
     assert only_review.review_needed == 1
     assert only_review.distinct_risks == 0
+
+
+def test_security_ceiling_active_critical_never_passes():
+    """P1.1 — an active CRITICAL must never present as a passing grade, even
+    when pin/permission bonuses accrue (they're zeroed only when their own
+    rule fired, so a CRITICAL repo with pinned actions could otherwise land in
+    a passing band)."""
+    findings = [
+        _fn(f"R{i}", Severity.CRITICAL, family=f"fam{i}", owasp="CICD-SEC-4") for i in range(5)
+    ]
+    score = compute_score(findings, files_scanned=3, platforms_scanned={Platform.GITHUB})
+    assert score.total_score <= 49
+    assert score.grade == "F"
+
+
+def test_security_ceiling_multiple_high_caps_at_c():
+    """P1.1 — more than one unmitigated HIGH caps the headline at C (<=69)."""
+    findings = [
+        _fn("H1", Severity.HIGH, family="a", owasp="CICD-SEC-3"),
+        _fn("H2", Severity.HIGH, family="b", owasp="CICD-SEC-4"),
+    ]
+    score = compute_score(findings, files_scanned=3, platforms_scanned={Platform.GITHUB})
+    assert score.total_score <= 69
+
+
+def test_security_ceiling_ignores_review_needed_critical():
+    """P1.1 — a review-needed (unconfirmed) CRITICAL contributes 0 and must
+    NOT trip the ceiling, consistent with review-needed never moving the score."""
+    score = compute_score(
+        [
+            _fn(
+                "R",
+                Severity.CRITICAL,
+                review_needed=True,
+                family="privileged_pr_trigger",
+                owasp="CICD-SEC-4",
+            )
+        ],
+        files_scanned=3,
+        platforms_scanned={Platform.GITHUB},
+    )
+    assert score.total_score == 100
 
 
 def test_distinct_risk_count_matches_clusters():
@@ -142,7 +187,12 @@ def test_low_exploitability_deducts_less_than_high():
         file="x.yml", line=1, owasp_cicd="CICD-SEC-2",
         finding_family="identity_access", confidence="high", exploitability="high",
     ))
-    assert compute_score(low_expl).total_score > compute_score(high_expl).total_score
+    # Active CRITICAL present -> security ceiling clamps total_score to F for
+    # both; assert the weighting on the cluster deduction (ceiling-immune).
+    assert (
+        compute_score(low_expl).deductions["CLUSTERS"]
+        > compute_score(high_expl).deductions["CLUSTERS"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -271,9 +321,57 @@ def test_clean_repo_with_unknown_platforms_still_scores_a():
     """When platforms_scanned is omitted (the legacy / ad-hoc caller),
     a clean repo must still hit 100. Inference returns an empty set
     from no findings; the scorer treats that as 'all platforms'."""
-    score = compute_score([])
+    # files_scanned=1: this is a real scan that examined config and found
+    # nothing — it earns the coverage-gated all_permissions bonus.
+    score = compute_score([], files_scanned=1)
     assert score.total_score == 100
     assert score.bonuses["all_permissions"] == 5  # GitHub assumed scanned
+
+
+def test_zero_files_scanned_forfeits_pinning_bonuses():
+    """P2.5: the all_pinned / all_permissions bonuses assert 'we scanned
+    the config and everything is pinned/permissioned' — vacuous if no
+    files were scanned. A pin-clean GitHub finding set must therefore
+    score LOWER with files_scanned=0 (no coverage) than with
+    files_scanned=1 (real coverage), because the +5 pinned bonus (and the
+    GitHub +5 perms bonus) is only earned when something was scanned.
+
+    Real-world trigger: the Jenkins posture audit produces findings via a
+    live API but reports files_scanned=0, and was banking the +5 pinned
+    bonus undeservedly.
+    """
+    # Several DISTINCT MEDIUM GitHub findings — none of them a pin rule
+    # (SEC3-GH-001/002) or the perms rule (SEC2-GH-002), so both bonuses
+    # are otherwise earnable and only the files_scanned gate differs.
+    # MEDIUMs (not CRITICAL/HIGH) keep the security ceiling out of the
+    # picture, and enough distinct clusters push the deduction past the
+    # +15 of bonuses so the scanned score lands strictly below 100 — i.e.
+    # the forfeited bonus is observable, not clamped away.
+    findings = [
+        _fn(
+            f"SEC4-GH-{n:03d}",
+            severity=Severity.MEDIUM,
+            family=f"pipeline_execution_{n}",
+            owasp="CICD-SEC-4",
+        )
+        for n in range(10, 17)
+    ]
+
+    scanned = compute_score(findings, files_scanned=1)
+    unscanned = compute_score(findings, files_scanned=0)
+
+    # Coverage gate flips both bonuses off when nothing was scanned.
+    assert scanned.bonuses["all_actions_pinned"] == 5
+    assert scanned.bonuses["all_permissions"] == 5
+    assert unscanned.bonuses["all_actions_pinned"] == 0
+    assert unscanned.bonuses["all_permissions"] == 0
+    # no_criticals is a property of findings, not coverage — unchanged.
+    assert scanned.bonuses["no_criticals"] == unscanned.bonuses["no_criticals"]
+
+    # The headline score is strictly lower without coverage: the +10 of
+    # forfeited bonuses isn't being clamped away here (a single MEDIUM
+    # leaves ample headroom below 100), so the difference is observable.
+    assert unscanned.total_score < scanned.total_score
 
 
 def test_sec9_gl_artifact_cluster_does_not_dominate_score():

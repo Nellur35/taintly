@@ -121,7 +121,25 @@ _RE_WRITE_PERM = re.compile(
     re.MULTILINE,
 )
 _RE_WRITE_ALL = re.compile(r"^\s*permissions\s*:\s*write-all\b", re.MULTILINE)
+# ``id-token: write`` is the OIDC-federation signal: it grants the job a
+# short-lived, dynamically-minted token to authenticate to a cloud provider
+# WITHOUT a static secret in the repo. ``_RE_WRITE_PERM`` already folds
+# ``id-token`` into the generic ``has_write_permissions`` flag, but that
+# conflates "has SOME write scope" with "uses OIDC" — two very different
+# threat models (a static-secret leak vs. a token that can't be exfiltrated
+# for reuse). This distinct flag lets the scorer tell them apart. Anchored
+# to start-of-line + tolerant of the no-space ``id-token:write`` form.
+_RE_ID_TOKEN_WRITE = re.compile(r"^\s*id-token\s*:\s*['\"]?write\b", re.MULTILINE)
 _RE_PERMISSIONS_BLOCK = re.compile(r"^\s*permissions\s*:", re.MULTILINE)
+# GitHub-Actions positive marker: ``${{ … }}`` expressions and ``uses:`` step
+# references are GitHub-only syntax (GitLab uses ``$VAR`` / Jenkins uses Groovy),
+# so either one identifies the content as a GitHub workflow WITHOUT relying on a
+# ``permissions:`` block (which is exactly the thing P2.2's implicit-default-write
+# inference must NOT depend on). This scopes the implicit-write inference to
+# GitHub so a GitLab/Jenkins file — which also has ``has_explicit_permissions``
+# False because it never sets a GitHub permissions block — is not mis-credited a
+# write-capable default token it does not have.
+_RE_GITHUB_MARKER = re.compile(r"\$\{\{|^\s*(?:-\s*)?uses\s*:", re.MULTILINE)
 _RE_RELEASE_TRIGGER = re.compile(r"^\s*release\s*:", re.MULTILINE)
 _RE_REGISTRY_PUBLISH = re.compile(
     r"(npm\s+publish|pypi|twine\s+upload|docker\s+push|gh\s+release|"
@@ -210,21 +228,43 @@ class WorkflowContext:
     has_checkout: bool = False
     has_secrets_reference: bool = False
     has_write_permissions: bool = False
+    has_id_token_write: bool = False
     has_explicit_permissions: bool = False
     is_release_workflow: bool = False
     runs_self_hosted: bool = False
     has_fork_identity_guard: bool = False
     has_harden_runner_egress_block: bool = False
+    is_github: bool = False
+
+    @property
+    def has_implicit_default_write(self) -> bool:
+        """GitHub-only: a write-capable default ``GITHUB_TOKEN``.
+
+        On GitHub, a workflow with NO explicit ``permissions:`` block runs
+        with whatever default the repo/org sets — and the threat model treats
+        that absence as write-capable (GitHub's org default was write before
+        2023 and many repos still default to write).  This mirrors the
+        documented composer logic ``wf_default_write = wf.workflow_permissions
+        is None`` (composer.py:229-235).
+
+        Scoped to GitHub (``is_github``) so a GitLab / Jenkins file — which
+        also has ``has_explicit_permissions`` False because it never declares a
+        GitHub ``permissions:`` block — is not mis-credited a default token it
+        does not have.  Returns False if any explicit write scope is already
+        detected (that path is covered by ``has_write_permissions``).
+        """
+        return self.is_github and not self.has_explicit_permissions
 
     @property
     def is_privileged(self) -> bool:
         """Heuristic: does this workflow touch sensitive resources?
 
         True if the file has secrets available, write permissions, runs
-        on privileged triggers, publishes releases, or runs on a self-
-        hosted runner.  False means the rule fires in a context where
-        exploitation would require attacker control the workflow does
-        not offer.
+        on privileged triggers, publishes releases, runs on a self-hosted
+        runner, OR — on GitHub — has an implicit write-capable default token
+        (no explicit ``permissions:`` block).  False means the rule fires in
+        a context where exploitation would require attacker control the
+        workflow does not offer.
         """
         return (
             self.has_secrets_reference
@@ -232,6 +272,7 @@ class WorkflowContext:
             or self.has_pr_target
             or self.is_release_workflow
             or self.runs_self_hosted
+            or self.has_implicit_default_write
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -242,11 +283,14 @@ class WorkflowContext:
             "has_checkout": self.has_checkout,
             "has_secrets_reference": self.has_secrets_reference,
             "has_write_permissions": self.has_write_permissions,
+            "has_id_token_write": self.has_id_token_write,
             "has_explicit_permissions": self.has_explicit_permissions,
             "is_release_workflow": self.is_release_workflow,
             "runs_self_hosted": self.runs_self_hosted,
             "has_fork_identity_guard": self.has_fork_identity_guard,
             "has_harden_runner_egress_block": self.has_harden_runner_egress_block,
+            "is_github": self.is_github,
+            "has_implicit_default_write": self.has_implicit_default_write,
             "is_privileged": self.is_privileged,
         }
 
@@ -275,6 +319,7 @@ def analyze(content: str, file: str = "") -> WorkflowContext:
         has_checkout=bool(_RE_CHECKOUT.search(content)),
         has_secrets_reference=bool(_RE_SECRETS_REF.search(content)),
         has_write_permissions=bool(_RE_WRITE_PERM.search(content) or _RE_WRITE_ALL.search(content)),
+        has_id_token_write=bool(_RE_ID_TOKEN_WRITE.search(content)),
         has_explicit_permissions=bool(_RE_PERMISSIONS_BLOCK.search(content)),
         is_release_workflow=bool(
             _RE_RELEASE_TRIGGER.search(content) or _RE_REGISTRY_PUBLISH.search(content)
@@ -288,6 +333,10 @@ def analyze(content: str, file: str = "") -> WorkflowContext:
             and _RE_EGRESS_BLOCK.search(content)
             and not _RE_EGRESS_NONBLOCK.search(content)
         ),
+        # GitHub-content marker: structural GitHub trigger events, OR
+        # ``${{ … }}`` / ``uses:`` GitHub-Actions-only syntax. Scopes the
+        # implicit-default-write inference (P2.2) to GitHub workflows.
+        is_github=bool(gh_events or _RE_GITHUB_MARKER.search(content)),
     )
 
 
@@ -339,6 +388,16 @@ def compute_exploitability(family_id: str, ctx: WorkflowContext) -> str:
         if has_exposure and ctx.has_checkout:
             return _HIGH
         if has_exposure:
+            return _MEDIUM
+        # Floor (P2.3): ``pull_request_target`` runs in the BASE-repo trust
+        # context and is dangerous even with a fully-narrowed read-only token
+        # — checking out and processing untrusted PR HEAD content (build
+        # scripts, configs, generated code) is itself the attack surface (the
+        # pwn-request pattern). When the workflow checks out code under a
+        # pull_request_target trigger, never bottom it out at LOW just because
+        # permissions were narrowed: floor to MEDIUM. (No checkout + narrowed
+        # perms + no secrets really has nothing to reach, so that stays LOW.)
+        if ctx.has_pr_target and ctx.has_checkout:
             return _MEDIUM
         return _LOW
 
@@ -419,6 +478,29 @@ def compute_exploitability(family_id: str, ctx: WorkflowContext) -> str:
             return _MEDIUM
         if ctx.has_secrets_reference and ctx.has_checkout:
             return _MEDIUM
+        return _LOW
+
+    # Pipeline tool execution (LOTP) — split out of ``script_injection`` by
+    # P1.2.  A build tool running over attacker-controlled checkout is the
+    # same reach-and-privilege shape as script injection: it needs a
+    # fork-reachable trigger AND something worth stealing (secrets / write).
+    # Mirror script_injection's tiers so the split changes clustering only,
+    # not the exploitability hint.
+    if family_id == "pipeline_tool_execution":
+        if ctx.has_fork_triggered and (ctx.has_secrets_reference or ctx.has_write_permissions):
+            return _HIGH
+        if ctx.has_fork_triggered or ctx.has_secrets_reference:
+            return _MEDIUM
+        return _LOW
+
+    # Remote / encoded code execution and disabled-TLS transport — split out
+    # of ``credential_persistence`` by P1.2.  These are run: / script: shell
+    # primitives whose leverage tracks whether the job holds anything an
+    # attacker would want (the same gate credential_persistence used), so we
+    # mirror that family's tiers — the split changes clustering only.
+    if family_id in ("untrusted_code_execution", "insecure_transport"):
+        if ctx.has_secrets_reference or ctx.has_write_permissions:
+            return _HIGH
         return _LOW
 
     return _MEDIUM

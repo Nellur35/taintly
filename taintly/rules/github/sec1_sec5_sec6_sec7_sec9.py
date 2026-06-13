@@ -1173,6 +1173,7 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC6-GH-006",
+        finding_family="untrusted_code_execution",
         title="Base64-encoded payload decoded and executed",
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
@@ -1216,6 +1217,7 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC6-GH-007",
+        finding_family="untrusted_code_execution",
         title="curl/wget output piped directly to shell (GitHub Actions)",
         severity=Severity.HIGH,
         platform=Platform.GITHUB,

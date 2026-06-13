@@ -2069,6 +2069,7 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC4-GH-011A",
+        finding_family="pipeline_tool_execution",
         title="Package install in pull_request_target uses --ignore-scripts but still resolves PR dependencies",
         severity=Severity.HIGH,
         platform=Platform.GITHUB,

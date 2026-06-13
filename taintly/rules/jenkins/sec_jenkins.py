@@ -1548,6 +1548,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC8-JK-002",
+        finding_family="untrusted_code_execution",
         title="Remote Groovy script fetched from URL and executed",
         severity=Severity.CRITICAL,
         platform=Platform.JENKINS,
@@ -2245,6 +2246,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC6-JK-004",
+        finding_family="insecure_transport",
         title="TLS certificate verification disabled in shell step",
         severity=Severity.HIGH,
         platform=Platform.JENKINS,
@@ -2300,6 +2302,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC6-JK-009",
+        finding_family="insecure_transport",
         title="HTTP Request step disables TLS certificate verification (ignoreSslErrors)",
         severity=Severity.HIGH,
         platform=Platform.JENKINS,
@@ -2825,6 +2828,7 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC7-JK-004",
+        finding_family="insecure_transport",
         title="Docker registry accessed over cleartext HTTP",
         severity=Severity.HIGH,
         platform=Platform.JENKINS,

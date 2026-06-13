@@ -70,3 +70,56 @@ def test_yield_tuple_counts_as_produced():
 def test_real_closure_modules_are_clean():
     # Regression guard: the shipped engine keeps every consumed relation produced.
     assert gate.main() == 0
+
+
+# --- Inverse direction (P3.3): produced but never consumed = dead extraction ---
+
+
+def test_dead_extraction_relation_is_reported():
+    # _R_LIVE is produced AND consumed; _R_DEAD is only produced -> dead.
+    src = (
+        '_R_LIVE = "live"\n'
+        '_R_DEAD = "dead"\n'
+        "def rule(db):\n"
+        "    return db.all(_R_LIVE)\n"
+        "def build(db):\n"
+        "    db.add(_R_LIVE, 1)\n"
+        "    db.add(_R_DEAD, 2)\n"  # produced, nothing ever reads it
+    )
+    orphans, produced, consumed = gate.check_source(src)
+    # The orphan (consumed-unproduced) direction stays clean...
+    assert orphans == {}
+    # ...and the inverse direction flags the dead extraction.
+    dead = gate.dead_extractions(produced, consumed)
+    assert dead == {"dead"}
+    assert "live" not in dead
+
+
+def test_no_dead_extraction_when_all_produced_are_consumed():
+    src = (
+        '_R_X = "x"\n'
+        "def rule(db):\n"
+        "    if db.has(_R_X, 1):\n"
+        "        return None\n"
+        "def build(db):\n"
+        "    db.add(_R_X, 1)\n"
+    )
+    _orphans, produced, consumed = gate.check_source(src)
+    assert gate.dead_extractions(produced, consumed) == set()
+
+
+def test_dead_extraction_is_advisory_not_a_build_failure():
+    # Dead extractions never fail the build; the exit code is governed solely by
+    # the consumed-⊆-produced direction. The public closure pack ships clean on
+    # both directions, so the gate must still exit 0.
+    assert gate.main() == 0
+
+
+def test_public_dead_extraction_allowlist_is_empty():
+    # Public-repo divergence guard: the only upstream allowlist entry is for
+    # ``taintly/cross_workflow_facts.py`` (``call_edge``), a closure module the
+    # public repo does not ship. Listing an entry for an absent module would
+    # emit a spurious "stale — prune it" NOTE every run, so the allowlist is
+    # intentionally empty here. If a public closure module ever needs an entry,
+    # this guard documents why it was empty before.
+    assert gate._KNOWN_DEAD_EXTRACTIONS == {}
