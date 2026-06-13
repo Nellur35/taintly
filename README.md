@@ -603,7 +603,7 @@ do not recompute risk.
 
 
 <!-- AUTOGEN:summary -->
-301 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+303 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 
@@ -622,7 +622,7 @@ do not recompute risk.
 | SEC-9 — Improper Artifact Integrity | 6 | 5 | 4 |
 | SEC-10 — Insufficient Logging | 4 | 3 | 2 |
 | AI / ML | 39 | 16 | 12 |
-| TAINT — Multi-stage taint flows | 19 | 7 | 2 |
+| TAINT — Multi-stage taint flows | 19 | 9 | 2 |
 <!-- /AUTOGEN:coverage -->
 
 Plus 32 platform-posture rules in `--platform-audit` mode.
