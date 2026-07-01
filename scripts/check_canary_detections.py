@@ -12,7 +12,7 @@ safe VULNERABLE CI configs, each reconstructed from a public CVE /
 advisory shape and placed at its real repo-relative path
 (``.github/workflows/*.yml`` / ``.gitlab-ci.yml`` / ``Jenkinsfile``) so
 the gate exercises the SAME end-to-end discovery + scan + post-processor
-path the live-repo canaries and the shipped CLI use — not a narrow
+path the shipped CLI uses — not a narrow
 internal API a refactor could bypass.  ``expected_detections.json`` locks,
 per fixture, the set of rule-IDs that MUST fire and a floor on the total
 finding count.

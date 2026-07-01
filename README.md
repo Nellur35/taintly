@@ -194,19 +194,21 @@ taintly /path/to/repo --platform jenkins
 
 
 
-**GitLab CI (16.11+)**
+**GitLab CI** — taintly is hosted on GitHub, so run it as a normal job (there is no GitLab CI *component*):
 
 
 
 ```yaml
 
-include:
+taintly:
 
-  - component: $CI_SERVER_FQDN/nellur35/taintly/taintly@v1
+  image: python:3.12-slim
 
-    inputs:
+  script:
 
-      fail-on: HIGH
+    - pip install taintly            # or, pre-PyPI: pip install "git+https://github.com/Nellur35/taintly@v0.1.0"
+
+    - python -m taintly . --fail-on HIGH
 
 ```
 

@@ -8,7 +8,7 @@ requires-python = ">=3.10"
 authors = [{name = "Asaf Yashayev"}]
 keywords = ["security", "cicd", "github-actions", "gitlab", "supply-chain", "audit", "owasp"]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "Programming Language :: Python :: 3",

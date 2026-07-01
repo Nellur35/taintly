@@ -30,11 +30,9 @@ We follow a standard 90-day disclosure window. If the maintainer doesn't ship a 
 
 ## Supported versions
 
-| Version | Supported |
-|---------|-----------|
-| `1.x`   | ✅ — active |
-| `0.9.x` | ✅ — security fixes only (pre-1.0 shakedown line) |
-| `< 0.9` | ❌ — no longer supported |
+taintly is pre-1.0 and has **no tagged releases yet**. Until the first release, security fixes land
+on `main`. Once releases exist, the **latest tagged release** is the supported line — there is no
+`1.x` or `0.9.x` line (those versions do not exist).
 
 ## Credit
 
