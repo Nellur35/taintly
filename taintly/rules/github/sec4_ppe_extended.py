@@ -232,8 +232,13 @@ class GithubScriptDangerousContextPattern:
         r"commits|"
         r"pages|"
         r"workflow_run\.head_branch|"
-        r"base_ref|"
-        r"inputs\.[A-Za-z0-9_-]+"
+        r"base_ref"
+        # ``github.event.inputs.*`` removed to re-sync with the canonical
+        # ``_DANGEROUS_GITHUB_CONTEXT_RE`` (which intentionally excludes it,
+        # owned by SEC4-GH-008's workflow-dispatch calibration). Dispatch
+        # inputs require write access to set, so they are maintainer-
+        # controlled, not attacker-controlled. Top-level ``inputs.*``
+        # (reusable-workflow caller taint) stays covered by ``_INPUTS_RE``.
         r")|"
         r"head_ref"
         r")"
@@ -668,10 +673,14 @@ RULES: list[Rule] = [
         ),
         pattern=RegexPattern(
             match=(
-                r"\$\{\{[^}]*"
+                # Span bounded ({0,512}) so an adversarial ${{-heavy blob
+                # can't drive quadratic backtracking. Real Actions
+                # expressions are far shorter, so this is behavior-
+                # preserving on true positives. See test_redos_bounds.py.
+                r"\$\{\{[^}]{0,512}"
                 r"(event\.(issue\.(title|body)|pull_request\.(title|body)|comment\.body"
                 r"|head_commit\.message|review\.body)|head_ref)"
-                r"[^}]*\}\}[^#\n]*>>\s*\$GITHUB_ENV"
+                r"[^}]{0,512}\}\}[^#\n]*>>\s*\$GITHUB_ENV"
             ),
             exclude=[r"^\s*#"],
         ),
@@ -722,10 +731,14 @@ RULES: list[Rule] = [
         ),
         pattern=RegexPattern(
             match=(
-                r"\$\{\{[^}]*"
+                # Span bounded ({0,512}) so an adversarial ${{-heavy blob
+                # can't drive quadratic backtracking. Real Actions
+                # expressions are far shorter, so this is behavior-
+                # preserving on true positives. See test_redos_bounds.py.
+                r"\$\{\{[^}]{0,512}"
                 r"(event\.(issue\.(title|body)|pull_request\.(title|body)|comment\.body"
                 r"|head_commit\.message)|head_ref)"
-                r"[^}]*\}\}[^#\n]*>>\s*\$GITHUB_OUTPUT"
+                r"[^}]{0,512}\}\}[^#\n]*>>\s*\$GITHUB_OUTPUT"
             ),
             exclude=[r"^\s*#"],
         ),
@@ -1184,10 +1197,14 @@ RULES: list[Rule] = [
         pattern=ContextPattern(
             anchor=r"\$\{\{\s*steps\.[a-zA-Z0-9_-]+\.outputs\.",
             requires=(
-                r"\$\{\{[^}]*"
+                # Span bounded ({0,512}) so an adversarial ${{-heavy blob
+                # can't drive quadratic backtracking. Real Actions
+                # expressions are far shorter, so this is behavior-
+                # preserving on true positives. See test_redos_bounds.py.
+                r"\$\{\{[^}]{0,512}"
                 r"(event\.(issue\.(title|body)|pull_request\.(title|body)|comment\.body"
                 r"|head_commit\.message|review\.body)|head_ref)"
-                r"[^}]*\}\}[^#\n]*>>\s*\$GITHUB_OUTPUT"
+                r"[^}]{0,512}\}\}[^#\n]*>>\s*\$GITHUB_OUTPUT"
             ),
             exclude=[r"^\s*#"],
             # steps.X.outputs can only reference steps within the same job —
@@ -1255,13 +1272,19 @@ RULES: list[Rule] = [
             "are used in subsequent steps, this can lead to command injection, "
             "arbitrary file writes, or exfiltration of secrets. "
             "The `fromJSON()` pattern is especially dangerous: "
-            "`strategy.matrix.include: ${{ fromJSON(github.event.inputs.matrix) }}` "
-            "lets an attacker craft a matrix that spawns jobs with arbitrary configurations."
+            "`strategy.matrix.include: ${{ fromJSON(github.event.pull_request.body) }}` "
+            "lets an attacker craft a matrix that spawns jobs with arbitrary configurations. "
+            "(`github.event.inputs.*` is excluded — it is populated only on "
+            "workflow_dispatch, which requires write access, so it is maintainer-controlled.)"
         ),
         pattern=PathPattern(
             path=r"strategy\.matrix\.",
-            # github.event_name is NOT attacker-controlled — require github.event.<field>
-            value=r"\$\{\{.*github\.event\.[a-zA-Z]",
+            # github.event_name is NOT attacker-controlled — require github.event.<field>.
+            # (?!inputs\.) excludes github.event.inputs.* (workflow_dispatch payload,
+            # write-gated → maintainer-controlled), matching the canonical
+            # _DANGEROUS_GITHUB_CONTEXT_RE. Field FPs: gemini-cli release-promote,
+            # any dispatch-input matrix.
+            value=r"\$\{\{.*github\.event\.(?!inputs\.)[a-zA-Z]",
             exclude=[r"^\s*#"],
         ),
         remediation=(
@@ -1275,7 +1298,6 @@ RULES: list[Rule] = [
         ),
         reference="https://securitylab.github.com/resources/github-actions-untrusted-input/",
         test_positive=[
-            "strategy:\n  matrix:\n    config: ${{ fromJSON(github.event.inputs.matrix) }}",
             "strategy:\n  matrix:\n    include: ${{ github.event.pull_request.body }}",
         ],
         test_negative=[
@@ -1284,6 +1306,10 @@ RULES: list[Rule] = [
             "# strategy:\n#   matrix:\n#     config: ${{ fromJSON(github.event.inputs.x) }}",
             # github.event_name is not attacker-controlled
             "strategy:\n  matrix:\n    skip: ${{ github.event_name == 'pull_request' }}",
+            # github.event.inputs.* is the workflow_dispatch payload — settable
+            # only with write access, so maintainer-controlled, not attacker-
+            # controlled. Excluded to align with _DANGEROUS_GITHUB_CONTEXT_RE.
+            "strategy:\n  matrix:\n    config: ${{ fromJSON(github.event.inputs.matrix) }}",
         ],
         stride=["T", "E"],
         threat_narrative=(
@@ -1642,10 +1668,14 @@ RULES: list[Rule] = [
         ),
         pattern=RegexPattern(
             match=(
-                r"\$\{\{[^}]*"
+                # Span bounded ({0,512}) so an adversarial ${{-heavy blob
+                # can't drive quadratic backtracking. Real Actions
+                # expressions are far shorter, so this is behavior-
+                # preserving on true positives. See test_redos_bounds.py.
+                r"\$\{\{[^}]{0,512}"
                 r"(event\.(issue\.(title|body)|pull_request\.(title|body)|comment\.body"
                 r"|head_commit\.message|review\.body)|head_ref)"
-                r"[^}]*\}\}[^#\n]*>>\s*\$GITHUB_PATH"
+                r"[^}]{0,512}\}\}[^#\n]*>>\s*\$GITHUB_PATH"
             ),
             exclude=[r"^\s*#"],
         ),

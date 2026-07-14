@@ -2334,7 +2334,10 @@ RULES = [
             # sha-on-push, etc.) and secrets.*/vars.* (caller-set)
             # cannot be poisoned via this surface.
             match=(
-                r"\${{[^}]*"
+                # Spans bounded ({0,512}) to prevent quadratic backtracking
+                # on an adversarial ${{-heavy blob; real Actions expressions
+                # are far shorter, so true positives are unaffected.
+                r"\${{[^}]{0,512}"
                 r"(?:"
                 r"github\.event\."
                 r"|inputs\."
@@ -2347,7 +2350,7 @@ RULES = [
                 # potentially attacker-influenceable.
                 r"|matrix\."
                 r")"
-                r"[^}]*}}"
+                r"[^}]{0,512}}}"
             ),
             exclude=[
                 r"^\s*#",

@@ -1,33 +1,26 @@
 name: E2E canaries
 
-# Layer 3 of the "don't ship broken rules" enforcement.  The
-# in-repo corpus is a fixed set; this workflow defends recall against the
-# specific failure mode where a parser/engine refactor silently zeroes a
-# whole rule family: every per-rule unit test still passes in isolation
-# and recall on real configs drops to zero with no CI signal.
+# Layer 3 of the "don't ship broken rules" enforcement.  The in-repo corpus is
+# a fixed set; this workflow defends recall against the specific failure mode
+# where a parser/engine refactor silently zeroes a whole rule family: every
+# per-rule unit test still passes in isolation and recall on real configs drops
+# to zero with no CI signal.
 #
-# Two complementary gates (both BLOCKING):
+# One BLOCKING gate:
 #
-#   1. Locked-fixture detection gate (canary-fixtures job).  The reliable
-#      core.  A small set of committed, public-safe vulnerable CI configs
-#      under tests/canaries/ (reconstructed from public CVE/advisory
-#      shapes) with a committed snapshot of the exact rule-IDs that must
-#      fire (tests/canaries/expected_detections.json).
-#      scripts/check_canary_detections.py FAILS if any locked rule-ID
-#      stops firing.  Deterministic; no network; the true barrier.
+#   Locked-fixture detection gate (canary-fixtures job).  A small set of
+#   committed, public-safe vulnerable CI configs under tests/canaries/
+#   (reconstructed from public CVE/advisory shapes) with a committed snapshot of
+#   the exact rule-IDs that must fire (tests/canaries/expected_detections.json).
+#   scripts/check_canary_detections.py FAILS if any locked rule-ID stops firing.
+#   Deterministic; no network; the true barrier.
 #
-#   2. Live-repo drift guard (canary-github/gitlab/jenkins jobs).  The
-#      secondary, coarser net.  Each job clones one outside-corpus repo at
-#      a pinned SHA and scans it; scripts/check_canary_drift.py fails the
-#      build if the finding count drops >20% below the committed baseline
-#      (.github/canary-baselines/) or hits zero.  Rule-IDs on whole real
-#      repos are too churny to lock, so this guards counts only.  A
-#      baseline of `findings: null` means "not yet baselined" — the check
-#      emits a notice instead of failing, so the maintainer can adopt the
-#      real count from the first green run, then commit it to enforce.
-#
-# Each live job still smoke-checks that taintly exits cleanly (0/1/2/11)
-# and emits parseable JSON before the drift guard runs.
+# NOTE: a former secondary "live-repo drift guard" (which cloned a few real
+# outside-corpus repositories and tracked their finding counts) was removed
+# deliberately. Publishing scan counts that name real third-party projects is
+# poor etiquette, and the guard was inert anyway (its baselines were
+# `findings: null`, which passed without enforcing). Recall is covered by the
+# owned, vulnerable-by-design fixtures above.
 
 on:
   push:
@@ -39,10 +32,8 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref; never cancel on main — see
-# ci.yml for the rationale. Doubly useful here: the canary jobs clone
-# live external repositories, so serialising same-ref runs also removes
-# the chance of two overlapping runs racing on the same clone path.
+# Cancel superseded runs on the same ref; never cancel on main — see ci.yml for
+# the rationale.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -55,10 +46,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      # This job does no EXTERNAL clone, but actions/checkout + the pinned
-      # action downloads still need github.com / codeload egress, so block
-      # all egress EXCEPT those (tighter than the live-canary jobs, which
-      # additionally allow gitlab.com for their external clones).
+      # This job does no external clone, but actions/checkout + the pinned
+      # action downloads still need github.com / codeload egress, so block all
+      # egress except those.
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: block
@@ -75,277 +65,9 @@ jobs:
           python-version: "3.12"
 
       - name: Detection-regression gate (locked vulnerable fixtures)
-        # Scans the committed tests/canaries/ fixtures and FAILS if any
-        # locked rule-ID stops firing or the per-fixture finding count
-        # drops below its floor. This is the deterministic recall barrier;
-        # it needs no network and no external clone.
+        # Scans the committed tests/canaries/ fixtures and FAILS if any locked
+        # rule-ID stops firing or the per-fixture finding count drops below its
+        # floor. This is the deterministic recall barrier; no network, no clone.
         env:
           PYTHONUTF8: "1"
         run: python scripts/check_canary_detections.py
-
-  canary-github:
-    name: E2E canary (GitHub Actions — astral-sh/uv)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    env:
-      CANARY_REPO: https://github.com/astral-sh/uv.git
-      CANARY_SHA: e5d20c6e3a67900b499de4cee45513182d55d686
-      CANARY_NAME: astral-sh/uv
-    steps:
-      # Blocked egress boundary. The allow-list adds the canary CLONE hosts
-      # (github.com, codeload.github.com, gitlab.com) on top of checkout,
-      # since these jobs git-clone external repos. See ci.yml's lint job
-      # for the full rationale.
-      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
-        with:
-          egress-policy: block
-          allowed-endpoints: >
-            github.com:443
-            codeload.github.com:443
-            gitlab.com:443
-
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
-        with:
-          python-version: "3.12"
-
-      - name: Clone canary at pinned SHA
-        run: |
-          # Retry the live clone: a transient network blip / rate-limit must not
-          # fail the gate for reasons unrelated to the code under review. The
-          # assertion stays deterministic — the checkout is pinned to CANARY_SHA.
-          for attempt in 1 2 3; do
-            rm -rf /tmp/canary
-            if git clone --filter=blob:none --no-checkout "$CANARY_REPO" /tmp/canary; then
-              break
-            fi
-            echo "clone attempt $attempt failed; retrying in $((attempt * 5))s" >&2
-            sleep "$((attempt * 5))"
-          done
-          cd /tmp/canary
-          git checkout "$CANARY_SHA"
-
-      - name: Scan canary
-        # taintly exit codes 0/1/2/11 all mean "scan completed and emitted
-        # JSON" (clean / HIGH findings / CRITICAL findings / coverage
-        # degraded).  Any of those is fine for a smoke test — the gate is
-        # "did the scanner produce parseable output," not "did it find
-        # nothing."  Anything else (3 config error, segfault, unexpected
-        # exit) is a real failure.
-        run: |
-          set +e
-          python -m taintly /tmp/canary --format json > canary.json
-          rc=$?
-          set -e
-          case "$rc" in
-            0|1|2|11) echo "taintly exit=$rc (scan completed, JSON emitted)" ;;
-            *)
-              echo "::error::taintly exit=$rc — unexpected scanner failure"
-              head -c 4000 canary.json || true
-              exit 1
-              ;;
-          esac
-
-      - name: Summarize
-        run: |
-          python <<'PY'
-          import json, os
-          d = json.load(open('canary.json'))
-          findings = d.get('findings', [])
-          err = [f for f in findings if f.get('rule_id','').startswith('ENGINE-ERR')]
-          print(f"::notice::{os.environ['CANARY_NAME']} @ {os.environ['CANARY_SHA'][:7]}: {len(findings)} findings, {len(err)} ENGINE-ERR")
-          PY
-
-      - name: Drift guard (fail on large finding-count drop vs baseline)
-        # Blocking. Compares the live finding count against the committed
-        # baseline in .github/canary-baselines/. Fails on a >20% drop or a
-        # drop to zero (scanner went dark on this real repo). A baseline of
-        # `findings: null` is treated as "not yet baselined": the check
-        # emits a notice and passes, so the first green run establishes the
-        # number, which the maintainer then commits to start enforcing.
-        env:
-          PYTHONUTF8: "1"
-        run: |
-          python scripts/check_canary_drift.py \
-            --canary "$CANARY_NAME" \
-            --sha "$CANARY_SHA" \
-            --count-file canary.json
-
-  canary-gitlab:
-    name: E2E canary (GitLab CI — gitlab-org/gitlab-runner)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    env:
-      CANARY_REPO: https://gitlab.com/gitlab-org/gitlab-runner.git
-      CANARY_SHA: b22b1035770a5f13e648b3d2bc3fedb1f3a59b1c
-      CANARY_NAME: gitlab-org/gitlab-runner
-    steps:
-      # Blocked egress boundary (clone hosts + checkout).
-      # See ci.yml's lint job for the full rationale. First step.
-      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
-        with:
-          egress-policy: block
-          allowed-endpoints: >
-            github.com:443
-            codeload.github.com:443
-            gitlab.com:443
-
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
-        with:
-          python-version: "3.12"
-
-      - name: Clone canary at pinned SHA
-        run: |
-          # Retry the live clone: a transient network blip / rate-limit must not
-          # fail the gate for reasons unrelated to the code under review. The
-          # assertion stays deterministic — the checkout is pinned to CANARY_SHA.
-          for attempt in 1 2 3; do
-            rm -rf /tmp/canary
-            if git clone --filter=blob:none --no-checkout "$CANARY_REPO" /tmp/canary; then
-              break
-            fi
-            echo "clone attempt $attempt failed; retrying in $((attempt * 5))s" >&2
-            sleep "$((attempt * 5))"
-          done
-          cd /tmp/canary
-          git checkout "$CANARY_SHA"
-
-      - name: Scan canary
-        # See note in canary-github above — taintly exits 0/1/2/11 on
-        # successful scans; only 3 / unexpected codes are real failures.
-        run: |
-          set +e
-          python -m taintly /tmp/canary --platform gitlab --format json > canary.json
-          rc=$?
-          set -e
-          case "$rc" in
-            0|1|2|11) echo "taintly exit=$rc (scan completed, JSON emitted)" ;;
-            *)
-              echo "::error::taintly exit=$rc — unexpected scanner failure"
-              head -c 4000 canary.json || true
-              exit 1
-              ;;
-          esac
-
-      - name: Summarize
-        run: |
-          python <<'PY'
-          import json, os
-          d = json.load(open('canary.json'))
-          findings = d.get('findings', [])
-          err = [f for f in findings if f.get('rule_id','').startswith('ENGINE-ERR')]
-          print(f"::notice::{os.environ['CANARY_NAME']} @ {os.environ['CANARY_SHA'][:7]}: {len(findings)} findings, {len(err)} ENGINE-ERR")
-          PY
-
-      - name: Drift guard (fail on large finding-count drop vs baseline)
-        # Blocking. Compares the live finding count against the committed
-        # baseline in .github/canary-baselines/. Fails on a >20% drop or a
-        # drop to zero (scanner went dark on this real repo). A baseline of
-        # `findings: null` is treated as "not yet baselined": the check
-        # emits a notice and passes, so the first green run establishes the
-        # number, which the maintainer then commits to start enforcing.
-        env:
-          PYTHONUTF8: "1"
-        run: |
-          python scripts/check_canary_drift.py \
-            --canary "$CANARY_NAME" \
-            --sha "$CANARY_SHA" \
-            --count-file canary.json
-
-  canary-jenkins:
-    name: E2E canary (Jenkins — jenkinsci/plugin-installation-manager-tool)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    env:
-      CANARY_REPO: https://github.com/jenkinsci/plugin-installation-manager-tool.git
-      CANARY_SHA: 28b6ac3f9b1c5fd7b0bf8095d41a7e5c408c8ccd
-      CANARY_NAME: jenkinsci/plugin-installation-manager-tool
-    steps:
-      # Blocked egress boundary (clone hosts + checkout).
-      # See ci.yml's lint job for the full rationale. First step.
-      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
-        with:
-          egress-policy: block
-          allowed-endpoints: >
-            github.com:443
-            codeload.github.com:443
-            gitlab.com:443
-
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
-        with:
-          python-version: "3.12"
-
-      - name: Clone canary at pinned SHA
-        run: |
-          # Retry the live clone: a transient network blip / rate-limit must not
-          # fail the gate for reasons unrelated to the code under review. The
-          # assertion stays deterministic — the checkout is pinned to CANARY_SHA.
-          for attempt in 1 2 3; do
-            rm -rf /tmp/canary
-            if git clone --filter=blob:none --no-checkout "$CANARY_REPO" /tmp/canary; then
-              break
-            fi
-            echo "clone attempt $attempt failed; retrying in $((attempt * 5))s" >&2
-            sleep "$((attempt * 5))"
-          done
-          cd /tmp/canary
-          git checkout "$CANARY_SHA"
-
-      - name: Scan canary
-        # See note in canary-github above — taintly exits 0/1/2/11 on
-        # successful scans; only 3 / unexpected codes are real failures.
-        run: |
-          set +e
-          python -m taintly /tmp/canary --platform jenkins --format json > canary.json
-          rc=$?
-          set -e
-          case "$rc" in
-            0|1|2|11) echo "taintly exit=$rc (scan completed, JSON emitted)" ;;
-            *)
-              echo "::error::taintly exit=$rc — unexpected scanner failure"
-              head -c 4000 canary.json || true
-              exit 1
-              ;;
-          esac
-
-      - name: Summarize
-        run: |
-          python <<'PY'
-          import json, os
-          d = json.load(open('canary.json'))
-          findings = d.get('findings', [])
-          err = [f for f in findings if f.get('rule_id','').startswith('ENGINE-ERR')]
-          print(f"::notice::{os.environ['CANARY_NAME']} @ {os.environ['CANARY_SHA'][:7]}: {len(findings)} findings, {len(err)} ENGINE-ERR")
-          PY
-
-      - name: Drift guard (fail on large finding-count drop vs baseline)
-        # Blocking. Compares the live finding count against the committed
-        # baseline in .github/canary-baselines/. Fails on a >20% drop or a
-        # drop to zero (scanner went dark on this real repo). A baseline of
-        # `findings: null` is treated as "not yet baselined": the check
-        # emits a notice and passes, so the first green run establishes the
-        # number, which the maintainer then commits to start enforcing.
-        env:
-          PYTHONUTF8: "1"
-        run: |
-          python scripts/check_canary_drift.py \
-            --canary "$CANARY_NAME" \
-            --sha "$CANARY_SHA" \
-            --count-file canary.json

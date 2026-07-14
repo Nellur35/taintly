@@ -890,7 +890,7 @@ def main():
             else None
         )
         _output_report(report, args, score_report=score_report)
-        if score_report is not None and args.format != "html":
+        if score_report is not None and args.format == "text":
             print(format_score(score_report, use_color=not args.no_color))
         _exit_for_severity(report, effective_fail_on)
         return
@@ -966,6 +966,7 @@ def main():
                 report.findings,
                 files_scanned=report.files_scanned,
                 platforms_scanned=_platforms_for_reports(report),
+                scanned_config=report.files_scanned > 0 or bool(report.findings),
                 families_with_surface=report.families_with_surface,
                 families_with_ctx_coverage=report.families_with_ctx_coverage,
             )
@@ -973,7 +974,7 @@ def main():
             else None
         )
         _output_report(report, args, score_report=score_report)
-        if score_report is not None and args.format != "html":
+        if score_report is not None and args.format == "text":
             print(format_score(score_report, use_color=not args.no_color))
         _exit_for_severity(report, effective_fail_on)
         return
@@ -1046,6 +1047,7 @@ def main():
                 report.findings,
                 files_scanned=report.files_scanned,
                 platforms_scanned=_platforms_for_reports(report),
+                scanned_config=report.files_scanned > 0 or bool(report.findings),
                 families_with_surface=report.families_with_surface,
                 families_with_ctx_coverage=report.families_with_ctx_coverage,
             )
@@ -1053,7 +1055,7 @@ def main():
             else None
         )
         _output_report(report, args, score_report=score_report)
-        if score_report is not None and args.format != "html":
+        if score_report is not None and args.format == "text":
             print(format_score(score_report, use_color=not args.no_color))
         _exit_for_severity(report, effective_fail_on)
         return
@@ -1088,6 +1090,7 @@ def main():
                 report.findings,
                 files_scanned=report.files_scanned,
                 platforms_scanned=_platforms_for_reports(report),
+                scanned_config=report.files_scanned > 0 or bool(report.findings),
                 families_with_surface=report.families_with_surface,
                 families_with_ctx_coverage=report.families_with_ctx_coverage,
             )
@@ -1095,7 +1098,7 @@ def main():
             else None
         )
         _output_report(report, args, score_report=score_report)
-        if score_report is not None and args.format != "html":
+        if score_report is not None and args.format == "text":
             print(format_score(score_report, use_color=not args.no_color))
         _exit_for_severity(report, effective_fail_on)
         return
@@ -1302,6 +1305,10 @@ def main():
             all_findings,
             files_scanned=total_files,
             platforms_scanned=_platforms_for_reports(*reports),
+            # No config files found (empty repo / no CI/CD) → "not scored"
+            # rather than a fabricated 100/100. Findings can only come from
+            # scanned files here, so total_files is the authoritative signal.
+            scanned_config=total_files > 0,
             families_with_surface=agg_surface,
             families_with_ctx_coverage=agg_ctx_coverage,
         )
@@ -1327,7 +1334,7 @@ def main():
         for report in reports:
             _output_report(report, args, score_report=score_report)
 
-    if score_report is not None and args.format != "html":
+    if score_report is not None and args.format == "text":
         print(format_score(score_report, use_color=not args.no_color))
 
     # Exit code: built-in CRITICAL=2/HIGH=1 logic + optional fail-on
