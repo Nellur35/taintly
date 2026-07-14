@@ -35,6 +35,7 @@ ALLOWED_FILES: dict[str, str] = {
     ".gitignore": "project gitignore",
     ".gitleaks.toml": "secret-scanning config",
     ".pre-commit-hooks.yaml": "pre-commit hooks manifest",
+    ".taintly.yml": "taintly's own config — ignores tests/ so a self-scan of this repo doesn't score its intentionally-vulnerable fixtures",
     "CHANGELOG.md": "user-facing changelog",
     "CONTRIBUTING.md": "user-facing contribution guide",
     "LICENSE": "license",
