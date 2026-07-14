@@ -402,12 +402,19 @@ def _summary(
     count so a reader sees the headline numbers before scrolling."""
     parts: list[str] = ['<section aria-labelledby="sum-h"><h2 id="sum-h">Executive summary</h2>']
     parts.append('<div class="summary-card">')
-    if score_report is not None:
+    if score_report is not None and score_report.applicable:
         grade = score_report.grade
         parts.append(
             f'<div class="grade-box {_grade_class(grade)}">'
             f'<span class="grade">{_e(grade)}</span>'
             f'<span class="score">{_e(score_report.total_score)}/100</span>'
+            "</div>"
+        )
+    elif score_report is not None:
+        parts.append(
+            '<div class="grade-box">'
+            '<span class="grade">N/A</span>'
+            '<span class="score">not scored</span>'
             "</div>"
         )
     else:

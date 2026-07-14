@@ -328,6 +328,28 @@ def test_clean_repo_with_unknown_platforms_still_scores_a():
     assert score.bonuses["all_permissions"] == 5  # GitHub assumed scanned
 
 
+def test_no_config_scanned_is_not_applicable():
+    """A scan that found no CI/CD configuration (empty repo / no workflow
+    files) must NOT fabricate a passing grade — it reports 'not
+    applicable' so absence of an assessed surface never reads as an "A".
+    """
+    score = compute_score([], scanned_config=False)
+    assert score.applicable is False
+    assert score.grade == "N/A"
+    # to_dict / JSON consumers get the honest signal too.
+    assert score.to_dict()["applicable"] is False
+
+
+def test_scanned_config_defaults_true_and_still_scores():
+    """Default callers (all existing call sites + unit tests) leave
+    scanned_config at True and keep the numeric grade — the not-applicable
+    path must be strictly opt-in so it can't silently swallow real scores.
+    """
+    score = compute_score([], files_scanned=1)  # default scanned_config=True
+    assert score.applicable is True
+    assert score.grade == "A"
+
+
 def test_zero_files_scanned_forfeits_pinning_bonuses():
     """P2.5: the all_pinned / all_permissions bonuses assert 'we scanned
     the config and everything is pinned/permissioned' — vacuous if no

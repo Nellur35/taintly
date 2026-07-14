@@ -243,9 +243,16 @@ class ScoreReport:
     # view.  Complements the single letter grade by showing *where* the
     # debt sits rather than just *how much* of it there is.
     debt_profile: list[DebtDimension] = field(default_factory=list)
+    # False when there was no CI/CD configuration to assess — a scan that
+    # examined zero config files and is not a live-instance audit. The
+    # renderers show "not scored" instead of a fabricated grade so an
+    # empty repo never reads as a passing "A". Set via
+    # ``compute_score(scanned_config=False)``.
+    applicable: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "applicable": self.applicable,
             "total_score": self.total_score,
             "grade": self.grade,
             "deductions": {k: round(v, 1) for k, v in self.deductions.items()},
@@ -338,6 +345,7 @@ def compute_score(
     files_scanned: int = 0,
     platforms_scanned: set[Platform] | None = None,
     *,
+    scanned_config: bool = True,
     families_with_surface: set[str] | None = None,
     families_with_ctx_coverage: set[str] | None = None,
 ) -> ScoreReport:
@@ -360,7 +368,28 @@ def compute_score(
     from the rule-ID suffixes on the findings (with the empty-findings
     case treated as "all platforms scanned" so a clean repo still
     earns its bonuses).
+
+    ``scanned_config`` is the caller's assertion that there was an
+    assessable CI/CD surface. When ``False`` (a file scan that found no
+    config, e.g. an empty repo) the scorer returns a "not applicable"
+    report — no numeric grade — so an unassessed repo never fabricates a
+    passing "A". Callers that DID assess a surface (file scans with
+    config, or live posture audits that set ``files_scanned=0`` but
+    produce findings via an API) leave it at the default ``True``.
     """
+    # No CI/CD configuration to assess: emitting a numeric grade here
+    # would fabricate an "A" for a repo the scan never actually verified.
+    if not scanned_config:
+        return ScoreReport(
+            total_score=0,
+            grade="N/A",
+            deductions={"CLUSTERS": 0.0, "CRITICAL": 0.0, "HIGH": 0.0, "MEDIUM": 0.0},
+            bonuses={"no_criticals": 0, "all_actions_pinned": 0, "all_permissions": 0},
+            finding_count=len(findings),
+            files_scanned=files_scanned,
+            applicable=False,
+        )
+
     n_critical = sum(1 for f in findings if f.severity == Severity.CRITICAL)
     n_high = sum(1 for f in findings if f.severity == Severity.HIGH)
     n_medium = sum(1 for f in findings if f.severity == Severity.MEDIUM)

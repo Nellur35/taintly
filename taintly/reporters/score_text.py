@@ -37,6 +37,16 @@ def format_score(report: ScoreReport, use_color: bool = True) -> str:
     lines = []
     lines.append(f"\n{b}{sep * 3} CI/CD SECURITY SCORE {sep * 3}{r}")
     lines.append("")
+
+    # No assessable surface: show "not scored" rather than a fabricated
+    # grade. An empty repo (no CI/CD config) must never read as an "A".
+    if not report.applicable:
+        lines.append(f"  {b}Not scored:{r} no applicable CI/CD configuration found.")
+        lines.append("  taintly found no GitHub Actions, GitLab CI, or Jenkins config to assess.")
+        lines.append("  See docs/SCORING.md.")
+        lines.append("")
+        return "\n".join(lines)
+
     lines.append(f"  Score: {b}{gc}{report.total_score}/100 ({report.grade}){r}")
     # Threat-model disclosure.  The score is computed against a fixed
     # public-OSS threat model; the user's deployment may differ in ways

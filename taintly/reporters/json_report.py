@@ -63,7 +63,8 @@ def format_json(report: AuditReport, score_report: ScoreReport | None = None) ->
         # New fields added at the end so existing JSON consumers that
         # parse only the prior keys keep working unchanged.
         data["score"] = {
-            "total": score_report.total_score,
+            "applicable": score_report.applicable,
+            "total": score_report.total_score if score_report.applicable else None,
             "grade": score_report.grade,
             "distinct_risks": score_report.distinct_risks,
             "review_needed": score_report.review_needed,

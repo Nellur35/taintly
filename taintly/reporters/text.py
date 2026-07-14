@@ -319,7 +319,10 @@ def _format_executive_summary(
             bits.append(f"{review} review-needed")
         out.append(f"  Distinct risks: {', '.join(bits)}")
     if score_report is not None:
-        out.append(f"  Score:          {score_report.total_score}/100 ({score_report.grade})")
+        if score_report.applicable:
+            out.append(f"  Score:          {score_report.total_score}/100 ({score_report.grade})")
+        else:
+            out.append("  Score:          N/A (no applicable CI/CD configuration found)")
     sev_bits = []
     for sev in Severity:
         # Severity breakdown over vulnerability findings only — INFO

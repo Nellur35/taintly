@@ -1,0 +1,11 @@
+# taintly's own configuration, applied when taintly scans this repository.
+#
+# The test suite ships intentionally-vulnerable fixtures (positive test
+# cases under tests/) so the rules can be exercised. Those are test DATA,
+# not this project's real CI/CD config — scanning them makes
+# `python -m taintly .` on this repo report its own fixtures as findings
+# and score itself an F. Ignore tests/ so a self-scan reflects the
+# project's actual pipeline posture (its .github/workflows).
+version: 1
+ignore:
+  - path: tests/
