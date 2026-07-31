@@ -364,9 +364,32 @@ def canonical_path(node: object) -> str | None:
         elif isinstance(cur, Index) and isinstance(cur.index, Lit) and cur.index.kind == "string":
             parts.append(str(cur.index.value))
             cur = cur.recv
+        elif (roundtrip_value := _json_roundtrip_value(cur)) is not None:
+            # ``fromJSON(toJSON(x))`` preserves x's JSON object shape. This is
+            # the one call-rooted spine we can normalize without guessing about
+            # builtin semantics or inventing a path.
+            cur = roundtrip_value
         else:
             return None
     return ".".join(reversed(parts)).lower()
+
+
+def _json_roundtrip_value(node: object) -> object | None:
+    """Return the value in an exact ``fromJSON(toJSON(value))`` round trip.
+
+    Other function calls remain opaque. In particular, this does not treat
+    ``fromJSON(inputs.payload)`` as a property-preserving operation.
+    """
+    if (
+        isinstance(node, Call)
+        and node.name.lower() == "fromjson"
+        and len(node.args) == 1
+        and isinstance(node.args[0], Call)
+        and node.args[0].name.lower() == "tojson"
+        and len(node.args[0].args) == 1
+    ):
+        return node.args[0].args[0]
+    return None
 
 
 def _iter_paths(node: object) -> Iterator[str]:

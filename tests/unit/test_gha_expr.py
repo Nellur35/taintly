@@ -43,10 +43,13 @@ def test_comparison_yields_both_operands() -> None:
     assert set(paths) == {"github.event_name", _CANONICAL}
 
 
-def test_fromjson_roundtrip_yields_only_call_args_not_postcall_chain() -> None:
-    # fromJSON(toJSON(github.event)).pull_request.title — the post-call member
-    # chain needs builtin dataflow; we only see the argument path.
-    assert context_paths("fromJSON(toJSON(github.event)).pull_request.title") == ["github.event"]
+def test_fromjson_tojson_roundtrip_preserves_context_member_chain() -> None:
+    # The exact JSON round trip preserves github.event's object shape.
+    assert context_paths("fromJSON(toJSON(github.event)).pull_request.title") == [_CANONICAL]
+
+
+def test_non_identity_fromjson_remains_opaque() -> None:
+    assert context_paths("fromJSON(inputs.payload).pull_request.title") == ["inputs.payload"]
 
 
 def test_object_filter_yields_spine_before_star() -> None:
