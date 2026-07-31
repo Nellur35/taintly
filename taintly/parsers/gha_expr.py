@@ -28,10 +28,11 @@ Grammar facts (GitHub docs + actionlint):
   * Strings are single-quoted with ``''`` escaping; ``"`` is not a string
     delimiter in the expression language.
   * Functions (``fromJSON``, ``toJSON``, ``format``, ``contains``, …) are
-    opaque for path extraction: a spine rooted in a call (e.g.
-    ``fromJSON(toJSON(github.event)).pull_request.title``) yields only the
-    paths inside the call's arguments (``github.event``), never the post-call
-    member chain — modelling that needs builtin dataflow, out of scope here.
+    opaque for path extraction, except the exact identity round trip
+    ``fromJSON(toJSON(value))``. That form preserves ``value``'s object shape,
+    so a post-call member chain is canonicalized. All other call-rooted spines
+    yield only paths inside their arguments; modelling their member chains
+    would need builtin dataflow and remains out of scope here.
 
 On any malformed / unsupported input the tokenizer or parser raises
 :class:`ExprSyntaxError`; callers fall back to the legacy regex so there is no
