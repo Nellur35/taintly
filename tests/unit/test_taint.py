@@ -71,6 +71,24 @@ def test_brace_reference_variant_triggers():
     assert "${PR_TITLE}" in paths[0].sink_snippet
 
 
+def test_json_roundtrip_pr_title_into_echo_triggers():
+    """An identity JSON round trip must retain a PR title's taint path."""
+    paths = _analyze(
+        """
+        on: [pull_request_target]
+        jobs:
+          greet:
+            runs-on: ubuntu-latest
+            steps:
+              - env:
+                  PR_TITLE: ${{ fromJSON(toJSON(github.event)).pull_request.title }}
+                run: echo "PR is $PR_TITLE"
+        """
+    )
+    assert len(paths) == 1
+    assert paths[0].source_expr == "github.event.pull_request.title"
+
+
 def test_job_level_env_flows_to_step():
     """env: declared at job scope still taints steps in that job."""
     paths = _analyze(
