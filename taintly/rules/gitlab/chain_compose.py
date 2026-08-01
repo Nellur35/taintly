@@ -52,6 +52,7 @@ import re
 from taintly.gitlab_workflow_corpus import (
     GitLabCorpusFindings,
     GitLabCorpusPattern,
+    GitLabJobSummary,
     GitLabWorkflowCorpus,
     GitLabWorkflowSummary,
 )
@@ -74,17 +75,24 @@ _DEPLOY_PUBLISH_CMD_RE = re.compile(
 )
 
 
-def _has_deploy_or_publish_command(summary: GitLabWorkflowSummary) -> tuple[bool, int]:
+def _has_deploy_or_publish_command(lines: list[str], start_line: int) -> tuple[bool, int]:
     """Return ``(present, line_1based)``.  Line is the first match line
     or 0 when not present.
     """
-    for idx, line in enumerate(summary.lines):
+    for idx, line in enumerate(lines, start=start_line):
         if _DEPLOY_PUBLISH_CMD_RE.search(line):
             # Skip comment lines.
             if line.lstrip().startswith("#"):
                 continue
-            return True, idx + 1
+            return True, idx
     return False, 0
+
+
+def _job_lines(summary: GitLabWorkflowSummary, job: GitLabJobSummary) -> list[str]:
+    """Return one job's source lines without its top-level siblings."""
+    start = job.line - 1
+    end = job.end_line - 1
+    return summary.lines[start:end]
 
 
 # TAINT-GL-001's conjunct shape: a "tainted CI variable into project
@@ -168,31 +176,23 @@ def _compose_chain_gl_101(corpus: GitLabWorkflowCorpus) -> GitLabCorpusFindings:
     """
     findings: GitLabCorpusFindings = []
     for w in corpus.all():
-        if TriggerFamily.FORK_REACHABLE not in w.triggers:
-            continue
-        if w.protected_branch_only:
-            # Protected-branch gate suppresses the fork-attacker path.
-            # Without it, deploy commands run on MR pipelines from
-            # forks; with it, the deploy job only fires on the
-            # default branch after merge.
-            continue
-        if w.bot_gate_pattern:
-            # A trusted-bot gate excludes arbitrary fork authors; the
-            # composite's threat model is the unauthenticated PR
-            # author, not a bot account the project has whitelisted.
-            continue
-        if not w.id_tokens_declared:
-            continue
-        has_deploy, deploy_line = _has_deploy_or_publish_command(w)
-        if not has_deploy:
-            continue
-        snippet = (
-            "CHAIN-GL-101: MR-pipeline-reachable job runs a deploy or publish command "
-            "(SEC4-GL-005 shape) while the file declares id_tokens (OIDC cloud write-token). "
-            "A fork author opening an MR triggers the deploy command against production "
-            "cloud infrastructure with the project's OIDC scope."
-        )
-        findings.append((w.filepath, deploy_line, snippet))
+        for job in w.job_definitions:
+            if TriggerFamily.FORK_REACHABLE not in job.triggers:
+                continue
+            if job.protected_branch_only or job.bot_gate_pattern:
+                continue
+            if not job.id_tokens_declared:
+                continue
+            has_deploy, deploy_line = _has_deploy_or_publish_command(_job_lines(w, job), job.line)
+            if not has_deploy:
+                continue
+            snippet = (
+                "CHAIN-GL-101: MR-pipeline-reachable job runs a deploy or publish command "
+                "(SEC4-GL-005 shape) while that job declares id_tokens (OIDC cloud write-token). "
+                "A fork author opening an MR triggers the deploy command against production "
+                "cloud infrastructure with the job's OIDC scope."
+            )
+            findings.append((w.filepath, deploy_line, snippet))
     return findings
 
 

@@ -207,6 +207,16 @@ def test_trigger_classification_schedule_is_scheduled(tmp_path: Path) -> None:
     assert TriggerFamily.SCHEDULED in summary.triggers
 
 
+def test_trigger_classification_ignores_pipeline_source_inequality(tmp_path: Path) -> None:
+    _write_entry(
+        tmp_path,
+        'workflow:\n  rules:\n    - if: $CI_PIPELINE_SOURCE != "merge_request_event"\n',
+    )
+    corpus = build_gitlab_corpus(str(tmp_path))
+    summary = next(iter(corpus.workflows.values()))
+    assert TriggerFamily.FORK_REACHABLE not in summary.triggers
+
+
 def test_no_pipeline_source_compare_means_all_families_reachable(tmp_path: Path) -> None:
     # No `$CI_PIPELINE_SOURCE` compare anywhere → conservative worst case:
     # every family is potentially reachable.
