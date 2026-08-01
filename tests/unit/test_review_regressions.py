@@ -97,6 +97,32 @@ def test_sec2_gh_005_counts_quoted_job_keys(tmp_path, github_rules):
     assert "SEC2-GH-005" in _rule_ids(findings)
 
 
+def test_sec2_gh_001_matches_quoted_write_all_permissions(tmp_path, github_rules):
+    wf = _write(
+        tmp_path / ".github" / "workflows" / "ci.yml",
+        "on: push\npermissions: 'write-all'\njobs: {}\n",
+    )
+    findings = scan_file(str(wf), github_rules)
+    assert "SEC2-GH-001" in _rule_ids(findings)
+
+
+def test_sec2_gh_005_skips_quoted_write_all_permissions(tmp_path, github_rules):
+    wf = _write(
+        tmp_path / ".github" / "workflows" / "ci.yml",
+        "on: push\n"
+        'permissions: "write-all"\n'
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "  publish:\n"
+        "    runs-on: ubuntu-latest\n",
+    )
+    findings = scan_file(str(wf), github_rules)
+    rule_ids = _rule_ids(findings)
+    assert "SEC2-GH-001" in rule_ids
+    assert "SEC2-GH-005" not in rule_ids
+
+
 def test_sec2_gh_005_skips_quoted_workflow_call_only_reusable(tmp_path, github_rules):
     wf = _write(
         tmp_path / ".github" / "workflows" / "reusable.yml",

@@ -120,7 +120,9 @@ class _OverbroadWorkflowPermissionsPattern:
         r"(?ms)^permissions:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
     )
     _PERMS_WRITE_LINE_RE = re.compile(r"^[ \t]+([\w-]+):\s*['\"]?write['\"]?\s*(#.*)?$")
-    _WRITE_ALL_RE = re.compile(r"^permissions:\s*write-all\b", re.MULTILINE)
+    _WRITE_ALL_RE = re.compile(
+        r"^permissions:\s*['\"]?write-all['\"]?(\s*(#.*)?)?\s*$", re.MULTILINE
+    )
     _JOBS_BLOCK_RE = re.compile(
         r"(?ms)^jobs:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
     )
@@ -287,13 +289,22 @@ RULES: list[Rule] = [
             "the attacker has full read/write access to the repository and all resources."
         ),
         pattern=RegexPattern(
-            match=r"^\s*permissions:\s*write-all(\s*(#.*)?)?\s*$",
+            match=r"^\s*permissions:\s*['\"]?write-all['\"]?(\s*(#.*)?)?\s*$",
             exclude=[r"^\s*#"],
         ),
         remediation="Replace with minimal required permissions per job.",
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication",
-        test_positive=["permissions: write-all", "  permissions: write-all"],
-        test_negative=["permissions:\n  contents: read", "# permissions: write-all"],
+        test_positive=[
+            "permissions: write-all",
+            "  permissions: write-all",
+            "permissions: 'write-all'",
+            'permissions: "write-all"',
+        ],
+        test_negative=[
+            "permissions:\n  contents: read",
+            'permissions: "read-all"',
+            "# permissions: write-all",
+        ],
         stride=["E"],
         threat_narrative=(
             "write-all grants the GITHUB_TOKEN read/write access to every repository scope — "
