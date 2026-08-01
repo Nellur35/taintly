@@ -173,14 +173,8 @@ def fix_persist_credentials(filepath: str, dry_run: bool = False) -> list[FixRes
 
         if match:
             indent = match.group(1)
-            # Look ahead for 'with:' and 'persist-credentials'
+            # Look ahead for the checkout step's ``with:`` block.
             window_end = min(i + 10, len(lines))
-            window = "".join(lines[i:window_end])
-
-            if "persist-credentials: false" in window:
-                new_lines.append(line)
-                i += 1
-                continue
 
             # Check if 'with:' block exists
             has_with = False
@@ -197,6 +191,34 @@ def fix_persist_credentials(filepath: str, dry_run: bool = False) -> list[FixRes
                     break
 
             if has_with:
+                # An explicit value may be a deliberate requirement for a
+                # later push.  Do not add a second YAML key (or write a child
+                # under an inline mapping); changing the existing value is a
+                # semantic choice, not a Level-1 auto-fix.
+                with_line = lines[with_line_idx]
+                if "persist-credentials:" in with_line:
+                    new_lines.append(line)
+                    i += 1
+                    continue
+
+                with_indent_width = len(with_line) - len(with_line.lstrip())
+                has_explicit_persist = False
+                for j in range(with_line_idx + 1, window_end):
+                    candidate = lines[j]
+                    stripped = candidate.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    candidate_indent = len(candidate) - len(candidate.lstrip())
+                    if candidate_indent <= with_indent_width:
+                        break
+                    if stripped.startswith("persist-credentials:"):
+                        has_explicit_persist = True
+                        break
+                if has_explicit_persist:
+                    new_lines.append(line)
+                    i += 1
+                    continue
+
                 # Insert persist-credentials: false after 'with:'
                 new_lines.append(line)
                 i += 1
