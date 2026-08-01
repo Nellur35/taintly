@@ -361,9 +361,9 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "Same TaintPattern separator-fragility family as TAINT-GH-001."
     ),
     ("SEC4-GH-008", "whitespace_pad"): (
-        r"github-script pattern anchors on ``uses:\s+actions/github-script`` "
-        "and ``with:`` keys; whitespace_pad strips the required space after the "
-        "colon, producing a shape the anchor can't match (real workflows keep it)."
+        "The WorkflowAware structural reader requires valid YAML; whitespace_pad "
+        "breaks the parsed key/value shape, which is expected because real "
+        "workflows remain valid YAML."
     ),
     ("TAINT-GH-019", "whitespace_pad"): (
         "Same TaintPattern whitespace_pad gap as TAINT-GH-001..018 — the "

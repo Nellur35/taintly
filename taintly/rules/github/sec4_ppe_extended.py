@@ -17,8 +17,13 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+from taintly.parsers.gha_expr import (
+    ExprSyntaxError,
+    iter_expression_bodies,
+    result_provenance_paths,
+)
 from taintly.parsers.segmentation import for_each_step
-from taintly.workflow_aware_pattern import PredicateContext
+from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 from .sec3_sec4_supply_chain_ppe import _DANGEROUS_GITHUB_CONTEXT_RE
@@ -90,12 +95,16 @@ class StepOutputShellInterpolationPattern(_OutputToRunShellPattern):
 # aware detection keeps every TP shape and drops every FP shape.
 # ---------------------------------------------------------------------------
 
-# Shell-form ``${{ inputs.X }}`` / ``${{ github.event.inputs.X }}``
-# reference inside a scalar value.
-_INPUTS_REF_RE_PRED = re.compile(
-    r"\$\{\{\s*(?:github\.event\.inputs|inputs)\.[a-zA-Z0-9_]+\s*\}\}",
+# Bounded fallback for malformed expressions that the structural parser cannot
+# consume. It covers dot and literal bracket access without trying to evaluate
+# the surrounding expression.
+_INPUTS_REF_FALLBACK_RE = re.compile(
+    r"\b(?P<namespace>github\s*\.\s*event\s*\.\s*inputs|inputs)\s*"
+    r"(?:\.\s*(?P<dot>[a-zA-Z_][a-zA-Z0-9_-]*)|"
+    r"\[\s*['\"](?P<bracket>[^'\"]+)['\"]\s*\])",
     re.IGNORECASE,
 )
+_SAFE_INPUT_TYPES = frozenset({"boolean", "choice", "environment", "number"})
 
 # (action, with-slot) pairs whose value the action passes to a shell /
 # script / interpreter at runtime.  Splicing ``${{ inputs.X }}`` into
@@ -115,9 +124,8 @@ _SHELL_EXECUTING_ACTION_SLOTS: frozenset[tuple[str, str]] = frozenset(
         ("nick-fields/retry", "new_command"),
         ("nick-fields/retry", "on_retry_command"),
         # Azure inline-script slots (case variants seen in the wild).
-        ("azure/CLI", "inlineScript"),
-        ("azure/cli", "inlineScript"),
-        ("azure/powershell", "inlineScript"),
+        ("azure/cli", "inlinescript"),
+        ("azure/powershell", "inlinescript"),
         # SSH / remote-shell action families.
         ("appleboy/ssh-action", "script"),
         ("garygrossgarten/github-action-ssh", "command"),
@@ -135,8 +143,105 @@ def _action_name_for_slot(uses_value: str) -> str:
     head = uses_value.split("@", 1)[0].strip()
     parts = head.split("/")
     if len(parts) >= 2:
-        return f"{parts[0]}/{parts[1]}"
-    return head
+        return f"{parts[0]}/{parts[1]}".lower()
+    return head.lower()
+
+
+def _declared_input_types(
+    ctx: PredicateContext,
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Return lower-cased dispatch and reusable-workflow input type maps."""
+    by_namespace: dict[str, dict[str, set[str]]] = {
+        "workflow_dispatch": {},
+        "workflow_call": {},
+    }
+    for leaf in ctx.leaves:
+        leaf_path = leaf.path
+        if (
+            len(leaf_path) == 5
+            and leaf_path[0] == "on"
+            and leaf_path[1] in by_namespace
+            and leaf_path[2] == "inputs"
+            and isinstance(leaf_path[3], str)
+            and leaf_path[4] == "type"
+            and leaf.value
+        ):
+            by_namespace[leaf_path[1]].setdefault(leaf_path[3].lower(), set()).add(
+                leaf.value.lower()
+            )
+    return by_namespace["workflow_dispatch"], by_namespace["workflow_call"]
+
+
+def _input_source_is_safe(
+    source: str,
+    dispatch_types: dict[str, set[str]],
+    call_types: dict[str, set[str]],
+) -> bool:
+    """Whether every applicable declaration constrains this input's bytes."""
+    source = source.lower()
+    event_prefix = "github.event.inputs."
+    if source.startswith(event_prefix):
+        name = source[len(event_prefix) :].split(".", 1)[0]
+        types = dispatch_types.get(name, set())
+    elif source.startswith("inputs."):
+        name = source[len("inputs.") :].split(".", 1)[0]
+        types = dispatch_types.get(name, set()) | call_types.get(name, set())
+    else:
+        # Dynamic access such as inputs[matrix.key] can resolve to any input.
+        return False
+    return bool(types) and types <= _SAFE_INPUT_TYPES
+
+
+def _has_data_bearing_input(value: str, ctx: PredicateContext) -> bool:
+    sources: list[str] = []
+    for body in iter_expression_bodies(value or ""):
+        try:
+            sources.extend(result_provenance_paths(body))
+        except ExprSyntaxError:
+            for match in _INPUTS_REF_FALLBACK_RE.finditer(body):
+                namespace = match.group("namespace").replace(" ", "").lower()
+                name = match.group("dot") or match.group("bracket")
+                sources.append(f"{namespace}.{name}")
+    input_sources = [
+        source
+        for source in sources
+        if source in {"inputs", "github.event.inputs"}
+        or source.startswith("inputs.")
+        or source.startswith("github.event.inputs.")
+    ]
+    if not input_sources:
+        return False
+    if any(source in {"inputs", "github.event.inputs"} for source in input_sources):
+        return True
+
+    # Most run lines have no input source. Build declaration maps only after
+    # provenance establishes that type information can affect the verdict.
+    dispatch_types, call_types = _declared_input_types(ctx)
+    return any(
+        not _input_source_is_safe(source, dispatch_types, call_types) for source in input_sources
+    )
+
+
+def _is_shell_sink(path: tuple[object, ...], ctx: PredicateContext) -> bool:
+    if (
+        len(path) >= 5
+        and path[0] == "jobs"
+        and path[2] == "steps"
+        and isinstance(path[3], int)
+        and path[-1] == "run"
+    ):
+        return True
+    if (
+        len(path) == 6
+        and path[0] == "jobs"
+        and path[2] == "steps"
+        and isinstance(path[3], int)
+        and path[4] == "with"
+        and isinstance(path[5], str)
+    ):
+        action_name = _action_name_for_slot(ctx.step_uses(path) or "")
+        return (action_name, path[5].lower()) in _SHELL_EXECUTING_ACTION_SLOTS
+    return False
 
 
 def _is_dispatch_input_in_shell_sink(
@@ -155,40 +260,18 @@ def _is_dispatch_input_in_shell_sink(
       ``uses:`` action is in ``_SHELL_EXECUTING_ACTION_SLOTS`` for
       that slot (shell-executing action input).
 
-    Everything else (env-block, name, concurrency.group,
+    Declared boolean, choice, environment, and number inputs cannot carry
+    arbitrary shell bytes and are suppressed. Everything else (env-block, name, concurrency.group,
     string-only ``with:`` slots) is path-shape FP — those values
     never reach a shell parser, so the threat model doesn't apply.
     """
-    if not _INPUTS_REF_RE_PRED.search(value or ""):
-        return False
     # Comment-prefixed shell lines (inside ``run: |`` block scalars,
     # the predicate is invoked per body line; a leading ``#`` is a
     # shell comment — value won't execute).  Mirrors the original
     # RegexPattern's ``^\s*#`` exclude.
     if value.lstrip().startswith("#"):
         return False
-    if (
-        len(path) >= 5
-        and path[0] == "jobs"
-        and path[2] == "steps"
-        and isinstance(path[3], int)
-        and path[-1] == "run"
-    ):
-        return True
-    if (
-        len(path) == 6
-        and path[0] == "jobs"
-        and path[2] == "steps"
-        and isinstance(path[3], int)
-        and path[4] == "with"
-        and isinstance(path[5], str)
-    ):
-        slot = path[5]
-        uses = ctx.step_uses(path) or ""
-        action_name = _action_name_for_slot(uses)
-        if (action_name, slot) in _SHELL_EXECUTING_ACTION_SLOTS:
-            return True
-    return False
+    return _is_shell_sink(path, ctx) and _has_data_bearing_input(value, ctx)
 
 
 class GithubScriptDangerousContextPattern:
@@ -781,45 +864,9 @@ RULES: list[Rule] = [
             "Manually triggered inputs are user-controlled and may contain shell metacharacters. "
             "Exploited in the Langflow and Ultralytics supply chain incidents (2024-2025)."
         ),
-        pattern=RegexPattern(
-            match=r"\$\{\{\s*(github\.event\.inputs|inputs)\.[a-zA-Z0-9_-]+\s*\}\}",
-            # ``${{ inputs.* }}`` inside a with:/env: block is an action input or
-            # env assignment (incl. github-script's script: arg), NOT this
-            # workflow's shell — mask those block bodies. Only run: shell fires.
-            github_with_env_block_aware=True,
-            exclude=[
-                r"^\s*#",
-                r"^\s*if:",
-                # Exclude lines where ${{ inputs.* }} is the entire value of a YAML key.
-                # env: MY_VAR: ${{ inputs.x }} is the RECOMMENDED safe pattern — don't flag it.
-                # with: param: ${{ inputs.x }} passes a string to an action, not a shell command.
-                r"""^\s*[\w.-]+:\s*["']?\$\{\{[^}]*\}\}["']?\s*(#.*)?$""",
-                # Multi-interpolation in metadata-only YAML keys.  These keys
-                # are display strings, concurrency-group keys, or scalar
-                # action inputs — they never reach a shell from the
-                # workflow itself.  The single-interpolation form is caught
-                # by the line above; this entry covers values with multiple
-                # interpolations or interleaved literal text (e.g.
-                # ``name: ${{ matrix.os }}-${{ inputs.suite }}``,
-                # ``group: deploy-${{ inputs.env }}``).  The allowed body
-                # alphabet covers prose punctuation that appears in display
-                # labels — word chars, slashes, dots, dashes, underscores,
-                # spaces, parens/brackets, AND quotes/colons/commas/``#`` —
-                # but still excludes the shell metacharacters that would make
-                # the value executable if it ever reached a shell (`;`, `&`,
-                # `|`, `$(`, backticks, `<`, `>`, `{`, `}` outside the
-                # interpolation).  A step ``name:`` with an embedded
-                # ``'${{ inputs.x }}'`` (quotes for readability) is a pure
-                # display string GitHub never executes — field-precision FP
-                # S056 (aws/karpenter e2e-cleanup.yaml step name).  Quotes are
-                # added to the body alphabet so prose-with-quotes labels are
-                # recognised; the key allowlist below is the audited
-                # "not executed" set.
-                r"""^\s*(?:-\s+)?(?:name|group|title|body|tag_name|commit-message"""
-                r"""|repository|ref|branch|head|base)\s*:\s*['"]?"""
-                r"""(?:[\w./_\- ()\[\]'":,#!?@%+=]*\$\{\{[^}]+\}\})+"""
-                r"""[\w./_\- ()\[\]'":,#!?@%+=]*['"]?\s*(#.*)?$""",
-            ],
+        pattern=WorkflowAwarePattern(
+            path=["jobs.*.steps[*].run", "jobs.*.steps[*].with.*"],
+            predicate=_is_dispatch_input_in_shell_sink,
         ),
         remediation=(
             "Never interpolate ${{ inputs.* }} directly into a run: body\n"
@@ -833,8 +880,30 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-scripts-to-handle-untrusted-input",
         test_positive=[
-            '        run: echo "${{ inputs.user_input }}"',
-            "        run: deploy.sh ${{ github.event.inputs.environment }}",
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
+                '    steps:\n      - run: echo "${{ inputs.user_input }}"\n'
+            ),
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  deploy:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: deploy.sh ${{ github.event.inputs.environment }}\n"
+            ),
+            (
+                "on: workflow_dispatch\n"
+                "jobs:\n  release:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - run: dist ${{ inputs.tag && format('--tag={0}', inputs.tag) || 'plan' }}\n"
+            ),
+            (
+                "on: workflow_call\n"
+                "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: nick-fields/retry@v3\n"
+                "        with:\n"
+                "          command: pytest ${{ inputs.target || 'tests' }}\n"
+            ),
         ],
         test_negative=[
             "        if: inputs.deploy == true",

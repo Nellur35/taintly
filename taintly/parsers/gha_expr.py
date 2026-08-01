@@ -52,6 +52,7 @@ __all__ = [
     "context_paths",
     "iter_expression_bodies",
     "parse",
+    "result_provenance_paths",
     "structural_expr_enabled",
 ]
 
@@ -420,6 +421,73 @@ def context_paths(body: str) -> list[str]:
     seen: dict[str, None] = {}
     for p in _iter_paths(parse(body)):
         seen.setdefault(p, None)
+    return list(seen)
+
+
+_BOOLEAN_RESULT_FUNCTIONS = frozenset(
+    {
+        "always",
+        "cancelled",
+        "contains",
+        "endswith",
+        "failure",
+        "startswith",
+        "success",
+    }
+)
+_COMPARISON_OPERATORS = frozenset({"==", "!=", "<", "<=", ">", ">="})
+
+
+def _iter_result_provenance(node: object) -> Iterator[str]:
+    """Yield paths whose bytes can contribute to ``node``'s result value.
+
+    This is narrower than :func:`_iter_paths`: references used only as boolean
+    conditions do not taint the resulting string. Unknown value-returning
+    functions are conservative and propagate their arguments.
+    """
+    cp = canonical_path(node)
+    if cp is not None:
+        yield cp
+        return
+    if isinstance(node, Lit):
+        return
+    if isinstance(node, Deref | Filter | Index):
+        yield from _iter_result_provenance(node.recv)
+        if isinstance(node, Index):
+            yield from _iter_result_provenance(node.index)
+        return
+    if isinstance(node, Call):
+        if node.name.lower() in _BOOLEAN_RESULT_FUNCTIONS:
+            return
+        for arg in node.args:
+            yield from _iter_result_provenance(arg)
+        return
+    if isinstance(node, Unary):
+        # The only supported unary operator is ``!``; its result is boolean.
+        return
+    if isinstance(node, Binary):
+        if node.op in _COMPARISON_OPERATORS:
+            return
+        if node.op == "&&":
+            # The left side controls selection. Only the right side can become
+            # the value returned by GitHub's short-circuit expression.
+            yield from _iter_result_provenance(node.right)
+            return
+        if node.op == "||":
+            yield from _iter_result_provenance(node.left)
+            yield from _iter_result_provenance(node.right)
+
+
+def result_provenance_paths(body: str) -> list[str]:
+    """Return context paths whose values can reach the expression result.
+
+    Comparisons, negation, and boolean-returning functions are control-only.
+    Fallbacks and value transforms such as ``format()``, ``join()``,
+    ``toJSON()``, and ``fromJSON()`` preserve argument provenance.
+    """
+    seen: dict[str, None] = {}
+    for path in _iter_result_provenance(parse(body)):
+        seen.setdefault(path, None)
     return list(seen)
 
 
