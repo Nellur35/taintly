@@ -77,6 +77,8 @@ def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
     consumer findings (SEC4-GH-005 only).
     """
     for f in findings_by_rule(db, "SEC4-GH-005"):
+        if not f.job:
+            continue
         ctx = context_for(db, f.file, f.job)
         if ctx is None:
             continue
@@ -125,6 +127,8 @@ def _compose_chain_gh_102(db: Database) -> Iterable[tuple[str, Fact]]:
     actually changes the threat tier.
     """
     for f in findings_by_rule(db, "SEC3-GH-001"):
+        if not f.job:
+            continue
         ctx = context_for(db, f.file, f.job)
         if ctx is None:
             continue
@@ -236,6 +240,8 @@ def _compose_chain_gh_103(db: Database) -> Iterable[tuple[str, Fact]]:
     in the workflow's context.
     """
     for f in findings_by_rule(db, "TAINT-GH-001"):
+        if not f.job:
+            continue
         ctx = context_for(db, f.file, f.job)
         if ctx is None:
             continue
@@ -308,11 +314,14 @@ def _compose_chain_gh_104(db: Database) -> Iterable[tuple[str, Fact]]:
     # ``with:`` block.  A step is typically 2-12 lines tall, so a
     # SEC3-GH-001 finding within 15 lines BEFORE the SEC6-GH-010
     # line in the same file is the same step.
-    unpinned_by_file: dict[str, set[int]] = {}
+    unpinned_by_job: dict[tuple[str, str], set[int]] = {}
     for f in findings_by_rule(db, "SEC3-GH-001"):
-        unpinned_by_file.setdefault(f.file, set()).add(f.line)
+        if f.job:
+            unpinned_by_job.setdefault((f.file, f.job), set()).add(f.line)
 
     for f in findings_by_rule(db, "SEC6-GH-010"):
+        if not f.job:
+            continue
         ctx = context_for(db, f.file, f.job)
         if ctx is None:
             continue
@@ -323,7 +332,7 @@ def _compose_chain_gh_104(db: Database) -> Iterable[tuple[str, Fact]]:
         # Leg (3): does the SEC6-GH-010-bearing step's ``uses:``
         # line itself have a SEC3-GH-001 finding?  This locks the
         # third leg to the actual step, not a nearby earlier step.
-        unpinned_lines = unpinned_by_file.get(f.file, set())
+        unpinned_lines = unpinned_by_job.get((f.file, f.job), set())
         if not unpinned_lines:
             continue
         if not _has_unpinned_in_step_window(unpinned_lines, f.line, f.file):
