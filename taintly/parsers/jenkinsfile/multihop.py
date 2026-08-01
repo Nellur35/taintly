@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import cast
 
 from .groovy_lex import Token, TokKind, tokenize
 
@@ -68,6 +69,8 @@ class _Assign:
     var: str
     rhs: tuple[Token, ...]
     line: int
+    scope: tuple[int, ...]
+    declared: bool
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,7 @@ class _Sink:
     interpolated: bool
     # Leading identifiers of the body's GString interpolation spans.
     refs: frozenset[str]
+    scope: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -126,37 +130,57 @@ def _span_refs(tok: Token) -> set[str]:
 def _collect(content: str) -> tuple[list[_Assign], list[_Sink]]:
     """Single pass over the token stream collecting assignments and sinks.
 
-    Brace depth is NOT tracked for scope here — propagation soundness is
-    enforced by the value-preserving RHS rule, and the corpus verify-first
-    showed function-local name reuse is rare enough that a file-flat model
-    plus the RHS rule is precise.  (Cross-function over-taint was the FP
-    that the *naive* propagation produced; the RHS rule removes it.)
+    Brace-delimited closures receive lexical scope identifiers. This keeps
+    same-named locals in separate functions from becoming one dataflow path.
     """
     toks = list(tokenize(content))
     n = len(toks)
     assigns: list[_Assign] = []
     sinks: list[_Sink] = []
+    scope: tuple[int, ...] = ()
+    next_scope = 0
     i = 0
     while i < n:
         tok = toks[i]
+
+        if tok.kind == TokKind.LBRACE:
+            next_scope += 1
+            scope = (*scope, next_scope)
+            i += 1
+            continue
+        if tok.kind == TokKind.RBRACE:
+            scope = scope[:-1]
+            i += 1
+            continue
 
         if tok.kind == TokKind.IDENT:
             # Shell sink: ``sh "..."`` / ``sh(script: "...")`` / ``sh("...")``.
             if tok.value in _SHELL_CALLS:
                 sink = _read_sink(toks, i)
                 if sink is not None:
-                    sinks.append(sink)
+                    sinks.append(
+                        _Sink(
+                            call=sink.call,
+                            body=sink.body,
+                            line=sink.line,
+                            interpolated=sink.interpolated,
+                            refs=sink.refs,
+                            scope=scope,
+                        )
+                    )
                 # fall through to also consider this token as an assignment
                 # target only if it were ``sh = ...`` (never happens); advance.
 
             # Assignment target resolution.
             target_idx = i
             name = tok.value
+            declared = False
             if name in _TYPE_DECL_HEADS:
                 k = _next_significant(toks, i + 1)
                 if k < n and toks[k].kind == TokKind.IDENT:
                     name = toks[k].value
                     target_idx = k
+                    declared = True
                 else:
                     i += 1
                     continue
@@ -170,7 +194,15 @@ def _collect(content: str) -> tuple[list[_Assign], list[_Sink]]:
             ):
                 rhs, end = _read_rhs(toks, k + 1)
                 if rhs:
-                    assigns.append(_Assign(var=name, rhs=tuple(rhs), line=tok.line))
+                    assigns.append(
+                        _Assign(
+                            var=name,
+                            rhs=tuple(rhs),
+                            line=tok.line,
+                            scope=scope,
+                            declared=declared,
+                        )
+                    )
                 i = end
                 continue
 
@@ -199,6 +231,7 @@ def _read_sink(toks: list[Token], i: int) -> _Sink | None:
                 line=tk.line,
                 interpolated=tk.interpolations is not None,
                 refs=frozenset(_span_refs(tk)),
+                scope=(),
             )
         if tk.kind in (TokKind.NEWLINE, TokKind.RBRACE, TokKind.SEMI):
             break
@@ -355,60 +388,73 @@ def resolve_multihop_flows(content: str, source_re: re.Pattern[str]) -> list[Mul
     if not assigns or not sinks:
         return []
 
-    # ---- fixed point over value-preserving assignments -------------------
+    # ---- ordered value-preserving flow -----------------------------------
     # tainted[var] = ordered hop chain (source name, then each intermediate
-    # local) ending at this var.
-    tainted: dict[str, list[str]] = {}
-
-    for a in assigns:
-        if _rhs_is_direct_source(a.rhs, source_re):
-            # Seed: the source token text (first depth-0 match or first span).
-            src = _first_source_label(a.rhs, source_re)
-            tainted.setdefault(a.var, [src, a.var])
-
-    changed = True
-    # Bound the iteration by the assignment count (a chain can be at most
-    # len(assigns) hops long); the `changed` flag terminates earlier in
-    # practice, the bound is a hard stop against any pathological input.
-    for _ in range(len(assigns) + 1):
-        if not changed:
-            break
-        changed = False
-        for a in assigns:
-            if a.var in tainted:
-                continue
-            src_var = _rhs_propagates_from(a.rhs, tainted)
-            if src_var is not None:
-                tainted[a.var] = tainted[src_var] + [a.var]
-                changed = True
-
-    if not tainted:
-        return []
-
-    # ---- match tainted locals into sinks --------------------------------
+    # local) ending at this var. Groovy assignments execute in source order:
+    # a later source cannot influence an earlier sink, and a non-tainted
+    # reassignment kills a prior local taint binding.
+    tainted: dict[tuple[tuple[int, ...], str], list[str]] = {}
+    bindings: set[tuple[tuple[int, ...], str]] = set()
     flows: list[MultiHopFlow] = []
     seen: set[tuple[int, str]] = set()
-    for sink in sinks:
-        if not sink.interpolated:
+
+    def binding_key(
+        scope: tuple[int, ...], var: str, declared: bool
+    ) -> tuple[tuple[int, ...], str]:
+        if declared:
+            return (scope, var)
+        for depth in range(len(scope), -1, -1):
+            candidate = (scope[:depth], var)
+            if candidate in bindings:
+                return candidate
+        # Groovy assignment without ``def``/a type writes the script binding
+        # unless it resolves an existing lexical local. Jenkins pipelines use
+        # this for values shared between sibling ``stage`` closures.
+        return ((), var)
+
+    def visible_taint(scope: tuple[int, ...]) -> dict[str, list[str]]:
+        visible: dict[str, list[str]] = {}
+        for depth in range(len(scope), -1, -1):
+            for (candidate_scope, var), hops in tainted.items():
+                if candidate_scope == scope[:depth] and var not in visible:
+                    visible[var] = hops
+        return visible
+
+    events = [(a.line, 0, a) for a in assigns] + [(s.line, 1, s) for s in sinks]
+    for _, kind, event in sorted(events, key=lambda item: (item[0], item[1])):
+        if kind == 0:
+            assignment = cast("_Assign", event)
+            target_key = binding_key(assignment.scope, assignment.var, assignment.declared)
+            bindings.add(target_key)
+            visible = visible_taint(assignment.scope)
+            if _rhs_is_direct_source(assignment.rhs, source_re):
+                src = _first_source_label(assignment.rhs, source_re)
+                tainted[target_key] = [src, assignment.var]
+                continue
+            src_var = _rhs_propagates_from(assignment.rhs, visible)
+            if src_var is not None:
+                tainted[target_key] = visible[src_var] + [assignment.var]
+            else:
+                tainted.pop(target_key, None)
             continue
-        # Skip the direct case: a source interpolated straight into the body
-        # is TAINT-JK-001's finding, not a multi-hop one.
-        if source_re.search(sink.body):
+
+        sink = cast("_Sink", event)
+        if not sink.interpolated or source_re.search(sink.body):
             continue
+        visible = visible_taint(sink.scope)
         for ref in sink.refs:
-            if ref in tainted:
-                key = (sink.line, sink.body)
-                if key in seen:
+            if ref in visible:
+                flow_key = (sink.line, sink.body)
+                if flow_key in seen:
                     break
-                seen.add(key)
-                hops = tuple(tainted[ref] + [sink.call])
+                seen.add(flow_key)
                 flows.append(
                     MultiHopFlow(
                         var=ref,
                         sink_call=sink.call,
                         sink_line=sink.line,
                         sink_body=sink.body,
-                        hops=hops,
+                        hops=tuple(visible[ref] + [sink.call]),
                     )
                 )
                 break
