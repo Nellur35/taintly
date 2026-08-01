@@ -30,6 +30,8 @@ from .models import (
     Platform,
     Rule,
     Severity,
+    _chunked_search_coverage_incomplete,
+    _reset_chunked_search_coverage,
     scan_session,
 )
 from .parsers.anchor_expander import expand_anchors
@@ -381,6 +383,7 @@ def scan_file(
     budget = max_scan_seconds if max_scan_seconds is not None else _FILE_SCAN_WALLCLOCK_BUDGET_S
     deadline = time.monotonic() + budget
     unevaluated = 0
+    _reset_chunked_search_coverage()
     with scan_session(), set_pattern_filepath_context(filepath):
         for idx, rule in enumerate(rules):
             if time.monotonic() >= deadline:
@@ -517,6 +520,22 @@ def scan_file(
                         file=filepath,
                     )
                 )
+
+    if _chunked_search_coverage_incomplete():
+        findings.append(
+            Finding(
+                rule_id="ENGINE-ERR",
+                severity=Severity.LOW,
+                title="Chunked file-scope search ended before full coverage",
+                description=(
+                    "A file-scope regex search reached its chunk-count, line-size, "
+                    "or wall-clock safety bound before scanning the whole file. "
+                    "Taintly suppressed absence-based conclusions that could not "
+                    "be proven; per-line and already-completed rule checks still ran."
+                ),
+                file=filepath,
+            )
+        )
 
     if unevaluated:
         findings.append(
