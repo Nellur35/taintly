@@ -4,8 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from taintly.engine import scan_file
-from taintly.engine import _is_maintainer_gated_only
+from taintly.engine import _is_maintainer_gated_only, scan_file
 from taintly.models import Severity
 from taintly.staticguard import WorkflowContext
 
@@ -88,9 +87,39 @@ def test_workflow_dispatch_input_downgrades_when_maintainer_only(github_rules, t
     assert all("Maintainer-gated trigger path" in f.calibration_reason for f in findings)
 
 
-def test_dead_path_suppression_happens_before_maintainer_gated_downgrade(
+def test_compound_workflow_dispatch_input_downgrades_when_maintainer_only(github_rules, tmp_path):
+    path = _write_workflow(
+        tmp_path,
+        _workflow_dispatch_input().replace(
+            "${{ inputs.environment }}",
+            "${{ inputs.environment || 'staging' }}",
+        ),
+    )
+
+    findings = _sec4_gh_008_findings(path, github_rules)
+
+    assert findings
+    assert {f.severity for f in findings} == {Severity.MEDIUM}
+
+
+def test_compound_workflow_dispatch_input_stays_high_with_fork_reachable_trigger(
     github_rules, tmp_path
 ):
+    path = _write_workflow(
+        tmp_path,
+        _workflow_dispatch_input("  pull_request:\n").replace(
+            "${{ inputs.environment }}",
+            "${{ inputs.environment || 'staging' }}",
+        ),
+    )
+
+    findings = _sec4_gh_008_findings(path, github_rules)
+
+    assert findings
+    assert {f.severity for f in findings} == {Severity.HIGH}
+
+
+def test_dead_path_suppression_happens_before_maintainer_gated_downgrade(github_rules, tmp_path):
     path = _write_workflow(
         tmp_path,
         "on:\n"
@@ -305,7 +334,7 @@ def test_compound_repo_comparison_guard_does_not_suppress_findings(github_rules,
         "    if: github.repository == 'Nellur35/taintly' && success()\n"
         "    runs-on: ubuntu-latest\n"
         "    steps:\n"
-        "      - run: echo \"${{ github.event.pull_request.title }}\"\n",
+        '      - run: echo "${{ github.event.pull_request.title }}"\n',
     )
     ctx = WorkflowContext(repository="Nellur35/taintly", repository_owner="Nellur35")
 

@@ -12,6 +12,7 @@ from taintly.parsers.gha_expr import (
     context_paths,
     iter_expression_bodies,
     parse,
+    result_provenance_paths,
 )
 
 _CANONICAL = "github.event.pull_request.title"
@@ -94,6 +95,28 @@ def test_secrets_and_inputs_paths() -> None:
     assert context_paths("inputs['my-input']") == ["inputs.my-input"]
 
 
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [
+        ("inputs.tag", ["inputs.tag"]),
+        ("inputs['tag']", ["inputs.tag"]),
+        ("github.event.inputs.tag || 'latest'", ["github.event.inputs.tag"]),
+        ("condition && inputs.tag", ["inputs.tag"]),
+        ("inputs.tag && '--tagged' || '--default'", []),
+        ("inputs.tag != '' && format('{0}', inputs.tag)", ["inputs.tag"]),
+        ("format('{0}', inputs.tag)", ["inputs.tag"]),
+        ("join(fromJSON(inputs.tags), ',')", ["inputs.tags"]),
+        ("toJSON(inputs.payload)", ["inputs.payload"]),
+        ("fromJSON(inputs.payload).tag", ["inputs.payload"]),
+        ("inputs.tag == 'release'", []),
+        ("!inputs.enabled", []),
+        ("contains(inputs.tag, 'release')", []),
+    ],
+)
+def test_result_provenance_tracks_only_data_bearing_paths(expr: str, expected: list[str]) -> None:
+    assert result_provenance_paths(expr) == expected
+
+
 # --- resource bounds: adversarial expressions must not blow the stack -------
 #
 # A ``${{ }}`` body is attacker-controlled. The recursive-descent parser must
@@ -135,7 +158,7 @@ def test_parse_never_recurses_on_arbitrary_input(s: str) -> None:
     try:
         parse(s)
     except RecursionError:  # pragma: no cover - the bug this guards against
-        raise AssertionError("parse() raised RecursionError on fuzzed input")
+        raise AssertionError("parse() raised RecursionError on fuzzed input") from None
     except Exception:
         pass  # any clean rejection is acceptable; we only guard stack safety
 
@@ -146,6 +169,6 @@ def test_parse_bounds_arbitrary_paren_depth(n: int) -> None:
     try:
         parse("(" * n + "x" + ")" * n)
     except RecursionError:  # pragma: no cover
-        raise AssertionError(f"parse() raised RecursionError at paren depth {n}")
+        raise AssertionError(f"parse() raised RecursionError at paren depth {n}") from None
     except Exception:
         pass
