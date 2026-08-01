@@ -77,6 +77,30 @@ deploy-prod:
     assert _chain_findings(tmp_path, "CHAIN-GL-101") == []
 
 
+def test_chain_gl_101_requires_oidc_on_the_deploy_job(tmp_path: Path) -> None:
+    """A scheduled OIDC sibling does not empower the MR deploy job."""
+    content = """\
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+deploy-prod:
+  script:
+    - docker push registry.example.com/app:$CI_COMMIT_SHA
+
+scheduled-oidc:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  id_tokens:
+    AWS_TOKEN:
+      aud: https://sts.amazonaws.com
+  script:
+    - echo maintenance
+"""
+    _write_entry(tmp_path, content)
+    assert _chain_findings(tmp_path, "CHAIN-GL-101") == []
+
+
 def test_chain_gl_101_does_not_fire_when_protected_branch_gated(tmp_path: Path) -> None:
     # id_tokens + deploy command present BUT the workflow is gated to
     # protected branches — the fork-attacker primitive is severed.
@@ -84,6 +108,56 @@ def test_chain_gl_101_does_not_fire_when_protected_branch_gated(tmp_path: Path) 
 workflow:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy-prod:
+  id_tokens:
+    AWS_TOKEN:
+      aud: https://sts.amazonaws.com
+  script:
+    - docker push registry.example.com/app:$CI_COMMIT_SHA
+"""
+    _write_entry(tmp_path, content)
+    assert _chain_findings(tmp_path, "CHAIN-GL-101") == []
+
+
+def test_chain_gl_101_ignores_protected_or_bot_gates_in_sibling_jobs(tmp_path: Path) -> None:
+    """A sibling's gate cannot make the exposed deploy job safe."""
+    content = """\
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+deploy-prod:
+  id_tokens:
+    AWS_TOKEN:
+      aud: https://sts.amazonaws.com
+  script:
+    - docker push registry.example.com/app:$CI_COMMIT_SHA
+
+protected-maintenance:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - echo maintenance
+
+bot-maintenance:
+  rules:
+    - if: '$GITLAB_USER_LOGIN == "renovate-bot"'
+  script:
+    - echo maintenance
+"""
+    _write_entry(tmp_path, content)
+    assert len(_chain_findings(tmp_path, "CHAIN-GL-101")) == 1
+
+
+def test_chain_gl_101_does_not_treat_pipeline_source_inequality_as_mr_reachable(
+    tmp_path: Path,
+) -> None:
+    """An expression that excludes MR pipelines cannot establish the chain."""
+    content = """\
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "merge_request_event"
 
 deploy-prod:
   id_tokens:

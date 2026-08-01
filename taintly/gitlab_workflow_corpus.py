@@ -140,12 +140,23 @@ class GitLabJobSummary:
     :attr id_tokens_declared: ``True`` when this job declares
         ``id_tokens:`` (workflow-level id_tokens are tracked
         separately on :class:`GitLabWorkflowSummary`).
+    :attr triggers: Trigger families that can reach this job after
+        intersecting workflow and job ``rules:`` constraints.
+    :attr protected_branch_only: Whether workflow or job rules restrict
+        this job to protected/default branches.
+    :attr bot_gate_pattern: Whether workflow or job rules restrict this
+        job to a trusted bot identity.
     :attr line: 1-based line of the job's name key.
+    :attr end_line: 1-based exclusive end of this job's top-level block.
     """
 
     name: str
     id_tokens_declared: bool
     line: int
+    end_line: int
+    triggers: frozenset[TriggerFamily] = field(default_factory=frozenset)
+    protected_branch_only: bool = False
+    bot_gate_pattern: bool = False
 
 
 @dataclass(frozen=True)
@@ -587,7 +598,21 @@ def _summarize_gitlab_file(filepath: str, content: str) -> GitLabWorkflowSummary
     id_tokens = _detect_id_tokens(content)
     protected = _detect_protected_branch_only(content)
     bot_gate = _detect_bot_gate(content)
-    job_defs = _extract_job_definitions(lines)
+    workflow_content = _top_level_block(lines, "workflow")
+    default_content = _top_level_block(lines, "default")
+    workflow_triggers = _classify_gitlab_triggers(
+        _extract_pipeline_sources(workflow_content), workflow_content
+    )
+    workflow_protected = _detect_protected_branch_only(workflow_content)
+    workflow_bot_gate = _detect_bot_gate(workflow_content)
+    default_id_tokens = _detect_id_tokens(default_content)
+    job_defs = _extract_job_definitions(
+        lines,
+        workflow_triggers=workflow_triggers,
+        workflow_protected=workflow_protected,
+        workflow_bot_gate=workflow_bot_gate,
+        default_id_tokens=default_id_tokens,
+    )
     cross_project = _extract_cross_project_includes(filepath, content)
     unpinned = tuple(
         r for r in cross_project if r.kind == "project" and not _SHA40_RE.match(r.ref or "")
@@ -611,11 +636,11 @@ def _summarize_gitlab_file(filepath: str, content: str) -> GitLabWorkflowSummary
 # Extractors — pipeline sources, triggers, id_tokens, protected, bot-gate
 # ---------------------------------------------------------------------------
 
-# Match a `$CI_PIPELINE_SOURCE == 'value'` (or `=~`) clause inside an
-# `if:` expression.  GitLab YAML accepts single or double quotes; we
-# capture the bare value.
+# Match a literal-equality `$CI_PIPELINE_SOURCE == 'value'` clause.
+# Regex and inequality operators cannot prove that a source is reachable,
+# so they must not become trigger evidence for an escalated chain.
 _PIPELINE_SOURCE_COMPARE_RE = re.compile(
-    r"\$CI_PIPELINE_SOURCE\s*(?:==|!=|=~)\s*['\"]([a-z_]+)['\"]",
+    r"\$CI_PIPELINE_SOURCE\s*==\s*['\"]([a-z_]+)['\"]",
 )
 
 
@@ -745,7 +770,33 @@ _GITLAB_RESERVED_KEYS: frozenset[str] = frozenset(
 )
 
 
-def _extract_job_definitions(lines: list[str]) -> list[GitLabJobSummary]:
+def _top_level_block(lines: list[str], name: str) -> str:
+    """Return the source for a named top-level mapping block."""
+    for i, line in enumerate(lines):
+        if re.match(rf"^{re.escape(name)}\s*:\s*(?:#.*)?$", line):
+            end = i + 1
+            while end < len(lines):
+                candidate = lines[end]
+                stripped = candidate.lstrip()
+                if (
+                    stripped
+                    and not stripped.startswith("#")
+                    and not candidate.startswith((" ", "\t"))
+                ):
+                    break
+                end += 1
+            return "\n".join(lines[i:end])
+    return ""
+
+
+def _extract_job_definitions(
+    lines: list[str],
+    *,
+    workflow_triggers: frozenset[TriggerFamily],
+    workflow_protected: bool,
+    workflow_bot_gate: bool,
+    default_id_tokens: bool,
+) -> list[GitLabJobSummary]:
     """Return one :class:`GitLabJobSummary` per top-level job key.
 
     Walks indent-0 mapping keys, skips reserved keywords + hidden jobs
@@ -773,8 +824,6 @@ def _extract_job_definitions(lines: list[str]) -> list[GitLabJobSummary]:
         if name in _GITLAB_RESERVED_KEYS or name.startswith("."):
             i += 1
             continue
-        # Scan job body for id_tokens at any deeper indent.
-        body_has_id_tokens = False
         j = i + 1
         while j < n:
             nxt = lines[j]
@@ -785,14 +834,21 @@ def _extract_job_definitions(lines: list[str]) -> list[GitLabJobSummary]:
             nxt_indent = len(nxt) - len(nxt_stripped)
             if nxt_indent == 0:
                 break
-            if re.match(r"^\s*id_tokens\s*:\s*$", nxt):
-                body_has_id_tokens = True
             j += 1
+        job_content = "\n".join(lines[i:j])
+        job_triggers = _classify_gitlab_triggers(
+            _extract_pipeline_sources(job_content), job_content
+        )
         out.append(
             GitLabJobSummary(
                 name=name,
-                id_tokens_declared=body_has_id_tokens,
+                id_tokens_declared=default_id_tokens or _detect_id_tokens(job_content),
                 line=i + 1,
+                end_line=j + 1,
+                triggers=workflow_triggers & job_triggers,
+                protected_branch_only=workflow_protected
+                or _detect_protected_branch_only(job_content),
+                bot_gate_pattern=workflow_bot_gate or _detect_bot_gate(job_content),
             )
         )
         i = j
