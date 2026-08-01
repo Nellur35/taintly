@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from taintly.engine import discover_files, scan_file, scan_repo
-from taintly.models import Platform, RegexPattern, Rule, Severity
+from taintly.models import AbsencePattern, Platform, RegexPattern, Rule, Severity
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -137,6 +137,37 @@ def test_oversize_past_chunk_ceiling_states_degraded_not_preserved(tmp_path):
     assert "coverage degraded" in f.title
     assert "Coverage is preserved" not in f.description
     assert "scanned in chunks" not in f.title
+
+
+def test_short_line_chunk_limit_is_disclosed_below_byte_ceiling(tmp_path, monkeypatch):
+    """Many tiny lines can exhaust the chunk-count bound below the byte ceiling."""
+    import taintly.models as models
+
+    monkeypatch.setattr(models, "_MAX_SAFE_TEXT_LEN", 4)
+    monkeypatch.setattr(models, "_CHUNK_LINES", 2)
+    monkeypatch.setattr(models, "_CHUNK_OVERLAP_LINES", 0)
+    monkeypatch.setattr(models, "_MAX_CHUNKS", 2)
+    content = "x\n" * 6 + "sentinel\n"
+    path = tmp_path / "many-lines.yml"
+    path.write_text(content)
+    rule = Rule(
+        id="TEST-GH-ABSENCE",
+        title="Sentinel absent",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-3",
+        description="Test",
+        pattern=AbsencePattern(absent="sentinel"),
+        remediation="Test",
+        reference="https://example.com",
+    )
+
+    findings = scan_file(str(path), rules=[rule])
+
+    assert not any(f.rule_id == rule.id for f in findings)
+    assert any(
+        f.rule_id == "ENGINE-ERR" and "ended before full coverage" in f.title for f in findings
+    )
 
 
 def test_gitlab_dynamic_include_emits_coverage_disclosure(tmp_path):
