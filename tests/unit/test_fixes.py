@@ -15,6 +15,7 @@ from taintly.fixes import (
     fix_hoist_service_credentials,
     fix_jenkins_cap_add_hint,
     fix_npm_ignore_scripts,
+    fix_persist_credentials,
     fix_quote_github_refs,
     fix_quote_gitlab_ci_vars,
     fix_quote_gitlab_refs,
@@ -38,6 +39,26 @@ def _read(path: str) -> str:
     """Read helper that closes the handle — prevents ResourceWarning."""
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def test_persist_credentials_does_not_duplicate_explicit_setting(tmp_path):
+    original = "steps:\n  - uses: actions/checkout@v4\n    with:\n      persist-credentials: true\n"
+    path = _write(tmp_path, original)
+
+    results = fix_persist_credentials(path, dry_run=False)
+
+    assert results == []
+    assert _read(path) == original
+
+
+def test_persist_credentials_does_not_write_under_inline_with_mapping(tmp_path):
+    original = "steps:\n  - uses: actions/checkout@v4\n    with: { persist-credentials: true }\n"
+    path = _write(tmp_path, original)
+
+    results = fix_persist_credentials(path, dry_run=False)
+
+    assert results == []
+    assert _read(path) == original
 
 
 def test_ignore_scripts_adds_flag_to_npm_install(tmp_path):
@@ -455,7 +476,8 @@ def test_groovy_gstring_is_opt_in_not_default():
 def test_groovy_gstring_unquote_not_run_by_default(tmp_path):
     """A bare --fix must NOT apply the build-breaking GString unquote."""
     path = _write(
-        tmp_path, 'pipeline {\n  stages {\n    stage("s") {\n      steps { sh "echo ${params.X}" }\n    }\n  }\n}\n'
+        tmp_path,
+        'pipeline {\n  stages {\n    stage("s") {\n      steps { sh "echo ${params.X}" }\n    }\n  }\n}\n',
     )
     results = apply_fixes(path, dry_run=True)
     assert all(r.fix_type != "unquote_groovy_gstring_with_params" for r in results)
