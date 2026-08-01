@@ -159,22 +159,26 @@ _TRUSTED_BOT_PATTERNS: tuple[str, ...] = (
 
 def _seed_findings(
     db: Database,
+    corpus: WorkflowCorpus,
     prior_findings: Iterable[Finding],
 ) -> None:
     """Push each prior finding into the database as a FindingFact.
 
-    The composer can't derive what existing rules emit; it sees only
-    what the engine hands it. Findings without a job attribution are
-    still seeded (key carries ``job=None``); composer rules that
-    require job-level co-occurrence simply won't match them.
+    The composer derives job identity from the finding's source line
+    when a rule has not set it explicitly. Findings outside a known
+    job remain unscoped and cannot satisfy job-sensitive chains.
     """
+    from taintly.parsers.segmentation import job_at_line
+
+    workflow_content = {wf.filepath: wf.content for wf in corpus.all()}
     for f in prior_findings:
         if f.rule_id == "ENGINE-ERR":
             continue  # don't compose error-class findings into chains
-        # ``Finding.job`` was added late and may not exist on older
-        # Finding subclasses; tolerate the absence gracefully.
-        job = getattr(f, "job", None)
         line = f.line or 0
+        job = getattr(f, "job", None)
+        if not job:
+            content = workflow_content.get(f.file or "")
+            job = job_at_line(content, line) if content else None
         db.add(
             "finding",
             FindingFact(
@@ -195,14 +199,10 @@ def _seed_job_contexts(db: Database, corpus: WorkflowCorpus) -> None:
     the file. Job-level permissions override the workflow default
     when present.
 
-    Trusted-bot gate detection is content-level: if any `if:` line in
-    the workflow file mentions a trusted-bot user.login pattern, the
-    workflow-level context's ``trusted_bot_gate`` is set to True. This
-    over-approximates (a single bot-gated job suppresses all chain
-    findings on the file) but errs on the side of fewer FPs, which is
-    the right trade-off for composer rules whose precision is the
-    whole point.
+    Trusted-bot gates are evaluated per job so a guarded sibling cannot
+    suppress a chain in an attacker-reachable job.
     """
+    from taintly.parsers.segmentation import for_each_job
     from taintly.workflow_corpus import TriggerFamily
 
     for wf in corpus.all():
@@ -215,48 +215,30 @@ def _seed_job_contexts(db: Database, corpus: WorkflowCorpus) -> None:
         # absence as write-capable.)
         wf_default_write = wf.workflow_permissions is None
 
-        # Content-level bot-gate scan. Look for `if:` lines whose
-        # right-hand side mentions any trusted-bot pattern.
-        bot_gated = _content_has_trusted_bot_gate(wf.content)
+        job_permissions = {
+            block.scope_what: block
+            for block in wf.job_permissions
+            if block.scope_what and block.scope_what != "workflow"
+        }
 
-        # No structured job list in WorkflowSummary today — derive job
-        # names from the job_permissions blocks (which carry one entry
-        # per job that declared an override) plus the implicit "no
-        # override" jobs we can't see at this layer. The composer
-        # therefore creates JobContextFact only for jobs we have
-        # *enough* signal to reason about. Jobs whose permissions
-        # block is implicit fall back to workflow-level state under
-        # the same (file, "*") key.
-        for jb in wf.job_permissions:
-            # ``PermissionBlock`` carries the owning job name in
-            # ``scope_what`` (job-level blocks) — see
-            # :class:`taintly.workflow_corpus.PermissionBlock`. The
-            # legacy ``job`` / ``name`` attrs never existed on that
-            # dataclass, so the old lookup silently produced ZERO
-            # per-job contexts and every composer rule fell back to
-            # the ``(file, "*")`` workflow wildcard. Reading
-            # ``scope_what`` restores genuine per-job write-token
-            # resolution, which the cross-job privilege-escalation
-            # rule (CHAIN-GH-105) depends on to tell a read-only
-            # producer apart from a write-capable consumer.
-            job_name = (
-                getattr(jb, "scope_what", None)
-                or getattr(jb, "job", None)
-                or getattr(jb, "name", None)
-            )
-            # The workflow-level block also lands in job_permissions in
-            # some shapes; its scope_what is "workflow", which is not a
-            # job — skip it (the wildcard below carries workflow state).
-            if not job_name or job_name == "workflow":
+        # Every segmented job receives its effective permission context.
+        for job in for_each_job(wf.content):
+            if not job.name:
                 continue
+            jb = job_permissions.get(job.name)
+            job_name = job.name
             db.add(
                 "job_context",
                 JobContextFact(
                     file=wf.filepath,
                     job=job_name,
                     fork_reachable=fork,
-                    has_write_token=_permission_block_has_write(jb),
-                    trusted_bot_gate=bot_gated,
+                    has_write_token=(
+                        _permission_block_has_write(jb)
+                        if jb is not None
+                        else wf_write or wf_default_write
+                    ),
+                    trusted_bot_gate=_content_has_trusted_bot_gate(job.text),
                 ),
             )
 
@@ -270,7 +252,7 @@ def _seed_job_contexts(db: Database, corpus: WorkflowCorpus) -> None:
                 job="*",
                 fork_reachable=fork,
                 has_write_token=wf_write or wf_default_write,
-                trusted_bot_gate=bot_gated,
+                trusted_bot_gate=False,
             ),
         )
 
@@ -338,7 +320,7 @@ def run_composer(
     the :class:`Database` and yields ``(relation, fact)`` tuples).
     """
     db = Database()
-    _seed_findings(db, prior_findings)
+    _seed_findings(db, corpus, prior_findings)
     _seed_job_contexts(db, corpus)
     solve(db, composer_rules)
     return list(db.all("composite"))  # type: ignore[return-value]
