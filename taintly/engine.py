@@ -30,6 +30,8 @@ from .models import (
     Platform,
     Rule,
     Severity,
+    _chunked_search_coverage_incomplete,
+    _reset_chunked_search_coverage,
     scan_session,
 )
 from .parsers.anchor_expander import expand_anchors
@@ -381,6 +383,7 @@ def scan_file(
     budget = max_scan_seconds if max_scan_seconds is not None else _FILE_SCAN_WALLCLOCK_BUDGET_S
     deadline = time.monotonic() + budget
     unevaluated = 0
+    _reset_chunked_search_coverage()
     with scan_session(), set_pattern_filepath_context(filepath):
         for idx, rule in enumerate(rules):
             if time.monotonic() >= deadline:
@@ -517,6 +520,22 @@ def scan_file(
                         file=filepath,
                     )
                 )
+
+    if _chunked_search_coverage_incomplete():
+        findings.append(
+            Finding(
+                rule_id="ENGINE-ERR",
+                severity=Severity.LOW,
+                title="Chunked file-scope search ended before full coverage",
+                description=(
+                    "A file-scope regex search reached its chunk-count, line-size, "
+                    "or wall-clock safety bound before scanning the whole file. "
+                    "Taintly suppressed absence-based conclusions that could not "
+                    "be proven; per-line and already-completed rule checks still ran."
+                ),
+                file=filepath,
+            )
+        )
 
     if unevaluated:
         findings.append(
@@ -899,10 +918,6 @@ _FORK_REACHABLE_TRIGGER_RE = re.compile(
 # Single-line shape: ``on: push`` / ``on: [push, pull_request]``.
 _INLINE_TRIGGER_RE = re.compile(r"^on:\s*(\[[^\]]+\]|\w+)\s*$", re.MULTILINE)
 _REF_NAME_REF_RE = re.compile(r"\$\{?\s*GITHUB_REF_NAME\b|github\.ref_name\b", re.IGNORECASE)
-_INPUTS_REF_RE = re.compile(
-    r"\$\{\{\s*(?:github\.event\.inputs|inputs)\.[a-zA-Z0-9_]+\s*\}\}",
-    re.IGNORECASE,
-)
 # LOTP-GH-001 severity-inflation FP: workflows whose ``ref:`` is a
 # ``||`` fallback chain that *includes* ``pull_request.head.sha`` as
 # one alternative but whose triggers are all maintainer-gated.  No
@@ -941,7 +956,7 @@ _LOTP_PR_HEAD_IN_FALLBACK_RE = re.compile(
 class _DowngradePattern:
     """One entry in the maintainer-gated downgrade table.
 
-    Exactly one of ``snippet_regex`` / ``content_regex`` should be set:
+    At most one of ``snippet_regex`` / ``content_regex`` should be set:
 
     * ``snippet_regex`` — match against ``finding.snippet`` only.  Use
       this when the FP signal lives on the same line as the finding
@@ -951,6 +966,8 @@ class _DowngradePattern:
       finding (e.g. LOTP-GH-001's snippet is the build-tool line, but
       the signal is the fallback-chain ``ref:`` line in the checkout
       step earlier in the job).
+    * neither — the pinned rule ID and family are sufficient. Use this when
+      the rule's detector already proves the condition being calibrated.
 
     Both forms still gate on the workflow being maintainer-gated only
     (``_is_maintainer_gated_only``) and on the finding's family /
@@ -972,7 +989,6 @@ _MAINTAINER_DOWNGRADE_PATTERNS: tuple[_DowngradePattern, ...] = (
     _DowngradePattern(
         rule_id="SEC4-GH-008",
         family="script_injection",
-        snippet_regex=_INPUTS_REF_RE,
     ),
     # LOTP-GH-001 FP class: PR-head-sha appears as a ``||`` fallback
     # alternative in ``ref:`` on a workflow whose only triggers are
@@ -1076,7 +1092,7 @@ def _matches_maintainer_downgrade_pattern(finding: Finding, content: str) -> boo
     """Return True when ``finding`` matches any downgrade-table entry.
 
     Each entry checks the finding's ``family`` (and optional pinned
-    ``rule_id``) plus one of:
+    ``rule_id``) plus zero or one of:
 
     * ``snippet_regex`` against ``finding.snippet`` — original shape,
       used when the FP signal is on the offending line itself.
@@ -1104,6 +1120,7 @@ def _matches_maintainer_downgrade_pattern(finding: Finding, content: str) -> boo
             if entry.content_regex.search(content):
                 return True
             continue
+        return True
     return False
 
 

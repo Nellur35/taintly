@@ -39,6 +39,7 @@ class TestResult:
     actual: str
     passed: bool
     mutation_op: str = ""
+    known_gap: bool = False
 
 
 def run_self_test(rules: list[Rule]) -> list[TestResult]:
@@ -360,9 +361,9 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "Same TaintPattern separator-fragility family as TAINT-GH-001."
     ),
     ("SEC4-GH-008", "whitespace_pad"): (
-        r"github-script pattern anchors on ``uses:\s+actions/github-script`` "
-        "and ``with:`` keys; whitespace_pad strips the required space after the "
-        "colon, producing a shape the anchor can't match (real workflows keep it)."
+        "The WorkflowAware structural reader requires valid YAML; whitespace_pad "
+        "breaks the parsed key/value shape, which is expected because real "
+        "workflows remain valid YAML."
     ),
     ("TAINT-GH-019", "whitespace_pad"): (
         "Same TaintPattern whitespace_pad gap as TAINT-GH-001..018 — the "
@@ -638,7 +639,7 @@ def run_mutation_tests(
                 for mutant in mutants:
                     lines = mutant.splitlines()
                     matches = rule.pattern.check(mutant, lines)
-                    passed, _ = _mark(len(matches) > 0, rule.id, op_name)
+                    passed, known_gap = _mark(len(matches) > 0, rule.id, op_name)
                     results.append(
                         TestResult(
                             rule_id=rule.id,
@@ -648,6 +649,7 @@ def run_mutation_tests(
                             actual="trigger" if matches else "no_trigger",
                             passed=passed,
                             mutation_op=op_name,
+                            known_gap=known_gap,
                         )
                     )
 
@@ -658,7 +660,7 @@ def run_mutation_tests(
                 for mutant in mutants:
                     lines = mutant.splitlines()
                     matches = rule.pattern.check(mutant, lines)
-                    passed, _ = _mark(len(matches) == 0, rule.id, op_name)
+                    passed, known_gap = _mark(len(matches) == 0, rule.id, op_name)
                     results.append(
                         TestResult(
                             rule_id=rule.id,
@@ -668,6 +670,7 @@ def run_mutation_tests(
                             actual="no_trigger" if not matches else "trigger",
                             passed=passed,
                             mutation_op=op_name,
+                            known_gap=known_gap,
                         )
                     )
 
@@ -704,12 +707,15 @@ def format_test_results(
     # Mutation test summary
     if mutation_results:
         total = len(mutation_results)
-        killed = sum(1 for r in mutation_results if r.passed)
-        survived = total - killed
+        killed = sum(1 for r in mutation_results if r.passed and not r.known_gap)
+        known_gaps = sum(1 for r in mutation_results if r.known_gap)
+        survived = sum(1 for r in mutation_results if not r.passed)
         out.append(f"\nMutations tested: {total}")
         out.append(
-            f"Mutation kills: {killed}/{total} ({killed / total * 100:.1f}%)" if total else ""
+            f"Raw mutation kills: {killed}/{total} ({killed / total * 100:.1f}%)" if total else ""
         )
+        out.append(f"Known surviving gaps: {known_gaps}")
+        out.append(f"Unexpected survivors: {survived}")
 
         if survived:
             survivors = [r for r in mutation_results if not r.passed][:10]
@@ -747,6 +753,7 @@ def format_test_results_json(
             "expected": r.expected,
             "actual": r.actual,
             "passed": r.passed,
+            "known_gap": r.known_gap,
             "mutation_op": r.mutation_op or None,
             "sample_prefix": r.sample,
         }
@@ -768,33 +775,34 @@ def format_test_results_json(
     mutation_block: dict | None = None
     if mutation_results:
         total = len(mutation_results)
-        killed = sum(1 for result in mutation_results if result.passed)
-        known_gap_count = sum(
-            1
-            for result in mutation_results
-            if not result.passed and (result.rule_id, result.mutation_op) in _KNOWN_MUTATION_GAPS
-        )
+        killed = sum(1 for result in mutation_results if result.passed and not result.known_gap)
+        known_gap_count = sum(1 for result in mutation_results if result.known_gap)
+        unexpected_survivors = sum(1 for result in mutation_results if not result.passed)
         by_rule_op: dict[str, dict[str, int]] = {}
         for result in mutation_results:
             key = f"{result.rule_id}:{result.mutation_op or '_'}"
             entry = by_rule_op.setdefault(key, {"killed": 0, "total": 0})
             entry["total"] += 1
-            if result.passed:
+            if result.passed and not result.known_gap:
                 entry["killed"] += 1
         mutation_block = {
             "total": total,
             "killed": killed,
-            "kill_rate": (killed / total) if total else 0.0,
+            "raw_kill_rate": (killed / total) if total else 0.0,
             "known_gaps": known_gap_count,
+            "unexpected_survivors": unexpected_survivors,
             "by_rule_op": by_rule_op,
             "survivors": [
                 _result_to_dict(result) for result in mutation_results if not result.passed
+            ],
+            "known_gap_survivors": [
+                _result_to_dict(result) for result in mutation_results if result.known_gap
             ],
         }
 
     return json.dumps(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "self_test": self_block,
             "mutation": mutation_block,
         },

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import signal
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
@@ -23,6 +24,32 @@ from .parsers.gha_expr import (
 
 class _PatternTimeout(Exception):
     """Raised when a pattern match exceeds the safety timeout."""
+
+
+class _IncompleteChunkedSearch:
+    """Falsey sentinel distinguishing bounded coverage from a clean miss."""
+
+    def __bool__(self) -> bool:
+        return False
+
+
+_INCOMPLETE_CHUNKED_SEARCH = _IncompleteChunkedSearch()
+_CHUNKED_SEARCH_INCOMPLETE: ContextVar[bool] = ContextVar(
+    "taintly_chunked_search_incomplete", default=False
+)
+
+
+def _reset_chunked_search_coverage() -> None:
+    _CHUNKED_SEARCH_INCOMPLETE.set(False)
+
+
+def _chunked_search_coverage_incomplete() -> bool:
+    return _CHUNKED_SEARCH_INCOMPLETE.get()
+
+
+def _mark_chunked_search_incomplete() -> _IncompleteChunkedSearch:
+    _CHUNKED_SEARCH_INCOMPLETE.set(True)
+    return _INCOMPLETE_CHUNKED_SEARCH
 
 
 _MAX_SAFE_TEXT_LEN = 65_536  # chars; skip regex beyond this to prevent ReDoS in threads.  Bumped 50_000 → 65_536 (2026-05-05) after astral-sh/uv's build-release-binaries.yml hit 50064 bytes — clean 64 KiB power-of-2 covers realistic GitHub Actions / GitLab CI / Jenkins files with margin while keeping per-regex worst-case bounded.
@@ -119,7 +146,10 @@ def _safe_search_chunked(compiled_pattern, content: str):
     line-windowed chunks bounded by ``_MAX_SAFE_TEXT_LEN``; each
     chunk pays the
     SIGALRM ReDoS timeout and the per-chunk length cap, and the
-    overall search reaches the full file.
+    A completed search reaches the full file. If the chunk count,
+    single-line size, or wall-clock bound stops it early, the function
+    returns a distinct falsey incomplete sentinel and records degraded
+    coverage for the engine to disclose.
 
     Overlap of ``_CHUNK_OVERLAP_LINES`` lines preserves matches
     that span the chunk boundary; in practice every requires
@@ -150,9 +180,9 @@ def _safe_search_chunked(compiled_pattern, content: str):
         #     per-chunk SIGALRM ceilings.  An overall wall-clock
         #     budget contains the worst case end-to-end.
         if chunks_scanned >= _MAX_CHUNKS:
-            return None
+            return _mark_chunked_search_incomplete()
         if _time.monotonic() >= deadline:
-            return None
+            return _mark_chunked_search_incomplete()
         # Grow the window until either we hit the line budget or
         # adding the next line would exceed the byte cap.
         end = pos
@@ -166,6 +196,7 @@ def _safe_search_chunked(compiled_pattern, content: str):
             # A single line exceeds the cap on its own — nothing to
             # do but skip it (rare; would require a 50KB single line
             # which no real workflow has).
+            _mark_chunked_search_incomplete()
             pos += 1
             continue
         chunk = "".join(lines[pos:end])
@@ -199,12 +230,10 @@ _CHUNK_OVERLAP_LINES = 50
 _MAX_CHUNKS = 36
 _CHUNKED_WALLCLOCK_BUDGET_S = 3.0
 
-# The byte size beyond which ``_safe_search_chunked`` gives up (it returns
-# ``None`` once ``chunks_scanned >= _MAX_CHUNKS``).  Below this ceiling a file
-# that is over ``_MAX_SAFE_TEXT_LEN`` is still fully scanned window-by-window,
-# so file-scope patterns keep full coverage; only PAST it is coverage actually
-# degraded.  The engine uses this to decide when a large file is "scanned in
-# chunks, coverage preserved" versus genuinely "coverage degraded".
+# Byte-derived lower bound for an up-front coverage warning. A file past this
+# size cannot fit within ``_MAX_CHUNKS`` even with byte-full chunks. Files below
+# it may still exhaust the line-count or wall-clock bounds; runtime tracking in
+# ``_safe_search_chunked`` discloses those cases separately.
 _CHUNK_COVERAGE_CEILING = _MAX_CHUNKS * _MAX_SAFE_TEXT_LEN
 
 
@@ -681,7 +710,10 @@ class AbsencePattern:
         # 50KB length cap previously caused FALSE absences (the
         # pattern was actually present but the cap returned None).
         # That inverted FP/TP for absence-style rules on big files.
-        if not _safe_search_chunked(self._compiled, content):
+        search = _safe_search_chunked(self._compiled, content)
+        if search is _INCOMPLETE_CHUNKED_SEARCH:
+            return []
+        if not search:
             return [(1, f"(pattern not found: {self.absent})")]
         return []
 
@@ -1099,10 +1131,10 @@ class ContextPattern:
         )
         if not self._requires_hit(gated_content):
             return []
-        if self._requires_absent_re and _safe_search_chunked(
-            self._requires_absent_re, gated_content
-        ):
-            return []
+        if self._requires_absent_re:
+            absent_search = _safe_search_chunked(self._requires_absent_re, gated_content)
+            if absent_search is _INCOMPLETE_CHUNKED_SEARCH or absent_search:
+                return []
 
         # Build per-line job-segment content map if we need per-job anchor suppression.
         job_content_by_line: dict[int, str] = {}
@@ -1165,10 +1197,10 @@ class ContextPattern:
             # outright in that case, silently disabling the rule.
             if not self._requires_hit(seg_content):
                 continue
-            if self._requires_absent_re and _safe_search_chunked(
-                self._requires_absent_re, seg_content
-            ):
-                continue
+            if self._requires_absent_re:
+                absent_search = _safe_search_chunked(self._requires_absent_re, seg_content)
+                if absent_search is _INCOMPLETE_CHUNKED_SEARCH or absent_search:
+                    continue
             for j, line in enumerate(seg_lines):
                 if any(_safe_search(ex, line) for ex in self._excludes):
                     continue

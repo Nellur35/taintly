@@ -47,7 +47,7 @@ def _fires(content: str) -> list[tuple[int, str]]:
 
 
 def test_one_hop_param_local_to_sh():
-    code = "script {\n  def t = params.FOO\n  sh \"deploy ${t}\"\n}"
+    code = 'script {\n  def t = params.FOO\n  sh "deploy ${t}"\n}'
     flows = _flows(code)
     assert len(flows) == 1
     assert flows[0].var == "t"
@@ -56,11 +56,7 @@ def test_one_hop_param_local_to_sh():
 
 
 def test_two_hop_gstring_chain():
-    code = (
-        'def url = "${env.CHANGE_BRANCH}/build"\n'
-        'def cmd = "curl ${url}"\n'
-        'sh "${cmd}"'
-    )
+    code = 'def url = "${env.CHANGE_BRANCH}/build"\ndef cmd = "curl ${url}"\nsh "${cmd}"'
     flows = _flows(code)
     assert len(flows) == 1
     assert flows[0].hops == ("env.CHANGE_BRANCH", "url", "cmd", "sh")
@@ -108,6 +104,36 @@ def test_tainted_local_never_reaching_sink():
     assert _flows(code) == []
 
 
+def test_reassignment_to_a_constant_clears_taint():
+    code = 'def x = params.FOO\nx = "safe"\nsh "echo ${x}"'
+    assert _flows(code) == []
+
+
+def test_sink_before_source_is_not_a_flow():
+    code = 'sh "echo ${x}"\ndef x = params.FOO'
+    assert _flows(code) == []
+
+
+def test_reverse_assignment_order_is_not_a_flow():
+    code = 'def y = x\ndef x = params.FOO\nsh "echo ${y}"'
+    assert _flows(code) == []
+
+
+def test_same_local_name_in_separate_functions_is_not_a_flow():
+    code = 'def producer() {\n  def x = params.FOO\n}\ndef consumer() {\n  sh "echo ${x}"\n}\n'
+    assert _flows(code) == []
+
+
+def test_undeclared_script_binding_flows_between_sibling_closures():
+    code = (
+        "node {\n"
+        "  stage('source') { version = \"${env.BRANCH_NAME}\" }\n"
+        "  stage('sink') { sh \"echo ${version}\" }\n"
+        "}\n"
+    )
+    assert len(_flows(code)) == 1
+
+
 # ---------------------------------------------------------------------------
 # Quote-awareness.
 # ---------------------------------------------------------------------------
@@ -151,7 +177,7 @@ def test_jk003_does_not_fire_where_jk001_does():
 
 
 def test_rule_snippet_renders_hop_chain():
-    code = "script {\n  def t = params.FOO\n  sh \"deploy ${t}\"\n}"
+    code = 'script {\n  def t = params.FOO\n  sh "deploy ${t}"\n}'
     hits = _fires(code)
     assert len(hits) == 1
     line, snippet = hits[0]

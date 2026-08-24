@@ -28,10 +28,11 @@ Grammar facts (GitHub docs + actionlint):
   * Strings are single-quoted with ``''`` escaping; ``"`` is not a string
     delimiter in the expression language.
   * Functions (``fromJSON``, ``toJSON``, ``format``, ``contains``, …) are
-    opaque for path extraction: a spine rooted in a call (e.g.
-    ``fromJSON(toJSON(github.event)).pull_request.title``) yields only the
-    paths inside the call's arguments (``github.event``), never the post-call
-    member chain — modelling that needs builtin dataflow, out of scope here.
+    opaque for path extraction, except the exact identity round trip
+    ``fromJSON(toJSON(value))``. That form preserves ``value``'s object shape,
+    so a post-call member chain is canonicalized. All other call-rooted spines
+    yield only paths inside their arguments; modelling their member chains
+    would need builtin dataflow and remains out of scope here.
 
 On any malformed / unsupported input the tokenizer or parser raises
 :class:`ExprSyntaxError`; callers fall back to the legacy regex so there is no
@@ -51,6 +52,7 @@ __all__ = [
     "context_paths",
     "iter_expression_bodies",
     "parse",
+    "result_provenance_paths",
     "structural_expr_enabled",
 ]
 
@@ -364,9 +366,32 @@ def canonical_path(node: object) -> str | None:
         elif isinstance(cur, Index) and isinstance(cur.index, Lit) and cur.index.kind == "string":
             parts.append(str(cur.index.value))
             cur = cur.recv
+        elif (roundtrip_value := _json_roundtrip_value(cur)) is not None:
+            # ``fromJSON(toJSON(x))`` preserves x's JSON object shape. This is
+            # the one call-rooted spine we can normalize without guessing about
+            # builtin semantics or inventing a path.
+            cur = roundtrip_value
         else:
             return None
     return ".".join(reversed(parts)).lower()
+
+
+def _json_roundtrip_value(node: object) -> object | None:
+    """Return the value in an exact ``fromJSON(toJSON(value))`` round trip.
+
+    Other function calls remain opaque. In particular, this does not treat
+    ``fromJSON(inputs.payload)`` as a property-preserving operation.
+    """
+    if (
+        isinstance(node, Call)
+        and node.name.lower() == "fromjson"
+        and len(node.args) == 1
+        and isinstance(node.args[0], Call)
+        and node.args[0].name.lower() == "tojson"
+        and len(node.args[0].args) == 1
+    ):
+        return node.args[0].args[0]
+    return None
 
 
 def _iter_paths(node: object) -> Iterator[str]:
@@ -396,6 +421,73 @@ def context_paths(body: str) -> list[str]:
     seen: dict[str, None] = {}
     for p in _iter_paths(parse(body)):
         seen.setdefault(p, None)
+    return list(seen)
+
+
+_BOOLEAN_RESULT_FUNCTIONS = frozenset(
+    {
+        "always",
+        "cancelled",
+        "contains",
+        "endswith",
+        "failure",
+        "startswith",
+        "success",
+    }
+)
+_COMPARISON_OPERATORS = frozenset({"==", "!=", "<", "<=", ">", ">="})
+
+
+def _iter_result_provenance(node: object) -> Iterator[str]:
+    """Yield paths whose bytes can contribute to ``node``'s result value.
+
+    This is narrower than :func:`_iter_paths`: references used only as boolean
+    conditions do not taint the resulting string. Unknown value-returning
+    functions are conservative and propagate their arguments.
+    """
+    cp = canonical_path(node)
+    if cp is not None:
+        yield cp
+        return
+    if isinstance(node, Lit):
+        return
+    if isinstance(node, Deref | Filter | Index):
+        yield from _iter_result_provenance(node.recv)
+        if isinstance(node, Index):
+            yield from _iter_result_provenance(node.index)
+        return
+    if isinstance(node, Call):
+        if node.name.lower() in _BOOLEAN_RESULT_FUNCTIONS:
+            return
+        for arg in node.args:
+            yield from _iter_result_provenance(arg)
+        return
+    if isinstance(node, Unary):
+        # The only supported unary operator is ``!``; its result is boolean.
+        return
+    if isinstance(node, Binary):
+        if node.op in _COMPARISON_OPERATORS:
+            return
+        if node.op == "&&":
+            # The left side controls selection. Only the right side can become
+            # the value returned by GitHub's short-circuit expression.
+            yield from _iter_result_provenance(node.right)
+            return
+        if node.op == "||":
+            yield from _iter_result_provenance(node.left)
+            yield from _iter_result_provenance(node.right)
+
+
+def result_provenance_paths(body: str) -> list[str]:
+    """Return context paths whose values can reach the expression result.
+
+    Comparisons, negation, and boolean-returning functions are control-only.
+    Fallbacks and value transforms such as ``format()``, ``join()``,
+    ``toJSON()``, and ``fromJSON()`` preserve argument provenance.
+    """
+    seen: dict[str, None] = {}
+    for path in _iter_result_provenance(parse(body)):
+        seen.setdefault(path, None)
     return list(seen)
 
 
