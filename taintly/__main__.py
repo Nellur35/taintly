@@ -39,10 +39,10 @@ from .deployment_context import (
 from .engine import detect_platform, scan_file, scan_repo
 from .models import Platform, Severity
 from .reporters._encoding import ensure_utf8_stdout
-from .reporters.csv_report import format_csv
+from .reporters.csv_report import format_csv, format_csv_reports
 from .reporters.html_report import format_html
 from .reporters.json_report import format_json
-from .reporters.sarif import format_sarif
+from .reporters.sarif import format_sarif, format_sarif_reports
 from .reporters.score_text import format_score
 from .reporters.text import format_text
 from .rules.registry import load_all_rules, load_rules_for_platform
@@ -1330,6 +1330,14 @@ def main():
             ],
         }
         print(json.dumps(wrapped, indent=2))
+    elif args.format == "csv" and len(reports) > 1:
+        for report in reports:
+            _print_engine_errors_to_stderr(report)
+        print(format_csv_reports(reports))
+    elif args.format == "sarif" and len(reports) > 1:
+        for report in reports:
+            _print_engine_errors_to_stderr(report)
+        print(format_sarif_reports(reports))
     else:
         for report in reports:
             _output_report(report, args, score_report=score_report)

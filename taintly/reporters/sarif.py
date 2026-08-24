@@ -219,3 +219,14 @@ def format_sarif(report: AuditReport) -> str:
     }
 
     return json.dumps(sarif, indent=2)
+
+
+def format_sarif_reports(reports: list[AuditReport]) -> str:
+    """Render multiple reports as one SARIF document with one run each."""
+    if not reports:
+        raise ValueError("at least one report is required")
+
+    documents = [json.loads(format_sarif(report)) for report in reports]
+    document = documents[0]
+    document["runs"] = [run for item in documents for run in item["runs"]]
+    return json.dumps(document, indent=2)

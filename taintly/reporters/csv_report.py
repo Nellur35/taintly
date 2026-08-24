@@ -51,3 +51,14 @@ def format_csv(report: AuditReport) -> str:
         row["context_tags"] = "; ".join(row.get("context_tags") or [])
         writer.writerow(row)
     return buf.getvalue()
+
+
+def format_csv_reports(reports: list[AuditReport]) -> str:
+    """Render multiple reports as one CSV table with a single header."""
+    rendered: list[str] = []
+    for index, report in enumerate(reports):
+        report_csv = format_csv(report)
+        if index:
+            _, _, report_csv = report_csv.partition("\n")
+        rendered.append(report_csv)
+    return "".join(rendered)
