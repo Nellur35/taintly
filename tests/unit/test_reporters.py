@@ -1504,6 +1504,64 @@ def test_single_platform_json_output_unchanged(tmp_path):
     assert "summary" in parsed
 
 
+def _write_structured_output_multi_platform_repo(root):
+    workflows = root / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "name: ci\n"
+        "on: push\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - uses: example-org/deploy-action@v1\n",
+        encoding="utf-8",
+    )
+    (root / "Jenkinsfile").write_text(
+        "pipeline {\n  agent any\n  stages {\n    stage('build') { steps { echo 'ok' } }\n  }\n}\n",
+        encoding="utf-8",
+    )
+
+
+def test_multi_platform_sarif_is_one_document_with_one_run_per_platform(tmp_path):
+    import subprocess
+    import sys
+
+    _write_structured_output_multi_platform_repo(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "taintly", str(tmp_path), "--format", "sarif"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 1
+    document = json.loads(result.stdout)
+    assert document["version"] == "2.1.0"
+    assert len(document["runs"]) == 2
+
+
+def test_multi_platform_csv_has_one_header(tmp_path):
+    import subprocess
+    import sys
+
+    _write_structured_output_multi_platform_repo(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "taintly", str(tmp_path), "--format", "csv"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 1
+    rows = list(csv.DictReader(io.StringIO(result.stdout)))
+    assert rows
+    assert result.stdout.count("rule_id,kind,severity,") == 1
+    assert all(row["rule_id"] != "rule_id" for row in rows)
+
+
 # =============================================================================
 # Terminal-control sanitisation (untrusted file-derived strings)
 # =============================================================================
