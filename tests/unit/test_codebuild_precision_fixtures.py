@@ -17,6 +17,10 @@ import pytest
 
 from taintly.engine import scan_file
 from taintly.models import Platform
+from taintly.rules.codebuild.sec_codebuild import (
+    _is_install_command_prefix,
+    _iter_shell_c_sinks,
+)
 from taintly.rules.registry import load_all_rules
 
 _POS = Path(__file__).parent.parent / "fixtures" / "codebuild" / "positives"
@@ -225,3 +229,14 @@ def test_codebuild_independent_review_regressions(
     buildspec.write_text(content, encoding="utf-8")
     fired = rule_id in {finding.rule_id for finding in scan_file(str(buildspec), cb_rules)}
     assert fired is should_fire
+
+
+def test_codebuild_prefix_parsers_are_bounded_on_adversarial_input():
+    shell_input = "&sh -" + ("AA -" * 20_000)
+    assert _iter_shell_c_sinks(shell_input, len(shell_input)) == []
+
+    env_input = "env" + (" A=! env" * 20_000)
+    assert not _is_install_command_prefix(env_input)
+
+    path_input = "-/" * 20_000
+    assert isinstance(_is_install_command_prefix(path_input), bool)

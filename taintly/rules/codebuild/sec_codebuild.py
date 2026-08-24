@@ -490,11 +490,34 @@ _WEBHOOK_VAR_RE = re.compile(
     r"|CODEBUILD_WEBHOOK_BASE_REF|CODEBUILD_WEBHOOK_TRIGGER)\b\}?"
 )
 _SECOND_EVAL_RE = re.compile(r"(?:^|[;&|])\s*eval\b")
-_SHELL_C_RE = re.compile(
-    r"(?:^|[;&|])\s*(?:bash|dash|ksh|sh|zsh)"
-    r"(?:\s+(?:--[A-Za-z][\w-]*|-[A-Za-z]*[A-BD-Zabd-z][A-Za-z]*))*"
-    r"\s+-(?:[A-Za-z]*c[A-Za-z]*)\b"
-)
+_SHELL_HEAD_RE = re.compile(r"(?:^|[;&|])\s*(?:bash|dash|ksh|sh|zsh)\b")
+_SHELL_OPTION_TERMINATOR = "--"
+_ENV_EXECUTABLE = "env"
+
+
+def _iter_shell_c_sinks(code: str, stop: int) -> list[tuple[int, int]]:
+    """Return shell-command starts and the end of their ``-c`` option."""
+    sinks: list[tuple[int, int]] = []
+    for head in _SHELL_HEAD_RE.finditer(code, 0, stop):
+        cursor = head.end()
+        while cursor < stop:
+            while cursor < stop and code[cursor].isspace():
+                cursor += 1
+            if cursor >= stop or code[cursor] != "-":
+                break
+            token_end = cursor + 1
+            while token_end < stop and not code[token_end].isspace():
+                token_end += 1
+            token = code[cursor:token_end]
+            if token == _SHELL_OPTION_TERMINATOR:
+                break
+            if not token.startswith("--") and "c" in token[1:]:
+                sinks.append((head.start(), token_end))
+                break
+            cursor = token_end
+    return sinks
+
+
 _COMMANDS_KEY_RE = re.compile(r"^(\s*)commands\s*:\s*(?:#.*)?$")
 
 
@@ -656,20 +679,73 @@ def _command_segment_end(code: str, position: int) -> int:
     return len(code)
 
 
-_LOTP_COMMAND_PREFIX_RE = re.compile(
-    r"^(?:(?:!|if|then|elif|else|do|while|until|command|builtin|exec|time|nohup)\s+"
-    r"|(?:env(?:\s+(?:-[^\s]+|[A-Za-z_]\w*=\S+))*\s+)"
-    r"|(?:[A-Za-z_]\w*=\S+\s+))*"
-    r"(?:[./A-Za-z0-9_-]+/)*$"
+_COMMAND_PREFIX_WORDS = frozenset(
+    {
+        "!",
+        "if",
+        "then",
+        "elif",
+        "else",
+        "do",
+        "while",
+        "until",
+        "command",
+        "builtin",
+        "exec",
+        "time",
+        "nohup",
+    }
 )
+_PATH_PREFIX_CHARS = frozenset("./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+
+
+def _is_assignment_token(token: str) -> bool:
+    name, separator, value = token.partition("=")
+    return bool(
+        separator
+        and value
+        and name
+        and (name[0].isalpha() or name[0] == "_")
+        and all(char.isalnum() or char == "_" for char in name[1:])
+    )
+
+
+def _is_install_command_prefix(prefix: str) -> bool:
+    """Recognize bounded shell prefixes that still invoke the matched installer."""
+    tokens = prefix.split()
+    index = 0
+    seen_env = False
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _COMMAND_PREFIX_WORDS or _is_assignment_token(token):
+            index += 1
+            continue
+        if token == _ENV_EXECUTABLE and not seen_env:
+            seen_env = True
+            index += 1
+            while index < len(tokens) and (
+                tokens[index].startswith("-") or _is_assignment_token(tokens[index])
+            ):
+                index += 1
+            continue
+        break
+
+    remainder = tokens[index:]
+    if not remainder:
+        return True
+    return bool(
+        len(remainder) == 1
+        and remainder[0].endswith("/")
+        and all(char in _PATH_PREFIX_CHARS for char in remainder[0])
+    )
 
 
 def _is_executed_install(code: str, match: re.Match[str]) -> bool:
     """Distinguish a command invocation from inert text passed as data."""
-    for sink in _SHELL_C_RE.finditer(code, 0, match.start()):
-        if _is_quoted_at(code, sink.start(), "'") or _is_quoted_at(code, sink.start(), '"'):
+    for sink_start, sink_end in _iter_shell_c_sinks(code, match.start()):
+        if _is_quoted_at(code, sink_start, "'") or _is_quoted_at(code, sink_start, '"'):
             continue
-        span = _shell_c_command_span(code, sink.end())
+        span = _shell_c_command_span(code, sink_end)
         if span is not None and span[0] <= match.start() < span[1]:
             return True
 
@@ -677,7 +753,7 @@ def _is_executed_install(code: str, match: re.Match[str]) -> bool:
         return False
     prefix = code[_command_segment_start(code, match.start()) : match.start()]
     normalized_prefix = prefix.lstrip()
-    return bool(_LOTP_COMMAND_PREFIX_RE.fullmatch(normalized_prefix))
+    return _is_install_command_prefix(normalized_prefix)
 
 
 class _BuildToolInstallPattern:
@@ -801,12 +877,12 @@ class _SecondEvaluationWebhookRefPattern:
                         results.append((i + 1, stripped))
                         break
 
-                    for sink in _SHELL_C_RE.finditer(code, 0, variable.start()):
-                        if _is_quoted_at(code, sink.start(), "'") or _is_quoted_at(
-                            code, sink.start(), '"'
+                    for sink_start, sink_end in _iter_shell_c_sinks(code, variable.start()):
+                        if _is_quoted_at(code, sink_start, "'") or _is_quoted_at(
+                            code, sink_start, '"'
                         ):
                             continue
-                        span = _shell_c_command_span(code, sink.end())
+                        span = _shell_c_command_span(code, sink_end)
                         if span is None:
                             continue
                         arg_start, arg_end, quote = span
