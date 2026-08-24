@@ -1,0 +1,15 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      ruby: "$MY_RUBY_VAR"
+    commands:
+      - bundle install
+  build:
+    commands:
+      - bundle exec rake build
+
+artifacts:
+  files:
+    - "pkg/**/*"

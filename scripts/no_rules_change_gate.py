@@ -34,6 +34,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from taintly.models import Platform  # noqa: E402
+
 BASELINE = ROOT / "tests" / "_rule_pack_hashes.json"
 
 
@@ -66,7 +68,8 @@ def _scan_corpus() -> dict[str, str]:
     rules = load_all_rules()
     fixtures_root = ROOT / "tests" / "fixtures"
     out: dict[str, str] = {}
-    for plat in ("github", "gitlab", "jenkins"):
+    for platform in Platform:
+        plat = platform.value
         plat_dir = fixtures_root / plat
         if not plat_dir.exists():
             continue

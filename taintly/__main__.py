@@ -51,11 +51,7 @@ from .testing.self_test import format_test_results, run_mutation_tests, run_self
 
 # Map AuditReport.platform string to the Platform enum the scorer
 # uses for bonus gating. Keeps the call sites readable.
-_PLATFORM_LOOKUP: dict[str, Platform] = {
-    "github": Platform.GITHUB,
-    "gitlab": Platform.GITLAB,
-    "jenkins": Platform.JENKINS,
-}
+_PLATFORM_LOOKUP: dict[str, Platform] = {platform.value: platform for platform in Platform}
 
 
 def _platforms_for_reports(*reports) -> set[Platform]:
@@ -152,7 +148,9 @@ def main():
         "--format", "-f", choices=["text", "json", "csv", "sarif", "html"], default="text"
     )
     parser.add_argument("--no-color", action="store_true")
-    parser.add_argument("--platform", choices=["github", "gitlab", "jenkins"], default=None)
+    parser.add_argument(
+        "--platform", choices=[platform.value for platform in Platform], default=None
+    )
     parser.add_argument(
         "--min-severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"], default=None
     )
@@ -766,11 +764,7 @@ def main():
         if args.platform:
             platforms_to_fix = [Platform(args.platform)]
         else:
-            platforms_to_fix = [
-                p
-                for p in (Platform.GITHUB, Platform.GITLAB, Platform.JENKINS)
-                if discover_files(args.path, p)
-            ]
+            platforms_to_fix = [p for p in Platform if discover_files(args.path, p)]
             if not platforms_to_fix:
                 platforms_to_fix = [Platform.GITHUB]
 
@@ -786,12 +780,52 @@ def main():
         if args.fix_egress_allowlist_scaffold:
             extra_fix_types.append("egress_allowlist_scaffold")
 
-        files: list[str] = []
+        default_fix_types = {
+            Platform.GITHUB: [
+                "pin_sha",
+                "persist_credentials",
+                "add_permissions",
+                "remove_insecure_commands",
+                "remove_debug_logging",
+                "disable_setup_cache_in_release",
+                "quote_github_refs",
+            ],
+            Platform.GITLAB: ["quote_gitlab_refs", "quote_gitlab_ci_vars"],
+            Platform.JENKINS: [],
+            Platform.CODEBUILD: [],
+        }
+        opt_in_fix_types = {
+            Platform.GITHUB: {
+                "npm_ignore_scripts",
+                "github_ai_allowed_tools_scaffold",
+                "hoist_service_credentials",
+                "egress_allowlist_scaffold",
+            },
+            Platform.GITLAB: {
+                "npm_ignore_scripts",
+                "hoist_service_credentials",
+                "egress_allowlist_scaffold",
+            },
+            Platform.JENKINS: {"jenkins_cap_add_hint"},
+            Platform.CODEBUILD: {"npm_ignore_scripts"},
+        }
+
+        files: list[tuple[str, Platform]] = []
         for plat in platforms_to_fix:
-            files.extend(discover_files(args.path, plat))
+            files.extend((path, plat) for path in discover_files(args.path, plat))
         all_results = []
-        for fpath in files:
-            all_results.extend(apply_fixes(fpath, dry_run=dry_run, extra_fix_types=extra_fix_types))
+        for fpath, plat in files:
+            supported_opt_ins = [
+                fix_type for fix_type in extra_fix_types if fix_type in opt_in_fix_types[plat]
+            ]
+            all_results.extend(
+                apply_fixes(
+                    fpath,
+                    dry_run=dry_run,
+                    fix_types=default_fix_types[plat],
+                    extra_fix_types=supported_opt_ins,
+                )
+            )
 
         print(format_fix_results(all_results, dry_run=dry_run))
         sys.exit(0)

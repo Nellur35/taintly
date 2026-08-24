@@ -52,6 +52,8 @@ def _platform_for(rule_id: str) -> str:
         return "GitLab"
     if "-JK-" in rule_id:
         return "Jenkins"
+    if "-CB-" in rule_id:
+        return "CodeBuild"
     return "Other"
 
 
@@ -66,7 +68,11 @@ def _count_rules() -> tuple[int, dict[str, dict[str, int]]]:
     rules = load_all_rules()
     table: dict[str, Counter[str]] = {}
     for r in rules:
-        prefix = _category_prefix(r.id)
+        prefix = (
+            r.owasp_cicd.removeprefix("CICD-").replace("-", "")
+            if r.owasp_cicd
+            else _category_prefix(r.id)
+        )
         plat = _platform_for(r.id)
         table.setdefault(prefix, Counter())[plat] += 1
     return len(rules), {k: dict(v) for k, v in table.items()}
@@ -93,7 +99,7 @@ def _count_platform_checks() -> int:
 def render_summary(total_file: int, total_plat: int) -> str:
     return (
         f"{total_file} file-based rules and {total_plat} platform-posture "
-        f"checks across GitHub Actions, GitLab CI, and Jenkins. "
+        f"checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. "
         f"Includes a dedicated AI / ML category for workflows that load "
         f"models or run AI coding agents."
     )
@@ -101,14 +107,15 @@ def render_summary(total_file: int, total_plat: int) -> str:
 
 def render_coverage_table(table: dict[str, dict[str, int]]) -> str:
     lines = [
-        "| Category | GitHub | GitLab | Jenkins |",
-        "|----------|--------|--------|---------|",
+        "| Category | GitHub | GitLab | Jenkins | CodeBuild |",
+        "|----------|--------|--------|---------|-----------|",
     ]
     for label, prefix in _CATEGORIES:
         row = table.get(prefix, {})
         lines.append(
             f"| {label} | {row.get('GitHub', 0)} | "
-            f"{row.get('GitLab', 0)} | {row.get('Jenkins', 0)} |"
+            f"{row.get('GitLab', 0)} | {row.get('Jenkins', 0)} | "
+            f"{row.get('CodeBuild', 0)} |"
         )
     return "\n".join(lines)
 

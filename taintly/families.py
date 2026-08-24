@@ -355,17 +355,18 @@ _FAMILIES: tuple[FindingFamily, ...] = (
     ),
     FindingFamily(
         id="pipeline_tool_execution",
-        title="Build-tool / package-manager execution in untrusted context",
+        title="Build-tool / package-manager execution and integrity risk",
         why=(
-            "A build tool, test runner, or package-manager install that runs "
-            "in a fork-reachable job executes attacker-supplied lifecycle "
-            "scripts (npm/yarn/pnpm postinstall, a malicious setup.py, a "
-            "Gradle/Maven plugin) WITHOUT any attacker-controlled string ever "
-            "reaching a shell. The remediation is unrelated to input "
-            "sanitization — pass --ignore-scripts, pin the toolchain, or drop "
-            "the PR-head checkout — so this is a distinct root cause from the "
-            "PR-title-into-run: script injection it used to be folded under "
-            "(CICD-SEC-4)."
+            "Build tools, test runners, and package-manager installs can execute "
+            "lifecycle scripts and plugins from the dependencies or source they "
+            "consume, without an attacker-controlled string ever reaching a shell. "
+            "If that input is attacker-influenced — for example in a fork-reachable "
+            "job — this can become code execution in the build environment. Some "
+            "pipeline formats do not expose trigger reachability, so those findings "
+            "remain conditional and require context review. Remediation is unrelated "
+            "to input sanitization: use integrity checks and trusted inputs, pass "
+            "--ignore-scripts where appropriate, pin the toolchain, or avoid an "
+            "untrusted checkout."
         ),
         # Living-off-the-pipeline rules + the SEC4 npm-lifecycle sibling.  Split
         # out of ``script_injection`` by P1.2 after the corpus measurement

@@ -1,0 +1,22 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - echo "deps restored from cache, no install step"
+  build:
+    commands:
+      - yarn run build
+      - yarn test
+      - yarn lint
+      - corepack enable yarn
+
+cache:
+  key: "yarn-$(codebuild-hash-files yarn.lock)"
+  paths:
+    - ".yarn-cache/**/*"
+
+artifacts:
+  files:
+    - "dist/**/*"
+    - "yarn.lock"

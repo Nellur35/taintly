@@ -1,0 +1,18 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+  build:
+    on-failure: CONTINUE
+    commands:
+      - npm audit
+      - npm run build
+  post_build:
+    commands:
+      - ./publish.sh
+
+artifacts:
+  files:
+    - "dist/**/*"

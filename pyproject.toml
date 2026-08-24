@@ -1,7 +1,7 @@
 [project]
 name = "taintly"
 dynamic = ["version"]
-description = "Zero-dependency CI/CD pipeline security auditor for GitHub Actions and GitLab CI"
+description = "Zero-dependency CI/CD pipeline security auditor"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"

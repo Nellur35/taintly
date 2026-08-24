@@ -156,6 +156,8 @@ def _platform_from_rule_id(rule_id: str) -> Platform | None:
         return Platform.GITLAB
     if "-JK-" in rule_id:
         return Platform.JENKINS
+    if "-CB-" in rule_id:
+        return Platform.CODEBUILD
     return None
 
 
@@ -418,21 +420,24 @@ def compute_score(
             for platform in (_platform_from_rule_id(f.rule_id) for f in findings)
             if platform is not None
         }
-        platforms_scanned = inferred or {Platform.GITHUB, Platform.GITLAB, Platform.JENKINS}
+        platforms_scanned = inferred or set(Platform)
 
     bonus_no_criticals = (
         _BONUS_NO_CRITICALS if n_critical == 0 and n_high < _BONUS_NO_CRITICALS_HIGH_CAP else 0
     )
 
-    # all_pinned: for every scanned platform that HAS a pin rule, that
-    # rule must not have fired. Platforms without a pin rule are
-    # silently fine (they don't block the bonus).
-    bonus_all_pinned = _BONUS_ALL_PINNED
-    for plat in platforms_scanned:
-        plat_pins = _PIN_RULES_BY_PLATFORM.get(plat, frozenset())
-        if plat_pins and (fired_rule_ids & plat_pins):
-            bonus_all_pinned = 0
-            break
+    # all_pinned requires a platform whose rules can positively support the
+    # claim. CodeBuild's runtime rule detects floating declarations but cannot
+    # distinguish an exact pin from an omitted runtime, so it is not eligible.
+    pin_relevant = platforms_scanned & set(_PIN_RULES_BY_PLATFORM)
+    if not pin_relevant:
+        bonus_all_pinned = 0
+    else:
+        bonus_all_pinned = _BONUS_ALL_PINNED
+        for plat in pin_relevant:
+            if fired_rule_ids & _PIN_RULES_BY_PLATFORM[plat]:
+                bonus_all_pinned = 0
+                break
 
     # all_permissions: only applies when at least one scanned platform
     # HAS a permissions concept. On a Jenkins-only / GitLab-only scan

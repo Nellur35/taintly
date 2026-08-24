@@ -1,0 +1,12 @@
+version: 0.2
+
+phases:
+  build:
+    on-failure: CONTINUE
+    commands:
+      # - npm audit
+      - npm run build
+
+artifacts:
+  files:
+    - "dist/**/*"

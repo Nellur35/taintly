@@ -38,7 +38,7 @@ if str(_ROOT) not in sys.path:
 from taintly.testing.self_test import _KNOWN_MUTATION_GAPS  # noqa: E402
 
 # Per rule-family-prefix baseline of allowlisted mutation gaps. The SUM is the
-# global baseline (currently 100); tracking per prefix is what makes a flat-count
+# global baseline (currently 103); tracking per prefix is what makes a flat-count
 # cross-family swap detectable. Update an entry — never paper over a regression
 # by editing a different one — when a gap is intentionally added or closed.
 #
@@ -61,6 +61,7 @@ _PER_PREFIX_BASELINE: dict[str, int] = {
     "SEC10-GL": 1,
     "SEC3-GH": 2,
     "SEC4-GH": 7,
+    "SEC4-CB": 1,
     "SEC4-GL": 1,
     "SEC4-JK": 3,
     "SEC6-GH": 1,

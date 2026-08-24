@@ -501,6 +501,11 @@ def test_opt_in_fixer_runs_when_requested(tmp_path):
     assert any(r.fix_type == "npm_ignore_scripts" for r in results)
 
 
+def test_explicit_empty_default_fixer_set_runs_no_defaults(tmp_path):
+    path = _write(tmp_path, "name: ci\non: push\njobs: {}\n")
+    assert apply_fixes(path, dry_run=True, fix_types=[]) == []
+
+
 def test_opt_in_registry_separate_from_safe_set():
     """Guard against accidentally registering the opt-in fix in ALL_FIXERS."""
     assert "npm_ignore_scripts" not in ALL_FIXERS
@@ -573,7 +578,7 @@ def test_fix_dry_run_on_mixed_platform_repo_processes_both(tmp_path):
         encoding="utf-8",
     )
     (tmp_path / ".gitlab-ci.yml").write_text(
-        "include:\n  - project: org/shared\n    file: /ci.yml\n    ref: main\n",
+        "build:\n  script:\n    - echo $CI_COMMIT_REF_NAME\n",
         encoding="utf-8",
     )
 

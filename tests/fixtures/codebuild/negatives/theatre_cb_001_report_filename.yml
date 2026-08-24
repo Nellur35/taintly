@@ -1,0 +1,12 @@
+version: 0.2
+
+phases:
+  post_build:
+    on-failure: CONTINUE
+    commands:
+      - aws s3 cp bandit-report.json s3://mybucket/reports/
+      - aws s3 cp trivy.txt s3://mybucket/reports/
+
+artifacts:
+  files:
+    - "dist/**/*"

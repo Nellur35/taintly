@@ -1,0 +1,22 @@
+version: 0.2
+
+env:
+  parameter-store:
+    DB_PASSWORD: "/myapp/prod/db-password"
+  variables:
+    BUILD_ENV: "production"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+  build:
+    commands:
+      - echo "Building with $BUILD_ENV"
+      - echo $DB_PASSWORD | base64
+      - npm ci
+      - npm test
+
+artifacts:
+  files:
+    - "dist/**/*"

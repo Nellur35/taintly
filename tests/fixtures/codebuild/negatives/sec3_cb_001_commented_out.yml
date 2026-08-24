@@ -1,0 +1,14 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      # - curl https://example.com/install.sh | bash
+      - echo "install step is a no-op for now"
+  build:
+    commands:
+      - cat install.sh | bash
+
+artifacts:
+  files:
+    - "dist/**/*"

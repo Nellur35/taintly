@@ -1,0 +1,11 @@
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - npm audit
+      - npm run build
+
+artifacts:
+  files:
+    - "dist/**/*"

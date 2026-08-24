@@ -1,0 +1,14 @@
+version: 0.2
+
+env:
+  parameter-store:
+    DB_PASSWORD: /myapp/db-password
+
+phases:
+  build:
+    commands:
+      - echo $DB_PASSWORD | base64 -w0 -d
+
+artifacts:
+  files:
+    - "dist/**/*"

@@ -1,0 +1,10 @@
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - bash -c 'deploy "$1"' -- "$CODEBUILD_WEBHOOK_HEAD_REF"
+
+artifacts:
+  files:
+    - "dist/**/*"

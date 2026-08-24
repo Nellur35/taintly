@@ -1,0 +1,16 @@
+version: 0.2
+
+env:
+  parameter-store:
+    DB_PASSWORD: "/myapp/prod/db-password"
+
+phases:
+  build:
+    commands:
+      - npm ci
+      - echo $DB_PASSWORD | base64 -d > password.txt
+      - npm test
+
+artifacts:
+  files:
+    - "dist/**/*"

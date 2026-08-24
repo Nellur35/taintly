@@ -313,11 +313,7 @@ def test_vulnerable_fixture_fires_expected_rules(
     broadening into a loud test failure.
     """
     platform_str = fixture_path.split("/")[0]
-    _PLATFORM_MAP = {
-        "github": Platform.GITHUB,
-        "gitlab": Platform.GITLAB,
-        "jenkins": Platform.JENKINS,
-    }
+    _PLATFORM_MAP = {platform.value: platform for platform in Platform}
     platform = _PLATFORM_MAP[platform_str]
     rules = [r for r in all_rules if r.platform == platform]
 
@@ -465,7 +461,7 @@ def test_all_rules_have_test_samples(all_rules):
 def test_all_rules_have_valid_platform(all_rules):
     from taintly.models import Platform
     for rule in all_rules:
-        assert rule.platform in (Platform.GITHUB, Platform.GITLAB, Platform.JENKINS), (
+        assert rule.platform in set(Platform), (
             f"Rule {rule.id} has unknown platform: {rule.platform!r}"
         )
 

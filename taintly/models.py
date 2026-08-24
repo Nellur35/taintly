@@ -337,6 +337,7 @@ class Platform(str, Enum):
     GITHUB = "github"
     GITLAB = "gitlab"
     JENKINS = "jenkins"
+    CODEBUILD = "codebuild"
 
 
 class Confidence(str, Enum):
