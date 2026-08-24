@@ -20,11 +20,7 @@ from taintly.models import Platform, Rule
 _IMPORT_FAILURES: list[str] = []
 
 # Platform → package-name segment used under taintly/rules/.
-_PLATFORM_DIR: dict[Platform, str] = {
-    Platform.GITHUB: "github",
-    Platform.GITLAB: "gitlab",
-    Platform.JENKINS: "jenkins",
-}
+_PLATFORM_DIR: dict[Platform, str] = {platform: platform.value for platform in Platform}
 
 
 def _discover_rules_in_package(package_path: str, package_name: str) -> list[Rule]:
@@ -92,7 +88,7 @@ def load_all_rules() -> list[Rule]:
     """
     _IMPORT_FAILURES.clear()
     rules: list[Rule] = []
-    for plat in (Platform.GITHUB, Platform.GITLAB, Platform.JENKINS):
+    for plat in Platform:
         rules.extend(load_rules_for_platform(plat))
     return rules
 

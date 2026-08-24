@@ -48,6 +48,8 @@ def _infer_platform(filename: str) -> str:
         return "jenkins"
     if "gitlab" in filename.lower() or "_gl_" in filename.lower():
         return "gitlab"
+    if "buildspec" in filename.lower() or "_cb_" in filename.lower():
+        return "codebuild"
     return "github"
 
 
@@ -57,7 +59,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("rule_id", help="rule ID that now detects the bypass")
     parser.add_argument(
         "--platform",
-        choices=("github", "gitlab", "jenkins"),
+        choices=("github", "gitlab", "jenkins", "codebuild"),
         help="override the inferred platform",
     )
     args = parser.parse_args(argv)

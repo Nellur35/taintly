@@ -1,0 +1,13 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - pip install --require-hashes -r requirements.txt
+  build:
+    commands:
+      - python app.py
+
+artifacts:
+  files:
+    - "**/*"

@@ -42,7 +42,9 @@ def format_score(report: ScoreReport, use_color: bool = True) -> str:
     # grade. An empty repo (no CI/CD config) must never read as an "A".
     if not report.applicable:
         lines.append(f"  {b}Not scored:{r} no applicable CI/CD configuration found.")
-        lines.append("  taintly found no GitHub Actions, GitLab CI, or Jenkins config to assess.")
+        lines.append(
+            "  taintly found no GitHub Actions, GitLab CI, Jenkins, or CodeBuild config to assess."
+        )
         lines.append("  See docs/SCORING.md.")
         lines.append("")
         return "\n".join(lines)

@@ -23,7 +23,7 @@
 #           upload-sarif: true
 
 name: "taintly"
-description: "Scan CI/CD pipelines (GitHub Actions, GitLab, Jenkins) for security issues"
+description: "Scan CI/CD pipelines (GitHub Actions, GitLab, Jenkins, AWS CodeBuild) for security issues"
 author: "Asaf Yashayev"
 branding:
   icon: "shield"
@@ -62,9 +62,8 @@ inputs:
     default: "INFO"
 
   platform:
-    description: "Force a specific platform (github/gitlab/jenkins). Default auto-detects,
-      which works for single-platform repos. Specify explicitly for dual-platform (e.g.
-      repo has both .github/workflows/ AND .gitlab-ci.yml)."
+    description: "Force a specific platform (github/gitlab/jenkins/codebuild). Default
+      auto-detects every supported platform present in the repository."
     required: false
     default: ""
 

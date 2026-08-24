@@ -1,0 +1,12 @@
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - docker build -t myapp:$CODEBUILD_WEBHOOK_HEAD_REF .
+      - echo Deploying ${CODEBUILD_SOURCE_VERSION}
+      - eval 'echo fixed'; echo $CODEBUILD_WEBHOOK_HEAD_REF
+
+artifacts:
+  files:
+    - "dist/**/*"

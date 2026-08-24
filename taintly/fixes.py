@@ -1464,7 +1464,7 @@ def apply_fixes(
     these never run unless the caller requests them by name.
     """
     results: list[FixResult] = []
-    fixers = fix_types or list(ALL_FIXERS.keys())
+    fixers = list(ALL_FIXERS.keys()) if fix_types is None else fix_types
 
     for fix_name in fixers:
         if fix_name in ALL_FIXERS:

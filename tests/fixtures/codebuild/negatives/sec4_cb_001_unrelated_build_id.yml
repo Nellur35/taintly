@@ -1,0 +1,12 @@
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - echo "Build ID is $CODEBUILD_BUILD_ID"
+      - npm ci
+      - npm test
+
+artifacts:
+  files:
+    - "dist/**/*"

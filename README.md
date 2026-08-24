@@ -8,7 +8,7 @@
 
 
 
-Security scanner for CI/CD pipelines. Reads GitHub Actions, GitLab CI, and Jenkins configuration and reports misconfigurations mapped to the [OWASP CI/CD Top 10](https://owasp.org/www-project-top-10-ci-cd-security-risks/).
+Security scanner for CI/CD pipelines. Reads GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild buildspec configuration and reports misconfigurations mapped to the [OWASP CI/CD Top 10](https://owasp.org/www-project-top-10-ci-cd-security-risks/).
 
 
 
@@ -77,6 +77,8 @@ Common flags:
 |---|---|
 
 | `--score` | Print a 0–100 grade and a debt profile |
+
+| `--platform {github,gitlab,jenkins,codebuild}` | Select one platform instead of automatic discovery |
 
 | `--format {text,json,csv,sarif,html}` | Report format |
 
@@ -169,6 +171,8 @@ GITHUB_TOKEN=ghp_... taintly --github-org my-org
 GITLAB_TOKEN=glpat-... taintly --gitlab-group my-group
 
 taintly /path/to/repo --platform jenkins
+
+taintly /path/to/repo --platform codebuild
 
 ```
 
@@ -605,26 +609,26 @@ do not recompute risk.
 
 
 <!-- AUTOGEN:summary -->
-308 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, and Jenkins. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+317 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 
 
 <!-- AUTOGEN:coverage -->
-| Category | GitHub | GitLab | Jenkins |
-|----------|--------|--------|---------|
-| SEC-1 — Insufficient Flow Control | 2 | 3 | 2 |
-| SEC-2 — Inadequate IAM | 5 | 4 | 3 |
-| SEC-3 — Dependency Chain Abuse | 12 | 8 | 7 |
-| SEC-4 — Poisoned Pipeline Execution | 30 | 10 | 14 |
-| SEC-5 — Insufficient PBAC | 3 | 1 | 2 |
-| SEC-6 — Insufficient Credential Hygiene | 12 | 9 | 11 |
-| SEC-7 — Insecure System Configuration | 4 | 1 | 4 |
-| SEC-8 — Ungoverned 3rd Party Services | 6 | 3 | 5 |
-| SEC-9 — Improper Artifact Integrity | 6 | 5 | 4 |
-| SEC-10 — Insufficient Logging | 4 | 3 | 2 |
-| AI / ML | 39 | 16 | 12 |
-| TAINT — Multi-stage taint flows | 19 | 9 | 3 |
+| Category | GitHub | GitLab | Jenkins | CodeBuild |
+|----------|--------|--------|---------|-----------|
+| SEC-1 — Insufficient Flow Control | 6 | 3 | 2 | 0 |
+| SEC-2 — Inadequate IAM | 7 | 4 | 3 | 0 |
+| SEC-3 — Dependency Chain Abuse | 34 | 18 | 14 | 3 |
+| SEC-4 — Poisoned Pipeline Execution | 72 | 30 | 24 | 2 |
+| SEC-5 — Insufficient PBAC | 3 | 1 | 2 | 0 |
+| SEC-6 — Insufficient Credential Hygiene | 14 | 10 | 12 | 2 |
+| SEC-7 — Insecure System Configuration | 4 | 1 | 4 | 0 |
+| SEC-8 — Ungoverned 3rd Party Services | 6 | 3 | 5 | 0 |
+| SEC-9 — Improper Artifact Integrity | 7 | 5 | 4 | 2 |
+| SEC-10 — Insufficient Logging | 5 | 3 | 2 | 0 |
+| AI / ML | 0 | 0 | 0 | 0 |
+| TAINT — Multi-stage taint flows | 0 | 0 | 0 | 0 |
 <!-- /AUTOGEN:coverage -->
 
 Plus 32 platform-posture rules in `--platform-audit` mode.

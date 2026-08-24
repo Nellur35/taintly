@@ -14,7 +14,7 @@ results need human triage before becoming evasion fixtures.
 
 Usage:
 
-  python scripts/discover_evasions.py [--platform github|gitlab|jenkins]
+  python scripts/discover_evasions.py [--platform github|gitlab|jenkins|codebuild]
                                        [--severity CRITICAL|HIGH]
                                        [--output report.md]
 """
@@ -149,7 +149,7 @@ def render_markdown(survivors: list[dict[str, str]]) -> str:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--platform", choices=("github", "gitlab", "jenkins"))
+    parser.add_argument("--platform", choices=tuple(platform.value for platform in Platform))
     parser.add_argument("--severity", choices=("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"))
     parser.add_argument("--output", help="write markdown to this file (default: stdout)")
     args = parser.parse_args(argv)

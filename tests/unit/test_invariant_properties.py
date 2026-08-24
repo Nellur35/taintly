@@ -222,11 +222,11 @@ def test_registry_rule_ids_follow_naming_convention() -> None:
     import re
 
     pattern = re.compile(
-        r"^(SEC\d{1,2}-(GH|GL|JK)-\d{3}[A-Z]?"
+        r"^(SEC\d{1,2}-(GH|GL|JK|CB)-\d{3}[A-Z]?"
         r"|SEC\d{1,2}-GH-T\d{2}"
         r"|PLAT-(GH|GL)-\d{3}"
         r"|TAINT-(GH|GL|JK)-\d{3}"
-        r"|LOTP-(GH|GL|JK)-\d{3}"
+        r"|LOTP-(GH|GL|JK|CB)-\d{3}"
         r"|AI-(GH|GL|JK)-\d{3}"
         r"|PSE-(GH|GL|JK)-\d{3}"
         # XF-GH-* — cross-workflow rules whose evidence spans two or
@@ -244,7 +244,8 @@ def test_registry_rule_ids_follow_naming_convention() -> None:
         # threat shapes across the resolved-corpus join (entry file
         # + local includes).  Same distinct prefix convention as
         # XF-* so reports make the cross-file nature explicit.
-        r"|CHAIN-(GH|GL|JK)-\d{3})$"
+        r"|CHAIN-(GH|GL|JK)-\d{3}"
+        r"|THEATRE-CB-\d{3})$"
     )
     bad = [r.id for r in load_all_rules() if not pattern.match(r.id)]
     assert not bad, f"rule IDs violating the naming convention: {bad}"

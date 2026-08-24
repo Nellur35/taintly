@@ -1,0 +1,14 @@
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - bandit -r . -f json -o bandit-report.json
+    on-failure: CONTINUE
+  post_build:
+    commands:
+      - ./publish.sh
+
+artifacts:
+  files:
+    - "bandit-report.json"

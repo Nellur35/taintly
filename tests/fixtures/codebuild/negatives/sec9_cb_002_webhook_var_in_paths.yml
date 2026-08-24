@@ -1,0 +1,18 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - npm ci --ignore-scripts
+  build:
+    commands:
+      - npm run build
+
+cache:
+  key: build-stable
+  paths:
+    - '$CODEBUILD_WEBHOOK_HEAD_REF/**/*'
+
+artifacts:
+  files:
+    - 'dist/**/*'

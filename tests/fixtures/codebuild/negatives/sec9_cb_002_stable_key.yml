@@ -1,0 +1,18 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - npm ci --ignore-scripts
+  build:
+    commands:
+      - npm run build
+
+cache:
+  key: build-$(codebuild-hash-files package-lock.json)
+  paths:
+    - node_modules/**/*
+
+artifacts:
+  files:
+    - 'dist/**/*'

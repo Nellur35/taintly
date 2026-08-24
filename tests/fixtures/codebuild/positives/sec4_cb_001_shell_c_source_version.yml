@@ -1,0 +1,10 @@
+version: 0.2
+
+phases:
+  post_build:
+    commands:
+      - bash -c "docker build -t myapp:${CODEBUILD_SOURCE_VERSION} ."
+
+artifacts:
+  files:
+    - "dist/**/*"

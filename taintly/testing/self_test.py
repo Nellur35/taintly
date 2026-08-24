@@ -212,6 +212,13 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "structural walker doesn't emit a uses-leaf when the YAML "
         "separator is missing.  Same anchor-family gap as SEC3-GH-001."
     ),
+    ("SEC4-CB-001", "quote_swap"): (
+        "The rule deliberately distinguishes a double-quoted `eval`/shell-`-c` "
+        "command string, where the outer shell expands the CodeBuild variable "
+        "before a second parse, from a single-quoted string, where the outer "
+        "shell does not expand it. `quote_swap` therefore changes the injection "
+        "semantics and the rule correctly treats the mutant as clean."
+    ),
     ("SEC4-JK-008", "quote_swap"): (
         "Quote-swap mutation flips a double-quoted Groovy GString "
         '(``sh "...${env.X}..."``) into a single-quoted string '

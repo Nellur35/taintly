@@ -316,6 +316,20 @@ def test_clean_jenkins_only_repo_still_scores_a():
     assert score.total_score == 100
     assert score.grade == "A"
 
+def test_codebuild_floating_runtime_invalidates_all_pinned_bonus():
+    finding = _fn(
+        "SEC3-CB-002",
+        severity=Severity.MEDIUM,
+        family="supply_chain_immutability",
+    )
+    score = compute_score([finding], files_scanned=1, platforms_scanned={Platform.CODEBUILD})
+    assert score.bonuses["all_actions_pinned"] == 0
+
+
+def test_codebuild_without_runtime_declaration_cannot_earn_pinned_bonus():
+    score = compute_score([], files_scanned=1, platforms_scanned={Platform.CODEBUILD})
+    assert score.bonuses["all_actions_pinned"] == 0
+
 
 def test_clean_repo_with_unknown_platforms_still_scores_a():
     """When platforms_scanned is omitted (the legacy / ad-hoc caller),

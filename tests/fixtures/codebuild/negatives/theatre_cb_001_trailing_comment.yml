@@ -1,0 +1,11 @@
+version: 0.2
+
+phases:
+  build:
+    on-failure: CONTINUE
+    commands:
+      - make scan  # wraps trivy
+
+artifacts:
+  files:
+    - "dist/**/*"

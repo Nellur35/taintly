@@ -1,0 +1,12 @@
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - git checkout "$CODEBUILD_WEBHOOK_HEAD_REF"
+      - npm ci
+      - npm test
+
+artifacts:
+  files:
+    - "dist/**/*"

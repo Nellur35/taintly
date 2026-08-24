@@ -1,0 +1,10 @@
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - eval "deploy --ref $CODEBUILD_WEBHOOK_HEAD_REF"
+
+artifacts:
+  files:
+    - "dist/**/*"

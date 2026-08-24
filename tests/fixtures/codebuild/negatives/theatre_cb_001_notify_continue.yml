@@ -1,0 +1,11 @@
+version: 0.2
+
+phases:
+  post_build:
+    on-failure: CONTINUE
+    commands:
+      - curl -X POST https://hooks.slack.com/services/T000/B000/XXX -d 'build finished'
+
+artifacts:
+  files:
+    - "dist/**/*"

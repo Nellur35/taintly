@@ -1,0 +1,14 @@
+version: 0.2
+
+env:
+  variables:
+    DEPLOY_REF: $CODEBUILD_WEBHOOK_HEAD_REF
+
+phases:
+  build:
+    commands:
+      - npm run build
+
+artifacts:
+  files:
+    - "dist/**/*"

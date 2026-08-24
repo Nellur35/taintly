@@ -1,0 +1,13 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - bash <(curl -s https://example.com/bootstrap.sh)
+  build:
+    commands:
+      - make build
+
+artifacts:
+  files:
+    - "build/**/*"

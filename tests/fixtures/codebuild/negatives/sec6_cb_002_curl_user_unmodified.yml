@@ -1,0 +1,16 @@
+version: 0.2
+
+env:
+  parameter-store:
+    DB_PASSWORD: "/myapp/prod/db-password"
+
+phases:
+  build:
+    commands:
+      - npm ci
+      - curl --user "svc-account:$DB_PASSWORD" https://example.com/api/deploy
+      - npm test
+
+artifacts:
+  files:
+    - "dist/**/*"

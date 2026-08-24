@@ -17,6 +17,7 @@ from taintly.families import (
     cluster_findings,
     default_confidence,
     default_review_needed,
+    describe_family,
 )
 from taintly.models import Finding, Severity
 
@@ -74,6 +75,18 @@ def test_classify_falls_back_to_owasp_category():
 
 def test_classify_empty_when_no_info():
     assert classify_rule("UNKNOWN-RULE", "") == ""
+
+def test_codebuild_lotp_family_summary_keeps_trigger_context_conditional():
+    from taintly.rules.registry import get_rule_by_id
+
+    rule = get_rule_by_id("LOTP-CB-001")
+    assert rule is not None
+    title, why = describe_family(rule.finding_family or "")
+
+    assert title == "Build-tool / package-manager execution and integrity risk"
+    assert "If that input is attacker-influenced" in why
+    assert "do not expose trigger reachability" in why
+    assert "runs in a fork-reachable job" not in why
 
 
 # ---------------------------------------------------------------------------

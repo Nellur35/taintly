@@ -1,0 +1,18 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - curl -fsSL -o install.sh https://example.com/install.sh
+      - echo "abc123def456  install.sh" | sha256sum -c -
+      - bash install.sh
+  build:
+    commands:
+      - npm ci
+      - npm test
+
+artifacts:
+  files:
+    - "dist/**/*"

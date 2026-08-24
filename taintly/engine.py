@@ -1207,6 +1207,8 @@ def _file_matches_platform(filepath: str, platform: Platform) -> bool:
         return "/.gitlab/" in norm or "/ci/" in norm
     if platform == Platform.JENKINS:
         return _is_jenkinsfile_name(name) or name.endswith(".groovy")
+    if platform == Platform.CODEBUILD:
+        return name.endswith((".yml", ".yaml")) and _codebuild_yaml_is_buildspec(filepath)
     raise ValueError(f"unsupported platform: {platform}")
 
 
@@ -1261,6 +1263,48 @@ def _read_text_head(path: str, limit: int = 65536) -> str:
             return fh.read(limit)
     except OSError:
         return ""
+
+
+def _is_within_repo(repo_path: str, candidate: str) -> bool:
+    """Return whether candidate resolves inside repo_path."""
+    try:
+        repo_real = os.path.normcase(os.path.realpath(repo_path))
+        candidate_real = os.path.normcase(os.path.realpath(candidate))
+        return os.path.commonpath((repo_real, candidate_real)) == repo_real
+    except ValueError:
+        return False
+
+
+_CODEBUILD_VERSION = re.compile(
+    r"^version\s*:\s*['\"]?(?:0\.1|0\.2)['\"]?\s*(?:#.*)?$", re.MULTILINE
+)
+_CODEBUILD_PHASES = re.compile(r"^phases\s*:", re.MULTILINE)
+
+
+def _codebuild_yaml_is_buildspec(path: str) -> bool:
+    """Return True when YAML bytes have the minimum buildspec structure."""
+    content = _read_text_head(path)
+    return bool(_CODEBUILD_VERSION.search(content) and _CODEBUILD_PHASES.search(content))
+
+
+def _discover_codebuild_files(repo_path: str) -> list[str]:
+    """Find content-shaped buildspec YAML without crossing the repository boundary."""
+    excluded_segments = {".git", "node_modules", "vendor", "__pycache__"}
+    files: list[str] = []
+    for root, dirs, names in os.walk(repo_path):
+        dirs[:] = [
+            directory
+            for directory in dirs
+            if directory not in excluded_segments
+            and _is_within_repo(repo_path, os.path.join(root, directory))
+        ]
+        for name in names:
+            if not name.lower().endswith((".yml", ".yaml")):
+                continue
+            candidate = os.path.join(root, name)
+            if _is_within_repo(repo_path, candidate) and _codebuild_yaml_is_buildspec(candidate):
+                files.append(candidate)
+    return files
 
 
 def _groovy_looks_like_pipeline(path: str) -> bool:
@@ -1430,6 +1474,9 @@ def _discovery_confidence(repo_path: str, platform: Platform, files: list[str]) 
     if platform == Platform.GITHUB:
         # .github/workflows/ and dependabot.yml are location-authoritative.
         return {os.path.normpath(f): "high" for f in files}
+    if platform == Platform.CODEBUILD:
+        # Conventional name plus a buildspec content gate is authoritative.
+        return {os.path.normpath(f): "high" for f in files}
     if platform == Platform.JENKINS:
         return {
             os.path.normpath(f): ("high" if _is_jenkinsfile_name(os.path.basename(f)) else "low")
@@ -1538,7 +1585,7 @@ def detect_platform(repo_path: str) -> Platform | None:
 
     Returns a single Platform when exactly one platform's signal is
     present.  Returns None when zero or two-or-more signals are
-    present — the caller (``scan_repo``) handles None by probing all
+    +[Environment]::NewLine+    three platforms via ``discover_files``.
     three platforms via ``discover_files``.
 
     Prior to this change, the function short-circuited on the first
@@ -1556,6 +1603,7 @@ def detect_platform(repo_path: str) -> Platform | None:
     )
     has_gitlab = bool(_discover_gitlab_entry_files(repo_path))
     has_jenkins = bool(_discover_jenkins_files(repo_path))
+    has_codebuild = bool(_discover_codebuild_files(repo_path))
 
     detected: list[Platform] = []
     if has_github:
@@ -1564,10 +1612,12 @@ def detect_platform(repo_path: str) -> Platform | None:
         detected.append(Platform.GITLAB)
     if has_jenkins:
         detected.append(Platform.JENKINS)
+    if has_codebuild:
+        detected.append(Platform.CODEBUILD)
 
     if len(detected) == 1:
         return detected[0]
-    # Zero or multiple — caller probes all three via discover_files
+    # Zero or multiple — caller probes every supported platform via discover_files
     return None
 
 
@@ -1629,6 +1679,9 @@ def discover_files(repo_path: str, platform: Platform) -> list[str]:
                     if _groovy_looks_like_pipeline(cand):
                         files.append(cand)
 
+    elif platform == Platform.CODEBUILD:
+        files.extend(_discover_codebuild_files(repo_path))
+
     # Normalise separators before deduping.  Windows paths returned by
     # ``os.path.join`` use ``\`` while ``glob`` recursion can produce
     # the same file with mixed separators ("C:\repo/Jenkinsfile" vs
@@ -1668,6 +1721,11 @@ def scan_repo(
     import sys as _sys
 
     repo_path, explicit_files = _normalize_input_path(repo_path)
+    # Explicit paths bypass discovery, so enforce the real-path boundary
+    # before platform classification can inspect file content.
+    explicit_files = [
+        filepath for filepath in explicit_files if _is_within_repo(repo_path, filepath)
+    ]
     if explicit_files:
         # Surface that we're operating in scoped mode so a misconfigured
         # caller doesn't conclude "clean" from "we only scanned 1 file".
@@ -1688,7 +1746,7 @@ def scan_repo(
             platforms_to_scan = [detected]
         else:
             # Check all supported platforms
-            for p in [Platform.GITHUB, Platform.GITLAB, Platform.JENKINS]:
+            for p in Platform:
                 if discover_files(repo_path, p) or any(
                     _file_matches_platform(ef, p) for ef in explicit_files
                 ):

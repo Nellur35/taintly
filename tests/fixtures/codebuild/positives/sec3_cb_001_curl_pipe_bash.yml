@@ -1,0 +1,16 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - curl -fsSL https://get.example.com/install.sh | bash
+  build:
+    commands:
+      - npm ci
+      - npm test
+
+artifacts:
+  files:
+    - "dist/**/*"
