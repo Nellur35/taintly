@@ -49,7 +49,8 @@ def format_score(report: ScoreReport, use_color: bool = True) -> str:
         lines.append("")
         return "\n".join(lines)
 
-    lines.append(f"  Score: {b}{gc}{report.total_score}/100 ({report.grade}){r}")
+    review_status = "; review pending" if report.review_needed else ""
+    lines.append(f"  Score: {b}{gc}{report.total_score}/100 ({report.grade}{review_status}){r}")
     # Threat-model disclosure.  The score is computed against a fixed
     # public-OSS threat model; the user's deployment may differ in ways
     # taintly can't observe.  Surfacing this adjacent to the score (not
@@ -97,20 +98,16 @@ def format_score(report: ScoreReport, use_color: bool = True) -> str:
     )
     lines.append("")
 
-    # Bonuses
-    lines.append(f"{b}Bonuses:{r}")
+    # Positive controls are useful context, but the score already starts at
+    # 100. Showing them as added points would imply that they can cancel an
+    # unrelated confirmed finding.
+    lines.append(f"{b}Positive controls (informational; not added to score):{r}")
     nc_ok = report.bonuses["no_criticals"] > 0
     pin_ok = report.bonuses["all_actions_pinned"] > 0
     per_ok = report.bonuses["all_permissions"] > 0
-    lines.append(
-        f"  {_check(nc_ok)}  No critical findings            {'+' if nc_ok else ' '}{report.bonuses['no_criticals']}"
-    )
-    lines.append(
-        f"  {_check(pin_ok)}  All actions pinned to SHA       {'+' if pin_ok else ' '}{report.bonuses['all_actions_pinned']}"
-    )
-    lines.append(
-        f"  {_check(per_ok)}  All permissions explicit         {'+' if per_ok else ' '}{report.bonuses['all_permissions']}"
-    )
+    lines.append(f"  {_check(nc_ok)}  No critical; fewer than two high findings")
+    lines.append(f"  {_check(pin_ok)}  All actions pinned to SHA")
+    lines.append(f"  {_check(per_ok)}  All permissions explicit")
     lines.append("")
 
     # Per-category breakdown
@@ -127,7 +124,7 @@ def format_score(report: ScoreReport, use_color: bool = True) -> str:
             if cat.medium_count:
                 parts.append(f"{cat.medium_count} MEDIUM")
             note = ", ".join(parts) if parts else "clean"
-        bar = f"{cat.points:.0f}/{cat.max_points}"
+        bar = f"{cat.points:g}/{cat.max_points}"
         dash = em_dash_char()
         lines.append(f"  {cat.name:<30} {bar:>6}  {dash} {note}")
 

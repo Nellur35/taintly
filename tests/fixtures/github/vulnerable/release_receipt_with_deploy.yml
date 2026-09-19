@@ -1,0 +1,15 @@
+# release_receipt_with_deploy.yml - vulnerable fixture for SEC1-GH-001.
+#
+# A receipt check does not exempt a job that also deploys without an approval gate.
+name: Release receipt and deployment
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release_receipt:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs"
+      - run: ./deploy.sh

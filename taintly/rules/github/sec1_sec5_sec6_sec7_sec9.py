@@ -47,6 +47,12 @@ _SEC1_PUBLISH_OR_DEPLOY_RE = (
     r"|\bpublish\.sh\b"
 )
 
+_SEC1_RECEIPT_DEPLOY_RE = (
+    _SEC1_PUBLISH_OR_DEPLOY_RE + r"|\bdeploy(?:[-_]\w+)?\.sh\b"
+    r"|\bpypa/gh-action-pypi-publish@"
+    r"|\bactions/deploy-pages@"
+)
+
 
 class _JobScopedSequencePattern:
     """SequencePattern variant that only matches inside the ``jobs:``
@@ -436,15 +442,6 @@ def _is_unmasked_secret_input(
     return (action_name, input_slot) not in _SAFE_ACTION_INPUT_PAIRS
 
 
-_SEC1_PUBLISH_OR_DEPLOY_RE = (
-    r"\b(npm|pnpm|yarn|uv|cargo)\s+publish\b"
-    r"|\btwine\s+upload\b"
-    r"|\bdocker\s+push\b"
-    r"|\bgh\s+release\s+(create|upload)\b"
-    r"|\bpublish\.sh\b"
-)
-
-
 _SEC1_PUBLISH_SINK_RE = re.compile(_SEC1_PUBLISH_OR_DEPLOY_RE)
 
 
@@ -656,6 +653,14 @@ RULES: list[Rule] = [
                 ),
             ],
             exclude_if_within=[
+                (
+                    # A receipt job reading prior workflow runs does not
+                    # deploy. Retain the finding if that job also contains a
+                    # publish or deploy operation.
+                    r"^\s{2,4}release[-_]receipt:\s*$",
+                    r"\bgh\s+api\s+--method\s+GET\b[^\n]*\bactions/workflows/[^\n\"']*/runs\b",
+                    _SEC1_RECEIPT_DEPLOY_RE,
+                ),
                 (
                     # A plain release job that only opens a release PR is
                     # metadata preparation, not production release/publish.

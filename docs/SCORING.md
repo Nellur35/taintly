@@ -4,6 +4,20 @@ taintly produces a single 0–100 score per scan, with a letter grade.
 This document explains what that number means, what it assumes, and
 what assessment is on you rather than on the tool.
 
+The score starts at 100 and subtracts deductions for confirmed finding
+clusters. Positive controls, such as pinned actions and explicit permissions,
+are shown separately; they do not add points back or cancel an unrelated
+finding. Review-needed findings remain visible but do not affect the number
+until a human confirms them.
+When any review-needed clusters remain, text reports mark the grade
+"review pending". A score of 100 then means no confirmed deduction,
+not that every reported pattern has been cleared.
+
+The category breakdown is a separate display-only view, calculated from
+individual findings rather than root-cause clusters. Its sub-scores are
+rounded down to one decimal so a small confirmed deduction remains visible;
+they do not add up to the headline score.
+
 ## 1. What the score assumes
 
 taintly's score is computed against a fixed default threat model.

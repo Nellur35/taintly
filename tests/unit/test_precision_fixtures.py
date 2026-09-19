@@ -299,6 +299,19 @@ def test_sec1_gh_001_does_not_fire_on_release_metadata_job_with_environment(gh_r
     )
 
 
+def test_sec1_gh_001_does_not_fire_on_release_receipt_check(gh_rules):
+    findings = scan_file(str(_SAFE_GH / "release_receipt_read_only.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
+    assert not fired, f"A read-only receipt check is not a deployment: {fired}"
+
+
+def test_sec1_gh_001_still_fires_on_release_receipt_that_deploys(gh_rules):
+    findings = scan_file(str(_VULN_GH / "release_receipt_with_deploy.yml"), gh_rules)
+    fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]
+    assert len(fired) == 1
+    assert "release_receipt:" in fired[0].snippet
+
+
 def test_sec1_gh_001_still_fires_on_release_automation_that_publishes(gh_rules):
     findings = scan_file(str(_VULN_GH / "release_please_with_publish_step.yml"), gh_rules)
     fired = [f for f in findings if f.rule_id == "SEC1-GH-001"]

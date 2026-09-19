@@ -14,6 +14,7 @@ regress them.
 from __future__ import annotations
 
 from taintly.models import Finding, Platform, Severity
+from taintly.reporters.score_text import format_score
 from taintly.scorer import compute_score
 
 
@@ -42,13 +43,8 @@ def _fn(
 
 def test_low_confidence_finding_deducts_less_than_high():
     """A LOW-confidence HIGH finding must move the score less than a
-    HIGH-confidence HIGH finding of the same severity.  Uses enough
-    findings that per-severity deductions overcome the bonus floor so
-    the weight actually shows up in the final score.
+    HIGH-confidence HIGH finding of the same severity.
     """
-    # SEC3-GH-001 is in the "pinned" bonus set, so it suppresses the
-    # all_actions_pinned bonus — lets raw deductions drive the score.
-    # SEC2-GH-002 similarly suppresses the permissions bonus.
     findings_high = [_fn("SEC3-GH-001", Severity.HIGH, confidence="high") for _ in range(20)]
     findings_high.append(_fn("SEC2-GH-002", Severity.CRITICAL, confidence="high", family="identity_access", owasp="CICD-SEC-2"))
     findings_low = [_fn("SEC3-GH-001", Severity.HIGH, confidence="low") for _ in range(20)]
@@ -73,13 +69,57 @@ def test_review_needed_finding_does_not_deduct():
     assert only_review.total_score == 100
     assert only_review.review_needed == 1
     assert only_review.distinct_risks == 0
+    assert next(c for c in only_review.categories if c.owasp_id == "CICD-SEC-4").points == 30
+    assert "100/100 (A; review pending)" in format_score(only_review, use_color=False)
+
+
+def test_positive_controls_cannot_erase_confirmed_medium_finding():
+    """The stock-bot score inputs exposed this arithmetic bug: all three
+    positive controls must leave the supplied cluster deduction intact.
+    """
+    finding = _fn(
+        "SEC1-GH-001",
+        Severity.MEDIUM,
+        family="resource_controls",
+        owasp="CICD-SEC-1",
+    )
+    finding.exploitability = "low"
+    score = compute_score(
+        [finding], files_scanned=3, platforms_scanned={Platform.GITHUB}
+    )
+
+    assert score.bonuses == {
+        "no_criticals": 5,
+        "all_actions_pinned": 5,
+        "all_permissions": 5,
+    }
+    assert score.deductions["CLUSTERS"] == -1.5
+    assert score.total_score == 98
+    assert score.distinct_risks == 1
+    flow = next(c for c in score.categories if c.owasp_id == "CICD-SEC-1")
+    assert flow.points == 4.9
+    assert "4.9/5" in format_score(score, use_color=False)
+
+
+def test_single_confirmed_high_cannot_score_100():
+    finding = _fn(
+        "SEC4-GH-021", Severity.HIGH, family="script_injection", owasp="CICD-SEC-4"
+    )
+    score = compute_score(
+        [finding], files_scanned=1, platforms_scanned={Platform.GITHUB}
+    )
+    assert score.total_score < 100
+    assert score.bonuses == {
+        "no_criticals": 5,
+        "all_actions_pinned": 5,
+        "all_permissions": 5,
+    }
 
 
 def test_security_ceiling_active_critical_never_passes():
     """P1.1 — an active CRITICAL must never present as a passing grade, even
-    when pin/permission bonuses accrue (they're zeroed only when their own
-    rule fired, so a CRITICAL repo with pinned actions could otherwise land in
-    a passing band)."""
+    when pin/permission controls apply. The cluster deduction alone may not
+    push a single severe finding below the passing band."""
     findings = [
         _fn(f"R{i}", Severity.CRITICAL, family=f"fam{i}", owasp="CICD-SEC-4") for i in range(5)
     ]
@@ -172,10 +212,8 @@ def test_low_exploitability_deducts_less_than_high():
     """Same severity + confidence + rule count — low-exploitability
     clusters should score better than high-exploitability clusters.
     """
-    # Need enough findings to push past the bonus floor.
     high_expl = [_fn_expl("SEC3-GH-001", Severity.HIGH, "high") for _ in range(20)]
     low_expl = [_fn_expl("SEC3-GH-001", Severity.HIGH, "low") for _ in range(20)]
-    # Suppress bonuses in both cases equally
     from taintly.models import Finding
     high_expl.append(Finding(
         rule_id="SEC2-GH-002", severity=Severity.CRITICAL, title="", description="",
@@ -236,7 +274,7 @@ def test_jenkins_only_repo_does_not_collect_github_only_bonuses():
     a permissions concept was scanned. After the fix:
       * all_permissions bonus = 0 (Jenkins has no permissions concept)
       * cluster deductions are visible in the final score (< 100)
-      * no_criticals and all_pinned still apply where they're earned
+      * no_criticals and all_pinned remain visible where they apply
     """
     findings = [
         _jk_finding("LOTP-JK-001", "CICD-SEC-4", "script_injection"),
@@ -251,7 +289,7 @@ def test_jenkins_only_repo_does_not_collect_github_only_bonuses():
     )
     assert score.total_score < 100, (
         f"4 HIGH Jenkins findings produced score {score.total_score}; "
-        "cluster deductions were masked by an inapplicable bonus floor "
+        "cluster deductions were not reflected in the score "
         f"(deductions={score.deductions}, bonuses={score.bonuses})"
     )
 
@@ -269,9 +307,9 @@ def test_jenkins_three_high_findings_loses_no_criticals_bonus():
     score landed at 100 - 5.6 + 10 = 104, clamped to 100/A — the
     score was insensitive to the 3 HIGH findings.
 
-    Fix: no_criticals bonus also requires HIGH count below
-    _BONUS_NO_CRITICALS_HIGH_CAP (= 2). 3 HIGH → bonus drops to 0,
-    score moves below 100.
+    Earlier mitigation: no_criticals also requires HIGH count below
+    _BONUS_NO_CRITICALS_HIGH_CAP (= 2). The indicator now stays visible,
+    but score deductions are never offset by positive controls.
     """
     findings = [
         _jk_finding("LOTP-JK-001", "CICD-SEC-4", "script_injection")
@@ -295,8 +333,7 @@ def test_jenkins_three_high_findings_loses_no_criticals_bonus():
 
 def test_single_high_finding_keeps_no_criticals_bonus():
     """Threshold test: ONE HIGH finding still earns the no_criticals
-    bonus. The bonus floor is preserved for near-clean repos; only 2+
-    HIGH findings lose it.
+    informational indicator; 2+ HIGH findings lose it.
     """
     findings = [
         _jk_finding("LOTP-JK-001", "CICD-SEC-4", "script_injection"),
@@ -336,7 +373,7 @@ def test_clean_repo_with_unknown_platforms_still_scores_a():
     a clean repo must still hit 100. Inference returns an empty set
     from no findings; the scorer treats that as 'all platforms'."""
     # files_scanned=1: this is a real scan that examined config and found
-    # nothing — it earns the coverage-gated all_permissions bonus.
+    # nothing — it reports the coverage-gated all_permissions control.
     score = compute_score([], files_scanned=1)
     assert score.total_score == 100
     assert score.bonuses["all_permissions"] == 5  # GitHub assumed scanned
@@ -368,9 +405,8 @@ def test_zero_files_scanned_forfeits_pinning_bonuses():
     """P2.5: the all_pinned / all_permissions bonuses assert 'we scanned
     the config and everything is pinned/permissioned' — vacuous if no
     files were scanned. A pin-clean GitHub finding set must therefore
-    score LOWER with files_scanned=0 (no coverage) than with
-    files_scanned=1 (real coverage), because the +5 pinned bonus (and the
-    GitHub +5 perms bonus) is only earned when something was scanned.
+    lose the positive-control indicators with files_scanned=0 (no coverage).
+    Neither indicator affects the score for confirmed findings.
 
     Real-world trigger: the Jenkins posture audit produces findings via a
     live API but reports files_scanned=0, and was banking the +5 pinned
@@ -380,9 +416,7 @@ def test_zero_files_scanned_forfeits_pinning_bonuses():
     # (SEC3-GH-001/002) or the perms rule (SEC2-GH-002), so both bonuses
     # are otherwise earnable and only the files_scanned gate differs.
     # MEDIUMs (not CRITICAL/HIGH) keep the security ceiling out of the
-    # picture, and enough distinct clusters push the deduction past the
-    # +15 of bonuses so the scanned score lands strictly below 100 — i.e.
-    # the forfeited bonus is observable, not clamped away.
+    # picture; the checked-control difference is visible in the report.
     findings = [
         _fn(
             f"SEC4-GH-{n:03d}",
@@ -404,10 +438,8 @@ def test_zero_files_scanned_forfeits_pinning_bonuses():
     # no_criticals is a property of findings, not coverage — unchanged.
     assert scanned.bonuses["no_criticals"] == unscanned.bonuses["no_criticals"]
 
-    # The headline score is strictly lower without coverage: the +10 of
-    # forfeited bonuses isn't being clamped away here (a single MEDIUM
-    # leaves ample headroom below 100), so the difference is observable.
-    assert unscanned.total_score < scanned.total_score
+    # Coverage changes the informational controls, not the deduction.
+    assert unscanned.total_score == scanned.total_score
 
 
 def test_sec9_gl_artifact_cluster_does_not_dominate_score():
