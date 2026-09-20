@@ -1,83 +1,30 @@
-"""Workflow context analysis — per-file exploitability signals.
+"""Derive file and effective GitHub-job context for exploitability scoring.
 
-Severity is dual-dimension:
+The engine preserves rule severity and attaches a separate high/medium/low
+exploitability signal. GitHub triggers and top-level settings apply to jobs,
+while checkout, secrets, runner choice, guards, and egress controls are
+evaluated in the finding's own job. Findings outside a resolvable job and
+non-GitHub files retain the file-level fallback.
 
-    base severity + contextual modifiers = final analyst-facing priority
-
-The scoring model already down-weights low-confidence and
-review-needed findings.  This module adds the **file-level** context
-layer: the same rule hit in two different workflows can represent
-very different real-world risk depending on whether the workflow
-sees secrets, runs on fork-controlled triggers, has write
-permissions, or checks out untrusted code.
-
-What we detect (intentionally shallow — regex only, no full YAML parse)
----------------------------------------------------------------------
-* ``has_fork_triggered``       — pull_request / pull_request_target /
-                                   issue_comment / workflow_run
-* ``has_pr_target``            — pull_request_target specifically
-                                   (secrets-exposed, write by default)
-* ``has_checkout``             — any ``uses: actions/checkout``
-* ``has_secrets_reference``    — any ``${{ secrets.X }}`` expansion
-* ``has_write_permissions``    — an explicit ``*: write`` in a
-                                   permissions block, OR ``write-all``
-* ``has_explicit_permissions`` — a ``permissions:`` key at any level
-* ``is_release_workflow``      — triggered by ``release`` / publishes
-                                   to a registry
-* ``runs_self_hosted``         — ``runs-on:`` self-hosted / runner group
-* ``has_fork_identity_guard``  — ``if:`` condition that only allows the
-                                   job to run when the PR comes from the
-                                   same repository as the base (the
-                                   ``github.event.pull_request.head.repo.
-                                   full_name == github.repository`` idiom
-                                   used by Anthropic Cookbook and
-                                   similar). File-level detection, so
-                                   presence anywhere downgrades AI
-                                   exploitability for every finding in
-                                   the file — imprecise when one job
-                                   guards and a sibling job doesn't, but
-                                   strictly more accurate than "no
-                                   guard detection at all."
-
-Why shallow regex
------------------
-The scanner already has a full YAML path extractor, but the context
-signals needed here are textual — the goal is a best-effort "is this a
-privileged context?" flag, not a strict parse.  Regex keeps the module
-zero-dependency and fast enough to run on every scanned file without
-noticeably slowing the scan.
-
-Exploitability model
---------------------
-``compute_exploitability`` combines a rule's family with the workflow
-context to produce one of ``high`` / ``medium`` / ``low``:
-
-* Script-injection family        + fork-triggered + secrets   -> high
-* Script-injection family        + no fork / no secrets       -> medium
-* Supply-chain family            + privileged context         -> high
-* Supply-chain family            + read-only / no secrets     -> medium
-* Credential-persistence family  + has secrets                -> high
-* Credential-persistence family  + no secrets                 -> low
-* Resource-controls family       + always                     -> low
-* AI / ML family                 + fork-identity guard        -> low
-* AI / ML family                 + pr_target / fork+token     -> high
-* AI / ML family                 + fork-triggered only        -> medium
-* AI / ML family                 + read-only / no secrets     -> low
-* Everything else                                             -> medium
-
-This is deliberately conservative.  We never escalate above ``high``
-(that would require an authoritative privilege model) and we don't
-rewrite severity — we attach a second dimension the reporter and
-scorer can use.
+Trigger and job boundaries are structural. Other signals use shallow textual
+matchers, so this is a best-effort risk model rather than a full workflow
+interpreter. A plain fork ``pull_request`` differs from privileged
+``pull_request_target``: GitHub normally withholds secrets and write tokens
+from the former. Repository-level settings that override this default are
+outside the workflow file and remain unknown to this module. A reusable
+workflow's callers are also unknown during a file scan, so an absence of
+local secret references does not prove that execution has no sensitive input.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from .parsers.segmentation import for_each_job
 from .parsers.structural import triggers
+from .workflow_corpus import _extract_job_permissions, _extract_workflow_permissions
 
 # ---------------------------------------------------------------------------
 # Signal detection — each regex is intentionally forgiving so trailing
@@ -96,6 +43,7 @@ from .parsers.structural import triggers
 _GH_FORK_EVENTS = frozenset(
     {"pull_request", "pull_request_target", "issue_comment", "workflow_run"}
 )
+_GH_PRIVILEGED_FORK_EVENTS = frozenset({"pull_request_target", "issue_comment", "workflow_run"})
 # GitLab / Jenkins fork-trigger equivalents: MR pipeline rules and
 # Jenkins multibranch `pullRequest`/`ghprb*` webhooks bring attacker-
 # controlled refs into the same trust domain as the target repo.
@@ -110,7 +58,7 @@ _RE_CHECKOUT = re.compile(
 # GitHub Actions `${{ secrets.X }}`, GitLab `$VAULT_*` / `$CI_JOB_TOKEN`,
 # Jenkins `credentials('id')` / `withCredentials` / `env.X_TOKEN`.
 _RE_SECRETS_REF = re.compile(
-    r"\$\{\{\s*secrets\.|"
+    r"\$\{\{\s*(?i:secrets)\.|"
     r"\bcredentials\s*\(\s*['\"]|"
     r"\bwithCredentials\s*\(|"
     r"\$CI_JOB_TOKEN\b|\$VAULT_\w+|\$CI_REGISTRY_PASSWORD\b"
@@ -147,7 +95,7 @@ _RE_REGISTRY_PUBLISH = re.compile(
     re.IGNORECASE,
 )
 _RE_SELF_HOSTED = re.compile(
-    r"^\s*runs-on\s*:\s*\[?\s*(self-hosted|[A-Za-z_][\w-]*-self-hosted)|"
+    r"^\s*runs-on\s*:\s*\[?\s*['\"]?(self-hosted|[A-Za-z_][\w-]*-self-hosted)|"
     r"\bagent\s*\{\s*label\b|\bagent\s+any\b",
     re.MULTILINE,
 )
@@ -192,9 +140,8 @@ _RE_FORK_IDENTITY_GUARD = re.compile(
 # the key inside a COMMENT doesn't count — e.g. ossf/scorecard's
 # ``egress-policy: audit # TODO: change to 'egress-policy: block'`` must read
 # as audit, not block. ``audit`` / ``disabled`` only log, so they are NOT a
-# control; a file that MIXES block with audit/disabled is treated as not-fully-
-# hardened (we can't tell at file scope which job a finding is in, so we
-# conservatively decline to credit rather than over-credit an unprotected job).
+# control; a job that MIXES block with audit/disabled is treated as not-fully-
+# hardened. The file-level fallback also declines credit when jobs disagree.
 _RE_HARDEN_RUNNER = re.compile(
     r"^\s*(?:-\s*)?uses\s*:\s*['\"]?step-security/harden-runner", re.IGNORECASE | re.MULTILINE
 )
@@ -213,7 +160,7 @@ HARDEN_RUNNER_TEMPERED_FAMILIES: frozenset[str] = frozenset(
 
 @dataclass
 class WorkflowContext:
-    """File-level signals used for exploitability scoring.
+    """File or effective job signals used for exploitability scoring.
 
     All fields default to False; an unknown / unparseable file therefore
     looks like a maximally-benign context.  That's the safe default —
@@ -224,7 +171,9 @@ class WorkflowContext:
 
     file: str = ""
     has_fork_triggered: bool = False
+    has_privileged_fork_trigger: bool = False
     has_pr_target: bool = False
+    is_reusable_workflow: bool = False
     has_checkout: bool = False
     has_secrets_reference: bool = False
     has_write_permissions: bool = False
@@ -279,7 +228,9 @@ class WorkflowContext:
         return {
             "file": self.file,
             "has_fork_triggered": self.has_fork_triggered,
+            "has_privileged_fork_trigger": self.has_privileged_fork_trigger,
             "has_pr_target": self.has_pr_target,
+            "is_reusable_workflow": self.is_reusable_workflow,
             "has_checkout": self.has_checkout,
             "has_secrets_reference": self.has_secrets_reference,
             "has_write_permissions": self.has_write_permissions,
@@ -308,14 +259,17 @@ def analyze(content: str, file: str = "") -> WorkflowContext:
     # Jenkins fork-equivalents stay on their regexes (different languages, no
     # on: node). triggers() returns an empty set for non-GitHub content.
     gh_events = triggers(content)
+    other_fork_signal = bool(
+        _RE_FORK_TRIGGER_OTHER.search(content) or _RE_JENKINS_PARAMS.search(content)
+    )
     return WorkflowContext(
         file=file,
-        has_fork_triggered=bool(
-            (gh_events & _GH_FORK_EVENTS)
-            or _RE_FORK_TRIGGER_OTHER.search(content)
-            or _RE_JENKINS_PARAMS.search(content)
-        ),
+        has_fork_triggered=bool((gh_events & _GH_FORK_EVENTS) or other_fork_signal),
         has_pr_target="pull_request_target" in gh_events,
+        is_reusable_workflow="workflow_call" in gh_events,
+        has_privileged_fork_trigger=bool(
+            (gh_events & _GH_PRIVILEGED_FORK_EVENTS) or other_fork_signal
+        ),
         has_checkout=bool(_RE_CHECKOUT.search(content)),
         has_secrets_reference=bool(_RE_SECRETS_REF.search(content)),
         has_write_permissions=bool(_RE_WRITE_PERM.search(content) or _RE_WRITE_ALL.search(content)),
@@ -338,6 +292,92 @@ def analyze(content: str, file: str = "") -> WorkflowContext:
         # implicit-default-write inference (P2.2) to GitHub workflows.
         is_github=bool(gh_events or _RE_GITHUB_MARKER.search(content)),
     )
+
+
+def _github_global_content(content: str) -> str:
+    """Keep top-level GitHub settings without borrowing any job's body."""
+    global_lines: list[str] = []
+    in_jobs = False
+    for line in content.splitlines():
+        stripped = line.lstrip()
+        if stripped and not line[:1].isspace() and not stripped.startswith("#"):
+            in_jobs = bool(re.match(r"jobs\s*:", stripped))
+        if not in_jobs:
+            global_lines.append(line)
+    return "\n".join(global_lines)
+
+
+def _direct_job_fields(lines: tuple[str, ...]) -> list[str]:
+    """Return only direct child keys of one GitHub job segment."""
+    if not lines:
+        return []
+    base_indent = len(lines[0]) - len(lines[0].lstrip())
+    children = [
+        line
+        for line in lines[1:]
+        if line.strip()
+        and not line.lstrip().startswith("#")
+        and len(line) - len(line.lstrip()) > base_indent
+    ]
+    if not children:
+        return []
+    child_indent = min(len(line) - len(line.lstrip()) for line in children)
+    return [line for line in children if len(line) - len(line.lstrip()) == child_indent]
+
+
+def _job_inherits_secrets(fields: list[str]) -> bool:
+    """Recognize a direct ``jobs.<id>.secrets: inherit`` declaration."""
+    return any(
+        re.match(r"\s*secrets\s*:\s*['\"]?inherit(?:['\"])?\s*(?:#.*)?$", line) for line in fields
+    )
+
+
+def analyze_job_contexts(content: str, file: str = "") -> dict[str, WorkflowContext]:
+    """Project workflow-wide and effective job signals onto each GitHub job.
+
+    ``analyze`` remains the fallback for findings outside a resolvable job and
+    for other CI platforms. GitHub triggers reach every job and top-level
+    ``env`` reaches ordinary jobs but not reusable-workflow calls. Checkout,
+    job secrets, runner choice, and guards do not leak across siblings. A
+    job-level permissions block replaces the workflow block, matching the
+    corpus composer's effective-permission model.
+    """
+    if not triggers(content):
+        return {}
+    lines = content.splitlines()
+    globals_ctx = analyze(_github_global_content(content), file=file)
+    workflow_permissions = _extract_workflow_permissions(lines)
+    job_permissions = {block.scope_what: block for block in _extract_job_permissions(lines)}
+    contexts: dict[str, WorkflowContext] = {}
+    for job in for_each_job(content):
+        if not job.name:
+            continue
+        local_ctx = analyze(job.text, file=file)
+        direct_fields = _direct_job_fields(job.body_lines)
+        calls_reusable = any(re.match(r"\s*uses\s*:", line) for line in direct_fields)
+        permissions = job_permissions.get(job.name, workflow_permissions)
+        has_write = permissions is not None and (
+            permissions.is_write_all or "write" in permissions.grants.values()
+        )
+        id_token_write = permissions is not None and permissions.grants.get("id-token") == "write"
+        contexts[job.name] = replace(
+            globals_ctx,
+            has_checkout=local_ctx.has_checkout,
+            has_secrets_reference=(
+                (globals_ctx.has_secrets_reference and not calls_reusable)
+                or local_ctx.has_secrets_reference
+                or _job_inherits_secrets(direct_fields)
+            ),
+            has_write_permissions=has_write,
+            has_id_token_write=id_token_write,
+            has_explicit_permissions=permissions is not None,
+            is_release_workflow=(globals_ctx.is_release_workflow or local_ctx.is_release_workflow),
+            runs_self_hosted=local_ctx.runs_self_hosted,
+            has_fork_identity_guard=local_ctx.has_fork_identity_guard,
+            has_harden_runner_egress_block=local_ctx.has_harden_runner_egress_block,
+            is_github=True,
+        )
+    return contexts
 
 
 # ---------------------------------------------------------------------------
@@ -367,9 +407,11 @@ def compute_exploitability(family_id: str, ctx: WorkflowContext) -> str:
     # Script injection — needs attacker-controlled input AND privileged
     # context to be exploitable.
     if family_id == "script_injection":
-        if ctx.has_fork_triggered and (ctx.has_secrets_reference or ctx.has_write_permissions):
+        if ctx.has_privileged_fork_trigger and (
+            ctx.has_secrets_reference or ctx.has_write_permissions
+        ):
             return _HIGH
-        if ctx.has_fork_triggered or ctx.has_secrets_reference:
+        if ctx.has_fork_triggered or ctx.has_secrets_reference or ctx.is_reusable_workflow:
             return _MEDIUM
         return _LOW
 
@@ -421,7 +463,15 @@ def compute_exploitability(family_id: str, ctx: WorkflowContext) -> str:
     if family_id == "credential_persistence":
         if ctx.has_secrets_reference or ctx.has_write_permissions:
             return _HIGH
+        if ctx.is_reusable_workflow:
+            return _MEDIUM
         return _LOW
+
+    # Secret inheritance is a real boundary expansion, but exploitation
+    # depends on the called workflow or a transitive dependency being
+    # compromised. The rule severity distinguishes external and local calls.
+    if family_id == "secret_delegation":
+        return _MEDIUM
 
     # Identity / access — broad permissions only matter if the token is
     # actually usable for something sensitive in this workflow.
@@ -434,6 +484,11 @@ def compute_exploitability(family_id: str, ctx: WorkflowContext) -> str:
     # security impact; these are hygiene, not attack surface.
     if family_id == "resource_controls":
         return _LOW
+
+    # World-writable runner paths can persist across jobs on a shared
+    # self-hosted machine even when this job itself has no token or secret.
+    if family_id == "runner_integrity":
+        return _HIGH if ctx.runs_self_hosted else _MEDIUM
 
     # Release integrity — matters by construction in release workflows.
     if family_id == "release_integrity":
@@ -474,7 +529,12 @@ def compute_exploitability(family_id: str, ctx: WorkflowContext) -> str:
             ctx.has_fork_triggered and (ctx.has_write_permissions or ctx.has_secrets_reference)
         ):
             return _HIGH
-        if ctx.has_fork_triggered or ctx.is_release_workflow or ctx.runs_self_hosted:
+        if (
+            ctx.has_fork_triggered
+            or ctx.is_reusable_workflow
+            or ctx.is_release_workflow
+            or ctx.runs_self_hosted
+        ):
             return _MEDIUM
         if ctx.has_secrets_reference and ctx.has_checkout:
             return _MEDIUM
@@ -483,13 +543,15 @@ def compute_exploitability(family_id: str, ctx: WorkflowContext) -> str:
     # Pipeline tool execution (LOTP) — split out of ``script_injection`` by
     # P1.2.  A build tool running over attacker-controlled checkout is the
     # same reach-and-privilege shape as script injection: it needs a
-    # fork-reachable trigger AND something worth stealing (secrets / write).
+    # privileged fork-reachable trigger AND something worth stealing.
     # Mirror script_injection's tiers so the split changes clustering only,
     # not the exploitability hint.
     if family_id == "pipeline_tool_execution":
-        if ctx.has_fork_triggered and (ctx.has_secrets_reference or ctx.has_write_permissions):
+        if ctx.has_privileged_fork_trigger and (
+            ctx.has_secrets_reference or ctx.has_write_permissions
+        ):
             return _HIGH
-        if ctx.has_fork_triggered or ctx.has_secrets_reference:
+        if ctx.has_fork_triggered or ctx.has_secrets_reference or ctx.is_reusable_workflow:
             return _MEDIUM
         return _LOW
 
@@ -501,6 +563,8 @@ def compute_exploitability(family_id: str, ctx: WorkflowContext) -> str:
     if family_id in ("untrusted_code_execution", "insecure_transport"):
         if ctx.has_secrets_reference or ctx.has_write_permissions:
             return _HIGH
+        if ctx.is_reusable_workflow:
+            return _MEDIUM
         return _LOW
 
     return _MEDIUM

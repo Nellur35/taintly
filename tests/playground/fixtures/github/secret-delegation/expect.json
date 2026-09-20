@@ -1,0 +1,11 @@
+{
+  "platform": "github",
+  "vulnerable": {
+    "must_fire": ["SEC4-GH-012A"],
+    "must_not_fire": []
+  },
+  "fixed": {
+    "must_fire": [],
+    "must_not_fire": ["SEC4-GH-012A"]
+  }
+}

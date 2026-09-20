@@ -43,7 +43,11 @@ from .staticguard import (
     find_dead_line_ranges,
     is_workflow_whole_dead,
 )
-from .workflow_context import HARDEN_RUNNER_TEMPERED_FAMILIES, compute_exploitability
+from .workflow_context import (
+    HARDEN_RUNNER_TEMPERED_FAMILIES,
+    analyze_job_contexts,
+    compute_exploitability,
+)
 from .workflow_context import analyze as analyze_workflow
 from .workflow_corpus import CorpusPattern, build_corpus, is_fork_reachable
 
@@ -362,6 +366,20 @@ def scan_file(
             pass
 
     wf_ctx = analyze_workflow(content, file=filepath)
+    job_contexts = (
+        analyze_job_contexts(content, file=filepath)
+        if any(rule.platform is Platform.GITHUB for rule in rules)
+        else {}
+    )
+    job_context_ranges = (
+        [
+            (job.start_line, job.end_line, job_contexts[job.name])
+            for job in for_each_job(content)
+            if job.name in job_contexts
+        ]
+        if job_contexts
+        else []
+    )
 
     # Anchor-merge expansion: pre-compute lazily so rules that don't
     # opt in pay nothing.  See parsers/anchor_expander for the
@@ -421,16 +439,24 @@ def scan_file(
                     family = rule.finding_family or classify_rule(rule.id, rule.owasp_cicd)
                     confidence = rule.confidence or default_confidence(rule.id)
                     review_needed = rule.review_needed or default_review_needed(rule.id)
-                    exploitability = compute_exploitability(family, wf_ctx)
+                    finding_ctx = next(
+                        (
+                            job_ctx
+                            for start, end, job_ctx in job_context_ranges
+                            if start <= line_num <= end
+                        ),
+                        wf_ctx,
+                    )
+                    exploitability = compute_exploitability(family, finding_ctx)
                     ctx_notes: list[str] = []
                     ctx_tags: list[str] = []
                     if (
-                        wf_ctx.has_harden_runner_egress_block
+                        finding_ctx.has_harden_runner_egress_block
                         and family in HARDEN_RUNNER_TEMPERED_FAMILIES
                     ):
                         ctx_notes.append(
                             "Harden-Runner egress-policy: block is present in this "
-                            "workflow — exploitability tempered one tier (the "
+                            "finding context — exploitability tempered one tier (the "
                             "outbound exfil / C2 path is blocked)."
                         )
                         ctx_tags.append("harden-runner-egress-block")
@@ -451,7 +477,7 @@ def scan_file(
                         and not rule.finding_family
                         and family in _HYGIENE_FALLBACK_FAMILIES
                         and rule.severity in (Severity.CRITICAL, Severity.HIGH)
-                        and (wf_ctx.has_fork_triggered or wf_ctx.is_privileged)
+                        and (finding_ctx.has_fork_triggered or finding_ctx.is_privileged)
                     ):
                         exploitability = "medium"
                         ctx_notes.append(
