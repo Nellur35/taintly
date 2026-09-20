@@ -13,6 +13,7 @@ Jenkins pipelines have unique risk characteristics:
 
 import re
 
+from taintly.jenkinsguard import _groovy_code_mask
 from taintly.models import (
     ContextPattern,
     Platform,
@@ -21,6 +22,76 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+
+
+class _GitCheckoutHttpPattern:
+    """Match HTTP repository URLs only inside Git checkout syntax.
+
+    A plain ``url: 'http://...'`` can be an ``httpRequest`` API endpoint.
+    Use Groovy's code mask and balanced argument brackets to establish that
+    a named URL belongs to ``userRemoteConfigs`` or a ``git`` step.
+    """
+
+    _CANDIDATES = RegexPattern(
+        match=r"(?:\burl\s*:\s*['\"]http://|\bgit\s+clone\s+http://)(?!localhost|127\.0\.0\.1)",
+        groovy_comment_aware=True,
+    )
+    _CLONE = re.compile(r"\bgit\s+clone\s+http://")
+    _URL = re.compile(r"\burl\s*:\s*['\"]http://")
+    _REMOTE_CONFIGS = re.compile(r"\buserRemoteConfigs\s*:\s*\[")
+    _GIT_STEP = re.compile(r"^\s*git\s+(?:\w+\s*:\s*[^,\n]+,\s*)*url\s*:")
+
+    @staticmethod
+    def _balanced_closings(code: str) -> dict[int, int]:
+        """Pair argument delimiters in one pass over code outside strings."""
+        stacks: dict[str, list[int]] = {"[": [], "(": []}
+        closings: dict[int, int] = {}
+        for pos, char in enumerate(code):
+            if char in stacks:
+                stacks[char].append(pos)
+            elif char == "]" and stacks["["]:
+                closings[stacks["["].pop()] = pos
+            elif char == ")" and stacks["("]:
+                closings[stacks["("].pop()] = pos
+        return closings
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        mask = _groovy_code_mask(content)
+        code = "".join(char if mask[pos] else " " for pos, char in enumerate(content))
+        closings = self._balanced_closings(code)
+        remote_spans = []
+        for match in self._REMOTE_CONFIGS.finditer(code):
+            opening = match.end() - 1
+            closing = closings.get(opening)
+            if closing is not None:
+                remote_spans.append((opening, closing))
+        git_call_spans = []
+        for match in re.finditer(r"\bgit\s*\(", code):
+            opening = match.end() - 1
+            closing = closings.get(opening)
+            if closing is not None:
+                git_call_spans.append((opening, closing))
+
+        line_starts = [0]
+        line_starts.extend(match.end() for match in re.finditer("\n", content))
+        findings = []
+        for line_num, snippet in self._CANDIDATES.check(content, lines):
+            line = lines[line_num - 1]
+            if self._CLONE.search(line):
+                findings.append((line_num, snippet))
+                continue
+            url = self._URL.search(line)
+            if url is None:
+                continue
+            offset = line_starts[line_num - 1] + url.start()
+            code_line = code[line_starts[line_num - 1] : line_starts[line_num - 1] + len(line)]
+            if (
+                self._GIT_STEP.search(code_line)
+                or any(start <= offset < end for start, end in remote_spans)
+                or any(start <= offset < end for start, end in git_call_spans)
+            ):
+                findings.append((line_num, snippet))
+        return findings
 
 
 class _NodeBlockWithoutLabelPattern:
@@ -2896,10 +2967,9 @@ RULES: list[Rule] = [
     # SEC6-JK-004 only catches ``curl -k`` / ``wget --no-check-certificate``
     # in a shell body.  The Jenkins HTTP Request plugin (``httpRequest``)
     # has its own knob, ``ignoreSslErrors: true``, which the shell-anchored
-    # rule never sees.  We deliberately do NOT also match an http:// URL in
-    # ``httpRequest``: a bare ``url: 'http://...'`` already fires SEC8-JK-003
-    # (its matcher keys on ``url: 'http://'``), so matching it here would
-    # double-fire.  ``ignoreSslErrors`` is httpRequest-specific → near-zero FP.
+    # rule never sees.  Plain HTTP endpoints in ``httpRequest`` are separate
+    # from Git checkouts; SEC8-JK-003 requires Git syntax around its URL.
+    # ``ignoreSslErrors`` is httpRequest-specific → near-zero FP.
     # =========================================================================
     Rule(
         id="SEC6-JK-009",
@@ -3228,10 +3298,7 @@ RULES: list[Rule] = [
             "code into the source tree before the build runs, insert compromised "
             "dependencies, or replace downloaded scripts without any visible error."
         ),
-        pattern=RegexPattern(
-            match=r"(?:url\s*:\s*['\"]http://|git\s+clone\s+http://)(?!localhost|127\.0\.0\.1)",
-            exclude=[r"^\s*//"],
-        ),
+        pattern=_GitCheckoutHttpPattern(),
         remediation=(
             "Replace HTTP with HTTPS for all repository URLs:\n\n"
             "// BAD\n"
@@ -3243,11 +3310,13 @@ RULES: list[Rule] = [
         test_positive=[
             "checkout([$class: 'GitSCM', userRemoteConfigs: [[url: 'http://github.com/org/repo.git']]])",
             "sh 'git clone http://gitlab.example.com/group/project.git'",
+            "git(url: 'http://git.example.com/group/project.git')",
         ],
         test_negative=[
             "checkout([$class: 'GitSCM', userRemoteConfigs: [[url: 'https://github.com/org/repo.git']]])",
             "checkout scm",
             "// url: 'http://github.com/org/repo.git'",
+            "httpRequest(url: 'http://status.example.com/api', httpMode: 'POST')",
         ],
         stride=["T", "I"],
         threat_narrative=(
