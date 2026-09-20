@@ -18,6 +18,16 @@ individual findings rather than root-cause clusters. Its sub-scores are
 rounded down to one decimal so a small confirmed deduction remains visible;
 they do not add up to the headline score.
 
+For GitHub Actions, a finding's exploitability hint uses the containing job's
+secrets, effective permissions, runner, guard, checkout, and egress controls.
+Workflow triggers and top-level settings apply to each job where GitHub makes
+them available. A sibling job cannot raise or lower another job's hint.
+Findings outside a resolvable job use workflow-level context; other CI
+platforms retain workflow-level context. This hint changes prioritization,
+not whether a rule fires or its declared severity. Reusable workflows still
+need caller review because a file scan cannot see every caller's inputs and
+secrets.
+
 ## 1. What the score assumes
 
 taintly's score is computed against a fixed default threat model.

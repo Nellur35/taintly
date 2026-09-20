@@ -1,0 +1,7 @@
+name: Release caller
+on: workflow_dispatch
+jobs:
+  call:
+    uses: ./.github/workflows/release.yml
+    secrets:
+      release_token: ${{ secrets.RELEASE_TOKEN }}

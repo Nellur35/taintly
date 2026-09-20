@@ -158,6 +158,17 @@ _FAMILIES: tuple[FindingFamily, ...] = (
         ),
     ),
     FindingFamily(
+        id="secret_delegation",
+        title="Broad secret delegation to reusable workflows",
+        why=(
+            "Passing every caller secret to a reusable workflow widens the "
+            "credential boundary. The called workflow and its dependencies "
+            "receive more secrets than they may need; list required secrets "
+            "explicitly."
+        ),
+        members=frozenset({"SEC4-GH-012", "SEC4-GH-012A"}),
+    ),
+    FindingFamily(
         id="repository_governance",
         title="Repository governance and branch protection",
         why=(
@@ -265,6 +276,16 @@ _FAMILIES: tuple[FindingFamily, ...] = (
                 # SEC8-GL-002 retired (duplicate of SEC3-GL-002).
             }
         ),
+    ),
+    FindingFamily(
+        id="runner_integrity",
+        title="Runner filesystem integrity",
+        why=(
+            "World-writable paths let another process alter files a CI job "
+            "will later execute or consume. On a shared self-hosted runner, "
+            "those changes can survive into later jobs."
+        ),
+        members=frozenset({"SEC6-GH-014"}),
     ),
     FindingFamily(
         id="logging_visibility",
