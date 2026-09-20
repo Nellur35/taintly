@@ -49,9 +49,10 @@ def test_git_step_and_shell_clone_still_fire() -> None:
     content = """node {
   git(url: 'http://git.example.com/one.git')
   sh 'git clone http://git.example.com/two.git'
+  git branch: 'main', url: 'http://git.example.com/three.git'
 }
 """
-    assert _hits(content) == [2, 3]
+    assert _hits(content) == [2, 3, 4]
 
 
 def test_comment_or_string_cannot_create_remote_config_context() -> None:

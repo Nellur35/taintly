@@ -39,7 +39,23 @@ class _GitCheckoutHttpPattern:
     _CLONE = re.compile(r"\bgit\s+clone\s+http://")
     _URL = re.compile(r"\burl\s*:\s*['\"]http://")
     _REMOTE_CONFIGS = re.compile(r"\buserRemoteConfigs\s*:\s*\[")
-    _GIT_STEP = re.compile(r"^\s*git\s+(?:\w+\s*:\s*[^,\n]+,\s*)*url\s*:")
+    _GIT_HEAD = re.compile(r"^\s*git\b")
+    _FIELD_NAME = re.compile(r"^\s*\w+\s*$")
+
+    @classmethod
+    def _direct_git_step_url(cls, code_line: str, url_pos: int) -> bool:
+        """Read comma-separated named arguments without regex backtracking."""
+        head = cls._GIT_HEAD.match(code_line)
+        if head is None or head.end() > url_pos:
+            return False
+        fields = code_line[head.end() : url_pos].split(",")
+        if fields[-1].strip():
+            return False
+        for field in fields[:-1]:
+            name, separator, _value = field.partition(":")
+            if not separator or cls._FIELD_NAME.fullmatch(name) is None:
+                return False
+        return True
 
     @staticmethod
     def _balanced_closings(code: str) -> dict[int, int]:
@@ -86,7 +102,7 @@ class _GitCheckoutHttpPattern:
             offset = line_starts[line_num - 1] + url.start()
             code_line = code[line_starts[line_num - 1] : line_starts[line_num - 1] + len(line)]
             if (
-                self._GIT_STEP.search(code_line)
+                self._direct_git_step_url(code_line, url.start())
                 or any(start <= offset < end for start, end in remote_spans)
                 or any(start <= offset < end for start, end in git_call_spans)
             ):
