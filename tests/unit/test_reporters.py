@@ -685,7 +685,8 @@ def test_text_includes_score_when_passed():
     report = _multi_finding_report()
     score = compute_score(report.findings, files_scanned=report.files_scanned)
     output = format_text(report, use_color=False, score_report=score)
-    assert f"Score:          {score.total_score}/100 ({score.grade})" in output
+    qualifier = "; review pending" if score.review_needed else ""
+    assert f"Score:          {score.total_score}/100 ({score.grade}{qualifier})" in output
 
 
 def test_text_score_omitted_when_not_passed():

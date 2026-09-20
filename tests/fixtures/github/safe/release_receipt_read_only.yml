@@ -1,0 +1,23 @@
+# release_receipt_read_only.yml - safe fixture for SEC1-GH-001.
+#
+# The job checks for a prior manual release run and does not publish or deploy.
+name: Check release receipt
+
+on:
+  pull_request:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  release_receipt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Verify prior run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            --jq '.workflow_runs[] | select(.conclusion == "success") | .id'

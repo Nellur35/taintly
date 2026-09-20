@@ -1,7 +1,7 @@
 
 === CI/CD SECURITY SCORE ===
 
-  Score: 72/100 (C)
+  Score: 72/100 (C; review pending)
   Threat model: public-OSS deployment (fork PRs reachable, runners shared, secrets repo-scoped).
   Findings are exploitability-weighted against this model. Assessing fit to your deployment is required, not optional.
   See docs/SCORING.md.
@@ -14,10 +14,10 @@ Deductions:
   HIGH:       1 finding(s)  ->    0.0 pts  (unclassified)
   MEDIUM:     2 finding(s)  ->    6.0 pts  (unclassified)
 
-Bonuses:
-  X  No critical findings             0
-  X  All actions pinned to SHA        0
-  X  All permissions explicit          0
+Positive controls (informational; not added to score):
+  X  No critical; fewer than two high findings
+  X  All actions pinned to SHA
+  X  All permissions explicit
 
 Breakdown by category:
 

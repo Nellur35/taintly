@@ -9,8 +9,10 @@ classified finding. The single-track model below fixes that.
 
     SCORE = 100
             - sum(cluster_deduction for cl in clusters)
-            + bonuses
             clamped to [0, 100]
+
+Positive controls are reported separately. Adding their points to a score
+that already starts at 100 would erase unrelated confirmed findings.
 
 Per-cluster deduction = ``base_severity_points × confidence × exploitability``
 plus a small capped spread bonus so genuine breadth across workflows
@@ -24,8 +26,9 @@ Confidence weights:   high 1.0 / medium 0.6 / low 0.3
 Exploitability weights: high 1.0 / medium 0.8 / low 0.5
 Spread bonus: +1 per additional affected file, capped at +3 per cluster.
 
-Per-category sub-scores are display-only breakdowns using the same
-cluster-first model — they show teams *where* to focus.
+Per-category sub-scores are display-only indicators using per-finding
+weights. They show teams *where* to focus; they are not components of
+the headline cluster-based score.
 """
 
 from __future__ import annotations
@@ -74,7 +77,7 @@ def _weight(f: Finding) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Deduction / bonus constants
+# Deduction / positive-control constants
 # ---------------------------------------------------------------------------
 
 # Legacy per-severity constants — still used for the fallback track and
@@ -105,24 +108,16 @@ _CLUSTER_DEDUCTION_CAP = 70.0
 _SPREAD_BONUS_CAP = 3
 
 _BONUS_NO_CRITICALS = 5
-# Severity-headroom thresholds for the no_criticals bonus. The bonus's
-# label suggests "no severe findings", but field test (jenkins.io
-# 2026-04 retest, 3 HIGH findings still scored 100/A) showed that
-# applying it whenever n_critical == 0 over-rewards repos with many
-# HIGH findings. The bonus now also requires HIGH count below
-# _BONUS_NO_CRITICALS_HIGH_CAP. A single HIGH finding still earns it
-# (single-issue repos shouldn't lose the bonus on one finding) but
-# 2+ HIGH lose it.
+# Legacy positive-control threshold, retained for report compatibility.
+# Its value no longer changes the numeric score.
 _BONUS_NO_CRITICALS_HIGH_CAP = 2
 _BONUS_ALL_PINNED = 5  # zero pin rules fired for the platforms that were scanned
 _BONUS_ALL_PERMISSIONS = 5  # zero permission rules fired for platforms with a perms concept
 
 # Security ceilings — the granular 0-100 score stays for progress tracking, but
 # the headline grade must never present an active CRITICAL (or multiple
-# unmitigated HIGHs) as passing. Bonuses are zeroed only when their *specific*
-# rule fired, so without a ceiling a repo with CRITICAL clusters plus pinned
-# actions / a narrow permissions block could accumulate bonuses back into a
-# passing band (the +5/+10 swing that let a 5-CRITICAL repo land ~72/C).
+# unmitigated HIGHs) as passing. The cluster deduction alone may be smaller
+# than the grade-band distance for a single severe finding.
 _CRITICAL_SCORE_CEILING = 49  # any active CRITICAL cluster -> failing grade
 _HIGH_SCORE_CEILING = 69  # more than one unmitigated HIGH -> cap at C
 
@@ -230,6 +225,8 @@ class ScoreReport:
     total_score: int
     grade: str
     deductions: dict[str, float]
+    # Legacy field name retained for report consumers. Values identify
+    # positive controls; they are informational and never added to the score.
     bonuses: dict[str, int]
     categories: list[CategoryScore] = field(default_factory=list)
     finding_count: int = 0
@@ -369,7 +366,7 @@ def compute_score(
     and ad-hoc callers can leave it ``None`` and the scorer infers it
     from the rule-ID suffixes on the findings (with the empty-findings
     case treated as "all platforms scanned" so a clean repo still
-    earns its bonuses).
+    reports applicable positive controls).
 
     ``scanned_config`` is the caller's assertion that there was an
     assessable CI/CD surface. When ``False`` (a file scan that found no
@@ -410,9 +407,10 @@ def compute_score(
     ded_high = 0.0
     ded_medium = 0.0
 
-    # Bonuses — gated on platform applicability so a Jenkins-only or
-    # GitLab-only scan can't collect a GitHub-permissions bonus the
-    # rule pack would never have evaluated against.
+    # Positive controls are retained as informational signals for existing
+    # report consumers. They never offset deductions for confirmed risks.
+    # Platform applicability still matters: a Jenkins-only or GitLab-only
+    # scan cannot claim a GitHub-permissions control was checked.
     fired_rule_ids = {f.rule_id for f in findings}
     if platforms_scanned is None:
         inferred = {
@@ -441,7 +439,7 @@ def compute_score(
 
     # all_permissions: only applies when at least one scanned platform
     # HAS a permissions concept. On a Jenkins-only / GitLab-only scan
-    # the bonus is not applicable and contributes 0 — the prior
+    # the indicator is not applicable and remains 0 — the prior
     # behaviour of always-firing produced the field-test 100/A bug on
     # jenkins.io.
     perms_relevant = platforms_scanned & set(_PERMS_RULES_BY_PLATFORM)
@@ -454,25 +452,23 @@ def compute_score(
                 bonus_all_perms = 0
                 break
 
-    # Coverage gate: the "all pinned" / "all permissions" bonuses assert
+    # Coverage gate: the "all pinned" / "all permissions" indicators assert
     # "we scanned the config and everything is pinned/permissioned" — a
     # vacuous claim if nothing was actually scanned. A scan with zero
     # files (e.g. the Jenkins posture audit, which produces findings via
     # a live API but sets files_scanned=0) must not earn them. The
-    # no_criticals bonus is a property of the findings themselves, not of
+    # no_criticals is a property of the findings themselves, not of
     # file coverage, so it is left untouched.
     if files_scanned <= 0:
         bonus_all_pinned = 0
         bonus_all_perms = 0
 
-    total_bonus = bonus_no_criticals + bonus_all_pinned + bonus_all_perms
-
-    raw = 100 - cluster_ded + total_bonus
+    raw = 100 - cluster_ded
     total_score = max(0, min(100, int(raw)))
 
-    # Security ceiling (applied AFTER bonuses): an active CRITICAL can never
+    # Security ceiling: an active CRITICAL can never
     # present as a passing grade, and >1 unmitigated HIGH is capped at C, no
-    # matter how many bonuses accrued. Only ever lowers the score. Counts
+    # matter how the cluster deduction was weighted. Only ever lowers the score. Counts
     # EXCLUDE review-needed findings — those contribute 0 to the score by
     # design (unconfirmed until human triage), so they must not trip the
     # ceiling either; the ceiling fires only on confirmed/active risk.
@@ -641,10 +637,13 @@ def _compute_categories(findings: list[Finding]) -> list[CategoryScore]:
             + min(w_h * _HIGH_PER, _HIGH_CAP)
             + min(w_m * _MEDIUM_PER, _MEDIUM_CAP)
         )
-        # Normalize deduction to [0, max_pts]
+        # Normalize deduction to [0, max_pts]. Truncate to one decimal
+        # rather than rounding to nearest: even a small confirmed deduction
+        # must not be displayed as full marks in a small category.
         total_possible_ded = _CRITICAL_CAP + _HIGH_CAP + _MEDIUM_CAP  # 70
         deduction_ratio = min(cat_ded / total_possible_ded, 1.0)
         points = max(0.0, max_pts * (1.0 - deduction_ratio))
+        points = int(points * 10) / 10
 
         top_rule = ""
         if cat_findings:
@@ -656,7 +655,7 @@ def _compute_categories(findings: list[Finding]) -> list[CategoryScore]:
                 owasp_id=owasp,
                 name=name,
                 max_points=max_pts,
-                points=round(points, 1),
+                points=points,
                 finding_count=len(cat_findings),
                 critical_count=n_c,
                 high_count=n_h,
