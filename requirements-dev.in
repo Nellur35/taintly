@@ -22,7 +22,7 @@
 
 ruff==0.15.16
 mypy==2.1.0
-hypothesis==6.155.2
+hypothesis==6.165.10
 bandit==1.9.4
 pip==26.2
 pip-audit==2.10.0
