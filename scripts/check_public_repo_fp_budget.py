@@ -26,9 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-_DEFAULT_CACHE = Path(
-    os.environ.get("TAINTLY_SCAN_CACHE", "/tmp/taintly_scan_cache")
-)
+_DEFAULT_CACHE = Path(os.environ.get("TAINTLY_SCAN_CACHE", "/tmp/taintly_scan_cache"))
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _REPORT_EXIT_CODES = {0, 1, 2, 11}
 
@@ -95,6 +93,13 @@ class ScanResult:
     severity_counts: dict[str, int]
 
 
+@dataclass(frozen=True)
+class SourceIdentity:
+    revision: str
+    repo_url: str
+    worktree_dirty: bool
+
+
 def _validate_target(target: Target) -> None:
     if not target.label or not target.cache_name:
         raise ValueError("target label and cache_name must be non-empty")
@@ -128,6 +133,50 @@ def _head_sha(checkout: Path) -> str | None:
     return value if _SHA_RE.fullmatch(value) else None
 
 
+def _source_identity(checkout: Path) -> tuple[SourceIdentity | None, str | None]:
+    """Read the three source properties that make a cached checkout evidence."""
+    revision = _head_sha(checkout)
+    if revision is None:
+        return None, "checkout has no valid HEAD"
+    origin = _run_git(["remote", "get-url", "origin"], checkout, timeout=30)
+    repo_url = origin.stdout.strip() if origin.returncode == 0 else ""
+    if not repo_url:
+        return None, "checkout has no readable origin URL"
+    status = _run_git(
+        ["status", "--porcelain", "--untracked-files=all", "--ignored"],
+        checkout,
+        timeout=30,
+    )
+    if status.returncode != 0:
+        return None, "checkout worktree status could not be read"
+    return (
+        SourceIdentity(
+            revision=revision,
+            repo_url=repo_url,
+            worktree_dirty=bool(status.stdout.strip()),
+        ),
+        None,
+    )
+
+
+def _validate_source_identity(
+    checkout: Path, target: Target
+) -> tuple[SourceIdentity | None, str | None]:
+    identity, error = _source_identity(checkout)
+    if identity is None:
+        return None, error
+    if identity.revision != target.revision:
+        return None, (f"cached checkout has {identity.revision}, expected {target.revision}")
+    if identity.repo_url != target.repo_url:
+        return None, (
+            "cached checkout origin URL mismatch: "
+            f"expected {target.repo_url!r}, got {identity.repo_url!r}"
+        )
+    if identity.worktree_dirty:
+        return None, "cached checkout has modified, untracked, or ignored files"
+    return identity, None
+
+
 def _remove_partial(path: Path, cache: Path) -> None:
     """Remove only a failed materialization directory below ``cache``."""
     try:
@@ -151,9 +200,9 @@ def _materialize(target: Target, cache: Path) -> tuple[Path | None, str | None]:
     checkout = cache / target.cache_key
     wanted = checkout / Path(target.scan_target)
     if checkout.exists():
-        actual = _head_sha(checkout)
-        if actual != target.revision:
-            return None, f"cached checkout has {actual or 'no valid HEAD'}, expected {target.revision}"
+        _identity, identity_error = _validate_source_identity(checkout, target)
+        if identity_error:
+            return None, identity_error
         if not wanted.exists():
             return None, f"pinned target is missing: {target.scan_target}"
         return checkout, None
@@ -178,10 +227,10 @@ def _materialize(target: Target, cache: Path) -> tuple[Path | None, str | None]:
                 reason = detail[-1] if detail else f"git {' '.join(args)} failed"
                 _remove_partial(partial, cache)
                 return None, reason
-        actual = _head_sha(partial)
-        if actual != target.revision:
+        _identity, identity_error = _validate_source_identity(partial, target)
+        if identity_error:
             _remove_partial(partial, cache)
-            return None, f"fetched {actual or 'no valid HEAD'}, expected {target.revision}"
+            return None, identity_error
         if not (partial / Path(target.scan_target)).exists():
             _remove_partial(partial, cache)
             return None, f"pinned target is missing: {target.scan_target}"
@@ -266,10 +315,10 @@ def _scan(checkout: Path, target: Target) -> tuple[ScanResult | None, str | None
     raw_errors = report.get("errors", [])
     if not isinstance(raw_errors, list):
         return None, "scan JSON errors field is not a list"
-    findings = tuple(
-        _normalise_finding(item, checkout)
-        for item in raw_findings
-    )
+    try:
+        findings = tuple(_normalise_finding(item, checkout) for item in raw_findings)
+    except (TypeError, ValueError) as exc:
+        return None, f"scan JSON contains invalid finding fields: {exc}"
     rule_counts = dict(sorted(Counter(f["rule_id"] for f in findings).items()))
     severity_counts = dict(sorted(Counter(f["severity"] for f in findings).items()))
     finding_engine_errors = sum(f["rule_id"] == "ENGINE-ERR" for f in findings)
@@ -292,13 +341,9 @@ def _scan(checkout: Path, target: Target) -> tuple[ScanResult | None, str | None
 def _budget_failures(target: Target, result: ScanResult) -> list[str]:
     failures: list[str] = []
     if result.confirmed > target.max_confirmed:
-        failures.append(
-            f"confirmed {result.confirmed} exceeds {target.max_confirmed}"
-        )
+        failures.append(f"confirmed {result.confirmed} exceeds {target.max_confirmed}")
     if result.review_needed > target.max_review_needed:
-        failures.append(
-            f"review-needed {result.review_needed} exceeds {target.max_review_needed}"
-        )
+        failures.append(f"review-needed {result.review_needed} exceeds {target.max_review_needed}")
     if result.engine_errors:
         failures.append(f"{result.engine_errors} ENGINE-ERR coverage finding(s)")
     return failures
@@ -323,19 +368,36 @@ def _write_summary(lines: list[str]) -> None:
 def _scanner_identity() -> dict[str, Any]:
     """Return the scanner commit and whether tracked files differ from it."""
     root = Path(__file__).resolve().parents[1]
-    revision = os.environ.get("GITHUB_SHA", "").strip().lower()
-    if _SHA_RE.fullmatch(revision) is None:
-        revision = _head_sha(root) or "unknown"
-    status = _run_git(
-        ["status", "--porcelain", "--untracked-files=no"], root, timeout=30
+    revision = _head_sha(root) or "unknown"
+    workflow_revision_raw = os.environ.get("GITHUB_SHA", "").strip().lower()
+    workflow_revision: str | None = (
+        workflow_revision_raw if _SHA_RE.fullmatch(workflow_revision_raw) is not None else None
     )
+    status = _run_git(["status", "--porcelain", "--untracked-files=no"], root, timeout=30)
     dirty: bool | None = None
     if status.returncode == 0:
         dirty = bool(status.stdout.strip())
-    return {"revision": revision, "tracked_files_dirty": dirty}
+    return {
+        "revision": revision,
+        "workflow_revision": workflow_revision,
+        "workflow_revision_matches": (
+            workflow_revision == revision if workflow_revision is not None else None
+        ),
+        "tracked_files_dirty": dirty,
+    }
 
 
-def _target_receipt(target: Target, result: ScanResult) -> dict[str, Any]:
+def _scanner_identity_error(identity: dict[str, Any]) -> str | None:
+    if identity.get("revision") == "unknown":
+        return "scanner: current revision could not be read"
+    if identity.get("tracked_files_dirty") is not False:
+        return "scanner: tracked files are dirty or could not be verified clean"
+    if identity.get("workflow_revision_matches") is False:
+        return "scanner: GITHUB_SHA does not match the checked-out revision"
+    return None
+
+
+def _target_receipt(target: Target, result: ScanResult, identity: SourceIdentity) -> dict[str, Any]:
     return {
         "label": target.label,
         "source": {
@@ -343,6 +405,7 @@ def _target_receipt(target: Target, result: ScanResult) -> dict[str, Any]:
             "revision": target.revision,
             "scan_target": target.scan_target,
             "platform": target.platform,
+            "observed": asdict(identity),
         },
         "budgets": {
             "confirmed": target.max_confirmed,
@@ -378,6 +441,10 @@ def main(argv: list[str] | None = None) -> int:
     skipped: list[str] = []
     receipts: list[dict[str, Any]] = []
     summary = ["## Source-locked public-repo precision budget", ""]
+    scanner_identity = _scanner_identity()
+    scanner_error = _scanner_identity_error(scanner_identity)
+    if scanner_error:
+        skipped.append(scanner_error)
 
     for target in targets:
         checkout, checkout_error = _materialize(target, args.cache)
@@ -388,6 +455,10 @@ def main(argv: list[str] | None = None) -> int:
         if result is None:
             skipped.append(f"{target.label}: {scan_error}")
             continue
+        identity, identity_error = _validate_source_identity(checkout, target)
+        if identity is None:
+            skipped.append(f"{target.label}: source identity changed during scan: {identity_error}")
+            continue
         target_failures = _budget_failures(target, result)
         marker = "FAIL" if target_failures else "OK  "
         line = (
@@ -397,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(line)
         summary.append(f"- `{line}`")
-        receipts.append(_target_receipt(target, result))
+        receipts.append(_target_receipt(target, result, identity))
         for detail in target_failures:
             message = f"{target.label}: {detail}"
             failures.append(message)
@@ -414,8 +485,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.receipt:
         receipt = {
             "schema_version": 1,
+            "status": ("failed" if failures else "incomplete" if skipped else "complete"),
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "scanner": _scanner_identity(),
+            "scanner": scanner_identity,
+            "selection": {
+                "requested_targets": len(targets),
+                "completed_targets": len(receipts),
+            },
             "targets": receipts,
             "failures": failures,
             "skipped": skipped,
