@@ -84,6 +84,9 @@ class JobContextFact:
 
     * ``fork_reachable``: any trigger in the workflow is in
       ``TriggerFamily.FORK_REACHABLE``.
+    * ``external_privileged``: the workflow has an externally-triggerable
+      event whose token is not automatically downgraded to read-only like a
+      fork-originated ``pull_request`` token.
     * ``has_write_token``: the job's effective permissions include
       any write-scope (or the workflow defaults to write because no
       explicit ``permissions:`` block exists at workflow or job
@@ -97,6 +100,7 @@ class JobContextFact:
     file: str
     job: str
     fork_reachable: bool
+    external_privileged: bool
     has_write_token: bool
     trusted_bot_gate: bool
 
@@ -207,6 +211,7 @@ def _seed_job_contexts(db: Database, corpus: WorkflowCorpus) -> None:
 
     for wf in corpus.all():
         fork = TriggerFamily.FORK_REACHABLE in wf.triggers
+        external_privileged = corpus.has_external_privileged_trigger(wf)
         wf_write = _permission_block_has_write(wf.workflow_permissions)
         # Workflow's default GITHUB_TOKEN is write-capable when there is
         # no explicit `permissions:` block at all. (GitHub's default
@@ -233,6 +238,7 @@ def _seed_job_contexts(db: Database, corpus: WorkflowCorpus) -> None:
                     file=wf.filepath,
                     job=job_name,
                     fork_reachable=fork,
+                    external_privileged=external_privileged,
                     has_write_token=(
                         _permission_block_has_write(jb)
                         if jb is not None
@@ -251,6 +257,7 @@ def _seed_job_contexts(db: Database, corpus: WorkflowCorpus) -> None:
                 file=wf.filepath,
                 job="*",
                 fork_reachable=fork,
+                external_privileged=external_privileged,
                 has_write_token=wf_write or wf_default_write,
                 trusted_bot_gate=False,
             ),
