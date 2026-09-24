@@ -77,6 +77,8 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   repeated pip verbosity flags preserve the local install path.
 - Executable Git fetch commands parse options and forced refspecs for PR head
   and merge refs; GitHub CLI PR checkout changes source provenance.
+- Git global options, GitHub CLI PR URLs and worktree destinations are
+  tracked; dry-run fetches do not alter source provenance.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

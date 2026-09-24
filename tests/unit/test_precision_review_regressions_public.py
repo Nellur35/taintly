@@ -1559,3 +1559,71 @@ jobs:
 """
     assert not _fires("LOTP-GH-001", workflow)
     assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_git_global_options_before_pr_fetch_reach_build() -> None:
+    for command in (
+        "git -c protocol.version=2 fetch origin refs/pull/${{ github.event.pull_request.number }}/head",
+        "git -C . fetch origin refs/pull/${{ github.event.pull_request.number }}/merge",
+    ):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: {command}; git checkout FETCH_HEAD; npm ci
+"""
+        assert _fires("LOTP-GH-001", workflow), command
+        assert _fires("LOTP-GH-003", workflow), command
+
+
+def test_gh_pr_checkout_url_reaches_build() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: gh pr checkout https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+      - run: npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_gh_pr_checkout_worktree_taints_only_worktree_path() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: gh pr checkout ${{ github.event.pull_request.number }} --worktree fork
+      - run: npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+    fork_workflow = workflow.replace("- run: npm ci", "- run: npm --prefix fork ci")
+    assert _fires("LOTP-GH-001", fork_workflow)
+    assert _fires("LOTP-GH-003", fork_workflow)
+
+
+def test_dry_run_pr_fetch_does_not_change_fetch_head() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch origin main
+      - run: git fetch --dry-run origin refs/pull/${{ github.event.pull_request.number }}/head
+      - run: git checkout FETCH_HEAD
+      - run: npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)

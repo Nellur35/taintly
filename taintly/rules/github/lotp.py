@@ -33,7 +33,7 @@ _PR_HEAD_CHECKOUT = (
     r"(?:github\.event\.pull_request\.head\.(?:sha|ref)"
     r"|github\.event\.pull_request\.head\.repo\.full_name"
     r"|github\.event\.pull_request\.number|(?:refs/)?pull/\d+/(?:head|merge)"
-    r"|gh\s+pr\s+checkout\s+\d+"
+    r"|gh\s+pr\s+checkout\s+\d+|github\.com/\S+/pull/\d+"
     r"|github\.head_ref"
     r"|github\.event\.workflow_run\.head_branch)"
 )
@@ -151,8 +151,14 @@ _GIT_SOURCE_CHANGE_RE = re.compile(
 _PR_NUMBER_EXPRESSION_RE = re.compile(
     r"\$\{\{\s*github\.event\.pull_request\.number\s*\}\}", re.IGNORECASE
 )
+_REPOSITORY_EXPRESSION_RE = re.compile(r"\$\{\{\s*github\.repository\s*\}\}", re.I)
 _PR_FETCH_SOURCE_RE = re.compile(
     r"(?:refs/)?pull/(?:\d+|__PR_NUMBER__)/(?:head|merge)\Z", re.IGNORECASE
+)
+_GH_PR_URL_RE = re.compile(
+    r"https://github\.com/(?:__GITHUB_REPOSITORY__|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/"
+    r"pull/(?:\d+|__PR_NUMBER__)\Z",
+    re.IGNORECASE,
 )
 _GIT_FETCH_VALUE_OPTIONS = frozenset(
     {
@@ -515,29 +521,62 @@ def _shell_command_tokens(command: str) -> list[str] | None:
     """Keep GitHub's PR-number expression intact while splitting arguments."""
 
     normalized = _PR_NUMBER_EXPRESSION_RE.sub("__PR_NUMBER__", command)
+    normalized = _REPOSITORY_EXPRESSION_RE.sub("__GITHUB_REPOSITORY__", normalized)
     try:
         return shlex.split(normalized, comments=True)
     except ValueError:
         return None
 
 
-def _git_fetch_events(line: str, mask: list[bool]) -> list[tuple[int, str, str | None]]:
+def _git_command_index(tokens: list[str]) -> tuple[int, tuple[str, ...]] | None:
+    """Skip supported Git global options and retain temporary ``-C`` paths."""
+
+    if not tokens or tokens[0].lower() != "git":
+        return None
+    index = 1
+    paths: list[str] = []
+    while index < len(tokens) and tokens[index].startswith("-"):
+        option = tokens[index]
+        index += 1
+        if option in {"-C", "-c"}:
+            if index >= len(tokens):
+                return None
+            if option == "-C":
+                paths.append(tokens[index])
+            index += 1
+        elif option.startswith("-C") and len(option) > 2:
+            paths.append(option[2:])
+        elif (option.startswith("-c") and len(option) > 2) or option in {
+            "--no-pager",
+            "--no-replace-objects",
+            "--no-lazy-fetch",
+        }:
+            continue
+        else:
+            return None
+    return index, tuple(paths)
+
+
+def _git_fetch_events(
+    line: str, mask: list[bool]
+) -> list[tuple[int, str, str | None, tuple[str, ...], bool]]:
     """Parse fetch options and refspecs, including PR head and merge refs."""
 
-    events: list[tuple[int, str, str | None]] = []
+    events: list[tuple[int, str, str | None, tuple[str, ...], bool]] = []
     for column, command in _shell_command_segments(line, mask):
         tokens = _shell_command_tokens(command)
-        if (
-            tokens is None
-            or len(tokens) < 4
-            or [token.lower() for token in tokens[:2]]
-            != [
-                "git",
-                "fetch",
-            ]
-        ):
+        if tokens is None:
             continue
-        index = 2
+        invocation = _git_command_index(tokens)
+        if invocation is None:
+            continue
+        index, paths = invocation
+        if index >= len(tokens) or tokens[index].lower() != "fetch":
+            continue
+        index += 1
+        if "--dry-run" in tokens[index:]:
+            continue
+        write_fetch_head = "--no-write-fetch-head" not in tokens[index:]
         while index < len(tokens) and tokens[index].startswith("-"):
             option, inline_value, _ = tokens[index].partition("=")
             index += 1
@@ -565,7 +604,9 @@ def _git_fetch_events(line: str, mask: list[bool]) -> list[tuple[int, str, str |
             if _PR_FETCH_SOURCE_RE.fullmatch(source)
         ]
         if pr_candidates:
-            events.append((column, _UNTRUSTED, pr_candidates[0][1]))
+            pr_destination = pr_candidates[0][1]
+            if write_fetch_head or pr_destination:
+                events.append((column, _UNTRUSTED, pr_destination, paths, write_fetch_head))
         else:
             source, target_ref = candidates[-1]
             state = (
@@ -573,14 +614,15 @@ def _git_fetch_events(line: str, mask: list[bool]) -> list[tuple[int, str, str |
                 if _STATIC_REF_RE.fullmatch(source) and source.upper() not in _GIT_TRANSIENT_REFS
                 else _UNKNOWN
             )
-            events.append((column, state, target_ref))
+            if write_fetch_head or target_ref:
+                events.append((column, state, target_ref, paths, write_fetch_head))
     return events
 
 
-def _gh_pr_checkout_changes(line: str, mask: list[bool]) -> list[tuple[int, str, str]]:
+def _gh_pr_checkout_changes(line: str, mask: list[bool]) -> list[tuple[int, str, str, str | None]]:
     """Recognize an executable GitHub CLI pull-request checkout."""
 
-    changes: list[tuple[int, str, str]] = []
+    changes: list[tuple[int, str, str, str | None]] = []
     for column, command in _shell_command_segments(line, mask):
         tokens = _shell_command_tokens(command)
         if (
@@ -595,13 +637,28 @@ def _gh_pr_checkout_changes(line: str, mask: list[bool]) -> list[tuple[int, str,
         ):
             continue
         index = 3
-        while index < len(tokens) and tokens[index].startswith("-"):
-            option, inline_value, _ = tokens[index].partition("=")
+        selector: str | None = None
+        worktree: str | None = None
+        while index < len(tokens):
+            option = tokens[index]
             index += 1
-            if option in {"--repo", "-R"} and not inline_value:
-                index += 1
-        if index < len(tokens) and (tokens[index].isdigit() or tokens[index] == "__PR_NUMBER__"):
-            changes.append((column, _UNTRUSTED, "GH_PR_CHECKOUT"))
+            name, inline_value, value = option.partition("=")
+            if name in {"--repo", "-R", "--branch", "-b", "--worktree"}:
+                if not inline_value:
+                    if index >= len(tokens):
+                        break
+                    value = tokens[index]
+                    index += 1
+                if name == "--worktree":
+                    worktree = value
+            elif option.startswith("-"):
+                continue
+            elif selector is None:
+                selector = option
+        if selector and (
+            selector.isdigit() or selector == "__PR_NUMBER__" or _GH_PR_URL_RE.fullmatch(selector)
+        ):
+            changes.append((column, _UNTRUSTED, "GH_PR_CHECKOUT", worktree))
     return changes
 
 
@@ -750,7 +807,9 @@ def _git_source_changes(line: str, mask: list[bool]) -> list[tuple[int, str, str
         else:
             state = _UNKNOWN
         changes.append((match.start(), state, ref))
-    changes.extend(_gh_pr_checkout_changes(line, mask))
+    changes.extend(
+        (column, state, ref) for column, state, ref, _ in _gh_pr_checkout_changes(line, mask)
+    )
     return changes
 
 
@@ -765,7 +824,7 @@ def _run_may_select_pr_source(step: StepSegment) -> bool:
             for column, state, _ in _git_source_changes(line, mask)
         ):
             return True
-        if any(state == _UNTRUSTED for _, state, _ in _git_fetch_events(line, mask)):
+        if any(state == _UNTRUSTED for _, state, _, _, _ in _git_fetch_events(line, mask)):
             return True
     return False
 
@@ -911,15 +970,28 @@ class _OrderedPrBuildPattern(ContextPattern):
                     events: list[tuple[int, str, str | None]] = []
                     git_states = {column: state for column, state, _ in transitions}
                     fetch_states: dict[int, str] = {}
+                    fetch_paths: dict[int, tuple[str, ...]] = {}
+                    fetch_writes: dict[int, bool] = {}
+                    gh_worktrees: dict[int, str | None] = {}
                     if shell_line is not None:
                         for cd_match in _SHELL_CD_RE.finditer(shell_line):
                             if not shell_mask[cd_match.start()]:
                                 events.append(
                                     (cd_match.start("command"), "cd", cd_match.group("path"))
                                 )
-                        for column, state, destination in _git_fetch_events(shell_line, shell_mask):
+                        for column, state, destination, paths, writes in _git_fetch_events(
+                            shell_line, shell_mask
+                        ):
                             fetch_states[column] = state
+                            fetch_paths[column] = paths
+                            fetch_writes[column] = writes
                             events.append((column, "fetch", destination))
+                        gh_worktrees = {
+                            column: path
+                            for column, _, _, path in _gh_pr_checkout_changes(
+                                shell_line, shell_mask
+                            )
+                        }
                     for column, _, ref in transitions:
                         if not shell_mask[column]:
                             events.append((column, "git", ref))
@@ -968,10 +1040,17 @@ class _OrderedPrBuildPattern(ContextPattern):
                             else:
                                 cwd = next_cwd
                         elif kind == "fetch":
-                            if cwd is None:
+                            fetch_cwd = cwd
+                            for git_path in fetch_paths.get(column, ()):
+                                fetch_cwd = (
+                                    _literal_workspace_path(git_path, fetch_cwd)
+                                    if fetch_cwd is not None
+                                    else None
+                                )
+                            if fetch_cwd is None:
                                 uncertain_layout = True
                             else:
-                                source_key = _source_key(sources, cwd)
+                                source_key = _source_key(sources, fetch_cwd)
                                 refs = fetched_refs.setdefault(source_key, {})
                                 state, foreign = sources.get(source_key, (_UNKNOWN, False))
                                 target_state = _source_after_ref_change(
@@ -981,13 +1060,14 @@ class _OrderedPrBuildPattern(ContextPattern):
                                     shell_line is not None
                                     and _conditional_before_command(shell_line, column)
                                 )
-                                refs["FETCH_HEAD"] = (
-                                    _join_source_states(
-                                        refs.get("FETCH_HEAD", _UNKNOWN), target_state
+                                if fetch_writes.get(column, True):
+                                    refs["FETCH_HEAD"] = (
+                                        _join_source_states(
+                                            refs.get("FETCH_HEAD", _UNKNOWN), target_state
+                                        )
+                                        if conditional
+                                        else target_state
                                     )
-                                    if conditional
-                                    else target_state
-                                )
                                 if value:
                                     named_state = (
                                         _join_source_states(refs.get(value, _UNKNOWN), target_state)
@@ -1002,6 +1082,17 @@ class _OrderedPrBuildPattern(ContextPattern):
                         elif kind == "git":
                             if cwd is None:
                                 uncertain_layout = True
+                            elif value == "GH_PR_CHECKOUT" and column in gh_worktrees:
+                                worktree = gh_worktrees[column]
+                                if worktree is None:
+                                    source_key = _source_key(sources, cwd)
+                                    sources[source_key] = (_UNTRUSTED, False)
+                                else:
+                                    checkout_path = _literal_workspace_path(worktree, cwd)
+                                    if checkout_path is None:
+                                        uncertain_layout = True
+                                    else:
+                                        sources[checkout_path] = (_UNTRUSTED, False)
                             else:
                                 source_key = _source_key(sources, cwd)
                                 state, foreign = sources.get(source_key, (_UNKNOWN, False))
