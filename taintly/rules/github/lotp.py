@@ -94,6 +94,8 @@ _SHELL_CD_RE = re.compile(
     re.IGNORECASE,
 )
 _RUN_LINE_RE = re.compile(r"^\s*(?:-\s*)?run\s*:\s*(?P<body>.*)$")
+_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*['\"]?(?P<delimiter>[A-Za-z_][A-Za-z0-9_]*)['\"]?")
+_NPM_PREFIX_PATH_RE = re.compile(r"(?<!\S)--prefix(?:=|\s+)(?P<path>[^\s;&|]+)")
 _STATIC_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _STATIC_PATH_RE = re.compile(r"[A-Za-z0-9._/-]+\Z")
 _NPM_PREFIX_INSTALL_ANCHOR = r"\bnpm\s+--prefix(?:=|\s+)\S+\s+(?:install|ci|i)\b"
@@ -341,12 +343,12 @@ def _run_shell_lines(step: StepSegment) -> dict[int, str]:
 
 
 def _shell_quote_mask(line: str, initial: str | None) -> tuple[list[bool], str | None]:
-    """Mark characters inside shell quotes; carry multiline quote state."""
+    """Mark shell quotes and comments; carry multiline quote state."""
 
     quote = initial
     escaped = False
     mask: list[bool] = []
-    for char in line:
+    for index, char in enumerate(line):
         mask.append(quote is not None)
         if quote == "'":
             if char == "'":
@@ -358,9 +360,38 @@ def _shell_quote_mask(line: str, initial: str | None) -> tuple[list[bool], str |
         elif quote is not None:
             if char == quote:
                 quote = None
+        elif char == "#" and (index == 0 or line[index - 1].isspace() or line[index - 1] in ";&|("):
+            mask[-1] = True
+            mask.extend([True] * (len(line) - index - 1))
+            break
         elif char in "'\"":
             quote = char
     return mask, quote
+
+
+def _build_source_path(
+    shell_line: str | None, mask: list[bool], anchor_column: int, cwd: str | None
+) -> str | None:
+    """Resolve a literal npm prefix in the build command, if present."""
+
+    if shell_line is None or cwd is None:
+        return cwd
+    separators = [
+        index for index, char in enumerate(shell_line) if char in ";&|" and not mask[index]
+    ]
+    start = max((index + 1 for index in separators if index < anchor_column), default=0)
+    end = min((index for index in separators if index > anchor_column), default=len(shell_line))
+    segment = shell_line[start:end]
+    prefix_paths = [
+        match.group("path")
+        for match in _NPM_PREFIX_PATH_RE.finditer(segment)
+        if not mask[start + match.start()]
+    ]
+    if not prefix_paths:
+        return cwd
+    if len(prefix_paths) != 1:
+        return None
+    return _literal_workspace_path(prefix_paths[0], cwd)
 
 
 def _source_after_ref_change(state: str, foreign_repository: bool, target: str) -> str:
@@ -478,13 +509,32 @@ class _OrderedPrBuildPattern(ContextPattern):
                 cwd = _step_working_path(step, default_path)
                 shell_lines = _run_shell_lines(step)
                 shell_quote: str | None = None
+                heredoc_delimiter: str | None = None
 
                 for offset, source_line in enumerate(step.body_lines):
                     absolute_line = step.start_line + offset
                     shell_line = shell_lines.get(offset)
+                    if heredoc_delimiter is not None and shell_line is not None:
+                        if shell_line.strip() == heredoc_delimiter:
+                            heredoc_delimiter = None
+                        if absolute_line in step_candidates:
+                            resolved.add(absolute_line)
+                        continue
                     shell_mask: list[bool] = []
                     if shell_line is not None:
                         shell_mask, shell_quote = _shell_quote_mask(shell_line, shell_quote)
+                    opener = (
+                        next(
+                            (
+                                match
+                                for match in _HEREDOC_OPEN_RE.finditer(shell_line)
+                                if not shell_mask[match.start()]
+                            ),
+                            None,
+                        )
+                        if shell_line is not None
+                        else None
+                    )
                     transition = _git_source_change(shell_line) if shell_line is not None else None
                     anchor = self._source_anchor_re.search(source_line)
                     events: list[tuple[int, str, str | None]] = []
@@ -496,7 +546,7 @@ class _OrderedPrBuildPattern(ContextPattern):
                         events.append((transition[0], "git", transition[1]))
                     if anchor and absolute_line in step_candidates:
                         events.append((anchor.start(), "build", None))
-                    for _, kind, value in sorted(events):
+                    for column, kind, value in sorted(events):
                         if pr_excluded:
                             if kind == "build":
                                 resolved.add(absolute_line)
@@ -515,19 +565,20 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 )
                         else:
                             resolved.add(absolute_line)
-                            build_source_key = _source_key(sources, cwd) if cwd else None
-                            side_source = any(
-                                path != "." and state != _TRUSTED
-                                for path, (state, _) in sources.items()
+                            build_path = _build_source_path(shell_line, shell_mask, column, cwd)
+                            build_source_key = (
+                                _source_key(sources, build_path) if build_path else None
                             )
                             if (
                                 uncertain_layout
-                                or cwd is None
+                                or build_path is None
                                 or sources.get(build_source_key or ".", (_UNKNOWN, False))[0]
                                 != _TRUSTED
-                                or (build_source_key == "." and side_source)
                             ):
                                 kept.add(absolute_line)
+
+                    if opener is not None:
+                        heredoc_delimiter = opener.group("delimiter")
 
                 if checkout_state is not None and not pr_excluded:
                     state, foreign_repository, checkout_path = checkout_state

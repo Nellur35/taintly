@@ -157,6 +157,8 @@ jobs:
 """
     assert _fires("LOTP-GH-001", workflow)
     assert _fires("LOTP-GH-003", workflow)
+
+
 def test_side_by_side_checkouts_build_in_fork_path_fires() -> None:
     workflow = """on: pull_request_target
 jobs:
@@ -389,6 +391,8 @@ jobs:
 """
     assert _fires("LOTP-GH-001", workflow)
     assert _fires("LOTP-GH-003", workflow)
+
+
 def test_printed_cd_cannot_move_source_to_trusted_checkout() -> None:
     workflow = """on: pull_request_target
 jobs:
@@ -524,6 +528,110 @@ jobs:
           echo "starting;
           cd ../base"
           npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_commented_cd_cannot_clear_fork_source() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+      - run: |
+          cd fork
+          # ; cd ../base
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_heredoc_cd_cannot_clear_fork_source() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+      - run: |
+          cd fork
+          cat <<EOF
+          ; cd ../base
+          EOF
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_plain_root_build_with_fork_side_checkout_stays_silent() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: samples
+      - run: npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_explicit_trusted_prefix_stays_silent_with_fork_side_checkout() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+      - run: npm ci --prefix base
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_commented_prefix_cannot_redirect_fork_build_to_trusted_path() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+      - run: |
+          cd fork
+          npm ci # --prefix ../base
 """
     assert _fires("LOTP-GH-001", workflow)
     assert _fires("LOTP-GH-003", workflow)

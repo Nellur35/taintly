@@ -42,9 +42,11 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   paths stay visible. Cache-write rules recognize quoted literal modes and
   quoted cache action references.
 - The path tracker reads source changes only from executable `run:` text outside
-  shell quotes, and keeps workspace-root builds visible when command arguments
-  can select an untrusted side checkout. GitHub LOTP rules also recognize
-  `npm --prefix <path> ci/install` before the install verb.
+  shell quotes, comments, and static heredoc data. A trusted root build stays
+  silent beside an unrelated untrusted checkout; a literal npm `--prefix`
+  selects the source path for that build. Unresolved paths stay visible.
+  GitHub LOTP rules also recognize `npm --prefix <path> ci/install` before the
+  install verb.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.
