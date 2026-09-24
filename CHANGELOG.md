@@ -65,6 +65,9 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   `FETCH_HEAD` provenance, and printed Git text does not change it. Pip local
   installs are found after other options without treating output directories
   or named package installs as local source builds.
+- Every build command on a shell line is checked in order. Conditional Git
+  fallbacks preserve uncertain source provenance; pip certificate paths are
+  not install targets, and quoted `bash -c`/`sh -c` pip installs are inspected.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

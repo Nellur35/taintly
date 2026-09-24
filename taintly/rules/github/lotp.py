@@ -98,6 +98,8 @@ _PIP_NON_SOURCE_VALUE_OPTIONS = frozenset(
         "--prefix",
         "--root",
         "--cache-dir",
+        "--cert",
+        "--client-cert",
         "--index-url",
         "-i",
         "--extra-index-url",
@@ -416,8 +418,12 @@ def _build_source_path(
     end = min((index for index in separators if index > anchor_column), default=len(shell_line))
     segment = shell_line[start:end]
     if _PIP_INSTALL_RE.match(shell_line[anchor_column:]):
+        command = shell_line[anchor_column:end]
+        prefix = shell_line[start:anchor_column].rstrip()
+        if prefix.endswith(("'", '"')) and command.rstrip().endswith(prefix[-1]):
+            command = command.rstrip()[:-1]
         try:
-            tokens = shlex.split(shell_line[anchor_column:end], comments=True)
+            tokens = shlex.split(command, comments=True)
         except ValueError:
             return None, True
         if len(tokens) < 2 or tokens[1].lower() != "install":
@@ -477,7 +483,21 @@ def _at_shell_command_start(line: str, mask: list[bool], column: int) -> bool:
         default=0,
     )
     prefix = line[start:column].strip()
-    return not prefix or bool(re.fullmatch(r"(?:env\s+)?(?:[A-Za-z_]\w*=\S+\s*)+", prefix))
+    return (
+        not prefix
+        or bool(re.fullmatch(r"(?:env\s+)?(?:[A-Za-z_]\w*=\S+\s*)+", prefix))
+        or bool(re.fullmatch(r"(?:bash|sh)\s+-c\s+['\"]", prefix))
+    )
+
+
+def _conditional_before_command(line: str, column: int) -> bool:
+    """A command after ``&&`` or ``||`` may be skipped by the shell."""
+
+    return column > 0 and line[column] in "&|" and line[column - 1] == line[column]
+
+
+def _join_source_states(first: str, second: str) -> str:
+    return first if first == second else _UNKNOWN
 
 
 def _git_source_changes(line: str) -> list[tuple[int, str, str]]:
@@ -649,7 +669,7 @@ class _OrderedPrBuildPattern(ContextPattern):
                         ):
                             uncertain_layout = True
                     transitions = _git_source_changes(shell_line) if shell_line is not None else []
-                    anchor = self._source_anchor_re.search(source_line)
+                    anchors = list(self._source_anchor_re.finditer(source_line))
                     events: list[tuple[int, str, str | None]] = []
                     git_states = {column: state for column, state, _ in transitions}
                     fetch_states: dict[int, str] = {}
@@ -686,32 +706,31 @@ class _OrderedPrBuildPattern(ContextPattern):
                         and absolute_line in step_candidates
                     ):
                         resolved.add(absolute_line)
-                    if (
-                        anchor
-                        and absolute_line in step_candidates
-                        and shell_line is not None
-                        and (comment_start is None or anchor.start() < comment_start)
-                    ):
-                        if _PIP_INSTALL_RE.match(shell_line[anchor.start() :]) and not (
-                            _at_shell_command_start(shell_line, shell_mask, anchor.start())
-                        ):
+                    for anchor in anchors:
+                        if absolute_line not in step_candidates:
+                            continue
+                        if comment_start is not None and anchor.start() >= comment_start:
                             resolved.add(absolute_line)
-                        else:
-                            events.append((anchor.start(), "build", None))
-                    elif (
-                        anchor
-                        and absolute_line in step_candidates
-                        and comment_start is not None
-                        and anchor.start() >= comment_start
-                    ):
-                        resolved.add(absolute_line)
+                        elif shell_line is not None:
+                            if _PIP_INSTALL_RE.match(shell_line[anchor.start() :]) and not (
+                                _at_shell_command_start(shell_line, shell_mask, anchor.start())
+                            ):
+                                resolved.add(absolute_line)
+                            else:
+                                events.append((anchor.start(), "build", None))
                     for column, kind, value in sorted(events):
                         if pr_excluded:
                             if kind == "build":
                                 resolved.add(absolute_line)
                             continue
                         if kind == "cd":
-                            cwd = _literal_workspace_path(value or "", cwd) if cwd else None
+                            next_cwd = _literal_workspace_path(value or "", cwd) if cwd else None
+                            if shell_line is not None and _conditional_before_command(
+                                shell_line, column
+                            ):
+                                cwd = next_cwd if next_cwd == cwd else None
+                            else:
+                                cwd = next_cwd
                         elif kind == "fetch":
                             if cwd is None:
                                 uncertain_layout = True
@@ -722,13 +741,28 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 target_state = _source_after_ref_change(
                                     state, foreign, fetch_states.get(column, _UNKNOWN)
                                 )
-                                refs["FETCH_HEAD"] = target_state
+                                conditional = (
+                                    shell_line is not None
+                                    and _conditional_before_command(shell_line, column)
+                                )
+                                refs["FETCH_HEAD"] = (
+                                    _join_source_states(
+                                        refs.get("FETCH_HEAD", _UNKNOWN), target_state
+                                    )
+                                    if conditional
+                                    else target_state
+                                )
                                 if value:
-                                    refs[value] = target_state
+                                    named_state = (
+                                        _join_source_states(refs.get(value, _UNKNOWN), target_state)
+                                        if conditional
+                                        else target_state
+                                    )
+                                    refs[value] = named_state
                                     if value.startswith("refs/remotes/"):
-                                        refs[value.removeprefix("refs/remotes/")] = target_state
+                                        refs[value.removeprefix("refs/remotes/")] = named_state
                                     elif value.startswith("refs/heads/"):
-                                        refs[value.removeprefix("refs/heads/")] = target_state
+                                        refs[value.removeprefix("refs/heads/")] = named_state
                         elif kind == "git":
                             if cwd is None:
                                 uncertain_layout = True
@@ -739,8 +773,15 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 target_state = fetched_refs.get(source_key, {}).get(
                                     value or "", target_state
                                 )
+                                target_state = _source_after_ref_change(
+                                    state, foreign, target_state
+                                )
+                                if shell_line is not None and _conditional_before_command(
+                                    shell_line, column
+                                ):
+                                    target_state = _join_source_states(state, target_state)
                                 sources[source_key] = (
-                                    _source_after_ref_change(state, foreign, target_state),
+                                    target_state,
                                     foreign,
                                 )
                         else:

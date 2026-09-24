@@ -1156,3 +1156,120 @@ jobs:
       - run: {command}
 """
         assert not _fires("LOTP-GH-001", workflow), command
+
+
+def test_second_pip_build_on_line_selects_untrusted_checkout() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: pip install requests && pip install -e./fork
+"""
+    assert _fires("LOTP-GH-001", workflow)
+
+
+def test_second_npm_build_after_cd_on_line_is_untrusted() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: npm ci; cd fork; npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_conditional_trusted_git_fallback_cannot_clear_pr_source() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git fetch origin refs/pull/${{ github.event.pull_request.number }}/head
+          git checkout ${{ github.event.pull_request.head.sha }} || git checkout main
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_conditional_trusted_fetch_cannot_clear_pr_fetch_head() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git fetch origin refs/pull/${{ github.event.pull_request.number }}/head || git fetch origin main
+          git checkout FETCH_HEAD
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_pip_cert_path_is_not_install_source() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: pip install --cert ./fork/ca.pem requests
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+
+
+def test_bash_c_pip_local_side_checkout_is_detected() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: bash -c "pip install ./fork"
+"""
+    assert _fires("LOTP-GH-001", workflow)
+
+
+def test_bash_c_pip_trusted_side_checkout_stays_silent() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+      - run: bash -c "pip install ./base"
+"""
+    assert not _fires("LOTP-GH-001", workflow)
