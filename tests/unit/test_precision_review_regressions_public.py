@@ -1723,3 +1723,86 @@ jobs:
 """
     assert not _fires("LOTP-GH-001", workflow)
     assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_reset_and_merge_of_fetched_pr_source_reach_build() -> None:
+    for transition in (
+        "git reset --hard FETCH_HEAD",
+        "git merge FETCH_HEAD",
+        "git merge --no-ff FETCH_HEAD",
+    ):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch origin refs/pull/${{{{ github.event.pull_request.number }}}}/head; {transition}; npm ci
+"""
+        assert _fires("LOTP-GH-001", workflow), transition
+        assert _fires("LOTP-GH-003", workflow), transition
+
+
+def test_fork_remote_tracking_ref_after_fetch_reaches_build() -> None:
+    for fetch in ("git fetch fork main", "git fetch fork", "git remote add -f fork https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git"):
+        setup = "" if fetch.startswith("git remote add") else "git remote add fork https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git; "
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: {setup}{fetch}; git checkout fork/main; npm ci
+"""
+        assert _fires("LOTP-GH-001", workflow), fetch
+        assert _fires("LOTP-GH-003", workflow), fetch
+
+
+def test_direct_base_repository_url_restores_trusted_fetch_head() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch origin refs/pull/${{ github.event.pull_request.number }}/head
+      - run: git fetch https://github.com/${{ github.repository }}.git main
+      - run: git checkout FETCH_HEAD; npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_optioned_merge_of_trusted_fetch_stays_silent() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch origin refs/pull/${{ github.event.pull_request.number }}/head
+      - run: git fetch origin main
+      - run: git merge --no-ff FETCH_HEAD; npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_no_ref_fetch_from_base_origin_stays_trusted() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch origin refs/pull/${{ github.event.pull_request.number }}/head
+      - run: git fetch origin
+      - run: git checkout FETCH_HEAD; npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)

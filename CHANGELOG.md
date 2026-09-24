@@ -83,6 +83,8 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   repository provenance into later local builds.
 - PR fork fetches through a new remote or direct URL, including `clone_url`,
   now retain untrusted source provenance; appended fetch URLs keep their order.
+- Fetched refs now retain provenance through Git reset, merge, and
+  remote-tracking branch checkout; known base-repository fetches stay trusted.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.
