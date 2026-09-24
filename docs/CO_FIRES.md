@@ -52,7 +52,7 @@ regex but check different *conditions* on the surrounding job:
 
 | Rule | Condition |
 |---|---|
-| `LOTP-GH-001` | build tool runs in a job that checks out PR code |
+| `LOTP-GH-001` | build tool runs after PR-head checkout on a feasible PR path |
 | `LOTP-GH-004` | build tool runs after `actions/download-artifact` (untrusted artifact) |
 | `SEC4-GH-011` | build tool runs in a `pull_request_target` workflow |
 

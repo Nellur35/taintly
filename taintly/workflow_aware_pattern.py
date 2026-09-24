@@ -108,6 +108,9 @@ class PredicateContext:
     )
     _is_reusable: bool | None = field(default=None, init=False, repr=False)
     _caller_graph_cache: tuple[CallerInfo, ...] | None = field(default=None, init=False, repr=False)
+    _workflow_input_sink_cache: dict[tuple[str, str], bool] = field(
+        default_factory=dict, init=False, repr=False
+    )
     # Sentinel object used to distinguish "cache miss" from "cached
     # None result" for ``repo_root``.  ``None`` is a valid cached
     # return (no repo found / no filepath); without the sentinel a
@@ -542,6 +545,18 @@ class WorkflowAwarePattern:
     # the line whose textual content drove the predicate's truthy
     # result, and snippet is ``lines[line_num - 1].strip()`` (or the
     # ``snippet_format``-rendered string when provided).
+    def check_with_filepath(
+        self, content: str, lines: list[str], filepath: str
+    ) -> list[tuple[int, str]]:
+        """Evaluate with bounded access to the current workflow's repo.
+
+        The engine opts into this method only for this pattern type.  Keeping
+        the binding here prevents unrelated rules from gaining filesystem
+        access as a side effect of a workflow-specific precision feature.
+        """
+        with set_pattern_filepath_context(filepath):
+            return self.check(content, lines)
+
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         # Cheap pre-filter: skip the structural walk when the required literal
         # is absent (avoids walking secret-free / adversarially-deep workflows).
