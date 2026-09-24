@@ -70,6 +70,9 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   not install targets, and quoted `bash -c`/`sh -c` pip installs are inspected.
 - Pip global flags before `install` and literal nested shell commands are
   inspected in source order. Printed build commands stay silent.
+- Literal child shell scripts are inspected when followed by outer commands
+  or prefixed with `env`; their directory changes stay local to the child.
+  Non-install pip subcommands no longer count as builds.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

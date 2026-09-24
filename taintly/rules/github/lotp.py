@@ -71,7 +71,7 @@ _REPOSITORY_LINE_RE = re.compile(r"^\s*repository\s*:\s*(.*?)\s*(?:#.*)?$", re.M
 _CHECKOUT_PATH_LINE_RE = re.compile(r"^\s*path\s*:\s*(.*?)\s*(?:#.*)?$", re.MULTILINE)
 _WORKING_DIRECTORY_LINE_RE = re.compile(r"^\s*(?:-\s*)?working-directory\s*:\s*(.*?)\s*$")
 _SHELL_CD_RE = re.compile(
-    r"(?:^\s*(?:-\s*)?run\s*:\s*|^\s*|[;&|]\s*)cd\s+(?P<path>[^\s;&|]+)",
+    r"(?:^\s*(?:-\s*)?run\s*:\s*|^\s*|[;&|]\s*)(?P<command>cd)\s+(?P<path>[^\s;&|]+)",
     re.IGNORECASE,
 )
 _RUN_LINE_RE = re.compile(r"^\s*(?:-\s*)?run\s*:\s*(?P<body>.*)$")
@@ -81,10 +81,7 @@ _HEREDOC_OPEN_RE = re.compile(
 )
 _NPM_PREFIX_PATH_RE = re.compile(r"(?<!\S)--prefix(?:=|\s+)(?P<path>[^\s;&|]+)")
 _PIP_COMMAND_RE = re.compile(r"pip\d*(?:\.\d+)?\b", re.IGNORECASE)
-_SHELL_WRAPPER_RE = re.compile(
-    r"^\s*(?:bash|sh)\s+-(?:l)?c\s+(?P<quote>['\"])(?P<inner>.*)(?P=quote)\s*$",
-    re.IGNORECASE,
-)
+_SHELL_WRAPPER_RE = re.compile(r"\b(?:bash|sh)\s+-(?:l)?c\s+(?P<quote>['\"])", re.IGNORECASE)
 _STATIC_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _STATIC_PATH_RE = re.compile(r"[A-Za-z0-9._/-]+\Z")
 _NPM_PREFIX_INSTALL_ANCHOR = r"\bnpm\s+--prefix(?:=|\s+)\S+\s+(?:install|ci|i)\b"
@@ -124,6 +121,24 @@ _PIP_GLOBAL_VALUE_OPTIONS = _PIP_NON_SOURCE_VALUE_OPTIONS | {
     "--timeout",
     "--exists-action",
 }
+_PIP_GLOBAL_SWITCH_OPTIONS = frozenset(
+    {
+        "--isolated",
+        "--require-virtualenv",
+        "--no-input",
+        "--no-cache-dir",
+        "--disable-pip-version-check",
+        "--no-color",
+        "--quiet",
+        "--verbose",
+        "--help",
+        "--version",
+        "-q",
+        "-v",
+        "-h",
+        "-V",
+    }
+)
 _GIT_TRANSIENT_REFS = frozenset(
     {"HEAD", "FETCH_HEAD", "ORIG_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD"}
 )
@@ -350,17 +365,52 @@ def _source_key(sources: dict[str, tuple[str, bool]], cwd: str) -> str:
     return path
 
 
+def _shell_child_spans(line: str) -> list[tuple[int, int, int]]:
+    """Find executable, literal child-shell bodies and their wrapper starts."""
+
+    spans: list[tuple[int, int, int]] = []
+    mask, _, _ = _shell_quote_mask(line, None)
+    for match in _SHELL_WRAPPER_RE.finditer(line):
+        if mask[match.start()] or not _at_shell_command_start(line, mask, match.start()):
+            continue
+        command_start = max(
+            (
+                index + 1
+                for index, char in enumerate(line[: match.start()])
+                if char in ";&|" and not mask[index]
+            ),
+            default=0,
+        )
+        wrapper_start = (
+            command_start if line[command_start : match.start()].strip() else match.start()
+        )
+        quote = match.group("quote")
+        start = match.end()
+        index = start
+        while index < len(line):
+            if line[index] == "\\" and quote == '"':
+                index += 2
+            elif line[index] == quote:
+                spans.append((wrapper_start, start, index))
+                break
+            else:
+                index += 1
+    return spans
+
+
 def _static_shell_script(line: str) -> str:
-    """Expose a literal ``sh/bash -c`` body while preserving source columns."""
+    """Expose literal child-shell bodies while preserving source columns."""
 
-    match = _SHELL_WRAPPER_RE.match(line)
-    if not match:
-        return line
-    start, end = match.span("inner")
-    return " " * start + match.group("inner") + " " * (len(line) - end)
+    rendered = list(line)
+    for wrapper_start, start, end in _shell_child_spans(line):
+        rendered[wrapper_start:start] = " " * (start - wrapper_start)
+        rendered[end] = " "
+    return "".join(rendered)
 
 
-def _run_shell_lines(step: StepSegment) -> dict[int, str]:
+def _run_shell_lines(
+    step: StepSegment, child_scopes: dict[int, list[tuple[int, int]]] | None = None
+) -> dict[int, str]:
     """Return executable run lines, preserving columns for ordered events."""
 
     if not step.body_lines:
@@ -386,13 +436,22 @@ def _run_shell_lines(step: StepSegment) -> dict[int, str]:
                 next_line = step.body_lines[next_offset]
                 if next_line.strip() and len(next_line) - len(next_line.lstrip()) <= indent:
                     break
+                if child_scopes is not None:
+                    child_scopes[next_offset] = [
+                        (start, end) for _, start, end in _shell_child_spans(next_line)
+                    ]
                 script[next_offset] = _static_shell_script(next_line)
         else:
             prefix_len = match.start("body")
             # YAML's outer scalar quotes are delimiters, not shell quotes.
             if len(body) >= 2 and body[0] in "'\"" and body[-1] == body[0]:
                 body = " " + body[1:-1] + " "
-            script[offset] = _static_shell_script(" " * prefix_len + body)
+            shell_body = " " * prefix_len + body
+            if child_scopes is not None:
+                child_scopes[offset] = [
+                    (start, end) for _, start, end in _shell_child_spans(shell_body)
+                ]
+            script[offset] = _static_shell_script(shell_body)
     return script
 
 
@@ -451,10 +510,16 @@ def _build_source_path(
         while index < len(tokens) and tokens[index].startswith("-"):
             option = tokens[index]
             index += 1
-            if option in _PIP_GLOBAL_VALUE_OPTIONS:
+            option_name, has_inline_value, _ = option.partition("=")
+            if option_name in _PIP_GLOBAL_VALUE_OPTIONS and not has_inline_value:
                 index += 1
+            elif (
+                option_name not in _PIP_GLOBAL_VALUE_OPTIONS
+                and option not in _PIP_GLOBAL_SWITCH_OPTIONS
+            ):
+                return None, True
         if index >= len(tokens) or tokens[index].lower() != "install":
-            return None, True
+            return cwd, False
         paths: list[str] = []
         index += 1
         while index < len(tokens):
@@ -536,7 +601,9 @@ def _printed_build_text(line: str, mask: list[bool], column: int) -> bool:
 def _conditional_before_command(line: str, column: int) -> bool:
     """A command after ``&&`` or ``||`` may be skipped by the shell."""
 
-    return column > 0 and line[column] in "&|" and line[column - 1] == line[column]
+    return (column > 0 and line[column] in "&|" and line[column - 1] == line[column]) or line[
+        :column
+    ].rstrip().endswith(("&&", "||"))
 
 
 def _join_source_states(first: str, second: str) -> str:
@@ -659,7 +726,8 @@ class _OrderedPrBuildPattern(ContextPattern):
                 pr_excluded = _excludes_pr_path(_direct_if(step))
                 checkout_state = _checkout_action_state(step)
                 cwd = _step_working_path(step, default_path)
-                shell_lines = _run_shell_lines(step)
+                child_scopes: dict[int, list[tuple[int, int]]] = {}
+                shell_lines = _run_shell_lines(step, child_scopes)
                 script_indent = min(
                     (
                         len(line) - len(line.lstrip(" "))
@@ -719,7 +787,9 @@ class _OrderedPrBuildPattern(ContextPattern):
                     if shell_line is not None:
                         for cd_match in _SHELL_CD_RE.finditer(shell_line):
                             if not shell_mask[cd_match.start()]:
-                                events.append((cd_match.start(), "cd", cd_match.group("path")))
+                                events.append(
+                                    (cd_match.start("command"), "cd", cd_match.group("path"))
+                                )
                         pr_fetches = [
                             fetch
                             for fetch in _GIT_PR_FETCH_RE.finditer(shell_line)
@@ -764,11 +834,19 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 resolved.add(absolute_line)
                             else:
                                 events.append((anchor.start(), "build", None))
+                    outer_cwd: str | None = cwd
+                    scoped_cwds: dict[tuple[int, int], str | None] = dict.fromkeys(
+                        child_scopes.get(offset, []), cwd
+                    )
                     for column, kind, value in sorted(events):
                         if pr_excluded:
                             if kind == "build":
                                 resolved.add(absolute_line)
                             continue
+                        child_span = next(
+                            (span for span in scoped_cwds if span[0] <= column < span[1]), None
+                        )
+                        cwd = scoped_cwds[child_span] if child_span is not None else outer_cwd
                         if kind == "cd":
                             next_cwd = _literal_workspace_path(value or "", cwd) if cwd else None
                             if shell_line is not None and _conditional_before_command(
@@ -845,6 +923,12 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 != _TRUSTED
                             ):
                                 kept.add(absolute_line)
+                        if child_span is not None:
+                            scoped_cwds[child_span] = cwd
+                        else:
+                            outer_cwd = cwd
+
+                    cwd = outer_cwd
 
                     heredoc_queue.extend(
                         (opener.group("delimiter"), opener.group("operator") == "<<-")

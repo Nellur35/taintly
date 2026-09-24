@@ -1380,3 +1380,63 @@ jobs:
       - run: python3 -m pip --no-cache-dir install ./fork
 """
     assert _fires("LOTP-GH-001", workflow)
+
+
+def test_nested_shell_with_outer_commands_keeps_pr_build_visible() -> None:
+    for command in (
+        'bash -c "cd fork; npm ci" && echo done',
+        'env CI=1 bash -c "cd fork; npm ci"',
+        'echo ready && sh -c "cd fork; npm ci"',
+    ):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+          path: fork
+      - run: {command}
+"""
+        assert _fires("LOTP-GH-001", workflow), command
+
+
+def test_nested_shell_cd_does_not_change_parent_cwd() -> None:
+    for command in (
+        'bash -c "cd fork"\nnpm ci',
+        'bash -c "cd fork"; npm ci',
+    ):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+          path: fork
+      - run: |
+          {command.replace(chr(10), chr(10) + '          ')}
+"""
+        assert not _fires("LOTP-GH-001", workflow), command
+        assert not _fires("LOTP-GH-003", workflow), command
+
+
+def test_pip_non_install_subcommand_is_not_local_build() -> None:
+    for command in ("pip show install", "python -m pip show install"):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+      - run: {command}
+"""
+        assert not _fires("LOTP-GH-001", workflow), command
+        assert not _fires("LOTP-GH-003", workflow), command
