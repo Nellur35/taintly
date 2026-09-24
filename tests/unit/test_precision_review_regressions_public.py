@@ -962,3 +962,83 @@ jobs:
 """
     assert _fires("LOTP-GH-001", workflow)
     assert _fires("LOTP-GH-003", workflow)
+
+
+def test_pr_ref_fetch_then_fetch_head_build_is_untrusted() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git fetch origin refs/pull/${{ github.event.pull_request.number }}/head
+          git checkout FETCH_HEAD
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_pr_ref_fetched_into_named_branch_stays_untrusted() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: |
+          git fetch origin refs/pull/${{ github.event.pull_request.number }}/head:refs/remotes/origin/pr-head
+          git checkout origin/pr-head
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_git_checkout_target_ignores_adjacent_pr_echo() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: |
+          git checkout main && echo ${{ github.event.pull_request.head.sha }}
+          npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_pip_compact_short_options_resolve_fork_paths() -> None:
+    for command in ("pip install -e./fork", "pip install -r./fork/requirements.txt"):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+          path: fork
+      - run: {command}
+"""
+        assert _fires("LOTP-GH-001", workflow), command
+
+
+def test_pr_fetch_provenance_survives_run_step_boundary() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+      - run: git fetch origin refs/pull/${{ github.event.pull_request.number }}/head:refs/remotes/origin/pr-head
+      - run: git checkout origin/pr-head
+      - run: npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)

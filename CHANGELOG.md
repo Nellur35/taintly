@@ -58,6 +58,9 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   separated and equals forms. `HEAD` and fetch-derived Git refs do not prove
   trusted source. Executable Git PR switches can establish source evidence
   without a checkout `ref` value; an unresolved default checkout stays visible.
+- PR-ref `git fetch` now carries source provenance into `FETCH_HEAD` and named
+  remote branches across steps. Git source checks read the checkout argument,
+  and compact pip `-e`/`-r` paths select the correct checkout.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.
