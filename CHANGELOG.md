@@ -81,6 +81,8 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   tracked; dry-run fetches do not alter source provenance.
 - Git global options before checkout and changed fetch-remote URLs now carry
   repository provenance into later local builds.
+- PR fork fetches through a new remote or direct URL, including `clone_url`,
+  now retain untrusted source provenance; appended fetch URLs keep their order.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

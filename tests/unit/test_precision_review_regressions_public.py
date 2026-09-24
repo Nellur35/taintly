@@ -1677,3 +1677,49 @@ jobs:
 """
     assert not _fires("LOTP-GH-001", workflow)
     assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_fork_remote_add_and_direct_fetch_reach_build() -> None:
+    for commands in (
+        "git remote add fork https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git; git fetch fork main",
+        "git fetch https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git main",
+    ):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: {commands}; git checkout FETCH_HEAD; npm ci
+"""
+        assert _fires("LOTP-GH-001", workflow), commands
+        assert _fires("LOTP-GH-003", workflow), commands
+
+
+def test_fork_clone_url_changed_origin_reaches_build() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git remote set-url origin ${{ github.event.pull_request.head.repo.clone_url }}; git fetch origin main; git checkout FETCH_HEAD; npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_added_second_fetch_url_does_not_replace_trusted_first_url() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git remote set-url --add origin https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git; git fetch origin main; git checkout FETCH_HEAD; npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)

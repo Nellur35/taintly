@@ -31,7 +31,7 @@ from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 # it controls a checkout field or an executable Git source change.
 _PR_HEAD_CHECKOUT = (
     r"(?:github\.event\.pull_request\.head\.(?:sha|ref)"
-    r"|github\.event\.pull_request\.head\.repo\.full_name"
+    r"|github\.event\.pull_request\.head\.repo\.(?:full_name|clone_url)"
     r"|github\.event\.pull_request\.number|(?:refs/)?pull/\d+/(?:head|merge)"
     r"|gh\s+pr\s+checkout\s+\d+|github\.com/\S+/pull/\d+"
     r"|github\.head_ref"
@@ -60,7 +60,7 @@ _CROSS_WORKFLOW_UNTRUSTED_ARTIFACT = (
 # ---------------------------------------------------------------------------
 
 _PR_HEAD_PATH_RE = re.compile(
-    r"(?:github\.event\.pull_request\.head\.(?:sha|ref|repo\.full_name)|github\.head_ref)",
+    r"(?:github\.event\.pull_request\.head\.(?:sha|ref|repo\.(?:full_name|clone_url))|github\.head_ref)",
     re.IGNORECASE,
 )
 _WORKFLOW_RUN_HEAD_BRANCH_RE = re.compile(r"github\.event\.workflow_run\.head_branch", re.I)
@@ -153,7 +153,8 @@ _PR_NUMBER_EXPRESSION_RE = re.compile(
 )
 _REPOSITORY_EXPRESSION_RE = re.compile(r"\$\{\{\s*github\.repository\s*\}\}", re.I)
 _PR_HEAD_REPO_EXPRESSION_RE = re.compile(
-    r"\$\{\{\s*github\.event\.pull_request\.head\.repo\.full_name\s*\}\}", re.I
+    r"\$\{\{\s*github\.event\.pull_request\.head\.repo\.(?:full_name|clone_url)\s*\}\}",
+    re.I,
 )
 _PR_FETCH_SOURCE_RE = re.compile(
     r"(?:refs/)?pull/(?:\d+|__PR_NUMBER__)/(?:head|merge)\Z", re.IGNORECASE
@@ -619,15 +620,21 @@ def _git_fetch_events(
                 if _STATIC_REF_RE.fullmatch(source) and source.upper() not in _GIT_TRANSIENT_REFS
                 else _UNKNOWN
             )
+            if "__PR_HEAD_REPOSITORY__" in remote:
+                state = _UNTRUSTED
+            elif "://" in remote or remote.startswith("git@"):
+                state = _UNKNOWN
             if write_fetch_head or target_ref:
                 events.append((column, state, target_ref, paths, write_fetch_head, remote))
     return events
 
 
-def _git_remote_events(line: str, mask: list[bool]) -> list[tuple[int, str, str, tuple[str, ...]]]:
+def _git_remote_events(
+    line: str, mask: list[bool]
+) -> list[tuple[int, str, str, tuple[str, ...], str]]:
     """Track remote changes that can alter the provenance of a later fetch."""
 
-    events: list[tuple[int, str, str, tuple[str, ...]]] = []
+    events: list[tuple[int, str, str, tuple[str, ...], str]] = []
     for column, command in _shell_command_segments(line, mask):
         tokens = _shell_command_tokens(command)
         if tokens is None:
@@ -636,18 +643,23 @@ def _git_remote_events(line: str, mask: list[bool]) -> list[tuple[int, str, str,
         if invocation is None:
             continue
         index, paths = invocation
-        if tokens[index : index + 2] != ["remote", "set-url"]:
+        if index + 1 >= len(tokens) or tokens[index].lower() != "remote":
+            continue
+        operation = tokens[index + 1].lower()
+        if operation not in {"add", "set-url"}:
             continue
         args = tokens[index + 2 :]
-        if args and args[0] in {"--push", "--add", "--delete"}:
+        mode = "replace"
+        if operation == "set-url" and args and args[0] in {"--push", "--add", "--delete"}:
             if args[0] == "--push":
                 continue  # Push URL does not affect fetch provenance.
+            mode = "append" if args[0] == "--add" else "delete"
             args = args[1:]
         if len(args) < 2:
             continue
         remote, url = args[:2]
         state = _UNTRUSTED if "__PR_HEAD_REPOSITORY__" in url else _UNKNOWN
-        events.append((column, remote, state, paths))
+        events.append((column, remote, state, paths, mode))
     return events
 
 
@@ -885,7 +897,7 @@ def _run_may_select_pr_source(step: StepSegment) -> bool:
             return True
         if any(state == _UNTRUSTED for _, state, _, _, _, _ in _git_fetch_events(line, mask)):
             return True
-        if any(state == _UNTRUSTED for _, _, state, _ in _git_remote_events(line, mask)):
+        if any(state == _UNTRUSTED for _, _, state, _, _ in _git_remote_events(line, mask)):
             return True
     return False
 
@@ -1036,7 +1048,7 @@ class _OrderedPrBuildPattern(ContextPattern):
                     fetch_paths: dict[int, tuple[str, ...]] = {}
                     fetch_writes: dict[int, bool] = {}
                     fetch_remotes: dict[int, str] = {}
-                    changed_remotes: dict[int, tuple[str, str, tuple[str, ...]]] = {}
+                    changed_remotes: dict[int, tuple[str, str, tuple[str, ...], str]] = {}
                     gh_worktrees: dict[int, str | None] = {}
                     if shell_line is not None:
                         for cd_match in _SHELL_CD_RE.finditer(shell_line):
@@ -1052,10 +1064,10 @@ class _OrderedPrBuildPattern(ContextPattern):
                             fetch_writes[column] = writes
                             fetch_remotes[column] = remote
                             events.append((column, "fetch", destination))
-                        for column, remote, state, paths in _git_remote_events(
+                        for column, remote, state, paths, mode in _git_remote_events(
                             shell_line, shell_mask
                         ):
-                            changed_remotes[column] = remote, state, paths
+                            changed_remotes[column] = remote, state, paths, mode
                             events.append((column, "remote", None))
                         gh_worktrees = {
                             column: path
@@ -1111,7 +1123,7 @@ class _OrderedPrBuildPattern(ContextPattern):
                             else:
                                 cwd = next_cwd
                         elif kind == "remote":
-                            remote, state, paths = changed_remotes[column]
+                            remote, state, paths, mode = changed_remotes[column]
                             remote_cwd = cwd
                             for git_path in paths:
                                 remote_cwd = (
@@ -1124,11 +1136,21 @@ class _OrderedPrBuildPattern(ContextPattern):
                             else:
                                 source_key = _source_key(sources, remote_cwd)
                                 states = remote_states.setdefault(source_key, {})
+                                previous = states.get(
+                                    remote, _TRUSTED if remote == "origin" else _UNKNOWN
+                                )
+                                next_state = (
+                                    previous
+                                    if mode == "append"
+                                    else _UNKNOWN
+                                    if mode == "delete"
+                                    else state
+                                )
                                 states[remote] = (
-                                    _join_source_states(states.get(remote, _TRUSTED), state)
+                                    _join_source_states(previous, next_state)
                                     if shell_line is not None
                                     and _conditional_before_command(shell_line, column)
-                                    else state
+                                    else next_state
                                 )
                         elif kind == "fetch":
                             fetch_cwd = cwd
@@ -1144,8 +1166,9 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 source_key = _source_key(sources, fetch_cwd)
                                 refs = fetched_refs.setdefault(source_key, {})
                                 state, foreign = sources.get(source_key, (_UNKNOWN, False))
+                                remote = fetch_remotes.get(column, "")
                                 remote_state = remote_states.get(source_key, {}).get(
-                                    fetch_remotes.get(column, ""), _TRUSTED
+                                    remote, _TRUSTED if remote == "origin" else _UNKNOWN
                                 )
                                 fetched_state = fetch_states.get(column, _UNKNOWN)
                                 if remote_state == _UNTRUSTED:
