@@ -1042,3 +1042,117 @@ jobs:
 """
     assert _fires("LOTP-GH-001", workflow)
     assert _fires("LOTP-GH-003", workflow)
+
+
+def test_short_pr_fetch_spelling_taints_fetch_head() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git fetch origin pull/${{ github.event.pull_request.number }}/head
+          git checkout FETCH_HEAD
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_pip_option_before_compact_editable_path_is_detected() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: pip install --no-deps -e./fork
+"""
+    assert _fires("LOTP-GH-001", workflow)
+
+
+def test_later_trusted_fetch_replaces_fetch_head_provenance() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: |
+          git fetch origin refs/pull/${{ github.event.pull_request.number }}/head
+          git fetch origin main
+          git checkout FETCH_HEAD
+          npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_echoed_git_fetch_does_not_change_provenance() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: |
+          git fetch origin main
+          echo git fetch origin refs/pull/${{ github.event.pull_request.number }}/head
+          git checkout FETCH_HEAD
+          npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_echoed_git_checkout_does_not_change_provenance() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: |
+          echo git checkout ${{ github.event.pull_request.head.sha }}
+          npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_named_pip_package_after_option_stays_silent() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: pip install --no-deps requests
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+
+
+def test_pip_output_directory_does_not_select_source_checkout() -> None:
+    for command in (
+        "pip install --target ./output requests",
+        "pip install --prefix ./output requests",
+    ):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+      - run: {command}
+"""
+        assert not _fires("LOTP-GH-001", workflow), command

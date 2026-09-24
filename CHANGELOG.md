@@ -61,6 +61,10 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 - PR-ref `git fetch` now carries source provenance into `FETCH_HEAD` and named
   remote branches across steps. Git source checks read the checkout argument,
   and compact pip `-e`/`-r` paths select the correct checkout.
+- GitHub's `pull/ID/head` fetch form is recognized. Later fetches update
+  `FETCH_HEAD` provenance, and printed Git text does not change it. Pip local
+  installs are found after other options without treating output directories
+  or named package installs as local source builds.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

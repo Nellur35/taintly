@@ -32,7 +32,7 @@ from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 _PR_HEAD_CHECKOUT = (
     r"(?:github\.event\.pull_request\.head\.(?:sha|ref)"
     r"|github\.event\.pull_request\.head\.repo\.full_name"
-    r"|github\.event\.pull_request\.number|refs/pull/\d+/head"
+    r"|github\.event\.pull_request\.number|(?:refs/)?pull/\d+/head"
     r"|github\.head_ref"
     r"|github\.event\.workflow_run\.head_branch)"
 )
@@ -88,22 +88,47 @@ _NPM_PREFIX_BUILD_ANCHOR = (
     r"\bnpm\s+--prefix(?:=|\s+)\S+\s+"
     r"(?:install|ci|i|update|pack|publish|run|build|test)\b"
 )
-_PIP_LOCAL_OPTION_BUILD_ANCHOR = (
-    r"\bpip\d*(?:\.\d+)?\s+install\s+"
-    r"(?:-(?:e|r)(?:=|\s+)?|--(?:editable|requirement)(?:=|\s+))\S+"
+# Parsed arguments below decide whether pip installs local code.  Matching
+# only the first argument misses valid forms such as ``--no-deps -e./fork``.
+_PIP_INSTALL_ANCHOR = r"\bpip\d*(?:\.\d+)?\s+install\b"
+_PIP_NON_SOURCE_VALUE_OPTIONS = frozenset(
+    {
+        "--target",
+        "-t",
+        "--prefix",
+        "--root",
+        "--cache-dir",
+        "--index-url",
+        "-i",
+        "--extra-index-url",
+        "--find-links",
+        "-f",
+        "--trusted-host",
+        "--log",
+        "--src",
+        "--report",
+        "--config-settings",
+        "-C",
+    }
 )
 _GIT_TRANSIENT_REFS = frozenset(
     {"HEAD", "FETCH_HEAD", "ORIG_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD"}
 )
 _GIT_SOURCE_CHANGE_RE = re.compile(
-    r"\bgit\s+(?:checkout|switch)\s+(?:(?:--detach|--force)\s+)?"
+    r"(?:^|[;&|])\s*git\s+(?:checkout|switch)\s+(?:(?:--detach|--force)\s+)?"
     r"(?P<ref>['\"]?\$\{\{[^}]*\}\}['\"]?|[^\s;&|]+)",
     re.IGNORECASE,
 )
 _GIT_PR_FETCH_RE = re.compile(
-    r"\bgit\s+fetch\s+origin\s+refs/pull/"
+    r"(?:^|[;&|])\s*git\s+fetch\s+origin\s+(?:refs/)?pull/"
     r"(?:\d+|\$\{\{\s*github\.event\.pull_request\.number\s*\}\})/head"
     r"(?::(?P<dest>[A-Za-z0-9._/-]+))?(?=\s|[;&|#]|$)",
+    re.IGNORECASE,
+)
+_GIT_FETCH_RE = re.compile(
+    r"(?:^|[;&|])\s*git\s+fetch\s+origin\s+"
+    r"(?P<source>[A-Za-z0-9._/-]+)(?::(?P<dest>[A-Za-z0-9._/-]+))?"
+    r"(?=\s|[;&|#]|$)",
     re.IGNORECASE,
 )
 _STEP_IF_RE = re.compile(r"^\s*(?:-\s*)?if\s*:\s*(.*?)\s*$")
@@ -379,11 +404,11 @@ def _shell_quote_mask(line: str, initial: str | None) -> tuple[list[bool], str |
 
 def _build_source_path(
     shell_line: str | None, mask: list[bool], anchor_column: int, cwd: str | None
-) -> str | None:
-    """Resolve a literal npm prefix in the build command, if present."""
+) -> tuple[str | None, bool]:
+    """Resolve a local build path and whether this command builds local code."""
 
     if shell_line is None or cwd is None:
-        return cwd
+        return cwd, True
     separators = [
         index for index, char in enumerate(shell_line) if char in ";&|" and not mask[index]
     ]
@@ -394,9 +419,9 @@ def _build_source_path(
         try:
             tokens = shlex.split(shell_line[anchor_column:end], comments=True)
         except ValueError:
-            return None
+            return None, True
         if len(tokens) < 2 or tokens[1].lower() != "install":
-            return None
+            return None, True
         paths: list[str] = []
         index = 2
         while index < len(tokens):
@@ -404,28 +429,32 @@ def _build_source_path(
             if argument in {"-e", "--editable", "-r", "--requirement"}:
                 index += 1
                 if index >= len(tokens):
-                    return None
+                    return None, True
                 paths.append(tokens[index])
             elif argument.startswith(("-e=", "--editable=", "-r=", "--requirement=")):
                 paths.append(argument.split("=", 1)[1])
             elif argument.startswith(("-e", "-r")) and len(argument) > 2:
                 paths.append(argument[2:])
+            elif argument in _PIP_NON_SOURCE_VALUE_OPTIONS:
+                index += 1
+                if index >= len(tokens):
+                    return None, True
             elif argument == "." or argument.startswith(("./", "../", "/")):
                 paths.append(argument)
             index += 1
         if not paths:
-            return cwd
-        return _literal_workspace_path(paths[0], cwd) if len(paths) == 1 else None
+            return cwd, False
+        return (_literal_workspace_path(paths[0], cwd) if len(paths) == 1 else None), True
     prefix_paths = [
         match.group("path")
         for match in _NPM_PREFIX_PATH_RE.finditer(segment)
         if not mask[start + match.start()]
     ]
     if not prefix_paths:
-        return cwd
+        return cwd, True
     if len(prefix_paths) != 1:
-        return None
-    return _literal_workspace_path(prefix_paths[0], cwd)
+        return None, True
+    return _literal_workspace_path(prefix_paths[0], cwd), True
 
 
 def _source_after_ref_change(state: str, foreign_repository: bool, target: str) -> str:
@@ -436,23 +465,40 @@ def _source_after_ref_change(state: str, foreign_repository: bool, target: str) 
     return target
 
 
-def _git_source_change(line: str) -> tuple[int, str, str] | None:
-    """Return ``(column, source_state, ref)`` for a shell Git ref change."""
+def _at_shell_command_start(line: str, mask: list[bool], column: int) -> bool:
+    """Reject pip text printed as an argument to another shell command."""
 
-    match = _GIT_SOURCE_CHANGE_RE.search(line)
-    if not match:
-        return None
-    ref = match.group("ref").strip("'\"")
-    if ref == "--":
-        # ``git checkout -- path`` restores a path; it does not select a ref.
-        return None
-    if _contains_pr_head_reference(ref):
-        return (match.start(), _UNTRUSTED, ref)
-    if ref.upper() in _GIT_TRANSIENT_REFS:
-        return (match.start(), _UNKNOWN, ref)
-    if _STATIC_REF_RE.fullmatch(ref) and not ref.startswith("-"):
-        return (match.start(), _TRUSTED, ref)
-    return (match.start(), _UNKNOWN, ref)
+    start = max(
+        (
+            index + 1
+            for index, char in enumerate(line[:column])
+            if char in ";&|" and not mask[index]
+        ),
+        default=0,
+    )
+    prefix = line[start:column].strip()
+    return not prefix or bool(re.fullmatch(r"(?:env\s+)?(?:[A-Za-z_]\w*=\S+\s*)+", prefix))
+
+
+def _git_source_changes(line: str) -> list[tuple[int, str, str]]:
+    """Return ordered shell Git ref changes with target-only provenance."""
+
+    changes: list[tuple[int, str, str]] = []
+    for match in _GIT_SOURCE_CHANGE_RE.finditer(line):
+        ref = match.group("ref").strip("'\"")
+        if ref == "--":
+            # ``git checkout -- path`` restores a path; it does not select a ref.
+            continue
+        if _contains_pr_head_reference(ref):
+            state = _UNTRUSTED
+        elif ref.upper() in _GIT_TRANSIENT_REFS:
+            state = _UNKNOWN
+        elif _STATIC_REF_RE.fullmatch(ref) and not ref.startswith("-"):
+            state = _TRUSTED
+        else:
+            state = _UNKNOWN
+        changes.append((match.start(), state, ref))
+    return changes
 
 
 def _run_may_select_pr_source(step: StepSegment) -> bool:
@@ -461,11 +507,12 @@ def _run_may_select_pr_source(step: StepSegment) -> bool:
     quote: str | None = None
     for _, line in sorted(_run_shell_lines(step).items()):
         mask, quote, _ = _shell_quote_mask(line, quote)
-        change = _git_source_change(line)
-        if change and change[1] == _UNTRUSTED and not mask[change[0]]:
+        if any(
+            state == _UNTRUSTED and not mask[column]
+            for column, state, _ in _git_source_changes(line)
+        ):
             return True
-        fetch = _GIT_PR_FETCH_RE.search(line)
-        if fetch and not mask[fetch.start()]:
+        if any(not mask[fetch.start()] for fetch in _GIT_PR_FETCH_RE.finditer(line)):
             return True
     return False
 
@@ -486,7 +533,7 @@ class _OrderedPrBuildPattern(ContextPattern):
     def __init__(
         self,
         anchor: str = (
-            rf"(?:{_BUILD_TOOL_ANCHOR}|{_NPM_PREFIX_BUILD_ANCHOR}|{_PIP_LOCAL_OPTION_BUILD_ANCHOR})"
+            rf"(?:{_BUILD_TOOL_ANCHOR}|{_NPM_PREFIX_BUILD_ANCHOR}|{_PIP_INSTALL_ANCHOR})"
         ),
         exclude: list[str] | None = None,
     ) -> None:
@@ -601,18 +648,38 @@ class _OrderedPrBuildPattern(ContextPattern):
                             for index in range(len(shell_line) - 1)
                         ):
                             uncertain_layout = True
-                    transition = _git_source_change(shell_line) if shell_line is not None else None
-                    fetch = _GIT_PR_FETCH_RE.search(shell_line) if shell_line is not None else None
+                    transitions = _git_source_changes(shell_line) if shell_line is not None else []
                     anchor = self._source_anchor_re.search(source_line)
                     events: list[tuple[int, str, str | None]] = []
+                    git_states = {column: state for column, state, _ in transitions}
+                    fetch_states: dict[int, str] = {}
                     if shell_line is not None:
                         for cd_match in _SHELL_CD_RE.finditer(shell_line):
                             if not shell_mask[cd_match.start()]:
                                 events.append((cd_match.start(), "cd", cd_match.group("path")))
-                    if transition and not shell_mask[transition[0]]:
-                        events.append((transition[0], "git", transition[2]))
-                    if fetch and not shell_mask[fetch.start()]:
-                        events.append((fetch.start(), "fetch", fetch.group("dest")))
+                        pr_fetches = [
+                            fetch
+                            for fetch in _GIT_PR_FETCH_RE.finditer(shell_line)
+                            if not shell_mask[fetch.start()]
+                        ]
+                        pr_fetch_columns = {fetch.start() for fetch in pr_fetches}
+                        for fetch in pr_fetches:
+                            fetch_states[fetch.start()] = _UNTRUSTED
+                            events.append((fetch.start(), "fetch", fetch.group("dest")))
+                        for fetch in _GIT_FETCH_RE.finditer(shell_line):
+                            if fetch.start() in pr_fetch_columns or shell_mask[fetch.start()]:
+                                continue
+                            source = fetch.group("source")
+                            fetch_states[fetch.start()] = (
+                                _TRUSTED
+                                if _STATIC_REF_RE.fullmatch(source)
+                                and source.upper() not in _GIT_TRANSIENT_REFS
+                                else _UNKNOWN
+                            )
+                            events.append((fetch.start(), "fetch", fetch.group("dest")))
+                    for column, _, ref in transitions:
+                        if not shell_mask[column]:
+                            events.append((column, "git", ref))
                     if (
                         shell_line is None
                         and action_input_step
@@ -625,7 +692,12 @@ class _OrderedPrBuildPattern(ContextPattern):
                         and shell_line is not None
                         and (comment_start is None or anchor.start() < comment_start)
                     ):
-                        events.append((anchor.start(), "build", None))
+                        if _PIP_INSTALL_RE.match(shell_line[anchor.start() :]) and not (
+                            _at_shell_command_start(shell_line, shell_mask, anchor.start())
+                        ):
+                            resolved.add(absolute_line)
+                        else:
+                            events.append((anchor.start(), "build", None))
                     elif (
                         anchor
                         and absolute_line in step_candidates
@@ -646,21 +718,24 @@ class _OrderedPrBuildPattern(ContextPattern):
                             else:
                                 source_key = _source_key(sources, cwd)
                                 refs = fetched_refs.setdefault(source_key, {})
-                                refs["FETCH_HEAD"] = _UNTRUSTED
+                                state, foreign = sources.get(source_key, (_UNKNOWN, False))
+                                target_state = _source_after_ref_change(
+                                    state, foreign, fetch_states.get(column, _UNKNOWN)
+                                )
+                                refs["FETCH_HEAD"] = target_state
                                 if value:
-                                    refs[value] = _UNTRUSTED
+                                    refs[value] = target_state
                                     if value.startswith("refs/remotes/"):
-                                        refs[value.removeprefix("refs/remotes/")] = _UNTRUSTED
+                                        refs[value.removeprefix("refs/remotes/")] = target_state
                                     elif value.startswith("refs/heads/"):
-                                        refs[value.removeprefix("refs/heads/")] = _UNTRUSTED
+                                        refs[value.removeprefix("refs/heads/")] = target_state
                         elif kind == "git":
                             if cwd is None:
                                 uncertain_layout = True
                             else:
                                 source_key = _source_key(sources, cwd)
                                 state, foreign = sources.get(source_key, (_UNKNOWN, False))
-                                ref_state = _git_source_change(shell_line or "")
-                                target_state = ref_state[1] if ref_state else _UNKNOWN
+                                target_state = git_states.get(column, _UNKNOWN)
                                 target_state = fetched_refs.get(source_key, {}).get(
                                     value or "", target_state
                                 )
@@ -670,11 +745,13 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 )
                         else:
                             resolved.add(absolute_line)
-                            build_path = _build_source_path(shell_line, shell_mask, column, cwd)
+                            build_path, local_build = _build_source_path(
+                                shell_line, shell_mask, column, cwd
+                            )
                             build_source_key = (
                                 _source_key(sources, build_path) if build_path else None
                             )
-                            if (
+                            if local_build and (
                                 uncertain_layout
                                 or build_path is None
                                 or sources.get(build_source_key or ".", (_UNKNOWN, False))[0]
