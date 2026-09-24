@@ -1140,6 +1140,7 @@ class _OrderedPrBuildPattern(ContextPattern):
             remote_states: dict[str, dict[str, str]] = {}
             local_branches: dict[str, dict[str, str]] = {}
             current_branches: dict[str, str | None] = {}
+            implicit_clone_parents: dict[str, str] = {}
             uncertain_layout = False
             for step in job_steps:
                 step_candidates = {
@@ -1385,9 +1386,17 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 if start_ref is None:
                                     branch_state = sources.get(source_key, (_UNKNOWN, False))[0]
                                 else:
-                                    branch_state = fetched_refs.get(source_key, {}).get(
+                                    refs = fetched_refs.get(source_key, {})
+                                    remote_ref_state = (
+                                        refs.get(f"{start_ref.split('/', 1)[0]}/*")
+                                        if "/" in start_ref
+                                        else None
+                                    )
+                                    branch_state = refs.get(
                                         start_ref,
-                                        local_branches.get(source_key, {}).get(
+                                        remote_ref_state
+                                        if remote_ref_state is not None
+                                        else local_branches.get(source_key, {}).get(
                                             start_ref,
                                             _UNTRUSTED
                                             if _contains_pr_head_reference(start_ref)
@@ -1415,6 +1424,15 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 uncertain_layout = True
                             elif destination is not None:
                                 sources[destination] = clone_state, clone_state != _TRUSTED
+                            elif clone_cwd is None:
+                                uncertain_layout = True
+                            else:
+                                prior_clone_state = implicit_clone_parents.get(clone_cwd)
+                                implicit_clone_parents[clone_cwd] = (
+                                    clone_state
+                                    if prior_clone_state is None
+                                    else _join_source_states(prior_clone_state, clone_state)
+                                )
                         elif kind in {"fetch", "pull"}:
                             fetch_cwd = cwd
                             for git_path in fetch_paths.get(column, ()):
@@ -1556,9 +1574,20 @@ class _OrderedPrBuildPattern(ContextPattern):
                             build_source_key = (
                                 _source_key(sources, build_path) if build_path else None
                             )
+                            possible_implicit_clone = bool(
+                                build_path
+                                and any(
+                                    clone_state != _TRUSTED
+                                    and build_path != parent
+                                    and (parent == "." or build_path.startswith(f"{parent}/"))
+                                    and build_source_key == _source_key(sources, parent)
+                                    for parent, clone_state in implicit_clone_parents.items()
+                                )
+                            )
                             if local_build and (
                                 uncertain_layout
                                 or build_path is None
+                                or possible_implicit_clone
                                 or sources.get(build_source_key or ".", (_UNKNOWN, False))[0]
                                 != _TRUSTED
                             ):

@@ -89,6 +89,8 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   preserve source provenance through later local builds.
 - Branch creation and all-remotes fetches now carry source provenance;
   a clone into a new subdirectory does not taint the original build directory.
+- Builds in a possible implicit clone directory stay visible for review,
+  and local branches inherit provenance from unqualified remote fetches.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

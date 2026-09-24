@@ -1918,3 +1918,31 @@ jobs:
 """
     assert not _fires("LOTP-GH-001", workflow)
     assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_clone_without_destination_keeps_possible_child_source_visible() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git clone ${{ github.event.pull_request.head.repo.clone_url }}; cd fork; npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_branch_created_from_unqualified_fork_fetch_keeps_source() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git remote add fork https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git; git fetch fork; git branch candidate fork/main; git checkout candidate; npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
