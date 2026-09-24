@@ -152,6 +152,9 @@ _PR_NUMBER_EXPRESSION_RE = re.compile(
     r"\$\{\{\s*github\.event\.pull_request\.number\s*\}\}", re.IGNORECASE
 )
 _REPOSITORY_EXPRESSION_RE = re.compile(r"\$\{\{\s*github\.repository\s*\}\}", re.I)
+_PR_HEAD_REPO_EXPRESSION_RE = re.compile(
+    r"\$\{\{\s*github\.event\.pull_request\.head\.repo\.full_name\s*\}\}", re.I
+)
 _PR_FETCH_SOURCE_RE = re.compile(
     r"(?:refs/)?pull/(?:\d+|__PR_NUMBER__)/(?:head|merge)\Z", re.IGNORECASE
 )
@@ -522,6 +525,7 @@ def _shell_command_tokens(command: str) -> list[str] | None:
 
     normalized = _PR_NUMBER_EXPRESSION_RE.sub("__PR_NUMBER__", command)
     normalized = _REPOSITORY_EXPRESSION_RE.sub("__GITHUB_REPOSITORY__", normalized)
+    normalized = _PR_HEAD_REPO_EXPRESSION_RE.sub("__PR_HEAD_REPOSITORY__", normalized)
     try:
         return shlex.split(normalized, comments=True)
     except ValueError:
@@ -559,10 +563,10 @@ def _git_command_index(tokens: list[str]) -> tuple[int, tuple[str, ...]] | None:
 
 def _git_fetch_events(
     line: str, mask: list[bool]
-) -> list[tuple[int, str, str | None, tuple[str, ...], bool]]:
+) -> list[tuple[int, str, str | None, tuple[str, ...], bool, str]]:
     """Parse fetch options and refspecs, including PR head and merge refs."""
 
-    events: list[tuple[int, str, str | None, tuple[str, ...], bool]] = []
+    events: list[tuple[int, str, str | None, tuple[str, ...], bool, str]] = []
     for column, command in _shell_command_segments(line, mask):
         tokens = _shell_command_tokens(command)
         if tokens is None:
@@ -584,7 +588,8 @@ def _git_fetch_events(
                 index += 1
         if index >= len(tokens):
             continue
-        index += 1  # remote
+        remote = tokens[index]
+        index += 1
         candidates: list[tuple[str, str | None]] = []
         while index < len(tokens):
             token = tokens[index]
@@ -606,7 +611,7 @@ def _git_fetch_events(
         if pr_candidates:
             pr_destination = pr_candidates[0][1]
             if write_fetch_head or pr_destination:
-                events.append((column, _UNTRUSTED, pr_destination, paths, write_fetch_head))
+                events.append((column, _UNTRUSTED, pr_destination, paths, write_fetch_head, remote))
         else:
             source, target_ref = candidates[-1]
             state = (
@@ -615,7 +620,34 @@ def _git_fetch_events(
                 else _UNKNOWN
             )
             if write_fetch_head or target_ref:
-                events.append((column, state, target_ref, paths, write_fetch_head))
+                events.append((column, state, target_ref, paths, write_fetch_head, remote))
+    return events
+
+
+def _git_remote_events(line: str, mask: list[bool]) -> list[tuple[int, str, str, tuple[str, ...]]]:
+    """Track remote changes that can alter the provenance of a later fetch."""
+
+    events: list[tuple[int, str, str, tuple[str, ...]]] = []
+    for column, command in _shell_command_segments(line, mask):
+        tokens = _shell_command_tokens(command)
+        if tokens is None:
+            continue
+        invocation = _git_command_index(tokens)
+        if invocation is None:
+            continue
+        index, paths = invocation
+        if tokens[index : index + 2] != ["remote", "set-url"]:
+            continue
+        args = tokens[index + 2 :]
+        if args and args[0] in {"--push", "--add", "--delete"}:
+            if args[0] == "--push":
+                continue  # Push URL does not affect fetch provenance.
+            args = args[1:]
+        if len(args) < 2:
+            continue
+        remote, url = args[:2]
+        state = _UNTRUSTED if "__PR_HEAD_REPOSITORY__" in url else _UNKNOWN
+        events.append((column, remote, state, paths))
     return events
 
 
@@ -789,10 +821,10 @@ def _join_source_states(first: str, second: str) -> str:
     return first if first == second else _UNKNOWN
 
 
-def _git_source_changes(line: str, mask: list[bool]) -> list[tuple[int, str, str]]:
+def _git_source_changes(line: str, mask: list[bool]) -> list[tuple[int, str, str, tuple[str, ...]]]:
     """Return ordered shell Git ref changes with target-only provenance."""
 
-    changes: list[tuple[int, str, str]] = []
+    changes: list[tuple[int, str, str, tuple[str, ...]]] = []
     for match in _GIT_SOURCE_CHANGE_RE.finditer(line):
         ref = match.group("ref").strip("'\"")
         if ref == "--":
@@ -806,9 +838,36 @@ def _git_source_changes(line: str, mask: list[bool]) -> list[tuple[int, str, str
             state = _TRUSTED
         else:
             state = _UNKNOWN
-        changes.append((match.start(), state, ref))
+        changes.append((match.start(), state, ref, ()))
+    for column, command in _shell_command_segments(line, mask):
+        tokens = _shell_command_tokens(command)
+        if tokens is None:
+            continue
+        invocation = _git_command_index(tokens)
+        if invocation is None:
+            continue
+        index, paths = invocation
+        if not paths and index == 1:
+            continue  # The existing matcher handles plain Git commands.
+        if index >= len(tokens) or tokens[index].lower() not in {"checkout", "switch"}:
+            continue
+        args = tokens[index + 1 :]
+        while args and args[0] in {"--detach", "--force"}:
+            args = args[1:]
+        if not args or args[0] == "--":
+            continue
+        ref = args[0]
+        if _contains_pr_head_reference(ref):
+            state = _UNTRUSTED
+        elif ref.upper() in _GIT_TRANSIENT_REFS:
+            state = _UNKNOWN
+        elif _STATIC_REF_RE.fullmatch(ref) and not ref.startswith("-"):
+            state = _TRUSTED
+        else:
+            state = _UNKNOWN
+        changes.append((column, state, ref, paths))
     changes.extend(
-        (column, state, ref) for column, state, ref, _ in _gh_pr_checkout_changes(line, mask)
+        (column, state, ref, ()) for column, state, ref, _ in _gh_pr_checkout_changes(line, mask)
     )
     return changes
 
@@ -821,10 +880,12 @@ def _run_may_select_pr_source(step: StepSegment) -> bool:
         mask, quote, _ = _shell_quote_mask(line, quote)
         if any(
             state == _UNTRUSTED and not mask[column]
-            for column, state, _ in _git_source_changes(line, mask)
+            for column, state, _, _ in _git_source_changes(line, mask)
         ):
             return True
-        if any(state == _UNTRUSTED for _, state, _, _, _ in _git_fetch_events(line, mask)):
+        if any(state == _UNTRUSTED for _, state, _, _, _, _ in _git_fetch_events(line, mask)):
+            return True
+        if any(state == _UNTRUSTED for _, _, state, _ in _git_remote_events(line, mask)):
             return True
     return False
 
@@ -900,6 +961,7 @@ class _OrderedPrBuildPattern(ContextPattern):
             )
             sources: dict[str, tuple[str, bool]] = {".": (_TRUSTED, False)}
             fetched_refs: dict[str, dict[str, str]] = {}
+            remote_states: dict[str, dict[str, str]] = {}
             uncertain_layout = False
             for step in job_steps:
                 step_candidates = {
@@ -968,10 +1030,13 @@ class _OrderedPrBuildPattern(ContextPattern):
                     )
                     anchors = list(self._source_anchor_re.finditer(source_line))
                     events: list[tuple[int, str, str | None]] = []
-                    git_states = {column: state for column, state, _ in transitions}
+                    git_states = {column: state for column, state, _, _ in transitions}
+                    git_paths = {column: paths for column, _, _, paths in transitions}
                     fetch_states: dict[int, str] = {}
                     fetch_paths: dict[int, tuple[str, ...]] = {}
                     fetch_writes: dict[int, bool] = {}
+                    fetch_remotes: dict[int, str] = {}
+                    changed_remotes: dict[int, tuple[str, str, tuple[str, ...]]] = {}
                     gh_worktrees: dict[int, str | None] = {}
                     if shell_line is not None:
                         for cd_match in _SHELL_CD_RE.finditer(shell_line):
@@ -979,20 +1044,26 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 events.append(
                                     (cd_match.start("command"), "cd", cd_match.group("path"))
                                 )
-                        for column, state, destination, paths, writes in _git_fetch_events(
+                        for column, state, destination, paths, writes, remote in _git_fetch_events(
                             shell_line, shell_mask
                         ):
                             fetch_states[column] = state
                             fetch_paths[column] = paths
                             fetch_writes[column] = writes
+                            fetch_remotes[column] = remote
                             events.append((column, "fetch", destination))
+                        for column, remote, state, paths in _git_remote_events(
+                            shell_line, shell_mask
+                        ):
+                            changed_remotes[column] = remote, state, paths
+                            events.append((column, "remote", None))
                         gh_worktrees = {
                             column: path
                             for column, _, _, path in _gh_pr_checkout_changes(
                                 shell_line, shell_mask
                             )
                         }
-                    for column, _, ref in transitions:
+                    for column, _, ref, _ in transitions:
                         if not shell_mask[column]:
                             events.append((column, "git", ref))
                     if (
@@ -1039,6 +1110,26 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 cwd = next_cwd if next_cwd == cwd else None
                             else:
                                 cwd = next_cwd
+                        elif kind == "remote":
+                            remote, state, paths = changed_remotes[column]
+                            remote_cwd = cwd
+                            for git_path in paths:
+                                remote_cwd = (
+                                    _literal_workspace_path(git_path, remote_cwd)
+                                    if remote_cwd is not None
+                                    else None
+                                )
+                            if remote_cwd is None:
+                                uncertain_layout = True
+                            else:
+                                source_key = _source_key(sources, remote_cwd)
+                                states = remote_states.setdefault(source_key, {})
+                                states[remote] = (
+                                    _join_source_states(states.get(remote, _TRUSTED), state)
+                                    if shell_line is not None
+                                    and _conditional_before_command(shell_line, column)
+                                    else state
+                                )
                         elif kind == "fetch":
                             fetch_cwd = cwd
                             for git_path in fetch_paths.get(column, ()):
@@ -1053,8 +1144,16 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 source_key = _source_key(sources, fetch_cwd)
                                 refs = fetched_refs.setdefault(source_key, {})
                                 state, foreign = sources.get(source_key, (_UNKNOWN, False))
+                                remote_state = remote_states.get(source_key, {}).get(
+                                    fetch_remotes.get(column, ""), _TRUSTED
+                                )
+                                fetched_state = fetch_states.get(column, _UNKNOWN)
+                                if remote_state == _UNTRUSTED:
+                                    fetched_state = _UNTRUSTED
+                                elif remote_state == _UNKNOWN and fetched_state != _UNTRUSTED:
+                                    fetched_state = _UNKNOWN
                                 target_state = _source_after_ref_change(
-                                    state, foreign, fetch_states.get(column, _UNKNOWN)
+                                    state, foreign, fetched_state
                                 )
                                 conditional = (
                                     shell_line is not None
@@ -1080,21 +1179,28 @@ class _OrderedPrBuildPattern(ContextPattern):
                                     elif value.startswith("refs/heads/"):
                                         refs[value.removeprefix("refs/heads/")] = named_state
                         elif kind == "git":
-                            if cwd is None:
+                            git_cwd = cwd
+                            for git_path in git_paths.get(column, ()):
+                                git_cwd = (
+                                    _literal_workspace_path(git_path, git_cwd)
+                                    if git_cwd is not None
+                                    else None
+                                )
+                            if git_cwd is None:
                                 uncertain_layout = True
                             elif value == "GH_PR_CHECKOUT" and column in gh_worktrees:
                                 worktree = gh_worktrees[column]
                                 if worktree is None:
-                                    source_key = _source_key(sources, cwd)
+                                    source_key = _source_key(sources, git_cwd)
                                     sources[source_key] = (_UNTRUSTED, False)
                                 else:
-                                    checkout_path = _literal_workspace_path(worktree, cwd)
+                                    checkout_path = _literal_workspace_path(worktree, git_cwd)
                                     if checkout_path is None:
                                         uncertain_layout = True
                                     else:
                                         sources[checkout_path] = (_UNTRUSTED, False)
                             else:
-                                source_key = _source_key(sources, cwd)
+                                source_key = _source_key(sources, git_cwd)
                                 state, foreign = sources.get(source_key, (_UNKNOWN, False))
                                 target_state = git_states.get(column, _UNKNOWN)
                                 target_state = fetched_refs.get(source_key, {}).get(

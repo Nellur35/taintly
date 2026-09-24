@@ -79,6 +79,8 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   and merge refs; GitHub CLI PR checkout changes source provenance.
 - Git global options, GitHub CLI PR URLs and worktree destinations are
   tracked; dry-run fetches do not alter source provenance.
+- Git global options before checkout and changed fetch-remote URLs now carry
+  repository provenance into later local builds.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

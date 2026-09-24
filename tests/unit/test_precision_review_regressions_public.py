@@ -1627,3 +1627,53 @@ jobs:
 """
     assert not _fires("LOTP-GH-001", workflow)
     assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_global_git_options_before_checkout_preserve_pr_fetch_provenance() -> None:
+    for checkout in (
+        "git -C . checkout FETCH_HEAD",
+        "git -c protocol.version=2 checkout FETCH_HEAD",
+        "git -C fork checkout FETCH_HEAD; cd fork",
+    ):
+        fetch = "git -C fork fetch" if "fork" in checkout else "git fetch"
+        setup = "mkdir fork; git clone . fork; " if "fork" in checkout else ""
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: {setup}{fetch} origin refs/pull/${{{{ github.event.pull_request.number }}}}/head; {checkout}; npm ci
+"""
+        assert _fires("LOTP-GH-001", workflow), checkout
+        assert _fires("LOTP-GH-003", workflow), checkout
+
+
+def test_changed_origin_to_pr_fork_makes_static_ref_untrusted() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git remote set-url origin https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git; git fetch origin main; git checkout FETCH_HEAD; npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_static_origin_still_keeps_static_ref_trusted() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git remote set-url origin https://github.com/example/base.git; git fetch origin main; git checkout FETCH_HEAD; npm ci
+      - run: echo ${{ github.event.pull_request.number }}
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
