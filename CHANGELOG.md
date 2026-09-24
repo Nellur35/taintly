@@ -22,6 +22,13 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 - Distribution surfaces: composite GitHub Action (`action.yml`), pre-commit hooks
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
+### Changed
+- Refined CI findings with job-level permission coverage, ordered PR-source checks,
+  executable reusable-workflow input sinks, and same-job output value proofs.
+- `SEC9-GL-001` now requires a strongly sensitive artifact path and still asks for
+  project visibility review. `SEC4-GH-026` is retired; `SEC4-GH-026A` reports
+  explicit write-capable cache access on low-trust GitHub workflows.
+
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.
 - Maturity: **TRL 7** (demonstrated on a real corpus, CI-green, stranger-reproducible clone-and-run).

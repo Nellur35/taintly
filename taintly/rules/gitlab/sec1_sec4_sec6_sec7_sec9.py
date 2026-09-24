@@ -26,6 +26,111 @@ _GITLAB_USER_GATE_RE = re.compile(
 _WHEN_NEVER_RE = re.compile(r"^\s*when\s*:\s*never\b")
 _RULES_ITEM_RE = re.compile(r"^(\s*)-\s")
 
+_RESTRICTIVE_ARTIFACT_ACCESS_RE = re.compile(
+    r"^access\s*:\s*['\"]?(?:developer|maintainer|none)['\"]?(?:\s+#.*)?$",
+    re.IGNORECASE,
+)
+_PRIVATE_ARTIFACT_VISIBILITY_RE = re.compile(
+    r"^public\s*:\s*['\"]?(?:false|no|off|0)['\"]?(?:\s+#.*)?$",
+    re.IGNORECASE,
+)
+_ARTIFACT_INHERITANCE_RE = re.compile(r"^(?:<<\s*:\s*\*|!reference\b|\*\w+)")
+_HIGH_RISK_ARTIFACT_PATH_RE = re.compile(
+    r"(?:"
+    r"(?:^|[/\\])\.env(?:\.[^/\\]+)?(?:$|[/\\])|"
+    r"(?:^|[/\\])\.(?:npmrc|pypirc|netrc)(?:$|[/\\])|"
+    r"(?:^|[/\\])\.ssh(?:$|[/\\])|"
+    r"(?:^|[/\\])\.aws[/\\]credentials(?:$|[/\\])|"
+    r"(?:^|[/\\])id_(?:rsa|dsa|ecdsa|ed25519)(?:$|[/\\])|"
+    r"(?:^|[/\\])(?:credentials?|secrets?)(?:[._-][^/\\]+)?(?:$|[/\\])|"
+    r"(?:^|[/\\])kubeconfig(?:[._-][^/\\]+)?(?:$|[/\\])|"
+    r"(?:^|[/\\])[^/\\]+\.(?:pem|key|p12|pfx|jks|keystore)(?:$|[/\\])|"
+    r"(?:^|[/\\])[^/\\]*\.tfstate(?:\.[^/\\]+)?(?:$|[/\\])|"
+    r"(?:^|[/\\])signed(?:$|[/\\])|"
+    r"(?:^|[/\\])[^/\\]+\.snap(?:$|[/\\])|"
+    r"(?:^|[/\\])gl-(?:sast|dependency-scanning|secret-detection|container-scanning|dast)-report(?:\.[^/\\]+)?(?:$|[/\\])|"
+    r"\$(?:\{)?[A-Z0-9_]*(?:SECRET|CREDENTIAL|PRIVATE_KEY|KUBECONFIG)[A-Z0-9_]*(?:\})?"
+    r")",
+    re.IGNORECASE,
+)
+
+
+class HighRiskArtifactAccessPattern:
+    """Find high-risk GitLab artifact paths without an access control.
+
+    The old SEC9-GL-001 matcher treated every ``artifacts:`` block as a
+    possible data leak. This matcher first proves a stronger local fact: the
+    exact artifact block contains a literal path (or strongly named variable)
+    associated with secrets, private keys, signed pre-release packages, or
+    security findings. Indentation bounds keep evidence, access controls, and
+    inheritance checks inside that block.
+    """
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        results: list[tuple[int, str]] = []
+        for i, line in enumerate(lines):
+            stripped = line.lstrip(" \t")
+            if stripped.startswith("#") or not re.fullmatch(r"artifacts\s*:\s*(?:#.*)?", stripped):
+                continue
+            block_indent = len(line) - len(stripped)
+            block = self._block(lines, i + 1, block_indent)
+            if not block:
+                continue
+            child_indent = min(indent for _, _, indent in block)
+            direct_children = [text for _, text, indent in block if indent == child_indent]
+            if any(_RESTRICTIVE_ARTIFACT_ACCESS_RE.fullmatch(text) for text in direct_children):
+                continue
+            if any(_PRIVATE_ARTIFACT_VISIBILITY_RE.fullmatch(text) for text in direct_children):
+                continue
+            if any(_ARTIFACT_INHERITANCE_RE.match(text) for text in direct_children):
+                continue
+            if self._has_sensitive_path(block, child_indent):
+                results.append((i + 1, stripped.strip()))
+        return results
+
+    @staticmethod
+    def _block(lines: list[str], start: int, parent_indent: int) -> list[tuple[int, str, int]]:
+        block: list[tuple[int, str, int]] = []
+        for i in range(start, len(lines)):
+            raw = lines[i]
+            text = raw.lstrip(" \t")
+            if not text or text.startswith("#"):
+                continue
+            indent = len(raw) - len(text)
+            if indent <= parent_indent:
+                break
+            block.append((i, text.strip(), indent))
+        return block
+
+    @staticmethod
+    def _has_sensitive_path(block: list[tuple[int, str, int]], child_indent: int) -> bool:
+        for pos, (_, text, indent) in enumerate(block):
+            if indent != child_indent:
+                continue
+            inline = re.fullmatch(r"paths\s*:\s*\[(.*)]\s*(?:#.*)?", text)
+            if inline:
+                return any(
+                    HighRiskArtifactAccessPattern._path_is_high_risk(item)
+                    for item in inline.group(1).split(",")
+                )
+            if not re.fullmatch(r"paths\s*:\s*(?:#.*)?", text):
+                continue
+            paths_indent = indent
+            for _, candidate, candidate_indent in block[pos + 1 :]:
+                if candidate_indent <= paths_indent:
+                    break
+                item = re.fullmatch(r"-\s*(.+)", candidate)
+                if item and HighRiskArtifactAccessPattern._path_is_high_risk(item.group(1)):
+                    return True
+        return False
+
+    @staticmethod
+    def _path_is_high_risk(value: str) -> bool:
+        # Bound parsing to the scalar itself. The common quoted forms and glob
+        # characters do not change the security meaning of the path.
+        scalar = value.split(" #", 1)[0].strip().strip("'\"")
+        return bool(scalar and _HIGH_RISK_ARTIFACT_PATH_RE.search(scalar))
+
 
 class GitlabIdentityGatePattern:
     """SEC4-GL-007: a pipeline ``rules:if:`` access-control gate keyed on the
@@ -650,41 +755,31 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC9-GL-001",
-        title="Artifacts block without access restriction in potentially public project",
+        title="High-risk artifact path lacks an access restriction",
         severity=Severity.MEDIUM,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-9",
-        # 2026-04-27 audit: route to review-needed. The threat
-        # narrative ("anonymous users can download these") only
-        # applies to public projects with sensitive artifact content,
-        # neither of which is visible from the CI YAML alone. Field
-        # test (gitlabhq, 2026-04) showed this rule firing on every
-        # job that produces an artifact, dominating the finding
-        # volume on internal projects where the threat doesn't apply.
+        # 2026-09-23 precision audit: the earlier matcher fired on every
+        # artifacts block and proved neither sensitive content nor effective
+        # public visibility. Require a strong secret-bearing path signal while
+        # retaining review-needed because project/pipeline visibility remains
+        # external context.
         review_needed=True,
         confidence="low",
         description=(
-            "Job produces artifacts without specifying an `artifacts:access:` value. In "
-            "public GitLab projects, artifacts are downloadable by anonymous users by "
-            "default. Artifacts may contain build outputs, environment details, dependency "
-            "lists, or log content that reveals internal infrastructure. Valid values for "
-            "`artifacts:access:` are `all` (default), `developer`, and `none` (GitLab 17.x "
-            "also added `maintainer`)."
+            "A job uploads a path whose name strongly indicates credentials, private keys, "
+            "environment secrets, kubeconfig or Terraform state, signed pre-release packages, "
+            "or security scan results, without setting "
+            "a restrictive `artifacts:access:` value or `artifacts:public: false`. In a "
+            "public project whose pipelines are public, `access: all` is the default and "
+            "the artifact can be downloaded by non-members. Project and pipeline visibility "
+            "are not proven by CI YAML, so this finding requires review."
         ),
-        pattern=SequencePattern(
-            pattern_a=r"^\s*artifacts:\s*$",
-            # GitLab CI accepts the access value with optional single or
-            # double quotes (e.g. ``access: "developer"``); the regex
-            # must allow both quoted and unquoted forms.  Pre-2026-05
-            # version did not, producing FPs on every quoted access
-            # declaration (round-2 corpus review, sec9-gl-001.md #29).
-            absent_within=r"""access:\s*['"]?(developer|none|maintainer)['"]?\b""",
-            lookahead_lines=12,
-            exclude=[r"^\s*#"],
-        ),
+        pattern=HighRiskArtifactAccessPattern(),
         remediation=(
-            "Set an explicit access level on artifact blocks. Valid values are "
-            "`all` (default), `developer`, `none`, and `maintainer` (GitLab 17.x+):\n"
+            "Keep secret material out of job artifacts. If the artifact is intentional, "
+            "set an explicit restrictive access level (`developer`, `maintainer`, or "
+            "`none`; `maintainer` requires GitLab 18.4+):\n"
             "\n"
             "artifacts:\n"
             "  access: developer   # was: implicit `all`\n"
@@ -693,12 +788,17 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.gitlab.com/ci/yaml/#artifactsaccess",
         test_positive=[
-            "build:\n  script:\n    - make build\n  artifacts:\n    paths:\n      - dist/",
-            "test:\n  script:\n    - pytest\n  artifacts:\n    reports:\n      junit: report.xml",
+            "build:\n  script:\n    - make build\n  artifacts:\n    paths:\n      - .env",
+            "deploy:\n  script:\n    - make bundle\n  artifacts:\n    paths:\n      - deploy/id_ed25519",
+            "state:\n  script:\n    - terraform apply\n  artifacts:\n    paths: [infra/terraform.tfstate]",
+            "sast:\n  script:\n    - semgrep ci --json > gl-sast-report.json\n  artifacts:\n    paths:\n      - gl-sast-report.json",
+            "release:\n  script:\n    - snapcraft\n  artifacts:\n    paths:\n      - app-edge.snap",
         ],
         test_negative=[
-            "build:\n  script:\n    - make build\n  artifacts:\n    access: developer\n    paths:\n      - dist/",
-            "test:\n  script:\n    - pytest\n  artifacts:\n    access: none\n    reports:\n      junit: report.xml",
+            "build:\n  script:\n    - make build\n  artifacts:\n    paths:\n      - dist/",
+            "test:\n  script:\n    - pytest\n  artifacts:\n    reports:\n      junit: report.xml",
+            "deploy:\n  script:\n    - make bundle\n  artifacts:\n    access: developer\n    paths:\n      - deploy/id_ed25519",
+            "state:\n  script:\n    - terraform apply\n  artifacts:\n    public: false\n    paths:\n      - terraform.tfstate",
             # GitLab CI accepts optional quotes around the value;
             # rule must not FP on either form.
             'test:\n  script:\n    - pytest\n  artifacts:\n    access: "developer"\n    reports:\n      junit: report.xml',
@@ -706,11 +806,10 @@ RULES: list[Rule] = [
         ],
         stride=["I"],
         threat_narrative=(
-            "Artifacts without access restriction in a public project are downloadable by "
-            "anyone who knows the job URL, including unauthenticated users. Build outputs "
-            "may contain compiled binaries, environment dumps, test coverage reports, or "
-            "dependency lockfiles that reveal internal library versions useful for targeted "
-            "attacks."
+            "A public project with public pipelines uploads a high-risk file under the default "
+            "`access: all` policy. A non-member downloads it through the GitLab UI or API and "
+            "obtains credentials, private keys, infrastructure state, signed pre-release "
+            "packages, or vulnerability details."
         ),
     ),
     # =========================================================================

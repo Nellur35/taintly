@@ -22,11 +22,39 @@ from taintly.parsers.gha_expr import (
     iter_expression_bodies,
     result_provenance_paths,
 )
-from taintly.parsers.segmentation import for_each_step
+from taintly.parsers.segmentation import for_each_job, for_each_step
 from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
+from taintly.workflow_corpus import is_fork_reachable
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
+from ._workflow_input_sinks import is_workflow_input_executable_sink
 from .sec3_sec4_supply_chain_ppe import _DANGEROUS_GITHUB_CONTEXT_RE
+
+
+def _iter_run_shell_lines(lines: list[str]):
+    """Yield line, snippet, and source for actual run shell text."""
+
+    run_line_re = re.compile(r"^\s*(?:-\s+)?run\s*:\s*(.*)$")
+    in_run_block = False
+    run_indent = 0
+    for i, line in enumerate(lines):
+        stripped = line.lstrip(" \t")
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(stripped)
+        if in_run_block and indent <= run_indent:
+            in_run_block = False
+        run_match = run_line_re.match(line)
+        if run_match:
+            value = run_match.group(1).strip()
+            if value in {"|", "|-", "|+", ">", ">-", ">+"}:
+                in_run_block = True
+                run_indent = indent
+            else:
+                yield i + 1, line.strip(), value
+            continue
+        if in_run_block:
+            yield i + 1, line.strip(), line
 
 
 class _OutputToRunShellPattern:
@@ -42,41 +70,13 @@ class _OutputToRunShellPattern:
     """
 
     _OUTPUT_RE: re.Pattern[str]  # set by subclass
-    _RUN_LINE_RE = re.compile(r"^\s*(?:-\s+)?run\s*:\s*(.*)$")
 
     def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
-        results: list[tuple[int, str]] = []
-        in_run_block = False
-        run_indent = 0
-        for i, line in enumerate(lines):
-            stripped = line.lstrip(" \t")
-            if not stripped or stripped.startswith("#"):
-                continue
-            indent = len(line) - len(stripped)
-            if in_run_block and indent <= run_indent:
-                in_run_block = False
-            m = self._RUN_LINE_RE.match(line)
-            if m:
-                value = m.group(1).strip()
-                if value in {"|", "|-", "|+", ">", ">-", ">+"}:
-                    in_run_block = True
-                    run_indent = indent
-                    continue
-                if self._OUTPUT_RE.search(value):
-                    results.append((i + 1, line.strip()))
-                continue
-            if in_run_block and self._OUTPUT_RE.search(line):
-                results.append((i + 1, line.strip()))
-        return results
-
-
-class StepOutputShellInterpolationPattern(_OutputToRunShellPattern):
-    """SEC4-GH-021: ``${{ steps.X.outputs.Y }}`` spliced into a shell context.
-    Supports dot-form (``outputs.Y``) and bracket-form (``outputs['Y']``)."""
-
-    _OUTPUT_RE = re.compile(
-        r"\$\{\{\s*steps\.[\w-]+\.outputs(?:\.[\w-]+|\[['\"][^'\"]+['\"]\])\s*\}\}"
-    )
+        return [
+            (line_num, snippet)
+            for line_num, snippet, source in _iter_run_shell_lines(lines)
+            if self._OUTPUT_RE.search(source)
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +222,42 @@ def _has_data_bearing_input(value: str, ctx: PredicateContext) -> bool:
     )
 
 
+_STEP_OUTPUT_REF_RE = re.compile(
+    r"\$\{\{\s*steps\.(?P<step>[\w-]+)\.outputs(?:\.(?P<dot>[\w-]+)"
+    r"|\[['\"](?P<bracket>[^'\"]+)['\"]\])\s*\}\}"
+)
+_GITHUB_OUTPUT_ECHO_RE = re.compile(
+    r"^\s*echo\s+(?P<quote>['\"])(?P<body>.*)(?P=quote)\s*>>\s*"
+    r"(?P<target>['\"]?\$(?:GITHUB_OUTPUT|\{GITHUB_OUTPUT\})['\"]?)\s*$"
+)
+_OUTPUT_BODY_RE = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_-]*)=(?P<value>.*)$")
+_OUTPUT_NAME_HINT_RE = re.compile(r"(?<![$A-Za-z0-9_-])(?P<name>[A-Za-z_][A-Za-z0-9_-]*)(?:=|<<)")
+_SAFE_SHELL_LITERAL_RE = re.compile(r"[A-Za-z0-9 ._+:/-]*")
+_INLINE_RUN_RE = re.compile(r"^\s*(?:-\s*)?run\s*:\s*(?P<body>.+)$")
+_NPM_PUBLISH_DIR_RE = re.compile(
+    r"^\s*\(\s*cd\s+(?P<quote>['\"])(?P<path>[^'\"]+)(?P=quote)\s*&&\s*"
+    r"npm\s+publish\b[^)&|;]*\)\s*$"
+)
+_PACKAGE_VERSION_ASSIGNMENT_RE = re.compile(
+    r"^\s*(?P<var>[A-Za-z_][A-Za-z0-9_]*)=\$\(\s*node\s+-p\s+"
+    r"(?P<outer>['\"])require\((?P<inner>['\"])(?P<file>[^'\"]+/package\.json)"
+    r"(?P=inner)\)\.version(?P=outer)\s*\)\s*$"
+)
+
+
+def _normalise_shell_path(value: str) -> str:
+    value = value.strip().replace("\\", "/")
+    while value.startswith("./"):
+        value = value[2:]
+    return value.rstrip("/")
+
+
+def _is_closed_shell_literal(value: str, quote: str) -> bool:
+    """True for a fixed value that stays inert in common runner shells."""
+
+    return quote not in value and bool(_SAFE_SHELL_LITERAL_RE.fullmatch(value))
+
+
 def _is_shell_sink(path: tuple[object, ...], ctx: PredicateContext) -> bool:
     if (
         len(path) >= 5
@@ -272,6 +308,133 @@ def _is_dispatch_input_in_shell_sink(
     if value.lstrip().startswith("#"):
         return False
     return _is_shell_sink(path, ctx) and _has_data_bearing_input(value, ctx)
+
+
+def _proven_shell_safe_outputs(content: str) -> dict[tuple[str, str, str], int]:
+    """Return same-job outputs whose complete observed value domain is safe.
+
+    The proof is intentionally small and fail-closed. It accepts fixed shell
+    literals and one validator-backed package-version shape. Any unrecognised or
+    mixed write to the same output invalidates the proof.
+    """
+
+    candidates: dict[tuple[str, str, str], list[int]] = {}
+    allow_package_version_proof = not is_fork_reachable(content)
+    for step in for_each_step(content):
+        if not step.id:
+            continue
+
+        validated_package_dir: str | None = None
+        validated_version_variable: str | None = None
+        output_safety: dict[str, bool] = {}
+        unknown_output_name_write = False
+
+        for raw_line in step.body_lines:
+            line = raw_line.strip()
+            inline_run = _INLINE_RUN_RE.match(line)
+            if inline_run:
+                line = inline_run.group("body").strip()
+
+            publish = _NPM_PUBLISH_DIR_RE.match(line)
+            if publish and not any(token in line for token in ("||", ";", "`", "$(")):
+                validated_package_dir = _normalise_shell_path(publish.group("path"))
+                validated_version_variable = None
+                continue
+
+            package_version = _PACKAGE_VERSION_ASSIGNMENT_RE.match(line)
+            if package_version:
+                package_file = _normalise_shell_path(package_version.group("file"))
+                package_dir = package_file[: -len("/package.json")]
+                variable = package_version.group("var")
+                validated_version_variable = (
+                    variable
+                    if allow_package_version_proof and package_dir == validated_package_dir
+                    else None
+                )
+                validated_package_dir = None
+                continue
+
+            if "GITHUB_OUTPUT" not in line:
+                # The semantic proof is deliberately adjacent. Any command
+                # between validation, version extraction, and output emission
+                # can mutate the file or variable, so it expires both facts.
+                if (
+                    line
+                    and not line.startswith("#")
+                    and line not in {"|", "|-", "|+", ">", ">-", ">+"}
+                ):
+                    validated_package_dir = None
+                    validated_version_variable = None
+                continue
+
+            echo_write = _GITHUB_OUTPUT_ECHO_RE.match(line)
+            if echo_write:
+                output = _OUTPUT_BODY_RE.match(echo_write.group("body"))
+                if output:
+                    name = output.group("name")
+                    value = output.group("value")
+                    safe = _is_closed_shell_literal(value, echo_write.group("quote"))
+                    if validated_version_variable and value == f"${validated_version_variable}":
+                        safe = True
+                    output_safety[name] = output_safety.get(name, True) and safe
+                    validated_package_dir = None
+                    validated_version_variable = None
+                    continue
+
+            # We saw a write but could not prove its encoding. If its output
+            # name is visible, explicitly poison that output's domain.
+            hint = _OUTPUT_NAME_HINT_RE.search(line)
+            if hint:
+                output_safety[hint.group("name")] = False
+            else:
+                unknown_output_name_write = True
+            validated_package_dir = None
+            validated_version_variable = None
+
+        for output_name, safe in output_safety.items():
+            if safe and not unknown_output_name_write:
+                key = (step.job_name, step.id, output_name)
+                candidates.setdefault(key, []).append(step.index)
+
+    # Duplicate step IDs are invalid/ambiguous workflow structure. Refuse to
+    # use either producer as proof rather than guessing GitHub's resolution.
+    return {key: indices[0] for key, indices in candidates.items() if len(indices) == 1}
+
+
+class StepOutputShellInterpolationPattern(_OutputToRunShellPattern):
+    """SEC4-GH-021: an unproven step output spliced into shell source."""
+
+    _OUTPUT_RE = _STEP_OUTPUT_REF_RE
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        safe_outputs = _proven_shell_safe_outputs(content)
+        steps = for_each_step(content)
+        results: list[tuple[int, str]] = []
+
+        for line_num, snippet, source in _iter_run_shell_lines(lines):
+            refs = list(_STEP_OUTPUT_REF_RE.finditer(source))
+            if not refs:
+                continue
+            consumer = next(
+                (step for step in steps if step.start_line <= line_num <= step.end_line), None
+            )
+            if consumer is None:
+                results.append((line_num, snippet))
+                continue
+
+            all_safe = True
+            for ref in refs:
+                output_name = ref.group("dot") or ref.group("bracket")
+                producer_index = safe_outputs.get(
+                    (consumer.job_name, ref.group("step"), output_name)
+                )
+                if producer_index is None or producer_index >= consumer.index:
+                    all_safe = False
+                    break
+            if not all_safe:
+                results.append((line_num, snippet))
+
+        return results
 
 
 class GithubScriptDangerousContextPattern:
@@ -661,6 +824,126 @@ class ArgumentInjectionInWithPattern:
         return results
 
 
+_CACHE_MODE_RE = re.compile(
+    r"^(?P<indent>[ \t]*)cache-mode\s*:\s*"
+    r"(?P<mode>write-only|write|read|none)\s*(?:#.*)?$",
+    re.IGNORECASE,
+)
+_DIRECT_CACHE_WRITE_RE = re.compile(
+    r"^\s*(?:-\s*)?uses\s*:\s*actions/cache(?:/save)?@",
+    re.IGNORECASE,
+)
+_SETUP_CACHE_ACTION_RE = re.compile(
+    r"^\s*(?:-\s*)?uses\s*:\s*"
+    r"(?P<action>actions/setup-(?:node|python|go|java|dotnet)|ruby/setup-ruby)@",
+    re.IGNORECASE,
+)
+_SETUP_CACHE_INPUT_RE = re.compile(
+    r"^\s*(?P<key>cache|bundler-cache)\s*:\s*(?P<value>[^#]+?)\s*(?:#.*)?$",
+    re.IGNORECASE,
+)
+
+
+def _workflow_cache_mode(lines: list[str]) -> str | None:
+    """Return a literal workflow-level cache mode, if one is declared."""
+
+    for line in lines:
+        match = _CACHE_MODE_RE.match(line)
+        if match and not match.group("indent"):
+            return match.group("mode").lower()
+    return None
+
+
+def _job_cache_modes(content: str) -> dict[str, str]:
+    """Return literal job-level cache modes without parsing step inputs."""
+
+    modes: dict[str, str] = {}
+    for job in for_each_job(content):
+        if not job.name:
+            continue
+        meaningful = [
+            line for line in job.body_lines if line.strip() and not line.lstrip().startswith("#")
+        ]
+        if not meaningful:
+            continue
+        job_indent = len(meaningful[0]) - len(meaningful[0].lstrip(" \t"))
+        child_indents = [
+            len(line) - len(line.lstrip(" \t"))
+            for line in meaningful[1:]
+            if len(line) - len(line.lstrip(" \t")) > job_indent
+        ]
+        if not child_indents:
+            continue
+        child_indent = min(child_indents)
+        for line in meaningful[1:]:
+            match = _CACHE_MODE_RE.match(line)
+            if match and len(match.group("indent")) == child_indent:
+                modes[job.name] = match.group("mode").lower()
+                break
+    return modes
+
+
+def _cache_write_line(step) -> tuple[int, str] | None:
+    """Locate a GitHub cache write in one parsed workflow step."""
+
+    setup_action = ""
+    cache_input: tuple[int, str, str, str] | None = None
+    for offset, line in enumerate(step.body_lines):
+        if _DIRECT_CACHE_WRITE_RE.match(line):
+            return step.start_line + offset, line.strip()
+        action_match = _SETUP_CACHE_ACTION_RE.match(line)
+        if action_match:
+            setup_action = action_match.group("action").lower()
+        input_match = _SETUP_CACHE_INPUT_RE.match(line)
+        if input_match:
+            cache_input = (
+                step.start_line + offset,
+                line.strip(),
+                input_match.group("key").lower(),
+                input_match.group("value").strip().strip("'\"").lower(),
+            )
+
+    if not setup_action:
+        return None
+    if cache_input is not None:
+        line_num, snippet, key, value = cache_input
+        if value in {"false", "none", "off", "no", "0"}:
+            return None
+        if key == "bundler-cache" and setup_action != "ruby/setup-ruby":
+            return None
+        return line_num, snippet
+    # setup-go enables dependency caching by default unless cache: false.
+    if setup_action == "actions/setup-go":
+        for offset, line in enumerate(step.body_lines):
+            if _SETUP_CACHE_ACTION_RE.match(line):
+                return step.start_line + offset, line.strip()
+    return None
+
+
+class ExplicitLowTrustCacheWritePattern:
+    """Cache write under PRT after an explicit write-capable override.
+
+    GitHub gives low-trust default-branch events read-only cache access.
+    A literal ``cache-mode: write`` or ``write-only`` opts back into the
+    cache-poisoning surface. Job mode overrides workflow mode.
+    """
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if not re.search(_PRT_TRIGGER_RE, content):
+            return []
+        workflow_mode = _workflow_cache_mode(lines)
+        job_modes = _job_cache_modes(content)
+        findings: list[tuple[int, str]] = []
+        for step in for_each_step(content):
+            effective_mode = job_modes.get(step.job_name, workflow_mode)
+            if effective_mode not in {"write", "write-only"}:
+                continue
+            cache_write = _cache_write_line(step)
+            if cache_write is not None:
+                findings.append(cache_write)
+        return findings
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # SEC4-GH-028: argument injection via a command-arg with: input
@@ -865,8 +1148,12 @@ RULES: list[Rule] = [
             "Exploited in the Langflow and Ultralytics supply chain incidents (2024-2025)."
         ),
         pattern=WorkflowAwarePattern(
-            path=["jobs.*.steps[*].run", "jobs.*.steps[*].with.*"],
-            predicate=_is_dispatch_input_in_shell_sink,
+            path=[
+                "jobs.*.steps[*].run",
+                "jobs.*.steps[*].with.*",
+                "jobs.*.with.*",
+            ],
+            predicate=is_workflow_input_executable_sink,
         ),
         remediation=(
             "Never interpolate ${{ inputs.* }} directly into a run: body\n"
@@ -1954,258 +2241,57 @@ RULES: list[Rule] = [
         ),
         incidents=["Ultralytics (Dec 2024, cross-job analog)"],
     ),
-    # =========================================================================
-    # SEC4-GH-023: ``${{ steps.X.outputs.Y }}`` interpolated into shell
+    # SEC4-GH-026 was retired in September 2026. GitHub scopes caches
+    # created by pull_request runs to refs/pull/<number>/merge, so the
+    # base branch and other pull requests cannot restore them. The old
+    # posture rule treated every ordinary PR dependency cache as a
+    # poisoning path and had no defensible positive class.
     #
-    # Step outputs are common transit for attacker-controllable bytes:
-    # an earlier step that scrapes a PR title via ``gh api``, reads a
-    # file the PR author wrote, or captures any ``github.event.*``
-    # value into ``$GITHUB_OUTPUT`` produces an output that carries
-    # attacker bytes.  Splicing that output into a ``run:`` body is
-    # shell injection — same threat shape as ``github.event.X`` direct
-    # splice (SEC4-GH-004), but the taint transits through the
-    # step-output map.  Maps to part of zizmor's
-    # ``template-injection`` audit.
     # =========================================================================
+    # SEC4-GH-026A: explicit cache-write override under pull_request_target.
     # =========================================================================
-    # SEC4-GH-026: cache poisoning surface — fork-reachable trigger writes
-    # to a workflow cache that subsequent privileged runs read from.
-    # =========================================================================
-    # GitHub Actions' cache (``actions/cache`` and ``setup-*`` actions
-    # with ``cache:`` enabled) is partitioned by repository + branch
-    # ref + cache key.  A pull_request workflow that WRITES the cache
-    # creates an entry attacker-controlled in content, keyed on a value
-    # that a later push/release workflow may LOOK UP (cache-restore
-    # falls back across branches via ``restore-keys:``).  When that
-    # later workflow is privileged (write token, OIDC mint, deploy
-    # job), the poisoned cache becomes a PPE chain: PR diff modifies
-    # build output -> cache write captures it -> main-branch build
-    # restores it -> privileged step executes poisoned artifact.
-    #
-    # Single-file shape - gap surfaced by the 2026-05-17 comparison
-    # study; zizmor's ``cache-poisoning`` catches this on the same
-    # workflow; taintly's CHAIN-GH-001 requires cross-workflow
-    # evidence and misses the same-file form.
-    #
-    # Trigger tier split (2026-05-19): pull_request and pull_request_target
-    # have different blast radii.  This rule keeps the plain pull_request
-    # posture signal at INFO + review_needed; SEC4-GH-026A handles the
-    # higher-risk pull_request_target form at MEDIUM.
-    Rule(
-        id="SEC4-GH-026",
-        title="Cache write under pull_request trigger - cache-poisoning surface",
-        severity=Severity.INFO,
-        platform=Platform.GITHUB,
-        owasp_cicd="CICD-SEC-4",
-        description=(
-            "A workflow whose ``on:`` block includes a ``pull_request`` "
-            "trigger (NOT ``pull_request_target`` — see SEC4-GH-026A "
-            "for that) writes to the GitHub Actions cache - either "
-            "via ``uses: actions/cache@`` (the direct form) or via a "
-            "``setup-*`` action with ``cache:`` enabled (the implicit "
-            "form, where ``setup-node``/``setup-python``/``setup-go``/"
-            "``setup-java`` store dependency caches keyed by lockfile "
-            "hash).\n"
-            "\n"
-            "Under ``pull_request``, the workflow runs with a default-"
-            "read-only ``GITHUB_TOKEN`` (since Feb-2023 for newly-"
-            "created orgs).  The cache write surface exists, but the "
-            "actual exploitation path requires a later privileged "
-            "workflow to restore under the same key prefix — that "
-            "cross-trigger shape is XF-GH-001 / XF-GH-001A's domain.  "
-            "This rule fires as a posture signal so the cache write "
-            "is visible during review, not as a confirmed exploit.\n"
-            "\n"
-            "INFO + ``review_needed``: many cache keys are PR-number-"
-            "scoped (``${{ github.run_id }}`` / ``${{ github.event."
-            "number }}``) and never matched by main-branch restores, "
-            "so the threat model only applies when the cache key "
-            "shape allows cross-branch restoration.  Operators who "
-            "want LOW enforcement can override via ``.taintly.yml``."
-        ),
-        pattern=ContextPattern(
-            # Anchor on the cache write - both direct (actions/cache /
-            # actions/cache/save) and the implicit setup-* form
-            # (cache: <package-manager>).
-            anchor=(
-                r"(?:"
-                r"uses:\s+actions/cache(?:/save)?@"
-                r"|cache:\s*(?:true|npm|yarn|pip|pipenv|poetry|gradle|maven|sbt|go|cargo)"
-                r")"
-            ),
-            # Workflow must declare ``pull_request`` (and NOT
-            # ``pull_request_target`` or a ``github.event.pull_request.*``
-            # context reference).  The lookahead chain
-            # ``(?!_target|\.)`` excludes both the superstring
-            # ``pull_request_target`` (SEC4-GH-026A's territory) and
-            # the github-context references like
-            # ``${{ github.event.pull_request.head.sha }}`` which
-            # technically contain ``pull_request`` as a substring but
-            # are NOT the trigger declaration.  Surfaced by the
-            # TanStack kill-chain fixture (tanstack-kill-chain-fixture-v1):
-            # ``pull_request_target`` workflows that also reference
-            # ``github.event.pull_request.head`` would otherwise
-            # co-fire 026 and 026A on the same line.  Tolerant of
-            # block form (``on:\n  pull_request:``) and inline
-            # list/flow forms.
-            requires=r"(?ms)^on:\s*(?:\n\s+|\[?\s*).*?pull_request(?!_target|\.)\b",
-            exclude=[r"^\s*#"],
-        ),
-        remediation=(
-            "Pick one:\n"
-            "  1. Scope the cache key to a value that NEVER matches a "
-            "later non-PR run:\n"
-            "     - ``key: ${{ github.event.number }}-${{ hashFiles('lockfile') }}``\n"
-            "     - Avoid bare ``hashFiles('package-lock.json')`` keys "
-            "without a PR-bound prefix.\n"
-            "  2. Drop ``restore-keys:`` entirely - no fallback means "
-            "no cross-branch lookup.\n"
-            "  3. Move the cache write to a non-PR-triggered workflow "
-            "(``push`` on protected branches only).\n"
-            "  4. If the cache content is build output rather than "
-            "dependency lock material, verify the build output is "
-            "deterministic and re-derived from pinned inputs each run."
-        ),
-        reference=(
-            "https://docs.github.com/en/actions/using-workflows/"
-            "caching-dependencies-to-speed-up-workflows"
-        ),
-        test_positive=[
-            (
-                "on:\n  pull_request:\n    branches: [main]\njobs:\n"
-                "  build:\n    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: actions/cache@v4\n        with:\n"
-                "          path: ./node_modules\n"
-                "          key: ${{ hashFiles('package-lock.json') }}\n"
-            ),
-            (
-                "on:\n  pull_request: {}\njobs:\n  test:\n"
-                "    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: actions/setup-node@v4\n        with:\n"
-                "          node-version: 20\n          cache: npm\n"
-            ),
-        ],
-        test_negative=[
-            # No fork-reachable trigger.
-            (
-                "on:\n  push:\n    branches: [main]\njobs:\n  build:\n"
-                "    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: actions/cache@v4\n        with:\n"
-                "          path: ./out\n"
-                "          key: ${{ hashFiles('lockfile') }}\n"
-            ),
-            # Cache-restore-only - we anchor on the save / unified
-            # cache, not restore-only.
-            (
-                "on:\n  pull_request: {}\njobs:\n  test:\n"
-                "    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: actions/cache/restore@v4\n        with:\n"
-                "          key: ${{ hashFiles('lockfile') }}\n"
-            ),
-            # pull_request_target is SEC4-GH-026A's territory.  The
-            # negative lookahead on ``pull_request(?!_target)`` keeps
-            # this rule silent on the higher-risk trigger.
-            (
-                "on:\n  pull_request_target: {}\njobs:\n  test:\n"
-                "    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: actions/cache@v4\n        with:\n"
-                "          path: ./node_modules\n"
-                "          key: ${{ hashFiles('package-lock.json') }}\n"
-            ),
-            # Comment-only mention.
-            "      # uses: actions/cache@v4",
-        ],
-        stride=["T", "E"],
-        threat_narrative=(
-            "A pull request modifies a built artifact - a webpack "
-            "bundle, a compiled binary, a generated config - in a way "
-            "the lockfile hash doesn't reflect.  The PR-triggered "
-            "workflow's cache write captures the modified output under "
-            "a key derived from the lockfile hash.  Later, a release "
-            "or deploy workflow on main looks up the same key, falls "
-            "back via ``restore-keys:`` to the PR's entry, and runs "
-            "the attacker-shaped bytes with the privileged workflow's "
-            "token.  The lockfile never changed, the PR was never "
-            "merged, but the cache became a transit channel for the "
-            "attacker's payload."
-        ),
-        review_needed=True,
-    ),
-    # =========================================================================
-    # SEC4-GH-026A: cache poisoning surface under pull_request_target.
-    # =========================================================================
+    # GitHub now grants low-trust triggers read-only access to the
+    # default branch cache scope. The risk returns only when a workflow
+    # explicitly declares cache-mode: write or write-only. Job-level
+    # mode overrides workflow-level mode, so the pattern models both.
     Rule(
         id="SEC4-GH-026A",
-        title="Cache write under pull_request_target - cache-poisoning attack surface",
+        title="Explicit cache write under pull_request_target",
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A workflow whose ``on:`` block includes a "
-            "``pull_request_target`` trigger writes to the GitHub "
-            "Actions cache - either via ``uses: actions/cache@`` "
-            "(the direct form) or via a ``setup-*`` action with "
-            "``cache:`` enabled (the implicit form, where "
-            "``setup-node`` / ``setup-python`` / ``setup-go`` / "
-            "``setup-java`` store dependency caches keyed by "
-            "lockfile hash).\n"
+            "A ``pull_request_target`` workflow explicitly opts into "
+            "``cache-mode: write`` or ``write-only`` and contains a "
+            "GitHub Actions cache write. Direct ``actions/cache`` and "
+            "supported setup-action dependency caches are covered.\n"
             "\n"
-            "Unlike plain ``pull_request``, ``pull_request_target`` "
-            "checks out the fork's HEAD but executes with the PARENT "
-            "repo's ``GITHUB_TOKEN`` and any explicit ``permissions:`` "
-            "grants — typically including write scopes.  The cache "
-            "write is a primary attack surface: attacker-controlled "
-            "bytes from the fork are persisted into a cache entry "
-            "indexed by a key the maintainers' downstream workflows "
-            "may later restore from.  Combined with explicit ``write`` "
-            "permissions, the surface is exploitation-ready, not "
-            "posture noise.\n"
+            "GitHub gives low-trust triggers read-only cache access by "
+            "default. The explicit write-capable override removes that "
+            "protection. If the job checks out or executes pull-request "
+            "content, attacker-shaped bytes can enter the default-branch "
+            "cache scope and reach a later trusted workflow.\n"
             "\n"
-            "Restore-only forms (``actions/cache/restore``) are not "
-            "anchored - they read but do not write the poisoned "
-            "entry; the actual exploitation is the WRITE, not the "
-            "read.  Cross-workflow restoration of a previously-"
-            "poisoned cache is XF-GH-001 / XF-GH-001A's domain."
+            "The rule stays silent for the secure default, explicit "
+            "``read`` or ``none`` modes, restore-only actions, and "
+            "ordinary ``pull_request`` caches confined to the merge ref."
         ),
-        pattern=ContextPattern(
-            # Same anchor as SEC4-GH-026 — cache write only.
-            anchor=(
-                r"(?:"
-                r"uses:\s+actions/cache(?:/save)?@"
-                r"|cache:\s*(?:true|npm|yarn|pip|pipenv|poetry|gradle|maven|sbt|go|cargo)"
-                r")"
-            ),
-            # Workflow must declare ``pull_request_target`` (the
-            # ``_target`` suffix is required — plain ``pull_request``
-            # is SEC4-GH-026's territory at INFO).
-            requires=r"(?ms)^on:\s*(?:\n\s+|\[?\s*).*?pull_request_target\b",
-            exclude=[r"^\s*#"],
-        ),
+        pattern=ExplicitLowTrustCacheWritePattern(),
         remediation=(
             "Pick one:\n"
-            "  1. Move the cache write to a separate ``push``-only "
-            "workflow on protected branches.  ``pull_request_target`` "
-            "should run only the minimal, read-only steps required "
-            "for the trusted post-merge logic.\n"
-            "  2. If the cache write must remain in the PRT workflow, "
-            "drop ``permissions:`` to ``contents: read`` (or finer) "
-            "and verify the cache content is deterministic from "
-            "non-attacker-controlled inputs.\n"
-            "  3. Switch to ``actions/cache/restore@`` (read-only) "
-            "and let a separate post-merge workflow do the save.\n"
-            "  4. Scope the cache key to a value that NEVER matches "
-            "a later non-PRT run (e.g. include "
-            "``${{ github.event.number }}`` as a key prefix)."
+            "  1. Remove the write-capable ``cache-mode`` override and "
+            "use GitHub's read-only default for this trigger.\n"
+            "  2. Set ``cache-mode: read`` or ``none`` explicitly.\n"
+            "  3. Move cache creation to a trusted ``push`` or scheduled "
+            "workflow, leaving this workflow restore-only.\n"
+            "  4. If writing is unavoidable, do not execute pull-request "
+            "content and isolate keys from trusted workflow consumers."
         ),
-        reference=(
-            "https://docs.github.com/en/actions/security-for-github-actions/"
-            "security-guides/security-hardening-for-github-actions"
-            "#using-the-pull_request_target-event"
-        ),
+        reference="https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#cache-access-for-low-trust-workflow-triggers",
         test_positive=[
             (
                 "on:\n  pull_request_target:\n    branches: [main]\n"
-                "permissions:\n  contents: write\n"
+                "cache-mode: write\n"
                 "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: actions/cache@v4\n"
                 "        with:\n          path: ./node_modules\n"
@@ -2213,13 +2299,13 @@ RULES: list[Rule] = [
             ),
             (
                 "on:\n  pull_request_target: {}\njobs:\n  test:\n"
-                "    runs-on: ubuntu-latest\n    steps:\n"
+                "    runs-on: ubuntu-latest\n    cache-mode: write-only\n    steps:\n"
                 "      - uses: actions/setup-node@v4\n        with:\n"
                 "          node-version: 20\n          cache: npm\n"
             ),
         ],
         test_negative=[
-            # pull_request (no _target) is SEC4-GH-026's territory.
+            # Plain pull_request caches remain confined to the merge ref.
             (
                 "on:\n  pull_request:\n    branches: [main]\n"
                 "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
@@ -2236,7 +2322,7 @@ RULES: list[Rule] = [
             ),
             # Restore-only under pull_request_target.
             (
-                "on:\n  pull_request_target: {}\njobs:\n  test:\n"
+                "on:\n  pull_request_target: {}\ncache-mode: write\njobs:\n  test:\n"
                 "    runs-on: ubuntu-latest\n    steps:\n"
                 "      - uses: actions/cache/restore@v4\n        with:\n"
                 "          key: ${{ hashFiles('lockfile') }}\n"
@@ -2244,18 +2330,11 @@ RULES: list[Rule] = [
         ],
         stride=["T", "E", "I"],
         threat_narrative=(
-            "A maintainer enables ``pull_request_target`` so the CI "
-            "build can post comments / labels / status checks on "
-            "external PRs.  The build also caches ``node_modules`` "
-            "or pip wheels keyed on ``hashFiles('package-lock.json')``.  "
-            "An attacker opens a PR that modifies ``package-lock.json`` "
-            "to point at a malicious tarball; the CI build runs "
-            "(with parent-repo permissions), the cache write captures "
-            "the malicious dependency layer indexed by the new lockfile "
-            "hash.  A maintainer's later release workflow on ``push`` "
-            "computes the same hash, restores the poisoned cache, and "
-            "publishes the malicious build artefacts under the "
-            "maintainer's signing identity."
+            "A maintainer opts a pull_request_target job back into cache "
+            "writes and then builds the pull request head. The untrusted "
+            "build places attacker-shaped files in a cache key later used "
+            "by a trusted push or release run. That run restores and "
+            "executes the poisoned files with its stronger credentials."
         ),
     ),
     Rule(

@@ -11,7 +11,11 @@ Rule IDs use the LOTP-<PLATFORM>-<NN> scheme so the category stays
 recognisable once GitLab and Jenkins LOTP rules land in follow-up PRs.
 """
 
+import re
+
 from taintly.models import ContextPattern, Platform, Rule, Severity
+from taintly.parsers.gha_expr import ExprSyntaxError, context_paths, iter_expression_bodies
+from taintly.parsers.segmentation import JobSegment, StepSegment, for_each_job, for_each_step
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 
@@ -66,6 +70,222 @@ _CROSS_WORKFLOW_UNTRUSTED_ARTIFACT = (
 
 
 # ---------------------------------------------------------------------------
+# LOTP-GH-001 execution-path model
+# ---------------------------------------------------------------------------
+
+_PR_HEAD_PATH_RE = re.compile(
+    r"(?:github\.event\.pull_request\.head\.(?:sha|ref)|github\.head_ref)",
+    re.IGNORECASE,
+)
+_CHECKOUT_ACTION_RE = re.compile(
+    r"^\s*(?:-\s*)?uses\s*:\s*['\"]?actions/checkout@", re.IGNORECASE | re.MULTILINE
+)
+_REF_LINE_RE = re.compile(r"^\s*ref\s*:\s*(.*?)\s*(?:#.*)?$", re.MULTILINE)
+_STATIC_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+_GIT_SOURCE_CHANGE_RE = re.compile(
+    r"\bgit\s+(?:checkout|switch)\s+(?:(?:--detach|--force)\s+)?(?P<ref>[^\s;&|]+)",
+    re.IGNORECASE,
+)
+_STEP_IF_RE = re.compile(r"^\s*(?:-\s*)?if\s*:\s*(.*?)\s*$")
+_EVENT_EQ_RE = re.compile(
+    r"github\.event_name\s*==\s*['\"](?P<event>[A-Za-z_]+)['\"]"
+    r"|['\"](?P<reverse>[A-Za-z_]+)['\"]\s*==\s*github\.event_name",
+    re.IGNORECASE,
+)
+_BUILD_TOOL_RE = re.compile(_BUILD_TOOL_ANCHOR)
+
+_TRUSTED = "trusted"
+_UNTRUSTED = "untrusted"
+_UNKNOWN = "unknown"
+
+
+def _contains_pr_head_reference(text: str) -> bool:
+    """Return whether text carries a PR-head source reference.
+
+    The structural path handles bracket access and context-name casing.  The
+    regex fallback preserves coverage when an expression is incomplete or the
+    structural parser declines it.
+    """
+
+    if _PR_HEAD_PATH_RE.search(text):
+        return True
+    try:
+        return any(
+            _PR_HEAD_PATH_RE.search(path)
+            for body in iter_expression_bodies(text)
+            for path in context_paths(body)
+        )
+    except ExprSyntaxError:
+        return False
+
+
+def _direct_if(step: StepSegment) -> str:
+    """Return a step's direct scalar ``if:`` value, or empty on ambiguity."""
+
+    if not step.body_lines:
+        return ""
+    first = step.body_lines[0]
+    first_indent = len(first) - len(first.lstrip())
+    body_indent = first_indent + 2
+    for line in step.body_lines:
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(stripped)
+        if indent not in {first_indent, body_indent}:
+            continue
+        match = _STEP_IF_RE.match(line)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if value in {"|", "|-", "|+", ">", ">-", ">+"}:
+            return ""
+        return value
+    return ""
+
+
+def _excludes_pr_path(condition: str) -> bool:
+    """Prove that a simple condition cannot execute on a PR event.
+
+    Only a conjunctive exact event comparison is accepted.  Disjunctions,
+    functions, dynamic comparands, and malformed expressions fail closed.
+    """
+
+    expr = condition.strip()
+    if not expr:
+        return False
+    if expr.startswith("${{") and expr.endswith("}}"):
+        expr = expr[3:-2].strip()
+    if "||" in expr:
+        return False
+    matches = list(_EVENT_EQ_RE.finditer(expr))
+    if not matches:
+        return False
+    if any("!" in expr[: match.start()] for match in matches):
+        return False
+    events = {(m.group("event") or m.group("reverse") or "").lower() for m in matches}
+    return bool(events) and events.isdisjoint({"pull_request", "pull_request_target"})
+
+
+def _checkout_action_state(step: StepSegment) -> str | None:
+    """Return the source state established by an actions/checkout step."""
+
+    if not _CHECKOUT_ACTION_RE.search(step.text):
+        return None
+    if _contains_pr_head_reference(step.text):
+        return _UNTRUSTED
+    refs = [match.group(1).strip().strip("'\"") for match in _REF_LINE_RE.finditer(step.text)]
+    if len(refs) == 1 and _STATIC_REF_RE.fullmatch(refs[0]):
+        return _TRUSTED
+    # Default checkout and dynamic refs depend on the event and repository
+    # state.  Retain findings until that state can be proved.
+    return _UNKNOWN
+
+
+def _git_source_change(line: str) -> tuple[int, str] | None:
+    """Return ``(column, source_state)`` for a shell git source change."""
+
+    match = _GIT_SOURCE_CHANGE_RE.search(line)
+    if not match:
+        return None
+    ref = match.group("ref").strip("'\"")
+    if ref == "--":
+        # ``git checkout -- path`` restores a path; it does not select a ref.
+        return None
+    if _contains_pr_head_reference(line):
+        return (match.start(), _UNTRUSTED)
+    if _STATIC_REF_RE.fullmatch(ref) and not ref.startswith("-"):
+        return (match.start(), _TRUSTED)
+    return (match.start(), _UNKNOWN)
+
+
+def _job_for_line(jobs: list[JobSegment], line: int) -> JobSegment | None:
+    return next((job for job in jobs if job.start_line <= line <= job.end_line), None)
+
+
+class _OrderedPrBuildPattern(ContextPattern):
+    """Keep build matches only on a feasible PR-head execution path.
+
+    ``ContextPattern`` supplies the existing mutation-hardened anchor and
+    source evidence.  This wrapper adds two conservative facts that the
+    job-wide join cannot express: source-revision state in step order and a
+    step guard that is mutually exclusive with PR events.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            anchor=_BUILD_TOOL_ANCHOR,
+            requires=_PR_HEAD_CHECKOUT,
+            scope="job",
+            exclude=[r"^\s*#"],
+            expr_augment_requires=True,
+        )
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        # Keep the public rule's ref-line gate. Canonicalize only a parsed
+        # PR-head expression in a ref value so bracket/case spelling cannot
+        # bypass it; unrelated PR references never satisfy the gate.
+        gated_lines = [
+            re.sub(
+                r"^(\s*ref\s*:).*$",
+                r"\1 ${{ github.event.pull_request.head.sha }}",
+                line,
+            )
+            if re.match(r"^\s*ref\s*:", line) and _contains_pr_head_reference(line)
+            else line
+            for line in lines
+        ]
+        raw = super().check("\n".join(gated_lines), gated_lines)
+        if not raw:
+            return []
+
+        jobs = [job for job in for_each_job(content) if job.name]
+        steps = for_each_step(content)
+        if not jobs or not steps:
+            return raw
+
+        raw_by_line = dict(raw)
+        kept: set[int] = set()
+        resolved: set[int] = set()
+
+        for job in jobs:
+            job_lines = {line for line in raw_by_line if job.start_line <= line <= job.end_line}
+            if not job_lines:
+                continue
+            state = _TRUSTED
+            for step in (step for step in steps if step.job_name == job.name):
+                step_candidates = {
+                    line for line in job_lines if step.start_line <= line <= step.end_line
+                }
+                pr_excluded = _excludes_pr_path(_direct_if(step))
+                checkout_state = _checkout_action_state(step)
+
+                for offset, source_line in enumerate(step.body_lines):
+                    absolute_line = step.start_line + offset
+                    transition = _git_source_change(source_line)
+                    anchor = _BUILD_TOOL_RE.search(source_line)
+                    if transition and (not anchor or transition[0] <= anchor.start()):
+                        state = transition[1]
+
+                    if absolute_line not in step_candidates:
+                        continue
+                    resolved.add(absolute_line)
+                    if not pr_excluded and state != _TRUSTED:
+                        kept.add(absolute_line)
+
+                    if transition and anchor and transition[0] > anchor.start():
+                        state = transition[1]
+
+                if checkout_state is not None:
+                    state = checkout_state
+
+        # Any match outside a resolvable step remains visible.  Parser gaps must
+        # never become silent suppressions.
+        kept.update(set(raw_by_line) - resolved)
+        return [(line, snippet) for line, snippet in raw if line in kept]
+
+
+# ---------------------------------------------------------------------------
 # Rules
 # ---------------------------------------------------------------------------
 
@@ -93,14 +313,13 @@ RULES: list[Rule] = [
             "with the workflow's permissions and secrets. This is the pattern "
             "that compromised Ultralytics YOLO in December 2024: a workflow "
             "checked out a fork PR and ran `pip install`, which executed "
-            "setup.py from the fork."
+            "setup.py from the fork. Taintly follows explicit checkout and "
+            "branch-switch operations in step order, and excludes a build "
+            "step only when a fixed trusted ref or a mutually exclusive "
+            "non-PR event guard is proven. Dynamic source changes and complex "
+            "guards remain visible for review."
         ),
-        pattern=ContextPattern(
-            anchor=_BUILD_TOOL_ANCHOR,
-            requires=_PR_HEAD_CHECKOUT,
-            scope="job",
-            exclude=[r"^\s*#"],
-        ),
+        pattern=_OrderedPrBuildPattern(),
         remediation=(
             "Do not run build tools in a job that has checked out untrusted "
             "PR code alongside your secrets. Apply one of the following:\n"

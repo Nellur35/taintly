@@ -3,6 +3,8 @@ name: prt cache write anchor
 on:
   pull_request_target:
 
+cache-mode: write
+
 permissions:
   contents: write
 
