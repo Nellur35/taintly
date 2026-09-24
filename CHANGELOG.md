@@ -87,6 +87,8 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   remote-tracking branch checkout; known base-repository fetches stay trusted.
 - Local branch changes, Git pull and clone paths, and exact fetched refs now
   preserve source provenance through later local builds.
+- Branch creation and all-remotes fetches now carry source provenance;
+  a clone into a new subdirectory does not taint the original build directory.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

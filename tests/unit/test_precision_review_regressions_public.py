@@ -1876,3 +1876,45 @@ jobs:
 """
     assert _fires("LOTP-GH-001", workflow)
     assert _fires("LOTP-GH-003", workflow)
+
+
+def test_local_branch_created_from_pr_fetch_keeps_provenance() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch origin refs/pull/${{ github.event.pull_request.number }}/head; git branch candidate FETCH_HEAD; git checkout candidate; npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_fetch_all_tracks_known_fork_remote_refs() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git remote add fork https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git; git fetch --all; git checkout fork/main; npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_clone_without_destination_does_not_taint_original_directory() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git clone ${{ github.event.pull_request.head.repo.clone_url }}; npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)

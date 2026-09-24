@@ -670,6 +670,53 @@ def _git_fetch_events(
     return events
 
 
+def _git_fetch_all_events(line: str, mask: list[bool]) -> list[tuple[int, tuple[str, ...]]]:
+    """Recognize an executable fetch of every configured remote."""
+
+    events: list[tuple[int, tuple[str, ...]]] = []
+    for column, command in _shell_command_segments(line, mask):
+        tokens = _shell_command_tokens(command)
+        if tokens is None:
+            continue
+        invocation = _git_command_index(tokens)
+        if invocation is None:
+            continue
+        index, paths = invocation
+        if (
+            index < len(tokens)
+            and tokens[index].lower() == "fetch"
+            and "--all" in tokens[index + 1 :]
+            and "--dry-run" not in tokens[index + 1 :]
+        ):
+            events.append((column, paths))
+    return events
+
+
+def _git_branch_events(
+    line: str, mask: list[bool]
+) -> list[tuple[int, str, str | None, tuple[str, ...]]]:
+    """Track local branch creation from an explicit or current start point."""
+
+    events: list[tuple[int, str, str | None, tuple[str, ...]]] = []
+    for column, command in _shell_command_segments(line, mask):
+        tokens = _shell_command_tokens(command)
+        if tokens is None:
+            continue
+        invocation = _git_command_index(tokens)
+        if invocation is None:
+            continue
+        index, paths = invocation
+        if index >= len(tokens) or tokens[index].lower() != "branch":
+            continue
+        args = tokens[index + 1 :]
+        while args and args[0] in {"-f", "--force"}:
+            args = args[1:]
+        if not 1 <= len(args) <= 2 or not _STATIC_REF_RE.fullmatch(args[0]):
+            continue
+        events.append((column, args[0], args[1] if len(args) == 2 else None, paths))
+    return events
+
+
 def _git_remote_events(
     line: str, mask: list[bool]
 ) -> list[tuple[int, str, str, tuple[str, ...], str]]:
@@ -1169,6 +1216,8 @@ class _OrderedPrBuildPattern(ContextPattern):
                     fetch_writes: dict[int, bool] = {}
                     fetch_remotes: dict[int, str] = {}
                     fetch_sources: dict[int, str | None] = {}
+                    fetch_all_paths: dict[int, tuple[str, ...]] = {}
+                    branch_changes: dict[int, tuple[str, str | None, tuple[str, ...]]] = {}
                     clone_states: dict[int, tuple[str, str | None, tuple[str, ...]]] = {}
                     changed_remotes: dict[int, tuple[str, str, tuple[str, ...], str]] = {}
                     gh_worktrees: dict[int, str | None] = {}
@@ -1199,6 +1248,12 @@ class _OrderedPrBuildPattern(ContextPattern):
                         ):
                             changed_remotes[column] = remote, state, paths, mode
                             events.append((column, "remote", None))
+                        for column, paths in _git_fetch_all_events(shell_line, shell_mask):
+                            fetch_all_paths[column] = paths
+                            events.append((column, "fetch-all", None))
+                        for column, name, ref, paths in _git_branch_events(shell_line, shell_mask):
+                            branch_changes[column] = name, ref, paths
+                            events.append((column, "branch", None))
                         for column, state, path, paths in _git_clone_events(shell_line, shell_mask):
                             clone_states[column] = state, path, paths
                             events.append((column, "clone", None))
@@ -1289,6 +1344,59 @@ class _OrderedPrBuildPattern(ContextPattern):
                                     refs = fetched_refs.setdefault(source_key, {})
                                     refs[f"{remote}/*"] = states[remote]
                                     refs["FETCH_HEAD"] = states[remote]
+                        elif kind == "fetch-all":
+                            fetch_cwd = cwd
+                            for git_path in fetch_all_paths[column]:
+                                fetch_cwd = (
+                                    _literal_workspace_path(git_path, fetch_cwd)
+                                    if fetch_cwd is not None
+                                    else None
+                                )
+                            if fetch_cwd is None:
+                                uncertain_layout = True
+                            else:
+                                source_key = _source_key(sources, fetch_cwd)
+                                refs = fetched_refs.setdefault(source_key, {})
+                                states = {"origin": _TRUSTED}
+                                states.update(remote_states.get(source_key, {}))
+                                combined: str | None = None
+                                for remote, state in states.items():
+                                    refs[f"{remote}/*"] = state
+                                    combined = (
+                                        state
+                                        if combined is None
+                                        else _join_source_states(combined, state)
+                                    )
+                                if combined is not None:
+                                    refs["FETCH_HEAD"] = combined
+                        elif kind == "branch":
+                            name, start_ref, paths = branch_changes[column]
+                            branch_cwd = cwd
+                            for git_path in paths:
+                                branch_cwd = (
+                                    _literal_workspace_path(git_path, branch_cwd)
+                                    if branch_cwd is not None
+                                    else None
+                                )
+                            if branch_cwd is None:
+                                uncertain_layout = True
+                            else:
+                                source_key = _source_key(sources, branch_cwd)
+                                if start_ref is None:
+                                    branch_state = sources.get(source_key, (_UNKNOWN, False))[0]
+                                else:
+                                    branch_state = fetched_refs.get(source_key, {}).get(
+                                        start_ref,
+                                        local_branches.get(source_key, {}).get(
+                                            start_ref,
+                                            _UNTRUSTED
+                                            if _contains_pr_head_reference(start_ref)
+                                            else _TRUSTED
+                                            if _STATIC_REF_RE.fullmatch(start_ref)
+                                            else _UNKNOWN,
+                                        ),
+                                    )
+                                local_branches.setdefault(source_key, {})[name] = branch_state
                         elif kind == "clone":
                             clone_state, clone_path, paths = clone_states[column]
                             clone_cwd = cwd
@@ -1303,9 +1411,9 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 if clone_path is not None and clone_cwd is not None
                                 else None
                             )
-                            if destination is None:
+                            if clone_path is not None and destination is None:
                                 uncertain_layout = True
-                            else:
+                            elif destination is not None:
                                 sources[destination] = clone_state, clone_state != _TRUSTED
                         elif kind in {"fetch", "pull"}:
                             fetch_cwd = cwd
