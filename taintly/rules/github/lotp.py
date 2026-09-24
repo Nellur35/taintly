@@ -11,7 +11,9 @@ Rule IDs use the LOTP-<PLATFORM>-<NN> scheme so the category stays
 recognisable once GitLab and Jenkins LOTP rules land in follow-up PRs.
 """
 
+import posixpath
 import re
+from collections.abc import Sequence
 
 from taintly.models import ContextPattern, Platform, Rule, Severity
 from taintly.parsers.gha_expr import ExprSyntaxError, context_paths, iter_expression_bodies
@@ -85,7 +87,14 @@ _CHECKOUT_ACTION_RE = re.compile(
 )
 _REF_LINE_RE = re.compile(r"^\s*ref\s*:\s*(.*?)\s*(?:#.*)?$", re.MULTILINE)
 _REPOSITORY_LINE_RE = re.compile(r"^\s*repository\s*:\s*(.*?)\s*(?:#.*)?$", re.MULTILINE)
+_CHECKOUT_PATH_LINE_RE = re.compile(r"^\s*path\s*:\s*(.*?)\s*(?:#.*)?$", re.MULTILINE)
+_WORKING_DIRECTORY_LINE_RE = re.compile(r"^\s*(?:-\s*)?working-directory\s*:\s*(.*?)\s*$")
+_SHELL_CD_RE = re.compile(
+    r"(?:^\s*(?:-\s*)?run\s*:\s*|^\s*|[;&|]\s*)cd\s+(?P<path>[^\s;&|]+)",
+    re.IGNORECASE,
+)
 _STATIC_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+_STATIC_PATH_RE = re.compile(r"[A-Za-z0-9._/-]+\Z")
 _GIT_SOURCE_CHANGE_RE = re.compile(
     r"\bgit\s+(?:checkout|switch)\s+(?:(?:--detach|--force)\s+)?(?P<ref>[^\s;&|]+)",
     re.IGNORECASE,
@@ -183,30 +192,110 @@ def _excludes_pr_path(condition: str) -> bool:
     return bool(events) and events.isdisjoint({"pull_request", "pull_request_target"})
 
 
-def _checkout_action_state(step: StepSegment) -> tuple[str, bool] | None:
-    """Return source state and whether checkout selected another repository."""
+def _literal_workspace_path(value: str, base: str = ".") -> str | None:
+    """Resolve a simple relative workspace path; ambiguity must stay visible."""
+
+    value = value.strip().strip("'\"").replace("\\", "/")
+    if not value or not _STATIC_PATH_RE.fullmatch(value) or value.startswith("/"):
+        return None
+    path = posixpath.normpath(posixpath.join(base, value))
+    if path == ".." or path.startswith("../"):
+        return None
+    return path
+
+
+def _checkout_action_state(step: StepSegment) -> tuple[str, bool, str | None] | None:
+    """Return source state, repository provenance, and checkout path."""
 
     if not _CHECKOUT_ACTION_RE.search(step.text):
         return None
+    paths = [match.group(1) for match in _CHECKOUT_PATH_LINE_RE.finditer(step.text)]
+    path = "." if not paths else _literal_workspace_path(paths[0]) if len(paths) == 1 else None
     repositories = [
         match.group(1).strip().strip("'\"") for match in _REPOSITORY_LINE_RE.finditer(step.text)
     ]
     if repositories:
         if len(repositories) != 1:
-            return _UNKNOWN, True
+            return _UNKNOWN, True, path
         if _contains_pr_head_reference(repositories[0]):
-            return _UNTRUSTED, True
+            return _UNTRUSTED, True, path
         if repositories[0] != "${{ github.repository }}":
             # A fixed branch in another repository cannot prove base trust.
-            return _UNKNOWN, True
+            return _UNKNOWN, True, path
     if _contains_pr_head_reference(step.text):
-        return _UNTRUSTED, False
+        return _UNTRUSTED, False, path
     refs = [match.group(1).strip().strip("'\"") for match in _REF_LINE_RE.finditer(step.text)]
     if len(refs) == 1 and _STATIC_REF_RE.fullmatch(refs[0]):
-        return _TRUSTED, False
+        return _TRUSTED, False, path
     # Default checkout and dynamic refs depend on the event and repository
     # state.  Retain findings until that state can be proved.
-    return _UNKNOWN, False
+    return _UNKNOWN, False, path
+
+
+def _step_working_path(step: StepSegment, default_path: str | None) -> str | None:
+    """Return a direct step working directory, or the inherited default."""
+
+    if not step.body_lines:
+        return default_path
+    first_indent = len(step.body_lines[0]) - len(step.body_lines[0].lstrip())
+    child_indents = [
+        len(line) - len(line.lstrip())
+        for line in step.body_lines[1:]
+        if line.strip() and len(line) - len(line.lstrip()) > first_indent
+    ]
+    direct_indent = min(child_indents) if child_indents else first_indent + 2
+    matches = [
+        match.group(1)
+        for line in step.body_lines
+        if len(line) - len(line.lstrip()) in {first_indent, direct_indent}
+        if (match := _WORKING_DIRECTORY_LINE_RE.match(line))
+    ]
+    return (
+        default_path
+        if not matches
+        else _literal_workspace_path(matches[0])
+        if len(matches) == 1
+        else None
+    )
+
+
+def _default_working_path(
+    lines: Sequence[str], defaults_indent: int, fallback: str | None
+) -> str | None:
+    """Read only ``defaults.run.working-directory`` at the expected scope."""
+
+    active_defaults: int | None = None
+    active_run: int | None = None
+    values: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if active_run is not None and indent <= active_run:
+            active_run = None
+        if active_defaults is not None and indent <= active_defaults:
+            active_defaults = None
+        if stripped == "defaults:" and indent == defaults_indent:
+            active_defaults = indent
+        elif active_defaults is not None and stripped == "run:" and indent > active_defaults:
+            active_run = indent
+        elif active_run is not None and indent > active_run:
+            match = _WORKING_DIRECTORY_LINE_RE.match(line)
+            if match:
+                values.append(match.group(1))
+    return (
+        fallback if not values else _literal_workspace_path(values[0]) if len(values) == 1 else None
+    )
+
+
+def _source_key(sources: dict[str, tuple[str, bool]], cwd: str) -> str:
+    """Find the nearest checkout root containing a working directory."""
+
+    path = cwd
+    while path not in sources and path != ".":
+        path = posixpath.dirname(path) or "."
+    return path
 
 
 def _source_after_ref_change(state: str, foreign_repository: bool, target: str) -> str:
@@ -289,42 +378,80 @@ class _OrderedPrBuildPattern(ContextPattern):
         raw_by_line = dict(raw)
         kept: set[int] = set()
         resolved: set[int] = set()
+        workflow_default = _default_working_path(lines, 0, ".")
 
         for job in jobs:
             job_lines = {line for line in raw_by_line if job.start_line <= line <= job.end_line}
             if not job_lines:
                 continue
-            state = _TRUSTED
-            foreign_repository = False
-            for step in (step for step in steps if step.job_name == job.name):
+            job_steps = [step for step in steps if step.job_name == job.name]
+            first_step_line = min((step.start_line for step in job_steps), default=job.end_line + 1)
+            job_header_indent = len(job.body_lines[0]) - len(job.body_lines[0].lstrip())
+            pre_step_lines = job.body_lines[: first_step_line - job.start_line]
+            child_indents = [
+                len(line) - len(line.lstrip())
+                for line in pre_step_lines[1:]
+                if line.strip() and len(line) - len(line.lstrip()) > job_header_indent
+            ]
+            default_path = _default_working_path(
+                pre_step_lines,
+                min(child_indents) if child_indents else job_header_indent + 2,
+                workflow_default,
+            )
+            sources: dict[str, tuple[str, bool]] = {".": (_TRUSTED, False)}
+            uncertain_layout = False
+            for step in job_steps:
                 step_candidates = {
                     line for line in job_lines if step.start_line <= line <= step.end_line
                 }
                 pr_excluded = _excludes_pr_path(_direct_if(step))
                 checkout_state = _checkout_action_state(step)
+                cwd = _step_working_path(step, default_path)
 
                 for offset, source_line in enumerate(step.body_lines):
                     absolute_line = step.start_line + offset
                     transition = _git_source_change(source_line)
                     anchor = self._source_anchor_re.search(source_line)
-                    if (
-                        not pr_excluded
-                        and transition
-                        and (not anchor or transition[0] <= anchor.start())
-                    ):
-                        state = _source_after_ref_change(state, foreign_repository, transition[1])
-
-                    if absolute_line not in step_candidates:
-                        continue
-                    resolved.add(absolute_line)
-                    if not pr_excluded and state != _TRUSTED:
-                        kept.add(absolute_line)
-
-                    if not pr_excluded and transition and anchor and transition[0] > anchor.start():
-                        state = _source_after_ref_change(state, foreign_repository, transition[1])
+                    events: list[tuple[int, str, str | None]] = []
+                    for cd_match in _SHELL_CD_RE.finditer(source_line):
+                        events.append((cd_match.start(), "cd", cd_match.group("path")))
+                    if transition:
+                        events.append((transition[0], "git", transition[1]))
+                    if anchor and absolute_line in step_candidates:
+                        events.append((anchor.start(), "build", None))
+                    for _, kind, value in sorted(events):
+                        if pr_excluded:
+                            if kind == "build":
+                                resolved.add(absolute_line)
+                            continue
+                        if kind == "cd":
+                            cwd = _literal_workspace_path(value or "", cwd) if cwd else None
+                        elif kind == "git":
+                            if cwd is None:
+                                uncertain_layout = True
+                            else:
+                                source_key = _source_key(sources, cwd)
+                                state, foreign = sources.get(source_key, (_UNKNOWN, False))
+                                sources[source_key] = (
+                                    _source_after_ref_change(state, foreign, value or _UNKNOWN),
+                                    foreign,
+                                )
+                        else:
+                            resolved.add(absolute_line)
+                            if (
+                                uncertain_layout
+                                or cwd is None
+                                or sources.get(_source_key(sources, cwd), (_UNKNOWN, False))[0]
+                                != _TRUSTED
+                            ):
+                                kept.add(absolute_line)
 
                 if checkout_state is not None and not pr_excluded:
-                    state, foreign_repository = checkout_state
+                    state, foreign_repository, checkout_path = checkout_state
+                    if checkout_path is None:
+                        uncertain_layout = True
+                    else:
+                        sources[checkout_path] = state, foreign_repository
 
         # Any match outside a resolvable step remains visible.  Parser gaps must
         # never become silent suppressions.

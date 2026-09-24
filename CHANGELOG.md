@@ -37,6 +37,10 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   action inputs no longer prove that a step output is safe for shell use.
 - Cache-write findings use the parsed workflow trigger, so trigger-looking
   text in a push-only shell script does not create a false warning.
+- PR-source findings now track side-by-side checkout paths and the build step's
+  working directory, including simple `cd` chains and run defaults. Unresolved
+  paths stay visible. Cache-write rules recognize quoted literal modes and
+  quoted cache action references.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

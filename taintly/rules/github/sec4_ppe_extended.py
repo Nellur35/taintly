@@ -870,15 +870,15 @@ class ArgumentInjectionInWithPattern:
 
 _CACHE_MODE_RE = re.compile(
     r"^(?P<indent>[ \t]*)cache-mode\s*:\s*"
-    r"(?P<mode>write-only|write|read|none)\s*(?:#.*)?$",
+    r"(?P<quote>['\"]?)(?P<mode>write-only|write|read|none)(?P=quote)\s*(?:#.*)?$",
     re.IGNORECASE,
 )
 _DIRECT_CACHE_WRITE_RE = re.compile(
-    r"^\s*(?:-\s*)?uses\s*:\s*actions/cache(?:/save)?@",
+    r"^\s*(?:-\s*)?uses\s*:\s*['\"]?actions/cache(?:/save)?@",
     re.IGNORECASE,
 )
 _SETUP_CACHE_ACTION_RE = re.compile(
-    r"^\s*(?:-\s*)?uses\s*:\s*"
+    r"^\s*(?:-\s*)?uses\s*:\s*['\"]?"
     r"(?P<action>actions/setup-(?:node|python|go|java|dotnet)|ruby/setup-ruby)@",
     re.IGNORECASE,
 )
