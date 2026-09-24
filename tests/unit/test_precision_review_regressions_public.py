@@ -1480,3 +1480,82 @@ jobs:
       - run: pip -vv install {path}
 """
         assert _fires("LOTP-GH-001", workflow) is expected, path
+
+
+def test_pr_merge_ref_fetch_reaches_build() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch origin refs/pull/${{ github.event.pull_request.number }}/merge; git checkout FETCH_HEAD; npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_pr_fetch_options_and_force_refspec_reach_build() -> None:
+    for command in (
+        "git fetch --depth=1 origin refs/pull/${{ github.event.pull_request.number }}/head",
+        "git fetch --depth 1 origin +refs/pull/${{ github.event.pull_request.number }}/head",
+        "git fetch origin +refs/pull/${{ github.event.pull_request.number }}/merge:refs/remotes/origin/pr",
+    ):
+        checkout = "refs/remotes/origin/pr" if ":refs/remotes/" in command else "FETCH_HEAD"
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: {command}; git checkout {checkout}; npm ci
+"""
+        assert _fires("LOTP-GH-001", workflow), command
+        assert _fires("LOTP-GH-003", workflow), command
+
+
+def test_gh_pr_checkout_reaches_build() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: gh pr checkout ${{ github.event.pull_request.number }}
+      - run: npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_pr_checkout_text_is_not_executed() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: echo gh pr checkout ${{ github.event.pull_request.number }}
+      - run: npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_optioned_trusted_fetch_keeps_build_silent() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch --depth 1 origin refs/heads/main; git checkout FETCH_HEAD; npm ci
+      - run: echo ${{ github.event.pull_request.number }}
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)

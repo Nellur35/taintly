@@ -32,7 +32,8 @@ from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 _PR_HEAD_CHECKOUT = (
     r"(?:github\.event\.pull_request\.head\.(?:sha|ref)"
     r"|github\.event\.pull_request\.head\.repo\.full_name"
-    r"|github\.event\.pull_request\.number|(?:refs/)?pull/\d+/head"
+    r"|github\.event\.pull_request\.number|(?:refs/)?pull/\d+/(?:head|merge)"
+    r"|gh\s+pr\s+checkout\s+\d+"
     r"|github\.head_ref"
     r"|github\.event\.workflow_run\.head_branch)"
 )
@@ -147,17 +148,25 @@ _GIT_SOURCE_CHANGE_RE = re.compile(
     r"(?P<ref>['\"]?\$\{\{[^}]*\}\}['\"]?|[^\s;&|]+)",
     re.IGNORECASE,
 )
-_GIT_PR_FETCH_RE = re.compile(
-    r"(?:^|[;&|])\s*git\s+fetch\s+origin\s+(?:refs/)?pull/"
-    r"(?:\d+|\$\{\{\s*github\.event\.pull_request\.number\s*\}\})/head"
-    r"(?::(?P<dest>[A-Za-z0-9._/-]+))?(?=\s|[;&|#]|$)",
-    re.IGNORECASE,
+_PR_NUMBER_EXPRESSION_RE = re.compile(
+    r"\$\{\{\s*github\.event\.pull_request\.number\s*\}\}", re.IGNORECASE
 )
-_GIT_FETCH_RE = re.compile(
-    r"(?:^|[;&|])\s*git\s+fetch\s+origin\s+"
-    r"(?P<source>[A-Za-z0-9._/-]+)(?::(?P<dest>[A-Za-z0-9._/-]+))?"
-    r"(?=\s|[;&|#]|$)",
-    re.IGNORECASE,
+_PR_FETCH_SOURCE_RE = re.compile(
+    r"(?:refs/)?pull/(?:\d+|__PR_NUMBER__)/(?:head|merge)\Z", re.IGNORECASE
+)
+_GIT_FETCH_VALUE_OPTIONS = frozenset(
+    {
+        "--depth",
+        "--filter",
+        "--refmap",
+        "--upload-pack",
+        "--jobs",
+        "--server-option",
+        "--shallow-since",
+        "--shallow-exclude",
+        "--negotiation-tip",
+        "-j",
+    }
 )
 _STEP_IF_RE = re.compile(r"^\s*(?:-\s*)?if\s*:\s*(.*?)\s*$")
 _EVENT_EQ_RE = re.compile(
@@ -484,6 +493,118 @@ def _shell_quote_mask(line: str, initial: str | None) -> tuple[list[bool], str |
     return mask, quote, comment_start
 
 
+def _shell_command_segments(line: str, mask: list[bool]) -> list[tuple[int, str]]:
+    """Split a shell line at executable command separators."""
+
+    segments: list[tuple[int, str]] = []
+    start = 0
+    for index, char in enumerate(line):
+        if char not in ";&|" or mask[index]:
+            continue
+        part = line[start:index]
+        if part.strip():
+            segments.append((start + len(part) - len(part.lstrip()), part.strip()))
+        start = index + 1
+    part = line[start:]
+    if part.strip():
+        segments.append((start + len(part) - len(part.lstrip()), part.strip()))
+    return segments
+
+
+def _shell_command_tokens(command: str) -> list[str] | None:
+    """Keep GitHub's PR-number expression intact while splitting arguments."""
+
+    normalized = _PR_NUMBER_EXPRESSION_RE.sub("__PR_NUMBER__", command)
+    try:
+        return shlex.split(normalized, comments=True)
+    except ValueError:
+        return None
+
+
+def _git_fetch_events(line: str, mask: list[bool]) -> list[tuple[int, str, str | None]]:
+    """Parse fetch options and refspecs, including PR head and merge refs."""
+
+    events: list[tuple[int, str, str | None]] = []
+    for column, command in _shell_command_segments(line, mask):
+        tokens = _shell_command_tokens(command)
+        if (
+            tokens is None
+            or len(tokens) < 4
+            or [token.lower() for token in tokens[:2]]
+            != [
+                "git",
+                "fetch",
+            ]
+        ):
+            continue
+        index = 2
+        while index < len(tokens) and tokens[index].startswith("-"):
+            option, inline_value, _ = tokens[index].partition("=")
+            index += 1
+            if option in _GIT_FETCH_VALUE_OPTIONS and not inline_value:
+                index += 1
+        if index >= len(tokens):
+            continue
+        index += 1  # remote
+        candidates: list[tuple[str, str | None]] = []
+        while index < len(tokens):
+            token = tokens[index]
+            index += 1
+            if token.startswith("-"):
+                option, inline_value, _ = token.partition("=")
+                if option in _GIT_FETCH_VALUE_OPTIONS and not inline_value:
+                    index += 1
+                continue
+            source, _, destination = token.lstrip("+").partition(":")
+            candidates.append((source, destination or None))
+        if not candidates:
+            continue
+        pr_candidates = [
+            (source, destination)
+            for source, destination in candidates
+            if _PR_FETCH_SOURCE_RE.fullmatch(source)
+        ]
+        if pr_candidates:
+            events.append((column, _UNTRUSTED, pr_candidates[0][1]))
+        else:
+            source, target_ref = candidates[-1]
+            state = (
+                _TRUSTED
+                if _STATIC_REF_RE.fullmatch(source) and source.upper() not in _GIT_TRANSIENT_REFS
+                else _UNKNOWN
+            )
+            events.append((column, state, target_ref))
+    return events
+
+
+def _gh_pr_checkout_changes(line: str, mask: list[bool]) -> list[tuple[int, str, str]]:
+    """Recognize an executable GitHub CLI pull-request checkout."""
+
+    changes: list[tuple[int, str, str]] = []
+    for column, command in _shell_command_segments(line, mask):
+        tokens = _shell_command_tokens(command)
+        if (
+            tokens is None
+            or len(tokens) < 4
+            or [token.lower() for token in tokens[:3]]
+            != [
+                "gh",
+                "pr",
+                "checkout",
+            ]
+        ):
+            continue
+        index = 3
+        while index < len(tokens) and tokens[index].startswith("-"):
+            option, inline_value, _ = tokens[index].partition("=")
+            index += 1
+            if option in {"--repo", "-R"} and not inline_value:
+                index += 1
+        if index < len(tokens) and (tokens[index].isdigit() or tokens[index] == "__PR_NUMBER__"):
+            changes.append((column, _UNTRUSTED, "GH_PR_CHECKOUT"))
+    return changes
+
+
 def _build_source_path(
     shell_line: str | None, mask: list[bool], anchor_column: int, cwd: str | None
 ) -> tuple[str | None, bool]:
@@ -611,7 +732,7 @@ def _join_source_states(first: str, second: str) -> str:
     return first if first == second else _UNKNOWN
 
 
-def _git_source_changes(line: str) -> list[tuple[int, str, str]]:
+def _git_source_changes(line: str, mask: list[bool]) -> list[tuple[int, str, str]]:
     """Return ordered shell Git ref changes with target-only provenance."""
 
     changes: list[tuple[int, str, str]] = []
@@ -629,6 +750,7 @@ def _git_source_changes(line: str) -> list[tuple[int, str, str]]:
         else:
             state = _UNKNOWN
         changes.append((match.start(), state, ref))
+    changes.extend(_gh_pr_checkout_changes(line, mask))
     return changes
 
 
@@ -640,10 +762,10 @@ def _run_may_select_pr_source(step: StepSegment) -> bool:
         mask, quote, _ = _shell_quote_mask(line, quote)
         if any(
             state == _UNTRUSTED and not mask[column]
-            for column, state, _ in _git_source_changes(line)
+            for column, state, _ in _git_source_changes(line, mask)
         ):
             return True
-        if any(not mask[fetch.start()] for fetch in _GIT_PR_FETCH_RE.finditer(line)):
+        if any(state == _UNTRUSTED for _, state, _ in _git_fetch_events(line, mask)):
             return True
     return False
 
@@ -780,7 +902,11 @@ class _OrderedPrBuildPattern(ContextPattern):
                             for index in range(len(shell_line) - 1)
                         ):
                             uncertain_layout = True
-                    transitions = _git_source_changes(shell_line) if shell_line is not None else []
+                    transitions = (
+                        _git_source_changes(shell_line, shell_mask)
+                        if shell_line is not None
+                        else []
+                    )
                     anchors = list(self._source_anchor_re.finditer(source_line))
                     events: list[tuple[int, str, str | None]] = []
                     git_states = {column: state for column, state, _ in transitions}
@@ -791,26 +917,9 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 events.append(
                                     (cd_match.start("command"), "cd", cd_match.group("path"))
                                 )
-                        pr_fetches = [
-                            fetch
-                            for fetch in _GIT_PR_FETCH_RE.finditer(shell_line)
-                            if not shell_mask[fetch.start()]
-                        ]
-                        pr_fetch_columns = {fetch.start() for fetch in pr_fetches}
-                        for fetch in pr_fetches:
-                            fetch_states[fetch.start()] = _UNTRUSTED
-                            events.append((fetch.start(), "fetch", fetch.group("dest")))
-                        for fetch in _GIT_FETCH_RE.finditer(shell_line):
-                            if fetch.start() in pr_fetch_columns or shell_mask[fetch.start()]:
-                                continue
-                            source = fetch.group("source")
-                            fetch_states[fetch.start()] = (
-                                _TRUSTED
-                                if _STATIC_REF_RE.fullmatch(source)
-                                and source.upper() not in _GIT_TRANSIENT_REFS
-                                else _UNKNOWN
-                            )
-                            events.append((fetch.start(), "fetch", fetch.group("dest")))
+                        for column, state, destination in _git_fetch_events(shell_line, shell_mask):
+                            fetch_states[column] = state
+                            events.append((column, "fetch", destination))
                     for column, _, ref in transitions:
                         if not shell_mask[column]:
                             events.append((column, "git", ref))
