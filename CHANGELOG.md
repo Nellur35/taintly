@@ -47,6 +47,13 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   selects the source path for that build. Unresolved paths stay visible.
   GitHub LOTP rules also recognize `npm --prefix <path> ci/install` before the
   install verb.
+- Complete static heredoc delimiters and their closing indentation are checked
+  before suppressing data lines. Local pip project and requirements paths select
+  the source checkout; multiple local paths stay visible. Build text in inline
+  shell comments or action inputs no longer counts as an executed command.
+- Local pip editable installs with named checkout paths are recognized. PR
+  source proof comes from checkout fields or executable Git changes, so PR
+  metadata logged by a trusted workflow does not create a build finding.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

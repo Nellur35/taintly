@@ -13,6 +13,7 @@ recognisable once GitLab and Jenkins LOTP rules land in follow-up PRs.
 
 import posixpath
 import re
+import shlex
 from collections.abc import Sequence
 
 from taintly.models import ContextPattern, Platform, Rule, Severity
@@ -82,6 +83,7 @@ _PR_HEAD_PATH_RE = re.compile(
     r"(?:github\.event\.pull_request\.head\.(?:sha|ref|repo\.full_name)|github\.head_ref)",
     re.IGNORECASE,
 )
+_WORKFLOW_RUN_HEAD_BRANCH_RE = re.compile(r"github\.event\.workflow_run\.head_branch", re.I)
 _CHECKOUT_ACTION_RE = re.compile(
     r"^\s*(?:-\s*)?uses\s*:\s*['\"]?actions/checkout@", re.IGNORECASE | re.MULTILINE
 )
@@ -94,8 +96,12 @@ _SHELL_CD_RE = re.compile(
     re.IGNORECASE,
 )
 _RUN_LINE_RE = re.compile(r"^\s*(?:-\s*)?run\s*:\s*(?P<body>.*)$")
-_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*['\"]?(?P<delimiter>[A-Za-z_][A-Za-z0-9_]*)['\"]?")
+_USES_LINE_RE = re.compile(r"^\s*(?:-\s*)?uses\s*:")
+_HEREDOC_OPEN_RE = re.compile(
+    r"(?P<operator><<-?)\s*(?P<quote>['\"]?)(?P<delimiter>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)(?=\s|[;&|]|$)"
+)
 _NPM_PREFIX_PATH_RE = re.compile(r"(?<!\S)--prefix(?:=|\s+)(?P<path>[^\s;&|]+)")
+_PIP_INSTALL_RE = re.compile(r"pip\d*(?:\.\d+)?\s+install\b", re.IGNORECASE)
 _STATIC_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _STATIC_PATH_RE = re.compile(r"[A-Za-z0-9._/-]+\Z")
 _NPM_PREFIX_INSTALL_ANCHOR = r"\bnpm\s+--prefix(?:=|\s+)\S+\s+(?:install|ci|i)\b"
@@ -103,6 +109,7 @@ _NPM_PREFIX_BUILD_ANCHOR = (
     r"\bnpm\s+--prefix(?:=|\s+)\S+\s+"
     r"(?:install|ci|i|update|pack|publish|run|build|test)\b"
 )
+_PIP_EDITABLE_BUILD_ANCHOR = r"\bpip\d*(?:\.\d+)?\s+install\s+(?:-e|--editable)\s+\S+"
 _GIT_SOURCE_CHANGE_RE = re.compile(
     r"\bgit\s+(?:checkout|switch)\s+(?:(?:--detach|--force)\s+)?(?P<ref>[^\s;&|]+)",
     re.IGNORECASE,
@@ -230,14 +237,34 @@ def _checkout_action_state(step: StepSegment) -> tuple[str, bool, str | None] | 
         if repositories[0] != "${{ github.repository }}":
             # A fixed branch in another repository cannot prove base trust.
             return _UNKNOWN, True, path
-    if _contains_pr_head_reference(step.text):
-        return _UNTRUSTED, False, path
     refs = [match.group(1).strip().strip("'\"") for match in _REF_LINE_RE.finditer(step.text)]
+    if any(
+        _contains_pr_head_reference(ref) or _WORKFLOW_RUN_HEAD_BRANCH_RE.search(ref) for ref in refs
+    ):
+        return _UNTRUSTED, False, path
     if len(refs) == 1 and _STATIC_REF_RE.fullmatch(refs[0]):
         return _TRUSTED, False, path
     # Default checkout and dynamic refs depend on the event and repository
     # state.  Retain findings until that state can be proved.
     return _UNKNOWN, False, path
+
+
+def _checkout_may_use_pr_source(step: StepSegment) -> bool:
+    """Require PR source evidence in checkout fields, not adjacent metadata."""
+
+    if not _CHECKOUT_ACTION_RE.search(step.text):
+        return False
+    values = [
+        match.group(1).strip().strip("'\"")
+        for pattern in (_REF_LINE_RE, _REPOSITORY_LINE_RE)
+        for match in pattern.finditer(step.text)
+    ]
+    return any(
+        _contains_pr_head_reference(value)
+        or _WORKFLOW_RUN_HEAD_BRANCH_RE.search(value)
+        or "${{" in value
+        for value in values
+    )
 
 
 def _step_working_path(step: StepSegment, default_path: str | None) -> str | None:
@@ -342,12 +369,13 @@ def _run_shell_lines(step: StepSegment) -> dict[int, str]:
     return script
 
 
-def _shell_quote_mask(line: str, initial: str | None) -> tuple[list[bool], str | None]:
-    """Mark shell quotes and comments; carry multiline quote state."""
+def _shell_quote_mask(line: str, initial: str | None) -> tuple[list[bool], str | None, int | None]:
+    """Mark shell quotes and comments; return the comment start separately."""
 
     quote = initial
     escaped = False
     mask: list[bool] = []
+    comment_start: int | None = None
     for index, char in enumerate(line):
         mask.append(quote is not None)
         if quote == "'":
@@ -361,12 +389,13 @@ def _shell_quote_mask(line: str, initial: str | None) -> tuple[list[bool], str |
             if char == quote:
                 quote = None
         elif char == "#" and (index == 0 or line[index - 1].isspace() or line[index - 1] in ";&|("):
+            comment_start = index
             mask[-1] = True
             mask.extend([True] * (len(line) - index - 1))
             break
         elif char in "'\"":
             quote = char
-    return mask, quote
+    return mask, quote, comment_start
 
 
 def _build_source_path(
@@ -382,6 +411,28 @@ def _build_source_path(
     start = max((index + 1 for index in separators if index < anchor_column), default=0)
     end = min((index for index in separators if index > anchor_column), default=len(shell_line))
     segment = shell_line[start:end]
+    if _PIP_INSTALL_RE.match(shell_line[anchor_column:]):
+        try:
+            tokens = shlex.split(shell_line[anchor_column:end], comments=True)
+        except ValueError:
+            return None
+        if len(tokens) < 2 or tokens[1].lower() != "install":
+            return None
+        paths: list[str] = []
+        index = 2
+        while index < len(tokens):
+            argument = tokens[index]
+            if argument in {"-e", "--editable", "-r", "--requirement"}:
+                index += 1
+                if index >= len(tokens):
+                    return None
+                paths.append(tokens[index])
+            elif argument == "." or argument.startswith(("./", "../", "/")):
+                paths.append(argument)
+            index += 1
+        if not paths:
+            return cwd
+        return _literal_workspace_path(paths[0], cwd) if len(paths) == 1 else None
     prefix_paths = [
         match.group("path")
         for match in _NPM_PREFIX_PATH_RE.finditer(segment)
@@ -419,6 +470,18 @@ def _git_source_change(line: str) -> tuple[int, str] | None:
     return (match.start(), _UNKNOWN)
 
 
+def _run_may_select_pr_source(step: StepSegment) -> bool:
+    """Keep a job visible when executable Git text selects a PR source."""
+
+    quote: str | None = None
+    for _, line in sorted(_run_shell_lines(step).items()):
+        mask, quote, _ = _shell_quote_mask(line, quote)
+        change = _git_source_change(line)
+        if change and change[1] == _UNTRUSTED and not mask[change[0]]:
+            return True
+    return False
+
+
 def _job_for_line(jobs: list[JobSegment], line: int) -> JobSegment | None:
     return next((job for job in jobs if job.start_line <= line <= job.end_line), None)
 
@@ -434,7 +497,9 @@ class _OrderedPrBuildPattern(ContextPattern):
 
     def __init__(
         self,
-        anchor: str = rf"(?:{_BUILD_TOOL_ANCHOR}|{_NPM_PREFIX_BUILD_ANCHOR})",
+        anchor: str = (
+            rf"(?:{_BUILD_TOOL_ANCHOR}|{_NPM_PREFIX_BUILD_ANCHOR}|{_PIP_EDITABLE_BUILD_ANCHOR})"
+        ),
         exclude: list[str] | None = None,
     ) -> None:
         super().__init__(
@@ -485,6 +550,13 @@ class _OrderedPrBuildPattern(ContextPattern):
             if not job_lines:
                 continue
             job_steps = [step for step in steps if step.job_name == job.name]
+            if not any(
+                (_checkout_may_use_pr_source(step) or _run_may_select_pr_source(step))
+                and not _excludes_pr_path(_direct_if(step))
+                for step in job_steps
+            ):
+                resolved.update(job_lines)
+                continue
             first_step_line = min((step.start_line for step in job_steps), default=job.end_line + 1)
             job_header_indent = len(job.body_lines[0]) - len(job.body_lines[0].lstrip())
             pre_step_lines = job.body_lines[: first_step_line - job.start_line]
@@ -508,21 +580,39 @@ class _OrderedPrBuildPattern(ContextPattern):
                 checkout_state = _checkout_action_state(step)
                 cwd = _step_working_path(step, default_path)
                 shell_lines = _run_shell_lines(step)
+                script_indent = min(
+                    (
+                        len(line) - len(line.lstrip(" "))
+                        for line in shell_lines.values()
+                        if line.strip()
+                    ),
+                    default=0,
+                )
+                action_input_step = any(
+                    _USES_LINE_RE.match(line) for line in step.body_lines
+                ) and not any(_RUN_LINE_RE.match(line) for line in step.body_lines)
                 shell_quote: str | None = None
                 heredoc_delimiter: str | None = None
+                heredoc_strip_tabs = False
 
                 for offset, source_line in enumerate(step.body_lines):
                     absolute_line = step.start_line + offset
                     shell_line = shell_lines.get(offset)
                     if heredoc_delimiter is not None and shell_line is not None:
-                        if shell_line.strip() == heredoc_delimiter:
+                        body = shell_line[script_indent:]
+                        if heredoc_strip_tabs:
+                            body = body.lstrip("\t")
+                        if body == heredoc_delimiter:
                             heredoc_delimiter = None
                         if absolute_line in step_candidates:
                             resolved.add(absolute_line)
                         continue
                     shell_mask: list[bool] = []
+                    comment_start: int | None = None
                     if shell_line is not None:
-                        shell_mask, shell_quote = _shell_quote_mask(shell_line, shell_quote)
+                        shell_mask, shell_quote, comment_start = _shell_quote_mask(
+                            shell_line, shell_quote
+                        )
                     opener = (
                         next(
                             (
@@ -535,6 +625,12 @@ class _OrderedPrBuildPattern(ContextPattern):
                         if shell_line is not None
                         else None
                     )
+                    if shell_line is not None and opener is None:
+                        if any(
+                            shell_line[index : index + 2] == "<<" and not shell_mask[index]
+                            for index in range(len(shell_line) - 1)
+                        ):
+                            uncertain_layout = True
                     transition = _git_source_change(shell_line) if shell_line is not None else None
                     anchor = self._source_anchor_re.search(source_line)
                     events: list[tuple[int, str, str | None]] = []
@@ -544,8 +640,26 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 events.append((cd_match.start(), "cd", cd_match.group("path")))
                     if transition and not shell_mask[transition[0]]:
                         events.append((transition[0], "git", transition[1]))
-                    if anchor and absolute_line in step_candidates:
+                    if (
+                        shell_line is None
+                        and action_input_step
+                        and absolute_line in step_candidates
+                    ):
+                        resolved.add(absolute_line)
+                    if (
+                        anchor
+                        and absolute_line in step_candidates
+                        and shell_line is not None
+                        and (comment_start is None or anchor.start() < comment_start)
+                    ):
                         events.append((anchor.start(), "build", None))
+                    elif (
+                        anchor
+                        and absolute_line in step_candidates
+                        and comment_start is not None
+                        and anchor.start() >= comment_start
+                    ):
+                        resolved.add(absolute_line)
                     for column, kind, value in sorted(events):
                         if pr_excluded:
                             if kind == "build":
@@ -579,6 +693,7 @@ class _OrderedPrBuildPattern(ContextPattern):
 
                     if opener is not None:
                         heredoc_delimiter = opener.group("delimiter")
+                        heredoc_strip_tabs = opener.group("operator") == "<<-"
 
                 if checkout_state is not None and not pr_excluded:
                     state, foreign_repository, checkout_path = checkout_state

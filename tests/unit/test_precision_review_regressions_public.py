@@ -635,3 +635,222 @@ jobs:
 """
     assert _fires("LOTP-GH-001", workflow)
     assert _fires("LOTP-GH-003", workflow)
+
+
+def test_inline_comment_build_text_is_not_executed() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: echo ready # npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_action_input_build_text_is_not_a_run_command() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: example/action@v1
+        with:
+          note: npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_shell_c_wrapper_still_executes_quoted_build_command() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: bash -c "npm ci"
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_quoted_hyphenated_heredoc_delimiter_keeps_later_fork_build() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: |
+          cat <<'END-EOF'
+          this is data
+          END-EOF
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_pip_local_side_checkout_is_untrusted_from_trusted_cwd() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: pip install ./fork
+"""
+    assert _fires("LOTP-GH-001", workflow)
+
+
+def test_pip_trusted_side_checkout_stays_silent() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+      - run: pip install ./base
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+
+
+def test_pip_requirements_from_fork_side_checkout_is_untrusted() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: pip install -r fork/requirements.txt
+"""
+    assert _fires("LOTP-GH-001", workflow)
+
+
+def test_pip_multiple_local_paths_do_not_prove_trusted_source() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: pip install . ./fork
+"""
+    assert _fires("LOTP-GH-001", workflow)
+
+
+def test_indented_heredoc_data_cannot_close_delimiter_early() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+      - run: |
+          cd fork
+          cat <<EOF
+            EOF
+          ; cd ../base
+          EOF
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_pip_editable_side_checkout_is_untrusted() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: pip install -e fork
+"""
+    assert _fires("LOTP-GH-001", workflow)
+
+
+def test_pip_long_editable_trusted_side_checkout_stays_silent() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+      - run: pip install --editable base
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+
+
+def test_pr_metadata_env_does_not_prove_pr_head_checkout() -> None:
+    workflow = """on: pull_request
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+        run: pip install -e ".[dev]"
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+
+
+def test_checkout_ref_still_proves_pr_head_with_metadata_env() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - env:
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+        run: pip install -e ".[dev]"
+"""
+    assert _fires("LOTP-GH-001", workflow)
