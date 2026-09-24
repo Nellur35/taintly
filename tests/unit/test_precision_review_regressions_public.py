@@ -1273,3 +1273,110 @@ jobs:
       - run: bash -c "pip install ./base"
 """
     assert not _fires("LOTP-GH-001", workflow)
+
+
+def test_pip_global_flag_before_install_keeps_local_source_visible() -> None:
+    for command in (
+        "pip --no-cache-dir install ./fork",
+        "python -m pip --disable-pip-version-check install ./fork",
+    ):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+          path: fork
+      - run: {command}
+"""
+        assert _fires("LOTP-GH-001", workflow), command
+
+
+def test_pip_global_cert_value_is_not_install_source() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: pip --cert ./fork/ca.pem install requests
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+
+
+def test_nested_shell_directory_change_selects_untrusted_source() -> None:
+    for command in (
+        'bash -c "cd fork; pip install ."',
+        'sh -c "cd fork; npm ci"',
+        'bash -lc "cd fork; npm ci"',
+        'bash -c "npm ci; cd fork; npm ci"',
+    ):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+          path: fork
+      - run: {command}
+"""
+        assert _fires("LOTP-GH-001", workflow), command
+
+
+def test_printed_build_text_is_not_executed() -> None:
+    for command in ('echo npm ci', 'bash -c "echo npm ci"'):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+      - run: {command}
+"""
+        assert not _fires("LOTP-GH-001", workflow), command
+        assert not _fires("LOTP-GH-003", workflow), command
+
+
+def test_nested_shell_pr_fetch_reaches_build() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: bash -c "git fetch origin pull/${{ github.event.pull_request.number }}/head; git checkout FETCH_HEAD; npm ci"
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_python3_m_pip_global_flag_reaches_side_checkout() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: python3 -m pip --no-cache-dir install ./fork
+"""
+    assert _fires("LOTP-GH-001", workflow)

@@ -68,6 +68,8 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 - Every build command on a shell line is checked in order. Conditional Git
   fallbacks preserve uncertain source provenance; pip certificate paths are
   not install targets, and quoted `bash -c`/`sh -c` pip installs are inspected.
+- Pip global flags before `install` and literal nested shell commands are
+  inspected in source order. Printed build commands stay silent.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

@@ -80,7 +80,11 @@ _HEREDOC_OPEN_RE = re.compile(
     r"(?P<operator><<-?)\s*(?P<quote>['\"]?)(?P<delimiter>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)(?=\s|[;&|]|$)"
 )
 _NPM_PREFIX_PATH_RE = re.compile(r"(?<!\S)--prefix(?:=|\s+)(?P<path>[^\s;&|]+)")
-_PIP_INSTALL_RE = re.compile(r"pip\d*(?:\.\d+)?\s+install\b", re.IGNORECASE)
+_PIP_COMMAND_RE = re.compile(r"pip\d*(?:\.\d+)?\b", re.IGNORECASE)
+_SHELL_WRAPPER_RE = re.compile(
+    r"^\s*(?:bash|sh)\s+-(?:l)?c\s+(?P<quote>['\"])(?P<inner>.*)(?P=quote)\s*$",
+    re.IGNORECASE,
+)
 _STATIC_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _STATIC_PATH_RE = re.compile(r"[A-Za-z0-9._/-]+\Z")
 _NPM_PREFIX_INSTALL_ANCHOR = r"\bnpm\s+--prefix(?:=|\s+)\S+\s+(?:install|ci|i)\b"
@@ -90,7 +94,7 @@ _NPM_PREFIX_BUILD_ANCHOR = (
 )
 # Parsed arguments below decide whether pip installs local code.  Matching
 # only the first argument misses valid forms such as ``--no-deps -e./fork``.
-_PIP_INSTALL_ANCHOR = r"\bpip\d*(?:\.\d+)?\s+install\b"
+_PIP_INSTALL_ANCHOR = r"\bpip\d*(?:\.\d+)?\b[^\n;&|#]*?\binstall\b"
 _PIP_NON_SOURCE_VALUE_OPTIONS = frozenset(
     {
         "--target",
@@ -113,6 +117,13 @@ _PIP_NON_SOURCE_VALUE_OPTIONS = frozenset(
         "-C",
     }
 )
+_PIP_GLOBAL_VALUE_OPTIONS = _PIP_NON_SOURCE_VALUE_OPTIONS | {
+    "--python",
+    "--proxy",
+    "--retries",
+    "--timeout",
+    "--exists-action",
+}
 _GIT_TRANSIENT_REFS = frozenset(
     {"HEAD", "FETCH_HEAD", "ORIG_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD"}
 )
@@ -339,6 +350,16 @@ def _source_key(sources: dict[str, tuple[str, bool]], cwd: str) -> str:
     return path
 
 
+def _static_shell_script(line: str) -> str:
+    """Expose a literal ``sh/bash -c`` body while preserving source columns."""
+
+    match = _SHELL_WRAPPER_RE.match(line)
+    if not match:
+        return line
+    start, end = match.span("inner")
+    return " " * start + match.group("inner") + " " * (len(line) - end)
+
+
 def _run_shell_lines(step: StepSegment) -> dict[int, str]:
     """Return executable run lines, preserving columns for ordered events."""
 
@@ -365,13 +386,13 @@ def _run_shell_lines(step: StepSegment) -> dict[int, str]:
                 next_line = step.body_lines[next_offset]
                 if next_line.strip() and len(next_line) - len(next_line.lstrip()) <= indent:
                     break
-                script[next_offset] = next_line
+                script[next_offset] = _static_shell_script(next_line)
         else:
             prefix_len = match.start("body")
             # YAML's outer scalar quotes are delimiters, not shell quotes.
             if len(body) >= 2 and body[0] in "'\"" and body[-1] == body[0]:
                 body = " " + body[1:-1] + " "
-            script[offset] = " " * prefix_len + body
+            script[offset] = _static_shell_script(" " * prefix_len + body)
     return script
 
 
@@ -417,7 +438,7 @@ def _build_source_path(
     start = max((index + 1 for index in separators if index < anchor_column), default=0)
     end = min((index for index in separators if index > anchor_column), default=len(shell_line))
     segment = shell_line[start:end]
-    if _PIP_INSTALL_RE.match(shell_line[anchor_column:]):
+    if _PIP_COMMAND_RE.match(shell_line[anchor_column:]):
         command = shell_line[anchor_column:end]
         prefix = shell_line[start:anchor_column].rstrip()
         if prefix.endswith(("'", '"')) and command.rstrip().endswith(prefix[-1]):
@@ -426,10 +447,16 @@ def _build_source_path(
             tokens = shlex.split(command, comments=True)
         except ValueError:
             return None, True
-        if len(tokens) < 2 or tokens[1].lower() != "install":
+        index = 1
+        while index < len(tokens) and tokens[index].startswith("-"):
+            option = tokens[index]
+            index += 1
+            if option in _PIP_GLOBAL_VALUE_OPTIONS:
+                index += 1
+        if index >= len(tokens) or tokens[index].lower() != "install":
             return None, True
         paths: list[str] = []
-        index = 2
+        index += 1
         while index < len(tokens):
             argument = tokens[index]
             if argument in {"-e", "--editable", "-r", "--requirement"}:
@@ -486,8 +513,24 @@ def _at_shell_command_start(line: str, mask: list[bool], column: int) -> bool:
     return (
         not prefix
         or bool(re.fullmatch(r"(?:env\s+)?(?:[A-Za-z_]\w*=\S+\s*)+", prefix))
-        or bool(re.fullmatch(r"(?:bash|sh)\s+-c\s+['\"]", prefix))
+        or bool(re.fullmatch(r"(?:bash|sh)\s+-(?:l)?c\s+['\"]", prefix))
+        or bool(re.fullmatch(r"python\d*(?:\.\d+)?\s+-m", prefix))
     )
+
+
+def _printed_build_text(line: str, mask: list[bool], column: int) -> bool:
+    """A build-tool word in a plain print command is not executed."""
+
+    start = max(
+        (
+            index + 1
+            for index, char in enumerate(line[:column])
+            if char in ";&|" and not mask[index]
+        ),
+        default=0,
+    )
+    prefix = line[start:column].strip()
+    return bool(re.match(r"(?:echo|printf)\b", prefix)) and "$(" not in prefix and "`" not in prefix
 
 
 def _conditional_before_command(line: str, column: int) -> bool:
@@ -712,8 +755,11 @@ class _OrderedPrBuildPattern(ContextPattern):
                         if comment_start is not None and anchor.start() >= comment_start:
                             resolved.add(absolute_line)
                         elif shell_line is not None:
-                            if _PIP_INSTALL_RE.match(shell_line[anchor.start() :]) and not (
-                                _at_shell_command_start(shell_line, shell_mask, anchor.start())
+                            if _printed_build_text(shell_line, shell_mask, anchor.start()) or (
+                                _PIP_COMMAND_RE.match(shell_line[anchor.start() :])
+                                and not _at_shell_command_start(
+                                    shell_line, shell_mask, anchor.start()
+                                )
                             ):
                                 resolved.add(absolute_line)
                             else:
