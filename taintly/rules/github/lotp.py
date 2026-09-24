@@ -580,10 +580,10 @@ def _git_fetch_remote_state(remote: str) -> str:
 
 def _git_fetch_events(
     line: str, mask: list[bool]
-) -> list[tuple[int, str, str | None, tuple[str, ...], bool, str, str | None]]:
+) -> list[tuple[int, str, str | None, tuple[str, ...], bool, str, str | None, bool]]:
     """Parse fetch options and refspecs, including PR head and merge refs."""
 
-    events: list[tuple[int, str, str | None, tuple[str, ...], bool, str, str | None]] = []
+    events: list[tuple[int, str, str | None, tuple[str, ...], bool, str, str | None, bool]] = []
     for column, command in _shell_command_segments(line, mask):
         tokens = _shell_command_tokens(command)
         if tokens is None:
@@ -592,8 +592,9 @@ def _git_fetch_events(
         if invocation is None:
             continue
         index, paths = invocation
-        if index >= len(tokens) or tokens[index].lower() != "fetch":
+        if index >= len(tokens) or tokens[index].lower() not in {"fetch", "pull"}:
             continue
+        integrates = tokens[index].lower() == "pull"
         index += 1
         if "--dry-run" in tokens[index:]:
             continue
@@ -628,6 +629,7 @@ def _git_fetch_events(
                     write_fetch_head,
                     remote,
                     None,
+                    integrates,
                 )
             )
             continue
@@ -648,6 +650,7 @@ def _git_fetch_events(
                         write_fetch_head,
                         remote,
                         pr_candidates[0][0],
+                        integrates,
                     )
                 )
         else:
@@ -661,7 +664,9 @@ def _git_fetch_events(
             if remote_state != _TRUSTED:
                 state = remote_state
             if write_fetch_head or target_ref:
-                events.append((column, state, target_ref, paths, write_fetch_head, remote, source))
+                events.append(
+                    (column, state, target_ref, paths, write_fetch_head, remote, source, integrates)
+                )
     return events
 
 
@@ -687,10 +692,16 @@ def _git_remote_events(
         args = tokens[index + 2 :]
         mode = "replace"
         if operation == "add":
-            while args and args[0] in {"-f", "--fetch", "--tags", "--no-tags"}:
+            while args and args[0].startswith("-"):
                 if args[0] in {"-f", "--fetch"}:
                     mode = "add-fetch"
-                args = args[1:]
+                    args = args[1:]
+                elif args[0] in {"-t", "--track", "-m", "--master"} and len(args) > 1:
+                    args = args[2:]
+                elif args[0] in {"--tags", "--no-tags"}:
+                    args = args[1:]
+                else:
+                    break
         if operation == "set-url" and args and args[0] in {"--push", "--add", "--delete"}:
             if args[0] == "--push":
                 continue  # Push URL does not affect fetch provenance.
@@ -701,6 +712,39 @@ def _git_remote_events(
         remote, url = args[:2]
         state = _UNTRUSTED if "__PR_HEAD_REPOSITORY__" in url else _UNKNOWN
         events.append((column, remote, state, paths, mode))
+    return events
+
+
+def _git_clone_events(
+    line: str, mask: list[bool]
+) -> list[tuple[int, str, str | None, tuple[str, ...]]]:
+    """Record an executable clone's source and explicit workspace directory."""
+
+    events: list[tuple[int, str, str | None, tuple[str, ...]]] = []
+    for column, command in _shell_command_segments(line, mask):
+        tokens = _shell_command_tokens(command)
+        if tokens is None:
+            continue
+        invocation = _git_command_index(tokens)
+        if invocation is None:
+            continue
+        index, paths = invocation
+        if index >= len(tokens) or tokens[index].lower() != "clone":
+            continue
+        args = tokens[index + 1 :]
+        while args and args[0].startswith("-"):
+            option, inline_value, _ = args[0].partition("=")
+            args = args[1:]
+            if (
+                option in {"--depth", "--branch", "-b", "--filter", "--origin", "-o"}
+                and not inline_value
+            ):
+                args = args[1:]
+        if not args:
+            continue
+        events.append(
+            (column, _git_fetch_remote_state(args[0]), args[1] if len(args) > 1 else None, paths)
+        )
     return events
 
 
@@ -893,7 +937,14 @@ def _git_source_changes(
             state = _TRUSTED
         else:
             state = _UNKNOWN
-        mode = "join" if match.group("op").lower() == "merge" else "select"
+        operation = match.group("op").lower()
+        mode = (
+            "join"
+            if operation == "merge"
+            else "reset"
+            if operation.startswith("reset")
+            else "select"
+        )
         changes.append((match.start(), state, ref, (), mode))
     for column, command in _shell_command_segments(line, mask):
         tokens = _shell_command_tokens(command)
@@ -939,7 +990,8 @@ def _git_source_changes(
             state = _TRUSTED
         else:
             state = _UNKNOWN
-        changes.append((column, state, ref, paths, "join" if operation == "merge" else "select"))
+        mode = "join" if operation == "merge" else "reset" if operation == "reset" else "select"
+        changes.append((column, state, ref, paths, mode))
     changes.extend(
         (column, state, ref, (), "select")
         for column, state, ref, _ in _gh_pr_checkout_changes(line, mask)
@@ -958,9 +1010,11 @@ def _run_may_select_pr_source(step: StepSegment) -> bool:
             for column, state, _, _, _ in _git_source_changes(line, mask)
         ):
             return True
-        if any(state == _UNTRUSTED for _, state, _, _, _, _, _ in _git_fetch_events(line, mask)):
+        if any(state == _UNTRUSTED for _, state, _, _, _, _, _, _ in _git_fetch_events(line, mask)):
             return True
         if any(state == _UNTRUSTED for _, _, state, _, _ in _git_remote_events(line, mask)):
+            return True
+        if any(state == _UNTRUSTED for _, state, _, _ in _git_clone_events(line, mask)):
             return True
     return False
 
@@ -1037,6 +1091,8 @@ class _OrderedPrBuildPattern(ContextPattern):
             sources: dict[str, tuple[str, bool]] = {".": (_TRUSTED, False)}
             fetched_refs: dict[str, dict[str, str]] = {}
             remote_states: dict[str, dict[str, str]] = {}
+            local_branches: dict[str, dict[str, str]] = {}
+            current_branches: dict[str, str | None] = {}
             uncertain_layout = False
             for step in job_steps:
                 step_candidates = {
@@ -1113,6 +1169,7 @@ class _OrderedPrBuildPattern(ContextPattern):
                     fetch_writes: dict[int, bool] = {}
                     fetch_remotes: dict[int, str] = {}
                     fetch_sources: dict[int, str | None] = {}
+                    clone_states: dict[int, tuple[str, str | None, tuple[str, ...]]] = {}
                     changed_remotes: dict[int, tuple[str, str, tuple[str, ...], str]] = {}
                     gh_worktrees: dict[int, str | None] = {}
                     if shell_line is not None:
@@ -1129,18 +1186,22 @@ class _OrderedPrBuildPattern(ContextPattern):
                             writes,
                             remote,
                             source,
+                            integrates,
                         ) in _git_fetch_events(shell_line, shell_mask):
                             fetch_states[column] = state
                             fetch_paths[column] = paths
                             fetch_writes[column] = writes
                             fetch_remotes[column] = remote
                             fetch_sources[column] = source
-                            events.append((column, "fetch", destination))
+                            events.append((column, "pull" if integrates else "fetch", destination))
                         for column, remote, state, paths, mode in _git_remote_events(
                             shell_line, shell_mask
                         ):
                             changed_remotes[column] = remote, state, paths, mode
                             events.append((column, "remote", None))
+                        for column, state, path, paths in _git_clone_events(shell_line, shell_mask):
+                            clone_states[column] = state, path, paths
+                            events.append((column, "clone", None))
                         gh_worktrees = {
                             column: path
                             for column, _, _, path in _gh_pr_checkout_changes(
@@ -1228,7 +1289,25 @@ class _OrderedPrBuildPattern(ContextPattern):
                                     refs = fetched_refs.setdefault(source_key, {})
                                     refs[f"{remote}/*"] = states[remote]
                                     refs["FETCH_HEAD"] = states[remote]
-                        elif kind == "fetch":
+                        elif kind == "clone":
+                            clone_state, clone_path, paths = clone_states[column]
+                            clone_cwd = cwd
+                            for git_path in paths:
+                                clone_cwd = (
+                                    _literal_workspace_path(git_path, clone_cwd)
+                                    if clone_cwd is not None
+                                    else None
+                                )
+                            destination = (
+                                _literal_workspace_path(clone_path, clone_cwd)
+                                if clone_path is not None and clone_cwd is not None
+                                else None
+                            )
+                            if destination is None:
+                                uncertain_layout = True
+                            else:
+                                sources[destination] = clone_state, clone_state != _TRUSTED
+                        elif kind in {"fetch", "pull"}:
                             fetch_cwd = cwd
                             for git_path in fetch_paths.get(column, ()):
                                 fetch_cwd = (
@@ -1278,10 +1357,21 @@ class _OrderedPrBuildPattern(ContextPattern):
                                     elif value.startswith("refs/heads/"):
                                         refs[value.removeprefix("refs/heads/")] = named_state
                                 if remote and "://" not in remote and "@" not in remote:
-                                    refs[f"{remote}/*"] = target_state
                                     source_ref = fetch_sources.get(column)
-                                    if source_ref and _STATIC_REF_RE.fullmatch(source_ref):
+                                    if source_ref is None:
+                                        refs[f"{remote}/*"] = target_state
+                                    elif _STATIC_REF_RE.fullmatch(
+                                        source_ref
+                                    ) and not _PR_FETCH_SOURCE_RE.fullmatch(source_ref):
                                         refs[f"{remote}/{source_ref}"] = target_state
+                                if kind == "pull":
+                                    merged_state = _join_source_states(state, target_state)
+                                    sources[source_key] = merged_state, foreign
+                                    branch = current_branches.get(source_key)
+                                    if branch is not None:
+                                        local_branches.setdefault(source_key, {})[branch] = (
+                                            merged_state
+                                        )
                         elif kind == "git":
                             git_cwd = cwd
                             for git_path in git_paths.get(column, ()):
@@ -1310,6 +1400,8 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 refs = fetched_refs.get(source_key, {})
                                 if value in refs:
                                     target_state = refs[value]
+                                elif value in local_branches.get(source_key, {}):
+                                    target_state = local_branches[source_key][value]
                                 elif value and "/" in value:
                                     target_state = refs.get(
                                         f"{value.split('/', 1)[0]}/*", target_state
@@ -1327,6 +1419,27 @@ class _OrderedPrBuildPattern(ContextPattern):
                                     target_state,
                                     foreign,
                                 )
+                                transition_mode = git_modes.get(column)
+                                if transition_mode == "select":
+                                    selected_branch: str | None = (
+                                        value
+                                        if value
+                                        and _STATIC_REF_RE.fullmatch(value)
+                                        and "/" not in value
+                                        and value.upper() not in _GIT_TRANSIENT_REFS
+                                        else None
+                                    )
+                                    current_branches[source_key] = selected_branch
+                                    if selected_branch is not None:
+                                        local_branches.setdefault(source_key, {})[
+                                            selected_branch
+                                        ] = target_state
+                                elif transition_mode in {"join", "reset"}:
+                                    active_branch = current_branches.get(source_key)
+                                    if active_branch is not None:
+                                        local_branches.setdefault(source_key, {})[active_branch] = (
+                                            target_state
+                                        )
                         else:
                             resolved.add(absolute_line)
                             build_path, local_build = _build_source_path(
@@ -1360,6 +1473,18 @@ class _OrderedPrBuildPattern(ContextPattern):
                         uncertain_layout = True
                     else:
                         sources[checkout_path] = state, foreign_repository
+                        action_refs = [
+                            match.group(1).strip().strip("'\"")
+                            for match in _REF_LINE_RE.finditer(step.text)
+                        ]
+                        branch = (
+                            action_refs[0]
+                            if len(action_refs) == 1 and _STATIC_REF_RE.fullmatch(action_refs[0])
+                            else None
+                        )
+                        current_branches[checkout_path] = branch
+                        if branch is not None:
+                            local_branches.setdefault(checkout_path, {})[branch] = state
 
         # Any match outside a resolvable step remains visible.  Parser gaps must
         # never become silent suppressions.

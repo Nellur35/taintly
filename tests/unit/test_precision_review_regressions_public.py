@@ -1806,3 +1806,73 @@ jobs:
 """
     assert not _fires("LOTP-GH-001", workflow)
     assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_merge_taints_current_local_branch_across_checkout() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch origin refs/pull/${{ github.event.pull_request.number }}/head; git merge --no-ff FETCH_HEAD; git checkout main; npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_pull_pr_ref_reaches_build() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git pull --no-rebase origin refs/pull/${{ github.event.pull_request.number }}/head; npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_direct_clone_of_pr_fork_reaches_build_in_clone_path() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git clone ${{ github.event.pull_request.head.repo.clone_url }} fork; cd fork; npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_explicit_pr_fetch_does_not_taint_unmodified_remote_main() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch origin refs/pull/${{ github.event.pull_request.number }}/head; git checkout origin/main; npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_remote_add_with_tracking_option_keeps_fork_provenance() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git remote add -t main fork https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git; git fetch fork main; git checkout FETCH_HEAD; npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
