@@ -516,6 +516,7 @@ def _build_source_path(
             elif (
                 option_name not in _PIP_GLOBAL_VALUE_OPTIONS
                 and option not in _PIP_GLOBAL_SWITCH_OPTIONS
+                and not re.fullmatch(r"-[vq]+", option)
             ):
                 return None, True
         if index >= len(tokens) or tokens[index].lower() != "install":
@@ -835,17 +836,19 @@ class _OrderedPrBuildPattern(ContextPattern):
                             else:
                                 events.append((anchor.start(), "build", None))
                     outer_cwd: str | None = cwd
-                    scoped_cwds: dict[tuple[int, int], str | None] = dict.fromkeys(
-                        child_scopes.get(offset, []), cwd
-                    )
+                    scoped_cwds: dict[tuple[int, int], str | None] = {}
+                    line_child_scopes = child_scopes.get(offset, [])
                     for column, kind, value in sorted(events):
                         if pr_excluded:
                             if kind == "build":
                                 resolved.add(absolute_line)
                             continue
                         child_span = next(
-                            (span for span in scoped_cwds if span[0] <= column < span[1]), None
+                            (span for span in line_child_scopes if span[0] <= column < span[1]),
+                            None,
                         )
+                        if child_span is not None and child_span not in scoped_cwds:
+                            scoped_cwds[child_span] = outer_cwd
                         cwd = scoped_cwds[child_span] if child_span is not None else outer_cwd
                         if kind == "cd":
                             next_cwd = _literal_workspace_path(value or "", cwd) if cwd else None

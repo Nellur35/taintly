@@ -1440,3 +1440,43 @@ jobs:
 """
         assert not _fires("LOTP-GH-001", workflow), command
         assert not _fires("LOTP-GH-003", workflow), command
+
+
+def test_child_shell_inherits_current_outer_directory_in_command_order() -> None:
+    for command, expected in (
+        ('cd fork; bash -c "npm ci"', True),
+        ('cd fork; bash -c "cd ..; npm ci"', False),
+    ):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+          path: fork
+      - run: {command}
+"""
+        assert _fires("LOTP-GH-001", workflow) is expected, command
+
+
+def test_pip_repeated_verbosity_keeps_local_install_path() -> None:
+    for path, expected in (("./base", False), ("./fork", True)):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{{{ github.event.pull_request.head.sha }}}}
+          path: fork
+      - run: pip -vv install {path}
+"""
+        assert _fires("LOTP-GH-001", workflow) is expected, path

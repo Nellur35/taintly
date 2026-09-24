@@ -73,6 +73,8 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 - Literal child shell scripts are inspected when followed by outer commands
   or prefixed with `env`; their directory changes stay local to the child.
   Non-install pip subcommands no longer count as builds.
+- Child shells inherit the outer working directory at their execution point;
+  repeated pip verbosity flags preserve the local install path.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.
