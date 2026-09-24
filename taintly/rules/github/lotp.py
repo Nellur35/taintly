@@ -51,6 +51,9 @@ _PR_HEAD_CHECKOUT = (
     r")"
     r"[^}]*?\}\}"
 )
+_PR_HEAD_REPOSITORY_RE = re.compile(
+    r"github\.event\.pull_request\.head\.repo\.full_name", re.IGNORECASE
+)
 
 # Evidence untrusted artefacts have been pulled into the job workspace.
 _UNTRUSTED_ARTIFACT = r"uses:\s*actions/download-artifact"
@@ -74,13 +77,14 @@ _CROSS_WORKFLOW_UNTRUSTED_ARTIFACT = (
 # ---------------------------------------------------------------------------
 
 _PR_HEAD_PATH_RE = re.compile(
-    r"(?:github\.event\.pull_request\.head\.(?:sha|ref)|github\.head_ref)",
+    r"(?:github\.event\.pull_request\.head\.(?:sha|ref|repo\.full_name)|github\.head_ref)",
     re.IGNORECASE,
 )
 _CHECKOUT_ACTION_RE = re.compile(
     r"^\s*(?:-\s*)?uses\s*:\s*['\"]?actions/checkout@", re.IGNORECASE | re.MULTILINE
 )
 _REF_LINE_RE = re.compile(r"^\s*ref\s*:\s*(.*?)\s*(?:#.*)?$", re.MULTILINE)
+_REPOSITORY_LINE_RE = re.compile(r"^\s*repository\s*:\s*(.*?)\s*(?:#.*)?$", re.MULTILINE)
 _STATIC_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _GIT_SOURCE_CHANGE_RE = re.compile(
     r"\bgit\s+(?:checkout|switch)\s+(?:(?:--detach|--force)\s+)?(?P<ref>[^\s;&|]+)",
@@ -92,7 +96,6 @@ _EVENT_EQ_RE = re.compile(
     r"|['\"](?P<reverse>[A-Za-z_]+)['\"]\s*==\s*github\.event_name",
     re.IGNORECASE,
 )
-_BUILD_TOOL_RE = re.compile(_BUILD_TOOL_ANCHOR)
 
 _TRUSTED = "trusted"
 _UNTRUSTED = "untrusted"
@@ -112,6 +115,19 @@ def _contains_pr_head_reference(text: str) -> bool:
     try:
         return any(
             _PR_HEAD_PATH_RE.search(path)
+            for body in iter_expression_bodies(text)
+            for path in context_paths(body)
+        )
+    except ExprSyntaxError:
+        return False
+
+
+def _contains_pr_head_repository(text: str) -> bool:
+    if _PR_HEAD_REPOSITORY_RE.search(text):
+        return True
+    try:
+        return any(
+            _PR_HEAD_REPOSITORY_RE.search(path)
             for body in iter_expression_bodies(text)
             for path in context_paths(body)
         )
@@ -174,6 +190,12 @@ def _checkout_action_state(step: StepSegment) -> str | None:
         return None
     if _contains_pr_head_reference(step.text):
         return _UNTRUSTED
+    repositories = [
+        match.group(1).strip().strip("'\"") for match in _REPOSITORY_LINE_RE.finditer(step.text)
+    ]
+    if repositories and (len(repositories) != 1 or repositories[0] != "${{ github.repository }}"):
+        # A static branch in another repository does not establish base trust.
+        return _UNKNOWN
     refs = [match.group(1).strip().strip("'\"") for match in _REF_LINE_RE.finditer(step.text)]
     if len(refs) == 1 and _STATIC_REF_RE.fullmatch(refs[0]):
         return _TRUSTED
@@ -212,29 +234,36 @@ class _OrderedPrBuildPattern(ContextPattern):
     step guard that is mutually exclusive with PR events.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, anchor: str = _BUILD_TOOL_ANCHOR, exclude: list[str] | None = None) -> None:
         super().__init__(
-            anchor=_BUILD_TOOL_ANCHOR,
+            anchor=anchor,
             requires=_PR_HEAD_CHECKOUT,
             scope="job",
-            exclude=[r"^\s*#"],
+            exclude=exclude or [r"^\s*#"],
             expr_augment_requires=True,
         )
+        self._source_anchor_re = re.compile(anchor)
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         # Keep the public rule's ref-line gate. Canonicalize only a parsed
         # PR-head expression in a ref value so bracket/case spelling cannot
         # bypass it; unrelated PR references never satisfy the gate.
-        gated_lines = [
-            re.sub(
-                r"^(\s*ref\s*:).*$",
-                r"\1 ${{ github.event.pull_request.head.sha }}",
-                line,
-            )
-            if re.match(r"^\s*ref\s*:", line) and _contains_pr_head_reference(line)
-            else line
-            for line in lines
-        ]
+        gated_lines = list(lines)
+        for step in for_each_step(content):
+            if not _CHECKOUT_ACTION_RE.search(step.text):
+                continue
+            for line_number in range(step.start_line, step.end_line + 1):
+                if line_number > len(gated_lines):
+                    break
+                source_line = gated_lines[line_number - 1]
+                ref = re.match(r"^(\s*ref\s*:).*$", source_line)
+                repository = re.match(r"^\s*repository\s*:", source_line)
+                if ref and _contains_pr_head_reference(source_line):
+                    gated_lines[line_number - 1] = (
+                        ref.group(1) + " ${{ github.event.pull_request.head.sha }}"
+                    )
+                elif repository and _contains_pr_head_repository(source_line):
+                    gated_lines[line_number - 1] = "ref: ${{ github.event.pull_request.head.sha }}"
         raw = super().check("\n".join(gated_lines), gated_lines)
         if not raw:
             return []
@@ -263,7 +292,7 @@ class _OrderedPrBuildPattern(ContextPattern):
                 for offset, source_line in enumerate(step.body_lines):
                     absolute_line = step.start_line + offset
                     transition = _git_source_change(source_line)
-                    anchor = _BUILD_TOOL_RE.search(source_line)
+                    anchor = self._source_anchor_re.search(source_line)
                     if transition and (not anchor or transition[0] <= anchor.start()):
                         state = transition[1]
 
@@ -419,10 +448,8 @@ RULES: list[Rule] = [
             "behaviour and closes the most common LOTP vector for "
             "JavaScript builds."
         ),
-        pattern=ContextPattern(
+        pattern=_OrderedPrBuildPattern(
             anchor=r"\b(?:npm\s+(?:install|ci|i)|yarn(?:\s+install)?|pnpm\s+(?:install|i))\b",
-            requires=_PR_HEAD_CHECKOUT,
-            scope="job",
             exclude=[
                 r"^\s*#",
                 r"--ignore-scripts",  # already mitigated — don't fire

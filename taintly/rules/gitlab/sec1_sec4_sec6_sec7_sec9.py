@@ -34,7 +34,6 @@ _PRIVATE_ARTIFACT_VISIBILITY_RE = re.compile(
     r"^public\s*:\s*['\"]?(?:false|no|off|0)['\"]?(?:\s+#.*)?$",
     re.IGNORECASE,
 )
-_ARTIFACT_INHERITANCE_RE = re.compile(r"^(?:<<\s*:\s*\*|!reference\b|\*\w+)")
 _HIGH_RISK_ARTIFACT_PATH_RE = re.compile(
     r"(?:"
     r"(?:^|[/\\])\.env(?:\.[^/\\]+)?(?:$|[/\\])|"
@@ -63,7 +62,8 @@ class HighRiskArtifactAccessPattern:
     exact artifact block contains a literal path (or strongly named variable)
     associated with secrets, private keys, signed pre-release packages, or
     security findings. Indentation bounds keep evidence, access controls, and
-    inheritance checks inside that block.
+    inheritance inside that block. An inherited access policy is not treated
+    as restrictive unless its effective value can be proved locally.
     """
 
     def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
@@ -81,8 +81,6 @@ class HighRiskArtifactAccessPattern:
             if any(_RESTRICTIVE_ARTIFACT_ACCESS_RE.fullmatch(text) for text in direct_children):
                 continue
             if any(_PRIVATE_ARTIFACT_VISIBILITY_RE.fullmatch(text) for text in direct_children):
-                continue
-            if any(_ARTIFACT_INHERITANCE_RE.match(text) for text in direct_children):
                 continue
             if self._has_sensitive_path(block, child_indent):
                 results.append((i + 1, stripped.strip()))

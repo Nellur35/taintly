@@ -22,7 +22,8 @@ from taintly.parsers.gha_expr import (
     iter_expression_bodies,
     result_provenance_paths,
 )
-from taintly.parsers.segmentation import for_each_job, for_each_step
+from taintly.parsers.segmentation import StepSegment, for_each_job, for_each_step
+from taintly.parsers.structural import triggers
 from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
 from taintly.workflow_corpus import is_fork_reachable
 
@@ -233,7 +234,8 @@ _GITHUB_OUTPUT_ECHO_RE = re.compile(
 _OUTPUT_BODY_RE = re.compile(r"^(?P<name>[A-Za-z_][A-Za-z0-9_-]*)=(?P<value>.*)$")
 _OUTPUT_NAME_HINT_RE = re.compile(r"(?<![$A-Za-z0-9_-])(?P<name>[A-Za-z_][A-Za-z0-9_-]*)(?:=|<<)")
 _SAFE_SHELL_LITERAL_RE = re.compile(r"[A-Za-z0-9 ._+:/-]*")
-_INLINE_RUN_RE = re.compile(r"^\s*(?:-\s*)?run\s*:\s*(?P<body>.+)$")
+_DIRECT_RUN_RE = re.compile(r"^(?:-\s*)?run\s*:\s*(?P<body>.*)$")
+_DIRECT_USES_RE = re.compile(r"^(?:-\s*)?uses\s*:")
 _NPM_PUBLISH_DIR_RE = re.compile(
     r"^\s*\(\s*cd\s+(?P<quote>['\"])(?P<path>[^'\"]+)(?P=quote)\s*&&\s*"
     r"npm\s+publish\b[^)&|;]*\)\s*$"
@@ -256,6 +258,43 @@ def _is_closed_shell_literal(value: str, quote: str) -> bool:
     """True for a fixed value that stays inert in common runner shells."""
 
     return quote not in value and bool(_SAFE_SHELL_LITERAL_RE.fullmatch(value))
+
+
+def _direct_run_source_lines(step: StepSegment) -> list[str]:
+    """Return only shell text of a direct ``run:`` step."""
+
+    if not step.body_lines:
+        return []
+    first = step.body_lines[0]
+    first_indent = len(first) - len(first.lstrip())
+    direct_key_indent = first_indent + 2
+    for line in step.body_lines:
+        text = line.lstrip()
+        indent = len(line) - len(text)
+        if indent in {first_indent, direct_key_indent} and _DIRECT_USES_RE.match(text):
+            return []
+
+    for position, line in enumerate(step.body_lines):
+        text = line.lstrip()
+        indent = len(line) - len(text)
+        if indent not in {first_indent, direct_key_indent}:
+            continue
+        match = _DIRECT_RUN_RE.match(text)
+        if not match:
+            continue
+        value = match.group("body").strip()
+        if value not in {"|", "|-", "|+", ">", ">-", ">+"}:
+            return [value] if value else []
+        body: list[str] = []
+        for child in step.body_lines[position + 1 :]:
+            child_text = child.lstrip()
+            child_indent = len(child) - len(child_text)
+            if child_text and child_indent <= indent:
+                break
+            if child_text:
+                body.append(child_text)
+        return body
+    return []
 
 
 def _is_shell_sink(path: tuple[object, ...], ctx: PredicateContext) -> bool:
@@ -329,11 +368,8 @@ def _proven_shell_safe_outputs(content: str) -> dict[tuple[str, str, str], int]:
         output_safety: dict[str, bool] = {}
         unknown_output_name_write = False
 
-        for raw_line in step.body_lines:
+        for raw_line in _direct_run_source_lines(step):
             line = raw_line.strip()
-            inline_run = _INLINE_RUN_RE.match(line)
-            if inline_run:
-                line = inline_run.group("body").strip()
 
             publish = _NPM_PUBLISH_DIR_RE.match(line)
             if publish and not any(token in line for token in ("||", ";", "`", "$(")):
@@ -682,7 +718,7 @@ _PRT_TRIGGER_RE = (
     r"(?m)("
     r"^\s*pull_request_target\s*:"
     r"|^\s*-\s*pull_request_target\s*$"
-    r"|^on\s*:\s*pull_request_target\s*$"
+    r"|^on\s*:\s*pull_request_target\s*(?:#.*)?$"
     r"|^on\s*:\s*\[[^\]]*\bpull_request_target\b[^\]]*\]"
     r")"
 )
@@ -941,6 +977,52 @@ class ExplicitLowTrustCacheWritePattern:
             cache_write = _cache_write_line(step)
             if cache_write is not None:
                 findings.append(cache_write)
+        return findings
+
+
+class WriteCapableReusableCachePattern:
+    """Identify a write-capable reusable call that needs callee review.
+
+    The caller grants a capability, but does not prove a callee cache write.
+    """
+
+    _REUSABLE_USES_RE = re.compile(
+        r"^uses\s*:\s*['\"]?(?:\./\.github/workflows/|"
+        r"[^/\s]+/[^/\s]+/\.github/workflows/)[^\s'\"]+",
+        re.IGNORECASE,
+    )
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        # Keep a top-level scalar fallback for whitespace-minimised fixtures;
+        # the structural read prevents a nested example from becoming a trigger.
+        scalar_trigger = re.search(r"(?m)^on:[ \t]*pull_request_target[ \t]*(?:#.*)?$", content)
+        if "pull_request_target" not in triggers(content) and not scalar_trigger:
+            return []
+        workflow_mode = _workflow_cache_mode(lines)
+        job_modes = _job_cache_modes(content)
+        findings: list[tuple[int, str]] = []
+        for job in for_each_job(content):
+            if not job.name or job_modes.get(job.name, workflow_mode) not in {
+                "write",
+                "write-only",
+            }:
+                continue
+            first = job.body_lines[0]
+            job_indent = len(first) - len(first.lstrip())
+            child_indents = [
+                len(line) - len(line.lstrip())
+                for line in job.body_lines[1:]
+                if line.strip() and len(line) - len(line.lstrip()) > job_indent
+            ]
+            if not child_indents:
+                continue
+            direct_indent = min(child_indents)
+            for offset, line in enumerate(job.body_lines):
+                stripped = line.lstrip()
+                if len(line) - len(stripped) != direct_indent:
+                    continue
+                if self._REUSABLE_USES_RE.match(stripped):
+                    findings.append((job.start_line + offset, stripped))
         return findings
 
 
@@ -2335,6 +2417,50 @@ RULES: list[Rule] = [
             "build places attacker-shaped files in a cache key later used "
             "by a trusted push or release run. That run restores and "
             "executes the poisoned files with its stronger credentials."
+        ),
+    ),
+    Rule(
+        id="SEC4-GH-026B",
+        title="Write-capable reusable workflow call requires cache review",
+        severity=Severity.INFO,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        review_needed=True,
+        confidence="low",
+        description=(
+            "A pull_request_target job explicitly grants write-capable cache "
+            "access to a reusable workflow. The called workflow may be in "
+            "another file or repository, so this caller alone does not prove "
+            "that a cache is written. Review the callee's cache steps and "
+            "untrusted input paths before treating this as exploitable."
+        ),
+        pattern=WriteCapableReusableCachePattern(),
+        remediation=(
+            "Set the calling job's cache-mode to read or none unless the "
+            "callee must write a cache. If writes are needed, inspect the "
+            "callee and avoid processing pull-request-controlled code before "
+            "the cache save."
+        ),
+        reference="https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#cache-access-in-reusable-workflows",
+        test_positive=[
+            "on: pull_request_target\njobs:\n  call:\n    cache-mode: write\n"
+            "    uses: ./.github/workflows/cache.yml",
+            "on: pull_request_target\ncache-mode: write-only\njobs:\n  call:\n"
+            "    uses: owner/repo/.github/workflows/cache.yml@v1",
+        ],
+        test_negative=[
+            "on: pull_request_target\njobs:\n  call:\n    cache-mode: read\n"
+            "    uses: ./.github/workflows/cache.yml",
+            "on: push\njobs:\n  call:\n    cache-mode: write\n"
+            "    uses: ./.github/workflows/cache.yml",
+        ],
+        stride=["T", "I"],
+        threat_narrative=(
+            "A reusable workflow invoked from a low-trust event inherits an "
+            "explicit cache-write capability. If that callee saves a cache "
+            "after processing attacker-controlled input, a later trusted run "
+            "may restore and execute the poisoned content. Callee inspection "
+            "is required to establish the complete path."
         ),
     ),
     Rule(
