@@ -2,6 +2,7 @@
 
 from taintly.rules.registry import get_rule_by_id
 
+
 def _matches(body: str) -> list[tuple[int, str]]:
     rule = get_rule_by_id("LOTP-GH-001")
     assert rule is not None
@@ -164,7 +165,20 @@ def test_bracket_encoded_pr_head_checkout_still_fires() -> None:
     assert _matches(body)
 
 
-def test_later_pr_checkout_does_not_taint_an_earlier_build() -> None:
+def test_later_pr_checkout_does_not_taint_an_earlier_trusted_build() -> None:
+    body = """jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: npm ci
+      - run: git checkout ${{ github.event.pull_request.head.sha }}
+"""
+    assert not _matches(body)
+
+
+def test_unresolved_default_checkout_remains_visible() -> None:
     body = """jobs:
   build:
     steps:
@@ -172,4 +186,4 @@ def test_later_pr_checkout_does_not_taint_an_earlier_build() -> None:
       - run: npm ci
       - run: git checkout ${{ github.event.pull_request.head.sha }}
 """
-    assert not _matches(body)
+    assert _matches(body)

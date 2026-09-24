@@ -54,6 +54,10 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 - Local pip editable installs with named checkout paths are recognized. PR
   source proof comes from checkout fields or executable Git changes, so PR
   metadata logged by a trusted workflow does not create a build finding.
+- Multiple static heredocs are read in order; pip local-path options accept
+  separated and equals forms. `HEAD` and fetch-derived Git refs do not prove
+  trusted source. Executable Git PR switches can establish source evidence
+  without a checkout `ref` value; an unresolved default checkout stays visible.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

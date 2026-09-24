@@ -14,6 +14,7 @@ recognisable once GitLab and Jenkins LOTP rules land in follow-up PRs.
 import posixpath
 import re
 import shlex
+from collections import deque
 from collections.abc import Sequence
 
 from taintly.models import ContextPattern, Platform, Rule, Severity
@@ -26,36 +27,13 @@ from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 # Shared patterns
 # ---------------------------------------------------------------------------
 
-# Evidence the job has checked out attacker-controlled code.  Matching any of
-# these in the same job segment as a build tool means the tool is operating
-# on untrusted source.
-#
-# Tight anchoring: the head-ref reference must appear as the value
-# of a ``ref:`` line (the only way
-# the reference actually CONTROLS what code gets checked out).
-# Previously matched any occurrence of ``github.head_ref`` etc. —
-# including defensive ``${{ github.head_ref || 'main' }}`` fallbacks
-# in command parameters of unrelated actions like wrangler-action.
-# Audit found 6 FPs on astral-sh/ruff publish-{,ty-}playground.yml
-# that use the head_ref-or-main pattern in cloudflare deploy
-# commands. The earlier loose regex assumed any reference to the
-# head ref meant a checkout; the new form requires the reference to
-# be in actions/checkout's ``ref:`` parameter (the only place where
-# it actually selects the code revision).
+# Candidate PR source context. The ordered source model below verifies that
+# it controls a checkout field or an executable Git source change.
 _PR_HEAD_CHECKOUT = (
-    # ``(?:^|\n)`` matches start-of-string or start-of-line in the
-    # segment content (ContextPattern doesn't compile with re.MULTILINE
-    # so ``^`` alone wouldn't match interior lines).
-    r"(?:^|\n)\s*ref:\s*\$\{\{[^}]*?"
-    r"(?:"
-    r"github\.event\.pull_request\.head\.(?:sha|ref)"
+    r"(?:github\.event\.pull_request\.head\.(?:sha|ref)"
+    r"|github\.event\.pull_request\.head\.repo\.full_name"
     r"|github\.head_ref"
-    r"|github\.event\.workflow_run\.head_(?:branch|sha)"
-    r")"
-    r"[^}]*?\}\}"
-)
-_PR_HEAD_REPOSITORY_RE = re.compile(
-    r"github\.event\.pull_request\.head\.repo\.full_name", re.IGNORECASE
+    r"|github\.event\.workflow_run\.head_branch)"
 )
 
 # Evidence untrusted artefacts have been pulled into the job workspace.
@@ -109,7 +87,13 @@ _NPM_PREFIX_BUILD_ANCHOR = (
     r"\bnpm\s+--prefix(?:=|\s+)\S+\s+"
     r"(?:install|ci|i|update|pack|publish|run|build|test)\b"
 )
-_PIP_EDITABLE_BUILD_ANCHOR = r"\bpip\d*(?:\.\d+)?\s+install\s+(?:-e|--editable)\s+\S+"
+_PIP_LOCAL_OPTION_BUILD_ANCHOR = (
+    r"\bpip\d*(?:\.\d+)?\s+install\s+"
+    r"(?:-e|--editable|-r|--requirement)(?:=|\s+)\S+"
+)
+_GIT_TRANSIENT_REFS = frozenset(
+    {"HEAD", "FETCH_HEAD", "ORIG_HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REBASE_HEAD"}
+)
 _GIT_SOURCE_CHANGE_RE = re.compile(
     r"\bgit\s+(?:checkout|switch)\s+(?:(?:--detach|--force)\s+)?(?P<ref>[^\s;&|]+)",
     re.IGNORECASE,
@@ -139,19 +123,6 @@ def _contains_pr_head_reference(text: str) -> bool:
     try:
         return any(
             _PR_HEAD_PATH_RE.search(path)
-            for body in iter_expression_bodies(text)
-            for path in context_paths(body)
-        )
-    except ExprSyntaxError:
-        return False
-
-
-def _contains_pr_head_repository(text: str) -> bool:
-    if _PR_HEAD_REPOSITORY_RE.search(text):
-        return True
-    try:
-        return any(
-            _PR_HEAD_REPOSITORY_RE.search(path)
             for body in iter_expression_bodies(text)
             for path in context_paths(body)
         )
@@ -427,6 +398,8 @@ def _build_source_path(
                 if index >= len(tokens):
                     return None
                 paths.append(tokens[index])
+            elif argument.startswith(("-e=", "--editable=", "-r=", "--requirement=")):
+                paths.append(argument.split("=", 1)[1])
             elif argument == "." or argument.startswith(("./", "../", "/")):
                 paths.append(argument)
             index += 1
@@ -465,6 +438,8 @@ def _git_source_change(line: str) -> tuple[int, str] | None:
         return None
     if _contains_pr_head_reference(line):
         return (match.start(), _UNTRUSTED)
+    if ref.upper() in _GIT_TRANSIENT_REFS:
+        return (match.start(), _UNKNOWN)
     if _STATIC_REF_RE.fullmatch(ref) and not ref.startswith("-"):
         return (match.start(), _TRUSTED)
     return (match.start(), _UNKNOWN)
@@ -498,7 +473,7 @@ class _OrderedPrBuildPattern(ContextPattern):
     def __init__(
         self,
         anchor: str = (
-            rf"(?:{_BUILD_TOOL_ANCHOR}|{_NPM_PREFIX_BUILD_ANCHOR}|{_PIP_EDITABLE_BUILD_ANCHOR})"
+            rf"(?:{_BUILD_TOOL_ANCHOR}|{_NPM_PREFIX_BUILD_ANCHOR}|{_PIP_LOCAL_OPTION_BUILD_ANCHOR})"
         ),
         exclude: list[str] | None = None,
     ) -> None:
@@ -512,26 +487,7 @@ class _OrderedPrBuildPattern(ContextPattern):
         self._source_anchor_re = re.compile(anchor)
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        # Keep the public rule's ref-line gate. Canonicalize only a parsed
-        # PR-head expression in a ref value so bracket/case spelling cannot
-        # bypass it; unrelated PR references never satisfy the gate.
-        gated_lines = list(lines)
-        for step in for_each_step(content):
-            if not _CHECKOUT_ACTION_RE.search(step.text):
-                continue
-            for line_number in range(step.start_line, step.end_line + 1):
-                if line_number > len(gated_lines):
-                    break
-                source_line = gated_lines[line_number - 1]
-                ref = re.match(r"^(\s*ref\s*:).*$", source_line)
-                repository = re.match(r"^\s*repository\s*:", source_line)
-                if ref and _contains_pr_head_reference(source_line):
-                    gated_lines[line_number - 1] = (
-                        ref.group(1) + " ${{ github.event.pull_request.head.sha }}"
-                    )
-                elif repository and _contains_pr_head_repository(source_line):
-                    gated_lines[line_number - 1] = "ref: ${{ github.event.pull_request.head.sha }}"
-        raw = super().check("\n".join(gated_lines), gated_lines)
+        raw = super().check(content, lines)
         if not raw:
             return []
 
@@ -592,18 +548,18 @@ class _OrderedPrBuildPattern(ContextPattern):
                     _USES_LINE_RE.match(line) for line in step.body_lines
                 ) and not any(_RUN_LINE_RE.match(line) for line in step.body_lines)
                 shell_quote: str | None = None
-                heredoc_delimiter: str | None = None
-                heredoc_strip_tabs = False
+                heredoc_queue: deque[tuple[str, bool]] = deque()
 
                 for offset, source_line in enumerate(step.body_lines):
                     absolute_line = step.start_line + offset
                     shell_line = shell_lines.get(offset)
-                    if heredoc_delimiter is not None and shell_line is not None:
+                    if heredoc_queue and shell_line is not None:
+                        heredoc_delimiter, heredoc_strip_tabs = heredoc_queue[0]
                         body = shell_line[script_indent:]
                         if heredoc_strip_tabs:
                             body = body.lstrip("\t")
                         if body == heredoc_delimiter:
-                            heredoc_delimiter = None
+                            heredoc_queue.popleft()
                         if absolute_line in step_candidates:
                             resolved.add(absolute_line)
                         continue
@@ -613,21 +569,21 @@ class _OrderedPrBuildPattern(ContextPattern):
                         shell_mask, shell_quote, comment_start = _shell_quote_mask(
                             shell_line, shell_quote
                         )
-                    opener = (
-                        next(
-                            (
-                                match
-                                for match in _HEREDOC_OPEN_RE.finditer(shell_line)
-                                if not shell_mask[match.start()]
-                            ),
-                            None,
-                        )
+                    openers = (
+                        [
+                            match
+                            for match in _HEREDOC_OPEN_RE.finditer(shell_line)
+                            if not shell_mask[match.start()]
+                        ]
                         if shell_line is not None
-                        else None
+                        else []
                     )
-                    if shell_line is not None and opener is None:
+                    if shell_line is not None:
+                        opener_columns = {match.start() for match in openers}
                         if any(
-                            shell_line[index : index + 2] == "<<" and not shell_mask[index]
+                            shell_line[index : index + 2] == "<<"
+                            and not shell_mask[index]
+                            and index not in opener_columns
                             for index in range(len(shell_line) - 1)
                         ):
                             uncertain_layout = True
@@ -691,9 +647,10 @@ class _OrderedPrBuildPattern(ContextPattern):
                             ):
                                 kept.add(absolute_line)
 
-                    if opener is not None:
-                        heredoc_delimiter = opener.group("delimiter")
-                        heredoc_strip_tabs = opener.group("operator") == "<<-"
+                    heredoc_queue.extend(
+                        (opener.group("delimiter"), opener.group("operator") == "<<-")
+                        for opener in openers
+                    )
 
                 if checkout_state is not None and not pr_excluded:
                     state, foreign_repository, checkout_path = checkout_state

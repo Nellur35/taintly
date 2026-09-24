@@ -854,3 +854,111 @@ jobs:
         run: pip install -e ".[dev]"
 """
     assert _fires("LOTP-GH-001", workflow)
+
+
+def test_second_heredoc_body_cannot_clear_fork_source() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+      - run: |
+          cd fork
+          cat <<A <<B
+          first body
+          A
+          ; cd ../base
+          B
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_pip_editable_equals_path_from_fork_is_untrusted() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: pip install --editable=./fork
+"""
+    assert _fires("LOTP-GH-001", workflow)
+
+
+def test_pip_long_requirement_path_from_fork_is_untrusted() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: fork
+      - run: pip install --requirement ./fork/requirements.txt
+"""
+    assert _fires("LOTP-GH-001", workflow)
+
+
+def test_executable_git_checkout_is_pr_source_without_checkout_ref() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git fetch origin refs/pull/${{ github.event.pull_request.number }}/head
+          git checkout ${{ github.event.pull_request.head.sha }}
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_fetch_head_does_not_prove_trusted_source() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: |
+          git fetch origin refs/pull/${{ github.event.pull_request.number }}/head
+          git checkout FETCH_HEAD
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_head_switch_does_not_prove_trusted_source() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: |
+          git checkout HEAD
+          npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
