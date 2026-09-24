@@ -93,8 +93,14 @@ _SHELL_CD_RE = re.compile(
     r"(?:^\s*(?:-\s*)?run\s*:\s*|^\s*|[;&|]\s*)cd\s+(?P<path>[^\s;&|]+)",
     re.IGNORECASE,
 )
+_RUN_LINE_RE = re.compile(r"^\s*(?:-\s*)?run\s*:\s*(?P<body>.*)$")
 _STATIC_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _STATIC_PATH_RE = re.compile(r"[A-Za-z0-9._/-]+\Z")
+_NPM_PREFIX_INSTALL_ANCHOR = r"\bnpm\s+--prefix(?:=|\s+)\S+\s+(?:install|ci|i)\b"
+_NPM_PREFIX_BUILD_ANCHOR = (
+    r"\bnpm\s+--prefix(?:=|\s+)\S+\s+"
+    r"(?:install|ci|i|update|pack|publish|run|build|test)\b"
+)
 _GIT_SOURCE_CHANGE_RE = re.compile(
     r"\bgit\s+(?:checkout|switch)\s+(?:(?:--detach|--force)\s+)?(?P<ref>[^\s;&|]+)",
     re.IGNORECASE,
@@ -298,6 +304,65 @@ def _source_key(sources: dict[str, tuple[str, bool]], cwd: str) -> str:
     return path
 
 
+def _run_shell_lines(step: StepSegment) -> dict[int, str]:
+    """Return executable run lines, preserving columns for ordered events."""
+
+    if not step.body_lines:
+        return {}
+    first_indent = len(step.body_lines[0]) - len(step.body_lines[0].lstrip())
+    child_indents = [
+        len(line) - len(line.lstrip())
+        for line in step.body_lines[1:]
+        if line.strip() and len(line) - len(line.lstrip()) > first_indent
+    ]
+    direct_indent = min(child_indents) if child_indents else first_indent + 2
+    script: dict[int, str] = {}
+    for offset, line in enumerate(step.body_lines):
+        indent = len(line) - len(line.lstrip())
+        if indent not in {first_indent, direct_indent}:
+            continue
+        match = _RUN_LINE_RE.match(line)
+        if not match:
+            continue
+        body = match.group("body")
+        if body.strip() in {"|", "|-", "|+", ">", ">-", ">+"}:
+            for next_offset in range(offset + 1, len(step.body_lines)):
+                next_line = step.body_lines[next_offset]
+                if next_line.strip() and len(next_line) - len(next_line.lstrip()) <= indent:
+                    break
+                script[next_offset] = next_line
+        else:
+            prefix_len = match.start("body")
+            # YAML's outer scalar quotes are delimiters, not shell quotes.
+            if len(body) >= 2 and body[0] in "'\"" and body[-1] == body[0]:
+                body = " " + body[1:-1] + " "
+            script[offset] = " " * prefix_len + body
+    return script
+
+
+def _shell_quote_mask(line: str, initial: str | None) -> tuple[list[bool], str | None]:
+    """Mark characters inside shell quotes; carry multiline quote state."""
+
+    quote = initial
+    escaped = False
+    mask: list[bool] = []
+    for char in line:
+        mask.append(quote is not None)
+        if quote == "'":
+            if char == "'":
+                quote = None
+        elif escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif quote is not None:
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+    return mask, quote
+
+
 def _source_after_ref_change(state: str, foreign_repository: bool, target: str) -> str:
     """A branch switch cannot turn a foreign repository into the base repo."""
 
@@ -336,7 +401,11 @@ class _OrderedPrBuildPattern(ContextPattern):
     step guard that is mutually exclusive with PR events.
     """
 
-    def __init__(self, anchor: str = _BUILD_TOOL_ANCHOR, exclude: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        anchor: str = rf"(?:{_BUILD_TOOL_ANCHOR}|{_NPM_PREFIX_BUILD_ANCHOR})",
+        exclude: list[str] | None = None,
+    ) -> None:
         super().__init__(
             anchor=anchor,
             requires=_PR_HEAD_CHECKOUT,
@@ -407,15 +476,23 @@ class _OrderedPrBuildPattern(ContextPattern):
                 pr_excluded = _excludes_pr_path(_direct_if(step))
                 checkout_state = _checkout_action_state(step)
                 cwd = _step_working_path(step, default_path)
+                shell_lines = _run_shell_lines(step)
+                shell_quote: str | None = None
 
                 for offset, source_line in enumerate(step.body_lines):
                     absolute_line = step.start_line + offset
-                    transition = _git_source_change(source_line)
+                    shell_line = shell_lines.get(offset)
+                    shell_mask: list[bool] = []
+                    if shell_line is not None:
+                        shell_mask, shell_quote = _shell_quote_mask(shell_line, shell_quote)
+                    transition = _git_source_change(shell_line) if shell_line is not None else None
                     anchor = self._source_anchor_re.search(source_line)
                     events: list[tuple[int, str, str | None]] = []
-                    for cd_match in _SHELL_CD_RE.finditer(source_line):
-                        events.append((cd_match.start(), "cd", cd_match.group("path")))
-                    if transition:
+                    if shell_line is not None:
+                        for cd_match in _SHELL_CD_RE.finditer(shell_line):
+                            if not shell_mask[cd_match.start()]:
+                                events.append((cd_match.start(), "cd", cd_match.group("path")))
+                    if transition and not shell_mask[transition[0]]:
                         events.append((transition[0], "git", transition[1]))
                     if anchor and absolute_line in step_candidates:
                         events.append((anchor.start(), "build", None))
@@ -438,11 +515,17 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 )
                         else:
                             resolved.add(absolute_line)
+                            build_source_key = _source_key(sources, cwd) if cwd else None
+                            side_source = any(
+                                path != "." and state != _TRUSTED
+                                for path, (state, _) in sources.items()
+                            )
                             if (
                                 uncertain_layout
                                 or cwd is None
-                                or sources.get(_source_key(sources, cwd), (_UNKNOWN, False))[0]
+                                or sources.get(build_source_key or ".", (_UNKNOWN, False))[0]
                                 != _TRUSTED
+                                or (build_source_key == "." and side_source)
                             ):
                                 kept.add(absolute_line)
 
@@ -594,7 +677,10 @@ RULES: list[Rule] = [
             "JavaScript builds."
         ),
         pattern=_OrderedPrBuildPattern(
-            anchor=r"\b(?:npm\s+(?:install|ci|i)|yarn(?:\s+install)?|pnpm\s+(?:install|i))\b",
+            anchor=(
+                r"\b(?:npm\s+(?:install|ci|i)|yarn(?:\s+install)?|pnpm\s+(?:install|i))\b"
+                "|" + _NPM_PREFIX_INSTALL_ANCHOR
+            ),
             exclude=[
                 r"^\s*#",
                 r"--ignore-scripts",  # already mitigated — don't fire
