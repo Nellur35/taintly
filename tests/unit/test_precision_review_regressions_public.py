@@ -87,3 +87,73 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
 """
     assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_fork_checkout_then_static_branch_switch_stays_untrusted() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: main
+      - run: git switch main
+      - run: npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)
+
+
+def test_uncapped_reusable_workflow_call_needs_cache_review() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  call:
+    uses: ./.github/workflows/cache.yml
+"""
+    assert _fires("SEC4-GH-026B", workflow)
+
+
+def test_cache_write_rule_ignores_trigger_text_in_push_script() -> None:
+    workflow = """on: push
+jobs:
+  build:
+    cache-mode: write
+    steps:
+      - run: |
+          pull_request_target:
+            echo example
+      - uses: actions/cache@v4
+"""
+    assert not _fires("SEC4-GH-026A", workflow)
+
+
+def test_push_only_checkout_does_not_taint_pr_build() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - if: github.event_name == 'push'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: npm ci
+"""
+    assert not _fires("LOTP-GH-001", workflow)
+    assert not _fires("LOTP-GH-003", workflow)
+
+
+def test_push_only_branch_switch_cannot_clear_pr_source() -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - if: github.event_name == 'push'
+        run: git switch main
+      - run: npm ci
+"""
+    assert _fires("LOTP-GH-001", workflow)
+    assert _fires("LOTP-GH-003", workflow)

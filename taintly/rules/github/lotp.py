@@ -183,25 +183,38 @@ def _excludes_pr_path(condition: str) -> bool:
     return bool(events) and events.isdisjoint({"pull_request", "pull_request_target"})
 
 
-def _checkout_action_state(step: StepSegment) -> str | None:
-    """Return the source state established by an actions/checkout step."""
+def _checkout_action_state(step: StepSegment) -> tuple[str, bool] | None:
+    """Return source state and whether checkout selected another repository."""
 
     if not _CHECKOUT_ACTION_RE.search(step.text):
         return None
-    if _contains_pr_head_reference(step.text):
-        return _UNTRUSTED
     repositories = [
         match.group(1).strip().strip("'\"") for match in _REPOSITORY_LINE_RE.finditer(step.text)
     ]
-    if repositories and (len(repositories) != 1 or repositories[0] != "${{ github.repository }}"):
-        # A static branch in another repository does not establish base trust.
-        return _UNKNOWN
+    if repositories:
+        if len(repositories) != 1:
+            return _UNKNOWN, True
+        if _contains_pr_head_reference(repositories[0]):
+            return _UNTRUSTED, True
+        if repositories[0] != "${{ github.repository }}":
+            # A fixed branch in another repository cannot prove base trust.
+            return _UNKNOWN, True
+    if _contains_pr_head_reference(step.text):
+        return _UNTRUSTED, False
     refs = [match.group(1).strip().strip("'\"") for match in _REF_LINE_RE.finditer(step.text)]
     if len(refs) == 1 and _STATIC_REF_RE.fullmatch(refs[0]):
-        return _TRUSTED
+        return _TRUSTED, False
     # Default checkout and dynamic refs depend on the event and repository
     # state.  Retain findings until that state can be proved.
-    return _UNKNOWN
+    return _UNKNOWN, False
+
+
+def _source_after_ref_change(state: str, foreign_repository: bool, target: str) -> str:
+    """A branch switch cannot turn a foreign repository into the base repo."""
+
+    if target == _TRUSTED and foreign_repository:
+        return _UNTRUSTED if state == _UNTRUSTED else _UNKNOWN
+    return target
 
 
 def _git_source_change(line: str) -> tuple[int, str] | None:
@@ -282,6 +295,7 @@ class _OrderedPrBuildPattern(ContextPattern):
             if not job_lines:
                 continue
             state = _TRUSTED
+            foreign_repository = False
             for step in (step for step in steps if step.job_name == job.name):
                 step_candidates = {
                     line for line in job_lines if step.start_line <= line <= step.end_line
@@ -293,8 +307,12 @@ class _OrderedPrBuildPattern(ContextPattern):
                     absolute_line = step.start_line + offset
                     transition = _git_source_change(source_line)
                     anchor = self._source_anchor_re.search(source_line)
-                    if transition and (not anchor or transition[0] <= anchor.start()):
-                        state = transition[1]
+                    if (
+                        not pr_excluded
+                        and transition
+                        and (not anchor or transition[0] <= anchor.start())
+                    ):
+                        state = _source_after_ref_change(state, foreign_repository, transition[1])
 
                     if absolute_line not in step_candidates:
                         continue
@@ -302,11 +320,11 @@ class _OrderedPrBuildPattern(ContextPattern):
                     if not pr_excluded and state != _TRUSTED:
                         kept.add(absolute_line)
 
-                    if transition and anchor and transition[0] > anchor.start():
-                        state = transition[1]
+                    if not pr_excluded and transition and anchor and transition[0] > anchor.start():
+                        state = _source_after_ref_change(state, foreign_repository, transition[1])
 
-                if checkout_state is not None:
-                    state = checkout_state
+                if checkout_state is not None and not pr_excluded:
+                    state, foreign_repository = checkout_state
 
         # Any match outside a resolvable step remains visible.  Parser gaps must
         # never become silent suppressions.

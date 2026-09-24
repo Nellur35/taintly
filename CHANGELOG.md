@@ -28,11 +28,15 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 - `SEC9-GL-001` now requires a strongly sensitive artifact path and still asks for
   project visibility review. Inherited settings alone no longer prove restricted
   access. `SEC4-GH-026` is retired; `SEC4-GH-026A` reports a visible cache write
-  with explicit write access, and `SEC4-GH-026B` marks write-capable reusable calls
-  for callee review without claiming a cache write is proved.
+  with explicit write access, and `SEC4-GH-026B` marks uncapped or write-capable
+  reusable calls for callee review without claiming a cache write is proved.
 - A static ref in a contributor repository no longer proves a trusted checkout.
-  Package install findings follow source changes in step order. Shell-looking
+  A later branch switch keeps that repository provenance, and source changes
+  in steps excluded from PR execution do not affect PR builds. Package install
+  findings follow source changes in step order. Shell-looking
   action inputs no longer prove that a step output is safe for shell use.
+- Cache-write findings use the parsed workflow trigger, so trigger-looking
+  text in a push-only shell script does not create a false warning.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

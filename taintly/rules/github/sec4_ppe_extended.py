@@ -724,6 +724,14 @@ _PRT_TRIGGER_RE = (
 )
 
 
+def _has_prt_trigger(content: str) -> bool:
+    """Read the actual trigger; keep narrow top-level mutation fallbacks."""
+
+    scalar = re.search(r"(?m)^on:[ \t]*pull_request_target[ \t]*(?:#.*)?$", content)
+    block = re.search(r"(?m)^on:[ \t]*(?:#.*)?\n[ \t]+pull_request_target[ \t]*:", content)
+    return "pull_request_target" in triggers(content) or bool(scalar or block)
+
+
 _IGNORE_SCRIPTS_INSTALL_LINE_RE = (
     r"^\s*(?:-\s*)?(?:run:\s*)?"
     r"[\"']?"
@@ -965,7 +973,7 @@ class ExplicitLowTrustCacheWritePattern:
     """
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        if not re.search(_PRT_TRIGGER_RE, content):
+        if not _has_prt_trigger(content):
             return []
         workflow_mode = _workflow_cache_mode(lines)
         job_modes = _job_cache_modes(content)
@@ -981,7 +989,7 @@ class ExplicitLowTrustCacheWritePattern:
 
 
 class WriteCapableReusableCachePattern:
-    """Identify a write-capable reusable call that needs callee review.
+    """Identify an uncapped or write-capable reusable call for callee review.
 
     The caller grants a capability, but does not prove a callee cache write.
     """
@@ -993,19 +1001,13 @@ class WriteCapableReusableCachePattern:
     )
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        # Keep a top-level scalar fallback for whitespace-minimised fixtures;
-        # the structural read prevents a nested example from becoming a trigger.
-        scalar_trigger = re.search(r"(?m)^on:[ \t]*pull_request_target[ \t]*(?:#.*)?$", content)
-        if "pull_request_target" not in triggers(content) and not scalar_trigger:
+        if not _has_prt_trigger(content):
             return []
         workflow_mode = _workflow_cache_mode(lines)
         job_modes = _job_cache_modes(content)
         findings: list[tuple[int, str]] = []
         for job in for_each_job(content):
-            if not job.name or job_modes.get(job.name, workflow_mode) not in {
-                "write",
-                "write-only",
-            }:
+            if not job.name or job_modes.get(job.name, workflow_mode) in {"read", "none"}:
                 continue
             first = job.body_lines[0]
             job_indent = len(first) - len(first.lstrip())
@@ -2421,16 +2423,17 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC4-GH-026B",
-        title="Write-capable reusable workflow call requires cache review",
+        title="Reusable workflow call may gain cache-write access",
         severity=Severity.INFO,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         review_needed=True,
         confidence="low",
         description=(
-            "A pull_request_target job explicitly grants write-capable cache "
-            "access to a reusable workflow. The called workflow may be in "
-            "another file or repository, so this caller alone does not prove "
+            "A pull_request_target job calls a reusable workflow without an "
+            "explicit read/none cache cap, or grants write-capable access. "
+            "An uncapped callee can request cache writes even when the low-trust "
+            "caller defaults to read-only. This caller alone does not prove "
             "that a cache is written. Review the callee's cache steps and "
             "untrusted input paths before treating this as exploitable."
         ),
@@ -2447,17 +2450,21 @@ RULES: list[Rule] = [
             "    uses: ./.github/workflows/cache.yml",
             "on: pull_request_target\ncache-mode: write-only\njobs:\n  call:\n"
             "    uses: owner/repo/.github/workflows/cache.yml@v1",
+            "on: pull_request_target\njobs:\n  call:\n    uses: ./.github/workflows/cache.yml",
         ],
         test_negative=[
             "on: pull_request_target\njobs:\n  call:\n    cache-mode: read\n"
             "    uses: ./.github/workflows/cache.yml",
             "on: push\njobs:\n  call:\n    cache-mode: write\n"
             "    uses: ./.github/workflows/cache.yml",
+            "on: pull_request_target\ncache-mode: read\njobs:\n  call:\n"
+            "    uses: ./.github/workflows/cache.yml",
         ],
         stride=["T", "I"],
         threat_narrative=(
-            "A reusable workflow invoked from a low-trust event inherits an "
-            "explicit cache-write capability. If that callee saves a cache "
+            "A reusable workflow invoked from a low-trust event may request "
+            "cache writes unless the caller explicitly caps it to read/none. "
+            "If that callee saves a cache "
             "after processing attacker-controlled input, a later trusted run "
             "may restore and execute the poisoned content. Callee inspection "
             "is required to establish the complete path."
