@@ -91,6 +91,8 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   a clone into a new subdirectory does not taint the original build directory.
 - Builds in a possible implicit clone directory stay visible for review,
   and local branches inherit provenance from unqualified remote fetches.
+- Fully qualified remote refs and native Git worktree destinations now retain
+  fetched source provenance through later builds.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.

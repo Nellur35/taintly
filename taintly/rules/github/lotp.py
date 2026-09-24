@@ -717,6 +717,53 @@ def _git_branch_events(
     return events
 
 
+def _git_worktree_add_events(
+    line: str, mask: list[bool]
+) -> list[tuple[int, str, str | None, tuple[str, ...]]]:
+    """Track a native worktree path and the ref checked out into it."""
+
+    events: list[tuple[int, str, str | None, tuple[str, ...]]] = []
+    for column, command in _shell_command_segments(line, mask):
+        tokens = _shell_command_tokens(command)
+        if tokens is None:
+            continue
+        invocation = _git_command_index(tokens)
+        if invocation is None:
+            continue
+        index, paths = invocation
+        if [token.lower() for token in tokens[index : index + 2]] != ["worktree", "add"]:
+            continue
+        args = tokens[index + 2 :]
+        while args and args[0].startswith("-"):
+            option, inline_value, _ = args[0].partition("=")
+            args = args[1:]
+            if option in {"-b", "-B", "--reason"} and not inline_value:
+                args = args[1:]
+        if args:
+            events.append((column, args[0], args[1] if len(args) > 1 else None, paths))
+    return events
+
+
+def _git_ref_state(
+    value: str, refs: dict[str, str], branches: dict[str, str], fallback: str
+) -> str:
+    """Resolve Git's full and shorthand names for fetched and local refs."""
+
+    alias = value
+    for prefix in ("refs/remotes/", "refs/heads/"):
+        if value.startswith(prefix):
+            alias = value.removeprefix(prefix)
+            break
+    for name in (value, alias):
+        if name in refs:
+            return refs[name]
+        if name in branches:
+            return branches[name]
+    if "/" in alias:
+        return refs.get(f"{alias.split('/', 1)[0]}/*", fallback)
+    return fallback
+
+
 def _git_remote_events(
     line: str, mask: list[bool]
 ) -> list[tuple[int, str, str, tuple[str, ...], str]]:
@@ -1219,6 +1266,7 @@ class _OrderedPrBuildPattern(ContextPattern):
                     fetch_sources: dict[int, str | None] = {}
                     fetch_all_paths: dict[int, tuple[str, ...]] = {}
                     branch_changes: dict[int, tuple[str, str | None, tuple[str, ...]]] = {}
+                    worktree_changes: dict[int, tuple[str, str | None, tuple[str, ...]]] = {}
                     clone_states: dict[int, tuple[str, str | None, tuple[str, ...]]] = {}
                     changed_remotes: dict[int, tuple[str, str, tuple[str, ...], str]] = {}
                     gh_worktrees: dict[int, str | None] = {}
@@ -1255,8 +1303,15 @@ class _OrderedPrBuildPattern(ContextPattern):
                         for column, name, ref, paths in _git_branch_events(shell_line, shell_mask):
                             branch_changes[column] = name, ref, paths
                             events.append((column, "branch", None))
-                        for column, state, path, paths in _git_clone_events(shell_line, shell_mask):
-                            clone_states[column] = state, path, paths
+                        for column, path, ref, paths in _git_worktree_add_events(
+                            shell_line, shell_mask
+                        ):
+                            worktree_changes[column] = path, ref, paths
+                            events.append((column, "worktree", None))
+                        for column, state, clone_path, paths in _git_clone_events(
+                            shell_line, shell_mask
+                        ):
+                            clone_states[column] = state, clone_path, paths
                             events.append((column, "clone", None))
                         gh_worktrees = {
                             column: path
@@ -1386,26 +1441,50 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 if start_ref is None:
                                     branch_state = sources.get(source_key, (_UNKNOWN, False))[0]
                                 else:
-                                    refs = fetched_refs.get(source_key, {})
-                                    remote_ref_state = (
-                                        refs.get(f"{start_ref.split('/', 1)[0]}/*")
-                                        if "/" in start_ref
-                                        else None
-                                    )
-                                    branch_state = refs.get(
+                                    branch_state = _git_ref_state(
                                         start_ref,
-                                        remote_ref_state
-                                        if remote_ref_state is not None
-                                        else local_branches.get(source_key, {}).get(
-                                            start_ref,
-                                            _UNTRUSTED
-                                            if _contains_pr_head_reference(start_ref)
-                                            else _TRUSTED
-                                            if _STATIC_REF_RE.fullmatch(start_ref)
-                                            else _UNKNOWN,
-                                        ),
+                                        fetched_refs.get(source_key, {}),
+                                        local_branches.get(source_key, {}),
+                                        _UNTRUSTED
+                                        if _contains_pr_head_reference(start_ref)
+                                        else _TRUSTED
+                                        if _STATIC_REF_RE.fullmatch(start_ref)
+                                        else _UNKNOWN,
                                     )
                                 local_branches.setdefault(source_key, {})[name] = branch_state
+                        elif kind == "worktree":
+                            worktree_path, start_ref, paths = worktree_changes[column]
+                            worktree_cwd = cwd
+                            for git_path in paths:
+                                worktree_cwd = (
+                                    _literal_workspace_path(git_path, worktree_cwd)
+                                    if worktree_cwd is not None
+                                    else None
+                                )
+                            destination = (
+                                _literal_workspace_path(worktree_path, worktree_cwd)
+                                if worktree_cwd is not None
+                                else None
+                            )
+                            if worktree_cwd is None or destination is None:
+                                uncertain_layout = True
+                            else:
+                                source_key = _source_key(sources, worktree_cwd)
+                                state, foreign = sources.get(source_key, (_UNKNOWN, False))
+                                target_state = (
+                                    _git_ref_state(
+                                        start_ref,
+                                        fetched_refs.get(source_key, {}),
+                                        local_branches.get(source_key, {}),
+                                        _UNKNOWN,
+                                    )
+                                    if start_ref is not None
+                                    else state
+                                )
+                                sources[destination] = (
+                                    _source_after_ref_change(state, foreign, target_state),
+                                    foreign,
+                                )
                         elif kind == "clone":
                             clone_state, clone_path, paths = clone_states[column]
                             clone_cwd = cwd
@@ -1524,13 +1603,12 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 state, foreign = sources.get(source_key, (_UNKNOWN, False))
                                 target_state = git_states.get(column, _UNKNOWN)
                                 refs = fetched_refs.get(source_key, {})
-                                if value in refs:
-                                    target_state = refs[value]
-                                elif value in local_branches.get(source_key, {}):
-                                    target_state = local_branches[source_key][value]
-                                elif value and "/" in value:
-                                    target_state = refs.get(
-                                        f"{value.split('/', 1)[0]}/*", target_state
+                                if value is not None:
+                                    target_state = _git_ref_state(
+                                        value,
+                                        refs,
+                                        local_branches.get(source_key, {}),
+                                        target_state,
                                     )
                                 target_state = _source_after_ref_change(
                                     state, foreign, target_state

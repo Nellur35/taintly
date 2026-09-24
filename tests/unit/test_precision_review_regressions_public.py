@@ -1946,3 +1946,39 @@ jobs:
 """
     assert _fires("LOTP-GH-001", workflow)
     assert _fires("LOTP-GH-003", workflow)
+
+
+def test_fully_qualified_remote_tracking_ref_keeps_fork_source() -> None:
+    for operation in (
+        "git checkout refs/remotes/fork/main",
+        "git branch candidate refs/remotes/fork/main; git checkout candidate",
+    ):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git remote add fork https://github.com/${{{{ github.event.pull_request.head.repo.full_name }}}}.git; git fetch fork main; {operation}; npm ci
+"""
+        assert _fires("LOTP-GH-001", workflow), operation
+        assert _fires("LOTP-GH-003", workflow), operation
+
+
+def test_native_worktree_from_fetched_pr_ref_keeps_source() -> None:
+    for operation in (
+        "git worktree add --detach fork FETCH_HEAD",
+        "git worktree add -b candidate fork FETCH_HEAD",
+    ):
+        workflow = f"""on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch origin refs/pull/${{{{ github.event.pull_request.number }}}}/head; {operation}; cd fork; npm ci
+"""
+        assert _fires("LOTP-GH-001", workflow), operation
+        assert _fires("LOTP-GH-003", workflow), operation
