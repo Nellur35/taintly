@@ -9,15 +9,28 @@ from taintly.models import (
     Rule,
     Severity,
 )
+from taintly.parsers.structural import EventKind, walk_workflow
 from taintly.structural_pattern import StructuralPattern
 
 
 class _NoExplicitPermissionsPattern(AbsencePattern):
     """SEC2-GH-002 variant of AbsencePattern.
 
-    Fires when a workflow has no ``permissions:`` block AT ANY LEVEL
-    (file or job), UNLESS the workflow's only top-level trigger is
-    ``workflow_call`` — i.e. it is a pure reusable workflow.
+    Fires when a workflow has no **file-level** ``permissions:`` block
+    (column 0 — i.e. top-level) and at least one job has no direct
+    ``permissions:`` declaration. It skips workflows whose jobs all
+    declare their effective token permissions and reusable workflows
+    whose only top-level trigger is ``workflow_call``.
+
+    The rule's `absent` regex stays anchored to column 0:
+    ``^permissions:``. A second, structural pass then asks whether
+    every current job has its own direct ``permissions`` key. This
+    preserves the 2026-05-11 fix for mixed workflows, where only some
+    jobs declare permissions, without reporting fully job-scoped
+    workflows as vulnerable. The distinction is backed by the frozen
+    2026-09-22 adjudicated sample: all seven reviewed negatives had
+    permissions on every job, while all eleven remaining cases had at
+    least one job that still depended on repository defaults.
 
     Reusable workflows (``workflow_call``-only) inherit GITHUB_TOKEN
     permissions from the calling workflow.  When the caller's
@@ -46,7 +59,42 @@ class _NoExplicitPermissionsPattern(AbsencePattern):
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         if self._is_workflow_call_only(content):
             return []
-        return super().check(content, lines)
+        matches = super().check(content, lines)
+        if not matches:
+            return []
+        if self._all_jobs_have_explicit_permissions(content):
+            return []
+        return matches
+
+    @staticmethod
+    def _all_jobs_have_explicit_permissions(content: str) -> bool:
+        """Return True only when every structurally parsed job has a
+        direct ``permissions`` key.
+
+        Parser uncertainty is fail-open for detection: a cutoff, an empty
+        job set, or an unrecognised shape returns False so the posture
+        finding remains visible.  This avoids turning parser limitations
+        into silent false negatives.
+        """
+        jobs: set[object] = set()
+        permissioned_jobs: set[object] = set()
+        for event in walk_workflow(
+            "anonymous.yml",
+            content=content,
+            recover=True,
+            include_keys=True,
+        ):
+            if event.kind == EventKind.CUTOFF:
+                return False
+            if event.kind != EventKind.MAP_KEY:
+                continue
+            if len(event.path) == 2 and event.path[0] == "jobs":
+                jobs.add(event.path[1])
+            elif (
+                len(event.path) == 3 and event.path[0] == "jobs" and event.path[2] == "permissions"
+            ):
+                permissioned_jobs.add(event.path[1])
+        return bool(jobs) and jobs <= permissioned_jobs
 
     def _is_workflow_call_only(self, content: str) -> bool:
         """Return True iff the file's ``on:`` declaration names
@@ -315,23 +363,28 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC2-GH-002",
-        title="No explicit permissions defined",
+        title="Job inherits repository default token permissions",
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-2",
         description=(
-            "Workflow does not define explicit permissions. Since February 2023 GitHub "
+            "At least one job does not define explicit permissions. Since February 2023 GitHub "
             "defaults the GITHUB_TOKEN to read-only for newly-created repositories, "
             "organisations, and enterprises. However, repositories created before that "
             "change — and any repository under an org/enterprise still set to the legacy "
             "'permissive (read/write)' workflow permissions option — inherit write-all "
             "across every scope. Declare explicit permissions so the effective scope "
             "does not silently depend on an org/enterprise toggle that can change under "
-            "you."
+            "you. This is a review-needed posture warning because the workflow file alone "
+            "does not reveal the repository's effective default token permissions."
         ),
-        pattern=_NoExplicitPermissionsPattern(absent=r"^\s*permissions:", scope="file"),
+        # File-level anchor: ``^permissions:`` at column 0 only. When
+        # it is absent, the structural pass above suppresses the rule
+        # only if every direct job declares its own permissions.
+        pattern=_NoExplicitPermissionsPattern(absent=r"^permissions:", scope="file"),
         remediation=(
-            "Add a top-level permissions block:\npermissions:\n  contents: read\n\n"
+            "Add a top-level read-only baseline or declare permissions on every job:\n"
+            "permissions:\n  contents: read\n\n"
             "Reusable workflows (``on: workflow_call``-only) inherit the calling "
             "workflow's permissions and do not need their own block — the rule already "
             "skips that shape."
@@ -339,11 +392,21 @@ RULES: list[Rule] = [
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication#modifying-the-permissions-for-the-github_token",
         test_positive=[
             "name: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest",
+            # Mixed workflow: release declares permissions, but build
+            # still inherits repository defaults. The rule must fire.
+            (
+                "name: deploy\non: workflow_dispatch\njobs:\n"
+                "  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: ./build.sh\n"
+                "  release:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n"
+                "    steps:\n      - run: ./release.sh\n"
+            ),
         ],
         test_negative=[
             "name: CI\npermissions:\n  contents: read\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest",
         ],
         stride=["E"],
+        confidence="low",
+        review_needed=True,
         threat_narrative=(
             "Without an explicit permissions block, GITHUB_TOKEN defaults to the "
             "repository's base permission level. Repositories created before February "

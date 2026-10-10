@@ -1,9 +1,9 @@
-# Triggers: SEC9-GL-001 — artifacts block without access restriction
+# Triggers: SEC9-GL-001 — sensitive artifact without access restriction
 build:
   stage: build
   script:
     - make build
   artifacts:
     paths:
-      - dist/
+      - .env
     expire_in: 1 week

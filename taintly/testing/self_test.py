@@ -161,20 +161,6 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "separator; broadening to ``\\s*`` would weaken precision across "
         "every rule that shares the pattern."
     ),
-    ("SEC4-GH-026", "whitespace_pad"): (
-        "Same ``uses:\\s+`` anchor family as AI-GH-019/020/021/022/035 "
-        "and TAINT-GH-010 — anchor matches ``uses:\\s+actions/cache@`` "
-        "and the zero-space mutant ``uses:foo`` would require "
-        "broadening to ``\\s*`` which weakens precision across every "
-        "rule that shares the anchor pattern."
-    ),
-    ("SEC4-GH-026A", "whitespace_pad"): (
-        "Tier-split sibling of SEC4-GH-026 (added 2026-05-19 by "
-        "github-tanstack-posture-design-v1).  Shares the SEC4-GH-026 "
-        "``uses:\\s+actions/cache@`` anchor verbatim, therefore "
-        "inherits the same ``uses:\\s+`` whitespace_pad gap.  See "
-        "SEC4-GH-026 entry above for the full anchor-family rationale."
-    ),
     ("AI-GH-035", "whitespace_pad"): (
         "Same family as AI-GH-019/020/021/022: anchor uses "
         "``AI_AGENT_USES_PATTERN`` whose ``uses:\\s+`` requires "
@@ -255,6 +241,13 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
         "Same family as SEC8-GH-001; image-pin regex fragile to whitespace."
     ),
     ("SEC8-GH-003", "whitespace_pad"): ("Same family; fragile to whitespace around `:` separator."),
+    ("TAINT-GH-006", "whitespace_pad"): (
+        "TAINT-GH-006 now shares the WorkflowAware executable-sink model with "
+        "SEC4-GH-008. The whitespace_pad operator removes required YAML mapping "
+        "separators, so the mutant no longer describes a runnable workflow. "
+        "Matching it would require regex fallback on malformed YAML and would "
+        "restore the false positives this structural migration removes."
+    ),
     ("SEC6-GH-010", "whitespace_pad"): (
         "Different family from the regex-fragility class above. The "
         "regex itself handles the whitespace_pad mutation correctly: "

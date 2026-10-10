@@ -267,8 +267,11 @@ def _steps_in_job(job: JobSegment) -> list[StepSegment]:
     for idx in range(steps_anchor + 1, len(lines)):
         line = lines[idx]
         stripped = line.lstrip()
-        if not stripped:
-            # Blank line belongs to the current step (if any).
+        if not stripped or stripped.startswith("#"):
+            # Blank and comment lines belong to the current step (if any).
+            # A comment may legally align with a same-indent ``- uses:``
+            # item; treating it as a sibling key would end the steps block
+            # and silently discard every later step.
             if current_start is not None:
                 current_lines.append(line)
             continue

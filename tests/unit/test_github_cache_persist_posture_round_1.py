@@ -49,10 +49,10 @@ def test_pull_request_target_cache_write_still_fires_sec4_gh_026(github_rules):
     assert "SEC4-GH-026" not in fired
 
 
-def test_pull_request_cache_write_fires_sec4_gh_026_info_tier(github_rules):
+def test_pull_request_cache_write_is_merge_ref_scoped(github_rules):
     fired = _ids("positive_pr_cache_hashfiles_write.yml", github_rules)
 
-    assert "SEC4-GH-026" in fired
+    assert "SEC4-GH-026" not in fired
     assert "SEC4-GH-026A" not in fired
 
 

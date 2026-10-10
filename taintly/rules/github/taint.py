@@ -49,6 +49,9 @@ from dataclasses import dataclass, field
 from taintly.models import BlockPattern, ContextPattern, Platform, RegexPattern, Rule, Severity
 from taintly.taint import TaintPath, _sink_is_safely_quoted
 from taintly.taint import analyze as taint_analyze
+from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
+
+from ._workflow_input_sinks import is_workflow_input_executable_sink
 
 # ---------------------------------------------------------------------------
 # Pattern adapter
@@ -187,6 +190,18 @@ def _format_chain(path: TaintPath) -> str:
             parts.append(f"steps.{sid}.outputs.{oname}")
     parts.append(path.sink_snippet[:120])
     return "taint: " + " -> ".join(parts)
+
+
+def _is_reusable_input_executable_sink(
+    value: str,
+    value_kind: str,
+    path: tuple[object, ...],
+    ctx: PredicateContext,
+) -> bool:
+    """Find unconstrained reusable inputs only where text is executed."""
+    return ctx.is_reusable_workflow() and is_workflow_input_executable_sink(
+        value, value_kind, path, ctx
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1088,25 +1103,22 @@ RULES = [
     # any ``with: X: ${{ github.event.* }}`` passes attacker bytes into
     # the callee's ``inputs.X`` namespace.
     #
-    # This rule fires on the CALLEE side: when a reusable workflow
-    # references ``${{ inputs.X }}`` anywhere in its body.  It's a
-    # review-needed finding because the author of the reusable workflow
-    # cannot know what callers pass; responsibility is shared, and a
-    # reviewer has to audit the callers to confirm safety.
+    # This rule fires on the CALLEE side when a reusable workflow places an
+    # unconstrained ``${{ inputs.X }}`` value in executable text.  It remains
+    # review-needed because the callee cannot know what every caller passes.
     #
     # Scope / caveats:
-    #   - Line-level regex, not a full dataflow analysis.  Fires on any
-    #     ``${{ inputs.X }}`` reference in a non-schema context.  The
-    #     schema-definition block (``inputs:`` under ``workflow_call``)
-    #     is excluded — references to inputs inside ``default:`` /
-    #     ``description:`` aren't sinks.
+    #   - Structural sink classification covers step ``run:`` bodies and
+    #     known action inputs that execute shell or script text.  Metadata,
+    #     identifiers, environment assignments, refs, and working directories
+    #     are data rather than executable sinks for this rule.
     #   - Caller side not tracked here.  A future PR can parse the local
     #     ``.github/workflows/*.yml`` tree to cross-reference which
     #     callers pass which tainted contexts.  Until then, the finding
     #     is a prompt to audit the callers manually.
     Rule(
         id="TAINT-GH-006",
-        title="Reusable workflow input reference (caller responsible for safety)",
+        title="Reusable workflow input reaches executable script text",
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
@@ -1118,49 +1130,27 @@ RULES = [
         review_needed=True,
         confidence="low",
         description=(
-            "A reusable workflow (``on: workflow_call``) references "
-            "``${{ inputs.X }}``.  The callee author has no way to "
+            "A reusable workflow (``on: workflow_call``) places an "
+            "unconstrained ``${{ inputs.X }}`` value in a step's shell "
+            "body or a known action input that executes script text. "
+            "The callee author has no way to "
             "know what callers pass — if any caller is reachable from "
             "a fork trigger (``pull_request_target``, "
             "``issue_comment``) and forwards an attacker-controlled "
             "``github.event.*`` into the input, the substituted bytes "
-            "land in the callee's execution context with the callee's "
+            "become code in the callee's execution context with its "
             "permissions.  Review every caller of this workflow to "
             "confirm the input is either a trusted context (SHA, ref, "
             "actor login on a push-only trigger) or properly sanitised."
         ),
-        pattern=ContextPattern(
-            anchor=r"\$\{\{\s*inputs\.[A-Za-z_][\w-]*\s*\}\}",
-            # File must be a reusable workflow. Three legal shapes of
-            # ``on: workflow_call``: bare string, flow-style list, or
-            # block-style nested key.  The ``\b`` on workflow_call
-            # protects against a user-defined event name that
-            # contained the substring (none exists today, forward-proof).
-            requires=(
-                r"(?m)^on:\s*workflow_call\s*(?:#.*)?$"
-                r"|^on:\s*\[[^\]]*\bworkflow_call\b"
-                r"|^\s+\bworkflow_call\s*:"
-            ),
-            exclude=[
-                # Schema-definition lines — inputs referenced in the
-                # declaration block itself aren't shell sinks.
-                r"^\s*(?:description|default|type|required)\s*:",
-                # Conditionals are evaluated by the Actions engine, not
-                # by bash.  Follow the same carve-out the existing
-                # TAINT rules apply for ``if:`` lines.
-                r"^\s*if\s*:",
-                # Structural / inert YAML scalar fields — the engine
-                # validates these before any shell sees them:
-                #   timeout-minutes  — numeric only, engine rejects non-numeric
-                #   concurrency      — grouping key, never reaches a shell
-                # Keep ``runs-on:`` / ``container:`` / ``image:`` IN — those
-                # do have real threats (self-hosted runner hijack, attacker-
-                # controlled container image pull) that belong in the audit.
-                r"^\s*(?:timeout-minutes|concurrency)\s*:",
-                # Comment-only lines.
-                r"^\s*#",
+        pattern=WorkflowAwarePattern(
+            path=[
+                "jobs.*.steps[*].run",
+                "jobs.*.steps[*].with.*",
+                "jobs.*.with.*",
             ],
-            scope="file",
+            predicate=_is_reusable_input_executable_sink,
+            requires="inputs",
         ),
         remediation=(
             "Do one of:\n"
@@ -1192,6 +1182,12 @@ RULES = [
             "on:\n  workflow_call:\n    inputs:\n      title:\n        type: string\n"
             "jobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n"
             "      - run: echo ${{ inputs.title }}\n",
+            "on: workflow_call\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - uses: nick-fields/retry@v3\n"
+            "        with:\n          command: npm test -- ${{ inputs.pattern }}\n",
+            "on: workflow_call\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - uses: actions/github-script@v7\n"
+            "        with:\n          script: console.log('${{ inputs.message }}')\n",
         ],
         test_negative=[
             # Not a reusable workflow — inputs.* here can only come
@@ -1216,6 +1212,17 @@ RULES = [
             "on: workflow_call\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
             "    timeout-minutes: ${{ inputs.timeout }}\n"
             "    steps:\n      - run: echo hi\n",
+            # Structured action inputs and step metadata are data, not code.
+            "on: workflow_call\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - uses: actions/checkout@v4\n"
+            "        with:\n          ref: ${{ inputs.ref }}\n",
+            "on: workflow_call\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - uses: actions/upload-artifact@v4\n"
+            "        with:\n          name: ${{ inputs.artifact_name }}\n",
+            "on: workflow_call\njobs:\n  b:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - working-directory: ${{ inputs.directory }}\n"
+            "        env:\n          TARGET: ${{ inputs.target }}\n"
+            "        run: ./fixed-command\n",
         ],
         stride=["T", "E"],
         threat_narrative=(

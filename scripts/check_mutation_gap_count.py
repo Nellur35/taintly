@@ -38,13 +38,14 @@ if str(_ROOT) not in sys.path:
 from taintly.testing.self_test import _KNOWN_MUTATION_GAPS  # noqa: E402
 
 # Per rule-family-prefix baseline of allowlisted mutation gaps. The SUM is the
-# global baseline (currently 103); tracking per prefix is what makes a flat-count
+# global baseline (currently 102); tracking per prefix is what makes a flat-count
 # cross-family swap detectable. Update an entry — never paper over a regression
 # by editing a different one — when a gap is intentionally added or closed.
 #
 # Regenerated from THIS repo's _KNOWN_MUTATION_GAPS (the public rule pack is a
-# curated subset of the lab pack, so this baseline differs from upstream — e.g.
-# SEC4-GH is 7 here, including SEC4-GH-002 whitespace_pad).
+# curated subset of the lab pack, so this baseline differs from upstream.
+# SEC4-GH shrank after retirement of SEC4-GH-026 and its gaps;
+# TAINT-GH grew by one documented structural-parser mutation for TAINT-GH-006.
 _PER_PREFIX_BASELINE: dict[str, int] = {
     # 20 -> 21: AI-GH-018 whitespace_pad gap documented (phase1-aigh-forkguard).
     # The rule's new ``anchor_step_exclude`` (suppresses agent-CLI flags that
@@ -60,7 +61,7 @@ _PER_PREFIX_BASELINE: dict[str, int] = {
     "SEC10-GH": 3,
     "SEC10-GL": 1,
     "SEC3-GH": 2,
-    "SEC4-GH": 7,
+    "SEC4-GH": 5,
     "SEC4-CB": 1,
     "SEC4-GL": 1,
     "SEC4-JK": 3,
@@ -71,7 +72,7 @@ _PER_PREFIX_BASELINE: dict[str, int] = {
     "SEC8-GH": 5,
     "SEC8-GL": 2,
     "SEC9-JK": 1,
-    "TAINT-GH": 27,
+    "TAINT-GH": 28,
     "TAINT-GL": 11,
     # 1 -> 2: TAINT-JK-003 quote_swap gap documented (Phase-3 multi-hop port).
     # The rule fires only on a DOUBLE-quoted Groovy GString sink/RHS (Groovy

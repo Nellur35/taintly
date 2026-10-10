@@ -1,15 +1,15 @@
 # TanStack-style kill chain — fork-reachable validation workflow.
 #
 # This is the PR side of the chain.  It runs on every PR
-# (including from forks) with the parent repo's tokens and writes
-# multiple caches keyed on lockfile hashes.  No persist-credentials:
+# (including from forks) with the parent repo's tokens and explicitly
+# enables cache writes keyed on lockfile hashes. No persist-credentials:
 # false on the checkout.  Job-level permissions only.
 #
 # What this fixture intentionally exercises:
-#   - SEC2-GH-002  : missing top-level permissions (job-level only)
+#   - SEC2-GH-002  : stays silent because every job declares permissions
 #   - SEC4-GH-005B : bare checkout under fork-reachable trigger
 #                    (no downstream consumer → posture sibling)
-#   - SEC4-GH-026A : cache write under pull_request_target
+#   - SEC4-GH-026A : explicit cache write under pull_request_target
 #                    (NOT plain pull_request, so MEDIUM tier)
 #   - SEC9-GH-005  : cache key derived from github.head_ref
 #                    (attacker-controlled context)
@@ -23,7 +23,9 @@ on:
   pull_request_target:
     branches: [main]
 
-# Job-level permissions only - SEC2-GH-002 fires on missing top level.
+cache-mode: write
+
+# Job-level permissions fully define the token policy.
 jobs:
   validate:
     runs-on: ubuntu-latest
