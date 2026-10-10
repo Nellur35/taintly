@@ -172,6 +172,34 @@ jobs:
     assert _LOTP_RULE_IDS <= _findings_for_workflow(tmp_path, workflow)
 
 
+def test_moved_branch_full_alias_keeps_fetched_pr_provenance(tmp_path: Path) -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch origin pull/${{ github.event.pull_request.number }}/head:pr; git fetch origin main:refs/heads/candidate; git branch review pr; git branch -M review candidate; git checkout refs/heads/candidate; npm ci
+"""
+    assert _LOTP_RULE_IDS <= _findings_for_workflow(tmp_path, workflow)
+
+
+def test_update_ref_unknown_then_trusted_fetch_restores_clean_fetch_head(
+    tmp_path: Path,
+) -> None:
+    workflow = """on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - run: git fetch origin pull/${{ github.event.pull_request.number }}/head:pr; git update-ref "$REF" "$COMMIT"; git fetch origin main; git checkout FETCH_HEAD; npm ci
+"""
+    assert not (_findings_for_workflow(tmp_path, workflow) & _LOTP_RULE_IDS)
+
+
 def test_replace_all_remote_url_tracks_pr_source_through_fetch(tmp_path: Path) -> None:
     workflow = """on: pull_request_target
 jobs:

@@ -787,10 +787,10 @@ def _git_update_ref_events(
 
 def _git_branch_rename_events(
     line: str, mask: list[bool]
-) -> list[tuple[int, str | None, tuple[str, ...]]]:
+) -> list[tuple[int, str | None, str | None, tuple[str, ...]]]:
     """Mark copied or renamed branch destinations unknown until resolved."""
 
-    events: list[tuple[int, str | None, tuple[str, ...]]] = []
+    events: list[tuple[int, str | None, str | None, tuple[str, ...]]] = []
     for column, command in _shell_command_segments(line, mask):
         tokens = _shell_command_tokens(command)
         if tokens is None:
@@ -810,9 +810,12 @@ def _git_branch_rename_events(
         if len(args) not in {1, 2}:
             continue
         destination = args[-1]
-        events.append(
-            (column, destination if _STATIC_REF_RE.fullmatch(destination) else None, paths)
-        )
+        if not _STATIC_REF_RE.fullmatch(destination):
+            events.append((column, None, None, paths))
+            continue
+        alias = destination.removeprefix("refs/heads/")
+        full_ref = destination if destination.startswith("refs/heads/") else f"refs/heads/{alias}"
+        events.append((column, full_ref, alias, paths))
     return events
 
 
@@ -1404,7 +1407,9 @@ class _OrderedPrBuildPattern(ContextPattern):
                     fetch_sources: dict[int, str | None] = {}
                     fetch_all_paths: dict[int, tuple[str, ...]] = {}
                     branch_changes: dict[int, tuple[str, str | None, tuple[str, ...]]] = {}
-                    branch_write_changes: dict[int, tuple[str | None, tuple[str, ...]]] = {}
+                    branch_write_changes: dict[
+                        int, tuple[str | None, str | None, tuple[str, ...]]
+                    ] = {}
                     ref_write_changes: dict[
                         int, tuple[str | None, str | None, tuple[str, ...]]
                     ] = {}
@@ -1445,8 +1450,10 @@ class _OrderedPrBuildPattern(ContextPattern):
                         for column, name, ref, paths in _git_branch_events(shell_line, shell_mask):
                             branch_changes[column] = name, ref, paths
                             events.append((column, "branch", None))
-                        for column, ref, paths in _git_branch_rename_events(shell_line, shell_mask):
-                            branch_write_changes[column] = ref, paths
+                        for column, full_ref, ref, paths in _git_branch_rename_events(
+                            shell_line, shell_mask
+                        ):
+                            branch_write_changes[column] = full_ref, ref, paths
                             events.append((column, "branch-write", None))
                         for column, full_ref, ref, paths in _git_update_ref_events(
                             shell_line, shell_mask
@@ -1603,11 +1610,6 @@ class _OrderedPrBuildPattern(ContextPattern):
                                         if _STATIC_REF_RE.fullmatch(start_ref)
                                         else _UNKNOWN,
                                     )
-                                    if (
-                                        source_key in ref_state_uncertain
-                                        and branch_state == _TRUSTED
-                                    ):
-                                        branch_state = _UNKNOWN
                                 local_branches.setdefault(source_key, {})[name] = branch_state
                         elif kind == "ref-write":
                             full_ref, ref, paths = ref_write_changes[column]
@@ -1624,6 +1626,8 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 source_key = _source_key(sources, ref_cwd)
                                 if ref is None:
                                     ref_state_uncertain.add(source_key)
+                                    fetched_refs.setdefault(source_key, {}).clear()
+                                    local_branches.setdefault(source_key, {}).clear()
                                 else:
                                     refs = fetched_refs.setdefault(source_key, {})
                                     previous = refs.get(
@@ -1642,7 +1646,7 @@ class _OrderedPrBuildPattern(ContextPattern):
                                     branches = local_branches.setdefault(source_key, {})
                                     branches[ref] = updated_state
                         elif kind == "branch-write":
-                            ref, paths = branch_write_changes[column]
+                            full_ref, ref, paths = branch_write_changes[column]
                             branch_cwd = cwd
                             for git_path in paths:
                                 branch_cwd = (
@@ -1656,9 +1660,13 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 source_key = _source_key(sources, branch_cwd)
                                 if ref is None:
                                     ref_state_uncertain.add(source_key)
+                                    fetched_refs.setdefault(source_key, {}).clear()
+                                    local_branches.setdefault(source_key, {}).clear()
                                 else:
+                                    refs = fetched_refs.setdefault(source_key, {})
+                                    refs[full_ref or ref] = _UNKNOWN
+                                    refs[ref] = _UNKNOWN
                                     local_branches.setdefault(source_key, {})[ref] = _UNKNOWN
-                                    fetched_refs.setdefault(source_key, {})[ref] = _UNKNOWN
                         elif kind == "worktree":
                             worktree_path, start_ref, paths = worktree_changes[column]
                             worktree_cwd = cwd
@@ -1817,14 +1825,8 @@ class _OrderedPrBuildPattern(ContextPattern):
                                         local_branches.get(source_key, {}),
                                         _UNKNOWN
                                         if source_key in ref_state_uncertain
-                                        and target_state == _TRUSTED
                                         else target_state,
                                     )
-                                    if (
-                                        source_key in ref_state_uncertain
-                                        and target_state == _TRUSTED
-                                    ):
-                                        target_state = _UNKNOWN
                                 target_state = _source_after_ref_change(
                                     state, foreign, target_state
                                 )
