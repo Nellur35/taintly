@@ -695,7 +695,7 @@ def _git_fetch_all_events(line: str, mask: list[bool]) -> list[tuple[int, tuple[
 def _git_branch_events(
     line: str, mask: list[bool]
 ) -> list[tuple[int, str, str | None, tuple[str, ...]]]:
-    """Track local branch creation from an explicit or current start point."""
+    """Track local branch creation, including an explicit tracking start point."""
 
     events: list[tuple[int, str, str | None, tuple[str, ...]]] = []
     for column, command in _shell_command_segments(line, mask):
@@ -709,11 +709,110 @@ def _git_branch_events(
         if index >= len(tokens) or tokens[index].lower() != "branch":
             continue
         args = tokens[index + 1 :]
-        while args and args[0] in {"-f", "--force"}:
-            args = args[1:]
+        while args and args[0].startswith("-"):
+            option, _, inline_value = args[0].partition("=")
+            if option == "--track" and inline_value not in {"", "direct", "inherit"}:
+                break
+            if option in {"-f", "--force", "-t", "--track", "--no-track"}:
+                args = args[1:]
+            else:
+                break
         if not 1 <= len(args) <= 2 or not _STATIC_REF_RE.fullmatch(args[0]):
             continue
         events.append((column, args[0], args[1] if len(args) == 2 else None, paths))
+    return events
+
+
+def _git_update_ref_events(
+    line: str, mask: list[bool]
+) -> list[tuple[int, str | None, str | None, tuple[str, ...]]]:
+    """Track update-ref writes whose destination is a local ref or ambiguous."""
+
+    events: list[tuple[int, str | None, str | None, tuple[str, ...]]] = []
+    for column, command in _shell_command_segments(line, mask):
+        tokens = _shell_command_tokens(command)
+        if tokens is None:
+            continue
+        invocation = _git_command_index(tokens)
+        if invocation is None:
+            continue
+        index, paths = invocation
+        if index >= len(tokens) or tokens[index].lower() != "update-ref":
+            continue
+        args = tokens[index + 1 :]
+        stdin_mode = False
+        delete = False
+        valid = True
+        while args and args[0].startswith("-"):
+            option, separator, _ = args[0].partition("=")
+            args = args[1:]
+            if option == "-m" and args:
+                args = args[1:]
+            elif option == "--no-deref" or option == "--create-reflog":
+                continue
+            elif option == "-d":
+                delete = True
+            elif option == "--stdin":
+                stdin_mode = True
+            elif separator:
+                valid = False
+                break
+            else:
+                valid = False
+                break
+        if not valid:
+            continue
+        if stdin_mode:
+            if not args:
+                events.append((column, None, None, paths))
+            continue
+        required_args = 1 if delete else 2
+        maximum_args = required_args + 1
+        if not required_args <= len(args) <= maximum_args:
+            continue
+        if _STATIC_REF_RE.fullmatch(args[0]):
+            full_ref = args[0]
+            alias = full_ref
+            for prefix in ("refs/heads/", "refs/remotes/"):
+                if full_ref.startswith(prefix):
+                    alias = full_ref.removeprefix(prefix)
+                    break
+            events.append((column, full_ref, alias, paths))
+        else:
+            # A valid write whose destination cannot be resolved makes later
+            # static-name fallback unsafe in this repository.
+            events.append((column, None, None, paths))
+    return events
+
+
+def _git_branch_rename_events(
+    line: str, mask: list[bool]
+) -> list[tuple[int, str | None, tuple[str, ...]]]:
+    """Mark copied or renamed branch destinations unknown until resolved."""
+
+    events: list[tuple[int, str | None, tuple[str, ...]]] = []
+    for column, command in _shell_command_segments(line, mask):
+        tokens = _shell_command_tokens(command)
+        if tokens is None:
+            continue
+        invocation = _git_command_index(tokens)
+        if invocation is None:
+            continue
+        index, paths = invocation
+        if index >= len(tokens) or tokens[index].lower() != "branch":
+            continue
+        args = tokens[index + 1 :]
+        while args and args[0] in {"-f", "--force"}:
+            args = args[1:]
+        if not args or args[0] not in {"-m", "-M", "--move", "-c", "-C", "--copy"}:
+            continue
+        args = args[1:]
+        if len(args) not in {1, 2}:
+            continue
+        destination = args[-1]
+        events.append(
+            (column, destination if _STATIC_REF_RE.fullmatch(destination) else None, paths)
+        )
     return events
 
 
@@ -778,6 +877,44 @@ def _git_remote_events(
         if invocation is None:
             continue
         index, paths = invocation
+        if index < len(tokens) and tokens[index].lower() == "config":
+            args = tokens[index + 1 :]
+            mode = "replace"
+            replace_all = False
+            while args and args[0] in {
+                "--local",
+                "--replace-all",
+                "--add",
+                "--unset",
+                "--unset-all",
+            }:
+                if args[0] == "--add":
+                    mode = "append"
+                elif args[0] == "--replace-all":
+                    replace_all = True
+                elif args[0] in {"--unset", "--unset-all"}:
+                    mode = "delete"
+                args = args[1:]
+            is_write = (len(args) == 2 or (replace_all and len(args) == 3)) and mode != "delete"
+            is_delete = len(args) == 1 and mode == "delete"
+            if is_write or is_delete:
+                key = args[0]
+                remote_key = re.fullmatch(r"remote\.(.+)\.url", key, re.IGNORECASE)
+                if remote_key:
+                    if is_delete:
+                        events.append((column, remote_key.group(1), _UNKNOWN, paths, mode))
+                    else:
+                        # A configured URL is not the implicit trusted remote named "origin".
+                        url = args[1]
+                        url_state = (
+                            _UNTRUSTED
+                            if "__PR_HEAD_REPOSITORY__" in url
+                            else _TRUSTED
+                            if _BASE_REPO_FETCH_URL_RE.fullmatch(url)
+                            else _UNKNOWN
+                        )
+                        events.append((column, remote_key.group(1), url_state, paths, mode))
+            continue
         if index + 1 >= len(tokens) or tokens[index].lower() != "remote":
             continue
         operation = tokens[index + 1].lower()
@@ -1186,6 +1323,7 @@ class _OrderedPrBuildPattern(ContextPattern):
             fetched_refs: dict[str, dict[str, str]] = {}
             remote_states: dict[str, dict[str, str]] = {}
             local_branches: dict[str, dict[str, str]] = {}
+            ref_state_uncertain: set[str] = set()
             current_branches: dict[str, str | None] = {}
             implicit_clone_parents: dict[str, str] = {}
             uncertain_layout = False
@@ -1266,6 +1404,10 @@ class _OrderedPrBuildPattern(ContextPattern):
                     fetch_sources: dict[int, str | None] = {}
                     fetch_all_paths: dict[int, tuple[str, ...]] = {}
                     branch_changes: dict[int, tuple[str, str | None, tuple[str, ...]]] = {}
+                    branch_write_changes: dict[int, tuple[str | None, tuple[str, ...]]] = {}
+                    ref_write_changes: dict[
+                        int, tuple[str | None, str | None, tuple[str, ...]]
+                    ] = {}
                     worktree_changes: dict[int, tuple[str, str | None, tuple[str, ...]]] = {}
                     clone_states: dict[int, tuple[str, str | None, tuple[str, ...]]] = {}
                     changed_remotes: dict[int, tuple[str, str, tuple[str, ...], str]] = {}
@@ -1303,6 +1445,14 @@ class _OrderedPrBuildPattern(ContextPattern):
                         for column, name, ref, paths in _git_branch_events(shell_line, shell_mask):
                             branch_changes[column] = name, ref, paths
                             events.append((column, "branch", None))
+                        for column, ref, paths in _git_branch_rename_events(shell_line, shell_mask):
+                            branch_write_changes[column] = ref, paths
+                            events.append((column, "branch-write", None))
+                        for column, full_ref, ref, paths in _git_update_ref_events(
+                            shell_line, shell_mask
+                        ):
+                            ref_write_changes[column] = full_ref, ref, paths
+                            events.append((column, "ref-write", None))
                         for column, path, ref, paths in _git_worktree_add_events(
                             shell_line, shell_mask
                         ):
@@ -1447,11 +1597,68 @@ class _OrderedPrBuildPattern(ContextPattern):
                                         local_branches.get(source_key, {}),
                                         _UNTRUSTED
                                         if _contains_pr_head_reference(start_ref)
+                                        else _UNKNOWN
+                                        if source_key in ref_state_uncertain
                                         else _TRUSTED
                                         if _STATIC_REF_RE.fullmatch(start_ref)
                                         else _UNKNOWN,
                                     )
+                                    if (
+                                        source_key in ref_state_uncertain
+                                        and branch_state == _TRUSTED
+                                    ):
+                                        branch_state = _UNKNOWN
                                 local_branches.setdefault(source_key, {})[name] = branch_state
+                        elif kind == "ref-write":
+                            full_ref, ref, paths = ref_write_changes[column]
+                            ref_cwd = cwd
+                            for git_path in paths:
+                                ref_cwd = (
+                                    _literal_workspace_path(git_path, ref_cwd)
+                                    if ref_cwd is not None
+                                    else None
+                                )
+                            if ref_cwd is None:
+                                uncertain_layout = True
+                            else:
+                                source_key = _source_key(sources, ref_cwd)
+                                if ref is None:
+                                    ref_state_uncertain.add(source_key)
+                                else:
+                                    refs = fetched_refs.setdefault(source_key, {})
+                                    previous = refs.get(
+                                        ref,
+                                        local_branches.get(source_key, {}).get(ref, _UNKNOWN),
+                                    )
+                                    updated_state = (
+                                        _join_source_states(previous, _UNKNOWN)
+                                        if shell_line is not None
+                                        and _conditional_before_command(shell_line, column)
+                                        else _UNKNOWN
+                                    )
+                                    if full_ref is not None:
+                                        refs[full_ref] = updated_state
+                                    refs[ref] = updated_state
+                                    branches = local_branches.setdefault(source_key, {})
+                                    branches[ref] = updated_state
+                        elif kind == "branch-write":
+                            ref, paths = branch_write_changes[column]
+                            branch_cwd = cwd
+                            for git_path in paths:
+                                branch_cwd = (
+                                    _literal_workspace_path(git_path, branch_cwd)
+                                    if branch_cwd is not None
+                                    else None
+                                )
+                            if branch_cwd is None:
+                                uncertain_layout = True
+                            else:
+                                source_key = _source_key(sources, branch_cwd)
+                                if ref is None:
+                                    ref_state_uncertain.add(source_key)
+                                else:
+                                    local_branches.setdefault(source_key, {})[ref] = _UNKNOWN
+                                    fetched_refs.setdefault(source_key, {})[ref] = _UNKNOWN
                         elif kind == "worktree":
                             worktree_path, start_ref, paths = worktree_changes[column]
                             worktree_cwd = cwd
@@ -1608,8 +1815,16 @@ class _OrderedPrBuildPattern(ContextPattern):
                                         value,
                                         refs,
                                         local_branches.get(source_key, {}),
-                                        target_state,
+                                        _UNKNOWN
+                                        if source_key in ref_state_uncertain
+                                        and target_state == _TRUSTED
+                                        else target_state,
                                     )
+                                    if (
+                                        source_key in ref_state_uncertain
+                                        and target_state == _TRUSTED
+                                    ):
+                                        target_state = _UNKNOWN
                                 target_state = _source_after_ref_change(
                                     state, foreign, target_state
                                 )

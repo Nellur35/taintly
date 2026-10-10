@@ -93,6 +93,8 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   and local branches inherit provenance from unqualified remote fetches.
 - Fully qualified remote refs and native Git worktree destinations now retain
   fetched source provenance through later builds.
+- Git tracking branches, ref writes, and local fetch-URL changes now preserve
+  source provenance through later builds, including unresolved mutations.
 
 ### Notes
 - Pure Python 3.10+, zero runtime dependencies, no telemetry.
