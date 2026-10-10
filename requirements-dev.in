@@ -30,3 +30,6 @@ pytest
 pytest-timeout
 pytest-cov
 pytest-xdist
+
+# Security floor for the dev/CI dependency stack; no runtime dependency.
+urllib3>=2.8.0
