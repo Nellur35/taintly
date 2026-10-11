@@ -12,6 +12,7 @@ Jenkins pipelines have unique risk characteristics:
 """
 
 import re
+from dataclasses import dataclass
 
 from taintly.jenkinsguard import _groovy_code_mask
 from taintly.models import (
@@ -22,6 +23,7 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+from taintly.parsers.jenkinsfile.groovy_lex import Token, TokKind, tokenize
 
 
 class _GitCheckoutHttpPattern:
@@ -110,49 +112,124 @@ class _GitCheckoutHttpPattern:
         return findings
 
 
+@dataclass
+class _JenkinsBlock:
+    name: str
+    head: int
+    start: int
+    parent: int | None
+    has_arguments: bool = False
+    end: int | None = None
+
+
+def _jenkins_block_index(
+    content: str,
+) -> tuple[list[Token], list[_JenkinsBlock], list[int | None]]:
+    """Index literal Groovy blocks; strings/comments cannot donate braces.
+
+    This is a bounded lexical ownership check, not execution or a full Groovy
+    parser. Unclosed blocks stay incomplete and cannot establish safe cleanup.
+    """
+    tokens = [t for t in tokenize(content) if t.kind not in (TokKind.COMMENT, TokKind.NEWLINE)]
+    blocks: list[_JenkinsBlock] = []
+    stack: list[_JenkinsBlock] = []
+    parens: list[int] = []
+    closing_parens: dict[int, int] = {}
+    owners: list[int | None] = []
+    for index, token in enumerate(tokens):
+        parent = stack[-1].start if stack else None
+        owners.append(parent)
+        if token.kind == TokKind.LPAREN:
+            parens.append(index)
+        elif token.kind == TokKind.RPAREN and parens:
+            closing_parens[index] = parens.pop()
+        elif token.kind == TokKind.LBRACE:
+            head = index - 1
+            has_arguments = False
+            if head in closing_parens:
+                opening = closing_parens[head]
+                has_arguments = head > opening + 1
+                head = opening - 1
+            name = ""
+            if head >= 0 and tokens[head].kind == TokKind.IDENT:
+                # A property call like object.node is not the pipeline DSL.
+                if head == 0 or tokens[head - 1].value != ".":
+                    name = tokens[head].value
+            block = _JenkinsBlock(name, max(head, 0), index, parent, has_arguments)
+            blocks.append(block)
+            stack.append(block)
+        elif token.kind == TokKind.RBRACE and stack:
+            stack.pop().end = index
+    return tokens, blocks, owners
+
+
 class _NodeBlockWithoutLabelPattern:
-    """SEC7-JK-002 — fire on ``node {`` blocks that lack a ``label`` directive.
+    """Distinguish labeled declarative agents from bare scripted allocation.
 
-    Replaces the prior single-line regex that misclassified the
-    declarative ``agent { node { label 'x' } }`` shape (label on a
-    later line, not inline as ``node('x') { ... }``).  Real
-    Jenkinsfiles using the declarative form must not fire.
-
-    Walker contract: scan brace-depth from the matching ``node {``
-    line until depth returns to baseline; if a ``label '<value>'``
-    directive appears inside that span, suppress the finding.
+    A direct label inside declarative agent/node config constrains allocation.
+    A label method in an already allocated scripted node does not. Token
+    ownership handles inline/multiline forms without borrowing nested labels.
     """
 
-    _NODE_RE = re.compile(r"^\s*node\s*(?:\(\s*\))?\s*\{")
-    _LABEL_RE = re.compile(r"^\s*label\s+['\"]")
-    _COMMENT_RE = re.compile(r"^\s*//")
-    _INLINE_LABEL_RE = re.compile(r"node\s*\(\s*['\"]")  # node('x') { } — not our shape
-
-    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        tokens, blocks, owners = _jenkins_block_index(content)
+        by_start = {block.start: block for block in blocks}
         results: list[tuple[int, str]] = []
-        i = 0
-        n = len(lines)
-        while i < n:
-            line = lines[i]
-            if self._COMMENT_RE.search(line) or self._INLINE_LABEL_RE.search(line):
-                i += 1
+        for block in blocks:
+            if block.name != "node" or block.has_arguments:
                 continue
-            if not self._NODE_RE.search(line):
-                i += 1
-                continue
-            depth = line.count("{") - line.count("}")
+            parent = by_start.get(block.parent) if block.parent is not None else None
+            declarative = parent is not None and parent.name == "agent"
             has_label = False
-            j = i + 1
-            while j < n and depth > 0:
-                inner = lines[j]
-                if self._LABEL_RE.search(inner):
-                    has_label = True
-                    break
-                depth += inner.count("{") - inner.count("}")
-                j += 1
+            if declarative:
+                end = block.end if block.end is not None else len(tokens)
+                for index in range(block.start + 1, end):
+                    token = tokens[index]
+                    if (
+                        owners[index] != block.start
+                        or token.kind != TokKind.IDENT
+                        or token.value != "label"
+                    ):
+                        continue
+                    if tokens[index - 1].value == ".":
+                        continue
+                    argument = index + 1
+                    if argument < end and tokens[argument].kind == TokKind.LPAREN:
+                        argument += 1
+                    if argument < end and tokens[argument].kind in (TokKind.STRING, TokKind.IDENT):
+                        has_label = bool(tokens[argument].value.strip())
+                    if has_label:
+                        break
             if not has_label:
-                results.append((i + 1, line.strip()))
-            i += 1
+                line = tokens[block.head].line
+                results.append((line, lines[line - 1].strip()))
+        return results
+
+
+class _PipelineWithoutAlwaysPostPattern:
+    """Check pipeline-owned post/always blocks without a line-count limit."""
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        tokens, blocks, _owners = _jenkins_block_index(content)
+        children: dict[int | None, list[_JenkinsBlock]] = {}
+        for block in blocks:
+            children.setdefault(block.parent, []).append(block)
+        results: list[tuple[int, str]] = []
+        for pipeline in blocks:
+            if pipeline.name != "pipeline" or pipeline.has_arguments:
+                continue
+            has_always = pipeline.end is not None and any(
+                post.name == "post"
+                and post.end is not None
+                and any(
+                    child.name == "always" and child.end is not None
+                    for child in children.get(post.start, [])
+                )
+                for post in children.get(pipeline.start, [])
+            )
+            if not has_always:
+                line = tokens[pipeline.head].line
+                results.append((line, lines[line - 1].strip()))
         return results
 
 
@@ -3465,12 +3542,7 @@ RULES: list[Rule] = [
             "cleanup creates a window where credential files or sensitive artifacts persist "
             "on the agent after a failed build."
         ),
-        pattern=SequencePattern(
-            pattern_a=r"^\s*pipeline\s*\{",
-            absent_within=r"\bpost\s*\{",
-            lookahead_lines=250,
-            exclude=[r"^\s*//"],
-        ),
+        pattern=_PipelineWithoutAlwaysPostPattern(),
         remediation=(
             "Add a post block with an always section:\n\n"
             "pipeline {\n"

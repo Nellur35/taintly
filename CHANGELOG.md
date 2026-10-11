@@ -26,6 +26,10 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- Jenkins installer warnings now require executable shell commands and live PR
+  context, with command-local `--ignore-scripts` handling. Declarative agent labels
+  are distinguished from unrestricted scripted nodes, and pipeline cleanup checks
+  follow owned `post { always { ... } }` blocks without a fixed line limit.
 - Trigger queries reuse the bounded structural parse cache. GitHub expression
   boundaries respect quoted strings, and compact quoted flow-mapping keys
   retain their structural paths.

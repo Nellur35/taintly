@@ -23,6 +23,9 @@ same Jenkinsfile``. File-scoped because we cannot reliably segment a
 Jenkinsfile into per-stage scopes the way we do for YAML job keys.
 """
 
+import re
+import shlex
+
 from taintly.models import ContextPattern, Platform, Rule, Severity
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
@@ -40,6 +43,218 @@ _PR_CONTEXT = (
     r"|\bGERRIT_(?:CHANGE_ID|BRANCH|REFSPEC|PATCHSET_REVISION)\b"
     r")"
 )
+
+
+class _JenkinsInstallerLeafPattern:
+    """Match an unsafe package installer in an actual Jenkins shell step.
+
+    LOTP-JK-003 used to search Jenkinsfile lines, which also matched stage
+    names and variable values that merely contained words like ``yarn``.
+    Island LEAF events constrain the search to executable ``sh``/``bat``/
+    ``powershell``/``pwsh`` bodies while retaining the call site's line.
+    """
+
+    _INSTALLER_RE = re.compile(
+        r"(?i)^\s*(?:(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*)"
+        r"(?P<tool>npm\s+(?:install|i|ci)|yarn(?:\s+install)?|pnpm\s+(?:install|i))"
+        r"(?=\s|$)"
+    )
+
+    def __init__(self) -> None:
+        # Share Jenkins' existing island-shell matcher for LEAF selection and
+        # call-site attribution; only this rule's body predicate is new.
+        from .sec_jenkins import _JenkinsfileShellLeafPattern
+
+        self._shell_pattern = _JenkinsfileShellLeafPattern(self._body_matches)
+
+    @staticmethod
+    def _pr_context(content: str) -> bool:
+        """Read PR signals from Groovy code or live GString expressions.
+
+        Comments and ordinary string data cannot donate file-level PR
+        context; the common ``"${env.CHANGE_BRANCH}"`` form remains covered.
+        """
+        from taintly.parsers.jenkinsfile.groovy_lex import TokKind, tokenize
+
+        tokens = list(tokenize(content))
+        significant = [
+            token
+            for token in tokens
+            if token.kind not in (TokKind.COMMENT, TokKind.NEWLINE, TokKind.SEMI)
+        ]
+        for index, token in enumerate(significant):
+            if token.kind == TokKind.IDENT and re.search(
+                r"(?i)^(?:ghprb(?:ActualCommit|PullId|PullTitle|SourceBranch|TargetBranch|PullAuthorEmail)|GERRIT_(?:CHANGE_ID|BRANCH|REFSPEC|PATCHSET_REVISION))$",
+                token.value,
+            ):
+                return True
+            if (
+                token.kind == TokKind.IDENT
+                and token.value == "env"
+                and index + 2 < len(significant)
+                and significant[index + 1].kind == TokKind.OP
+                and significant[index + 1].value == "."
+                and significant[index + 2].kind == TokKind.IDENT
+                and re.fullmatch(
+                    r"CHANGE_(?:ID|BRANCH|TARGET|URL|AUTHOR|TITLE|FORK)",
+                    significant[index + 2].value,
+                )
+            ):
+                return True
+            if token.kind == TokKind.STRING and any(
+                re.search(_PR_CONTEXT, span.expr) for span in (token.interpolations or ())
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _commands(body: str):
+        """Yield shell command segments, respecting quotes and comments."""
+        body = _JenkinsInstallerLeafPattern._remove_active_continuations(body)
+        start = 0
+        quote: str | None = None
+        escaped = False
+        i = 0
+        while i < len(body):
+            char = body[i]
+            if (
+                char == "$"
+                and i + 1 < len(body)
+                and body[i + 1] == "("
+                and quote != "'"
+                and not escaped
+            ):
+                end = _JenkinsInstallerLeafPattern._command_substitution_end(body, i)
+                if end is not None:
+                    yield from _JenkinsInstallerLeafPattern._commands(body[i + 2 : end])
+                    i = end
+                    continue
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote != "'":
+                escaped = True
+            elif quote:
+                if char == quote:
+                    quote = None
+            elif char in ("'", '"'):
+                quote = char
+            elif char == "#" and (i == start or body[i - 1].isspace()):
+                end = body.find("\n", i)
+                if end < 0:
+                    end = len(body)
+                yield body[start:i]
+                start = end + 1
+                i = end
+            elif char in ";|&\n":
+                yield body[start:i]
+                start = i + 1
+            i += 1
+        yield body[start:]
+
+    @staticmethod
+    def _remove_active_continuations(body: str) -> str:
+        """Remove shell line continuations except inside single-quoted data."""
+        output: list[str] = []
+        quote: str | None = None
+        escaped = False
+        i = 0
+        while i < len(body):
+            char = body[i]
+            if char == "\\" and quote != "'" and i + 1 < len(body):
+                if body[i + 1] == "\n" and not escaped:
+                    i += 2
+                    while i < len(body) and body[i] in " \t":
+                        i += 1
+                    continue
+                if (
+                    body[i + 1] == "\r"
+                    and i + 2 < len(body)
+                    and body[i + 2] == "\n"
+                    and not escaped
+                ):
+                    i += 3
+                    while i < len(body) and body[i] in " \t":
+                        i += 1
+                    continue
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote != "'":
+                escaped = True
+            elif quote:
+                if char == quote:
+                    quote = None
+            elif char in ("'", '"'):
+                quote = char
+            output.append(char)
+            i += 1
+        return "".join(output)
+
+    @staticmethod
+    def _command_substitution_end(body: str, start: int) -> int | None:
+        depth = 1
+        quote: str | None = None
+        escaped = False
+        i = start + 2
+        while i < len(body):
+            char = body[i]
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote != "'":
+                escaped = True
+            elif quote:
+                if char == quote:
+                    quote = None
+            elif char in ("'", '"'):
+                quote = char
+            elif body.startswith("$(", i):
+                depth += 1
+                i += 1
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return i
+            i += 1
+        return None
+
+    @classmethod
+    def _has_ignore_scripts(cls, command: str) -> bool:
+        try:
+            args = shlex.split(command, posix=True)
+        except ValueError:
+            return False
+        return any(
+            arg == "--ignore-scripts" or arg.lower() == "--ignore-scripts=true" for arg in args
+        )
+
+    @classmethod
+    def _body_matches(cls, body: str, _interpolated: bool = False) -> bool:
+        for command in cls._commands(body):
+            command = command.strip()
+            # Shell compound commands put executable commands after control
+            # words such as ``then``; discard only these leading keywords.
+            command = re.sub(
+                r"^(?:(?:then|else|elif|if|while|until|do)\b\s*)+", "", command, flags=re.I
+            )
+            match = cls._INSTALLER_RE.match(command)
+            if not match or cls._has_ignore_scripts(command):
+                continue
+            # Bare ``yarn`` means install; ``yarn test`` / ``yarn run``
+            # execute scripts and are not package installation sinks.
+            if (
+                match.group("tool").lower() == "yarn"
+                and command[match.end() :].strip()
+                and not command[match.end() :].lstrip().startswith("-")
+            ):
+                continue
+            return True
+        return False
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if not self._pr_context(content):
+            return []
+        return self._shell_pattern.check(content, lines)
 
 
 RULES: list[Rule] = [
@@ -439,19 +654,7 @@ RULES: list[Rule] = [
             "most common LOTP vector for JavaScript builds on "
             "Jenkins."
         ),
-        pattern=ContextPattern(
-            anchor=r"\b(?:npm\s+(?:install|ci|i)|yarn(?:\s+install)?|pnpm\s+(?:install|i))\b",
-            requires=_PR_CONTEXT,
-            scope="file",
-            exclude=[
-                r"^\s*//",
-                r"^\s*/\*",  # `/*` block-comment opener (single-line
-                # `/* ... */` or multi-line opener)
-                r"^\s*\*",
-                r"^\s*#",
-                r"--ignore-scripts",
-            ],
-        ),
+        pattern=_JenkinsInstallerLeafPattern(),
         remediation=(
             "Add ``--ignore-scripts`` to every npm / yarn / pnpm\n"
             "install command in a Jenkinsfile that can run on PR\n"

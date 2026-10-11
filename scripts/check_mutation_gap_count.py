@@ -47,6 +47,8 @@ from taintly.testing.self_test import _KNOWN_MUTATION_GAPS  # noqa: E402
 # SEC4-GH shrank after retirement of SEC4-GH-026 and its gaps;
 # TAINT-GH grew by one documented structural-parser mutation for TAINT-GH-006.
 _PER_PREFIX_BASELINE: dict[str, int] = {
+    # 0 -> 1: LOTP-JK-003 quote_swap changes live Groovy context to inert data.
+    "LOTP-JK": 1,
     # 20 -> 21: AI-GH-018 whitespace_pad gap documented (phase1-aigh-forkguard).
     # The rule's new ``anchor_step_exclude`` (suppresses agent-CLI flags that
     # land on a ``claude_args: |`` block-scalar continuation inside a ``uses:``
