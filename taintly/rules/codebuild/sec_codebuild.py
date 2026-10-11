@@ -7,8 +7,10 @@ Rules map to the OWASP CI/CD Top 10 (``owasp_cicd``) using the same
 """
 
 import re
+import shlex
 
 from taintly.models import Platform, Rule, Severity
+from taintly.parsers.structural import EventKind, walk_workflow
 
 # ---------------------------------------------------------------------------
 # SEC6-CB-001 — plaintext secret-shaped name in buildspec env.variables
@@ -36,6 +38,86 @@ _CREDENTIAL_SUFFIX_RE = re.compile(
 )
 
 
+_LITERAL_ASSIGNMENT_RE = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]*)=(?:'([^']*)'|\"([^\"]*)\"|([^\s;'\"|&()<>#]+))"
+    r"(?=\s|[;&|]|$)"
+)
+
+
+def _literal_secret_commands(content: str, lines: list[str]) -> list[tuple[int, str]]:
+    """Bounded leading shell assignments, owned by actual buildspec commands.
+
+    Names are a posture signal, not proof that the value is a real credential.
+    Dynamic values, heredocs, continuations and arbitrary KEY names are outside
+    this profile. Do not reinterpret quoted documentation as shell commands.
+    """
+    events = list(walk_workflow("buildspec.yml", content=content, recover=True))
+    if any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
+        return []
+    results: list[tuple[int, str]] = []
+    for event in events:
+        path = event.path
+        if not (
+            event.kind is EventKind.LEAF_SCALAR
+            and len(path) == 4
+            and path[0] == "phases"
+            and path[1] in {"install", "pre_build", "build", "post_build"}
+            and path[2] == "commands"
+            and isinstance(path[3], int)
+        ):
+            continue
+        source = event.value or ""
+        # The shared reader retains folded block text as physical newlines.
+        # A continuation can be an argument to echo, not another assignment.
+        if event.block_lines and re.match(r"^\s*-\s*>", lines[event.line - 1]):
+            continue
+        # Heredoc bodies and continued strings require a shell parser; do not
+        # turn their physical lines into standalone executable assignments.
+        if "<<" in source or "\\\n" in source:
+            continue
+        semantic_lines = source.splitlines()
+        try:
+            for command in semantic_lines:
+                shlex.split(command, comments=True)
+        except ValueError:
+            # A quoted string crossing a physical line is not a second command.
+            continue
+        first_line = event.block_lines[0][0] if event.block_lines else event.line
+        command_lines = [
+            (
+                event.block_lines[offset][0]
+                if event.block_lines and offset < len(event.block_lines)
+                else first_line,
+                command,
+            )
+            for offset, command in enumerate(semantic_lines)
+        ]
+        for line_number, command in command_lines:
+            command = command.lstrip()
+            if command.startswith("export ") or command.startswith("export\t"):
+                command = command[6:].lstrip()
+            position = 0
+            while match := _LITERAL_ASSIGNMENT_RE.match(command, position):
+                name = match.group(1)
+                value = next(v for v in match.groups()[1:] if v is not None)
+                if (
+                    _CREDENTIAL_SUFFIX_RE.search(name)
+                    and value
+                    and not any(char in value for char in "$`\\")
+                    and not re.fullmatch(r"\*+|<redacted>|redacted", value, re.IGNORECASE)
+                ):
+                    snippet = lines[line_number - 1].strip()
+                    result = (line_number, snippet)
+                    if result not in results:
+                        results.append(result)
+                position = match.end()
+                if position == len(command) or not command[position].isspace():
+                    break
+                while position < len(command) and command[position].isspace():
+                    position += 1
+    return results
+
+
 class _PlaintextSecretInEnvVariablesPattern:
     """Fire on a credential-shaped key bound directly under ``env.variables``.
 
@@ -48,7 +130,7 @@ class _PlaintextSecretInEnvVariablesPattern:
     a parameter-store *key* alias must not fire).
     """
 
-    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         results: list[tuple[int, str]] = []
         n = len(lines)
         for i, line in enumerate(lines):
@@ -92,6 +174,7 @@ class _PlaintextSecretInEnvVariablesPattern:
                 key_name = key_m.group(2)
                 if _CREDENTIAL_SUFFIX_RE.search(key_name):
                     results.append((j + 1, nxt.strip()))
+        results.extend(_literal_secret_commands(content, lines))
         return results
 
 
@@ -1145,7 +1228,7 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC6-CB-001",
-        title="Plaintext secret-shaped value bound in buildspec env.variables",
+        title="Credential-shaped plaintext binding in buildspec configuration or commands",
         severity=Severity.HIGH,
         platform=Platform.CODEBUILD,
         owasp_cicd="CICD-SEC-6",
@@ -1156,12 +1239,16 @@ RULES: list[Rule] = [
             "documentation states is plain text and readable via the CodeBuild "
             "console or AWS CLI. Sensitive values belong under "
             "`env.parameter-store` or `env.secrets-manager` instead."
+            " Also detects leading literal shell assignments to these same names in "
+            "supported phases.*.commands. Dynamic references and command substitutions "
+            "are excluded from that command profile. Names indicate possible sensitivity, "
+            "not proof of a real credential; arbitrary *_KEY names remain outside scope."
         ),
         pattern=_PlaintextSecretInEnvVariablesPattern(),
         remediation=(
             "Move the value to AWS Systems Manager Parameter Store or Secrets "
             "Manager and reference it under `env.parameter-store` / "
-            "`env.secrets-manager` instead of `env.variables`."
+            "`env.secrets-manager` instead of `env.variables` or literal shell assignments."
         ),
         reference="https://docs.aws.amazon.com/codebuild/latest/userguide/build-spec-ref.html",
         test_positive=[

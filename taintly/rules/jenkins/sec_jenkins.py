@@ -206,6 +206,95 @@ class _NodeBlockWithoutLabelPattern:
         return results
 
 
+class _InputWithoutSubmitterPattern:
+    """SEC4-JK-004 — report an actual unrestricted Pipeline ``input`` step.
+
+    The Groovy tokenizer keeps names inside strings and comments out of the
+    executable token stream. Invocation ranges also keep ``submitter`` scoped
+    to the input call instead of borrowing a nearby parameter description.
+    """
+
+    @staticmethod
+    def _matching(
+        tokens: list[Token], start: int, opening: TokKind, closing: TokKind
+    ) -> int | None:
+        depth = 0
+        for index in range(start, len(tokens)):
+            if tokens[index].kind == opening:
+                depth += 1
+            elif tokens[index].kind == closing:
+                depth -= 1
+                if depth == 0:
+                    return index
+        return None
+
+    @staticmethod
+    def _next(tokens: list[Token], index: int) -> int:
+        while index < len(tokens) and tokens[index].kind == TokKind.COMMENT:
+            index += 1
+        return index
+
+    @classmethod
+    def _command_end(cls, tokens: list[Token], start: int) -> int:
+        index = start
+        while index < len(tokens):
+            if tokens[index].kind in (TokKind.NEWLINE, TokKind.SEMI, TokKind.EOF):
+                previous = index - 1
+                if previous >= start and tokens[previous].value == ",":
+                    index += 1
+                    continue
+                return index
+            index += 1
+        return index
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        tokens = list(tokenize(content))
+        results: list[tuple[int, str]] = []
+        for index, token in enumerate(tokens):
+            if token.kind != TokKind.IDENT or token.value != "input":
+                continue
+            previous = index - 1
+            if previous >= 0 and tokens[previous].value == ".":
+                continue
+            after = self._next(tokens, index + 1)
+            if after < len(tokens) and tokens[after].kind == TokKind.NEWLINE:
+                after = self._next(tokens, after + 1)
+            if after >= len(tokens):
+                continue
+
+            end: int | None = None
+            if tokens[after].kind == TokKind.LBRACE:
+                end = self._matching(tokens, after, TokKind.LBRACE, TokKind.RBRACE)
+            elif tokens[after].kind == TokKind.LPAREN:
+                end = self._matching(tokens, after, TokKind.LPAREN, TokKind.RPAREN)
+            elif tokens[after].kind == TokKind.STRING:
+                end = self._command_end(tokens, after + 1)
+            elif tokens[after].kind == TokKind.IDENT:
+                colon = self._next(tokens, after + 1)
+                if (
+                    tokens[after].value == "message"
+                    and colon < len(tokens)
+                    and tokens[colon].kind == TokKind.OP
+                    and tokens[colon].value == ":"
+                ):
+                    end = self._command_end(tokens, after)
+            if end is None:
+                continue
+            if not any(
+                tokens[pos].kind == TokKind.IDENT
+                and tokens[pos].value == "submitter"
+                and pos + 1 < end
+                and (
+                    tokens[pos + 1].value in (":", "(")
+                    or tokens[pos + 1].kind in (TokKind.STRING, TokKind.IDENT)
+                )
+                for pos in range(after + 1, end)
+            ):
+                if 0 < token.line <= len(lines):
+                    results.append((token.line, lines[token.line - 1].strip()))
+        return results
+
+
 class _PipelineWithoutAlwaysPostPattern:
     """Check pipeline-owned post/always blocks without a line-count limit."""
 
@@ -2808,12 +2897,7 @@ RULES: list[Rule] = [
             "provides no assurance that a qualified person reviewed the change. "
             "An attacker with any Jenkins login could approve their own malicious deployment."
         ),
-        pattern=SequencePattern(
-            pattern_a=r"\binput\b\s*(?:message\s*:|[('\"])",
-            absent_within=r"\bsubmitter\s*:",
-            lookahead_lines=5,
-            exclude=[r"^\s*//"],
-        ),
+        pattern=_InputWithoutSubmitterPattern(),
         remediation=(
             "Restrict approvals to a named group or user:\n\n"
             "input {\n"
