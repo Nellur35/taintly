@@ -1054,10 +1054,12 @@ RULES: list[Rule] = [
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-9",
         description=(
-            "Pipeline downloads a binary or script file using curl/wget and executes it "
-            "without verifying a checksum (sha256sum, shasum, cosign, gpg). "
-            "Compromised download sources can deliver malicious payloads that run with "
-            "full access to CI/CD variables and deployment credentials."
+            "Pipeline downloads an archive, binary, or script using curl/wget without a "
+            "nearby checksum or signature verification step. This is an integrity gap; "
+            "download or extraction alone does not establish that the retrieved content is "
+            "executed. If a job later runs the retrieved content, a compromised source "
+            "could supply code that runs in the job context and may access variables or "
+            "credentials available to that job."
         ),
         pattern=SequencePattern(
             # The archive extension must sit in an ``http(s)://`` URL token
@@ -1088,10 +1090,12 @@ RULES: list[Rule] = [
         ],
         stride=["T"],
         threat_narrative=(
-            "Downloading a binary or script without verifying its checksum allows a CDN "
-            "compromise, DNS hijacking, or MITM attack to substitute a malicious payload. "
-            "The pipeline executes attacker-controlled code with full access to the runner "
-            "environment and all CI/CD variables before any integrity check can fire."
+            "A compromised download source could substitute "
+            "the downloaded payload when integrity is not verified. This finding detects "
+            "the missing verification step; it does not establish that the downloaded file "
+            "is executed. If the job later executes the retrieved content, that code runs "
+            "with the job's permissions and may access variables or credentials made "
+            "available to that job."
         ),
     ),
     # =========================================================================

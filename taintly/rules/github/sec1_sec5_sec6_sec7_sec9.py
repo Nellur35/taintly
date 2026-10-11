@@ -710,15 +710,18 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC1-GH-001",
-        title="Deploy/publish job missing environment approval gate",
+        title="Deployment-like job lacks explicit environment protection",
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-1",
         description=(
             "A job named 'deploy', 'release', 'publish', or similar does not reference an "
-            "'environment:' key. Without an environment, there is no approval gate — any "
-            "workflow trigger causes immediate deployment. GitHub Environments allow requiring "
-            "manual approval from designated reviewers before sensitive jobs run."
+            "'environment:' key. The job name is a heuristic: the missing key does not establish "
+            "what the job executes, whether it deploys or publishes, its target, or whether a "
+            "trigger reaches it. Jobs that reference a configured GitHub environment must follow "
+            "that environment's protection rules; required reviewers are an optional rule. "
+            "Review the job's commands and deployment context before treating this as an "
+            "unapproved deployment."
         ),
         pattern=_JobScopedSequencePattern(
             pattern_a=r"^\s{2,4}(deploy|release|publish|production|prod)[_-]?\w*:\s*$",
@@ -760,10 +763,10 @@ RULES: list[Rule] = [
             ],
         ),
         remediation=(
-            "Add an environment: key to deployment jobs:\n"
-            "jobs:\n  deploy:\n    environment: production\n    steps: ..."
-            "\nThen configure environment protection rules in GitHub settings "
-            "(Settings > Environments) to require reviewers."
+            "Review whether this job performs a deployment or publication that needs "
+            "environment protection. If it does, reference the intended GitHub environment and "
+            "configure the protection rules that fit the repository, such as required reviewers "
+            "where available. A job name alone does not establish deployment behavior or target."
         ),
         reference="https://docs.github.com/en/actions/managing-workflow-runs-and-deployments/managing-deployments/managing-environments-for-deployment",
         test_positive=[
@@ -776,10 +779,14 @@ RULES: list[Rule] = [
         ],
         stride=["E", "T"],
         threat_narrative=(
-            "Any automated trigger — including a webhook from an attacker who merged a malicious "
-            "dependency — can deploy directly to production with no human review. "
-            "Approval gates are the last barrier between CI/CD automation and production scope."
+            "A job without an environment reference but with a deployment-like name is a review "
+            "candidate. The name and missing key do not show whether the job deploys or publishes, "
+            "what target it uses, which triggers can reach it, or whether another control applies. "
+            "Inspect its commands and deployment configuration; jobs that target a configured "
+            "GitHub environment follow that environment's configured protection rules."
         ),
+        confidence="low",
+        review_needed=True,
     ),
     # =========================================================================
     # CICD-SEC-2: Hardcoded container/service registry credentials

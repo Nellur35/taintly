@@ -115,12 +115,11 @@ RULES: list[Rule] = [
         owasp_cicd="CICD-SEC-8",
         description=(
             "A GitLab CI `include: project:` directive pulls CI configuration from an "
-            "external project without specifying a commit SHA as the `ref:`. "
-            "Without a pinned ref, GitLab resolves the include against the default branch "
-            "at pipeline creation time — any push to that branch immediately affects all "
-            "pipelines that include it. "
-            "A branch name or tag ref is mutable: the branch can be force-pushed, the tag "
-            "can be recreated to point at different content. "
+            "external project without specifying a commit SHA as the `ref:`. If `ref:` "
+            "is omitted, GitLab retrieves the file from the project's `HEAD`; an explicit "
+            "branch or tag ref selects that named ref, which is not necessarily the default "
+            "branch. Branch and tag refs can move or be retargeted, so the included "
+            "configuration may change as the referenced ref changes. "
             "Pin to a full 40-character commit SHA so the included configuration is "
             "immutable and auditable."
         ),
@@ -167,11 +166,13 @@ RULES: list[Rule] = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "An external CI configuration file included from another project without a "
-            "pinned commit ref changes with every push to that project, meaning any "
-            "contributor to the included configuration can silently modify what your "
-            "pipeline executes. A compromised or malicious configuration file has full "
-            "access to your project's runner tokens and protected CI/CD variables."
+            "If the referenced branch or tag moves, the included configuration used by "
+            "later pipeline creation can change. The impact depends on the included "
+            "configuration and on who can change or use that ref. This include alone does "
+            "not establish that a particular job runs or that protected variables are "
+            "available; GitLab limits protected variables to eligible protected-branch or "
+            "protected-tag pipelines, with additional conditions for merge-request "
+            "pipelines."
         ),
     ),
 ]
