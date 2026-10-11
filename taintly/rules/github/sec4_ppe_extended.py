@@ -30,6 +30,7 @@ from taintly.workflow_corpus import is_fork_reachable
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 from ._job_output_domains import build_workflow_output_view
 from ._workflow_input_sinks import is_workflow_input_executable_sink
+from .lotp import _checkout_action_state, _is_run_block_header, _OrderedPrBuildPattern
 from .sec3_sec4_supply_chain_ppe import _DANGEROUS_GITHUB_CONTEXT_RE
 
 
@@ -731,6 +732,106 @@ def _has_prt_trigger(content: str) -> bool:
     scalar = re.search(r"(?m)^on:[ \t]*pull_request_target[ \t]*(?:#.*)?$", content)
     block = re.search(r"(?m)^on:[ \t]*(?:#.*)?\n[ \t]+pull_request_target[ \t]*:", content)
     return "pull_request_target" in triggers(content) or bool(scalar or block)
+
+
+class _PpeBuildSourcePattern(_OrderedPrBuildPattern):
+    """Apply SEC4-GH-011 only to executable build lines with source context.
+
+    The shared LOTP model already tracks checkout and Git source changes in
+    step order.  SEC4 retains its conservative candidate when that model has
+    no source evidence (or cannot resolve a step), but suppresses a build only
+    when the ordered model and an earlier checkout establish trusted source.
+    """
+
+    def __init__(self, anchor: str, exclude: list[str], anchor_job_exclude: str = "") -> None:
+        super().__init__(
+            anchor=anchor,
+            exclude=exclude,
+            default_trusted_checkout=True,
+        )
+        # SEC4 has a workflow-level trigger, while LOTP's source model scopes
+        # its own candidates to jobs.  Let the inherited ordered analysis see
+        # the trigger and then perform its existing per-job / per-step pass.
+        self.requires = _PRT_TRIGGER_RE
+        self._requires_re = re.compile(_PRT_TRIGGER_RE)
+        self.scope = "file"
+        self.anchor_job_exclude = anchor_job_exclude
+        self._anchor_job_exclude_re = re.compile(anchor_job_exclude) if anchor_job_exclude else None
+
+    @staticmethod
+    def _is_executable_run_line(step: StepSegment, absolute_line: int) -> bool:
+        """Reject build-tool words that occur only in step metadata."""
+
+        if not step.body_lines or not step.start_line <= absolute_line <= step.end_line:
+            return False
+        first = step.body_lines[0]
+        step_indent = len(first) - len(first.lstrip())
+        direct_indent = step_indent + 2
+        in_run_block = False
+        for offset, line in enumerate(step.body_lines):
+            number = step.start_line + offset
+            stripped = line.lstrip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(line) - len(stripped)
+            if indent <= direct_indent:
+                in_run_block = False
+            # The first step field may share the sequence marker's line.
+            field_line = (
+                line[step_indent + 1 :]
+                if offset == 0 and line[step_indent : step_indent + 1] == "-"
+                else line
+            )
+            match = re.match(r"^\s*run\s*:\s*(?P<value>.*)$", field_line)
+            if match:
+                value = match.group("value").strip()
+                if number == absolute_line:
+                    return True
+                in_run_block = _is_run_block_header(value)
+                continue
+            if number == absolute_line:
+                return in_run_block and indent > direct_indent
+        return False
+
+    @staticmethod
+    def _has_prior_checkout(step: StepSegment, steps: list[StepSegment], line: int) -> bool:
+        return any(
+            candidate.job_name == step.job_name
+            and candidate.start_line < line
+            and _checkout_action_state(candidate) is not None
+            for candidate in steps
+        )
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        raw = ContextPattern.check(self, content, lines)
+        if not raw:
+            return []
+
+        # Run the established ordered source model over these same candidates.
+        # Its omissions are proof of trusted state only when the candidate has
+        # a prior checkout; no-checkout and dynamic-source cases stay reviewable.
+        ordered = set(super().check(content, lines))
+        steps = for_each_step(content)
+        result: list[tuple[int, str]] = []
+        for line, snippet in raw:
+            step = next(
+                (
+                    candidate
+                    for candidate in steps
+                    if candidate.start_line <= line <= candidate.end_line
+                ),
+                None,
+            )
+            if step is None:
+                # Segmentation failure is unknown, not proof that the anchor
+                # belongs to metadata or trusted source.
+                result.append((line, snippet))
+                continue
+            if not self._is_executable_run_line(step, line):
+                continue
+            if (line, snippet) in ordered or not self._has_prior_checkout(step, steps, line):
+                result.append((line, snippet))
+        return result
 
 
 _IGNORE_SCRIPTS_INSTALL_LINE_RE = (
@@ -1447,15 +1548,16 @@ RULES: list[Rule] = [
         severity=Severity.CRITICAL,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
+        confidence="medium",
+        review_needed=True,
         description=(
             "Workflow uses pull_request_target AND runs build tools (npm, yarn, pip, make, "
-            "gradle, mvn, cargo, bundle) that read attacker-controlled files (package.json, "
-            "Makefile, pom.xml, build.gradle, etc.) from the PR branch. "
-            "Even without explicit actions/checkout, some tools run lifecycle hooks from "
-            "the repository root that can execute arbitrary attacker code. "
+            "gradle, mvn, cargo, bundle) with PR-controlled or unresolved workspace source. Taintly follows "
+            "checkout and Git source changes in step order; missing or dynamic source "
+            "information remains a review candidate. "
             "This pattern was exploited in the Ultralytics supply chain compromise (Dec 2024)."
         ),
-        pattern=ContextPattern(
+        pattern=_PpeBuildSourcePattern(
             # Shared build-tool anchor — see taintly/rules/github/_build_tools.py
             # for the full tool list and rationale.  Covers npm/yarn/pnpm
             # (install + user-scripts via run/build/test), pip install (., -e ., -r),
@@ -1477,7 +1579,9 @@ RULES: list[Rule] = [
             # needed because ContextPattern compiles regexes without
             # MULTILINE by default and ``requires`` is a file-wide
             # check.
-            requires=_PRT_TRIGGER_RE,
+            # Workflow-level pull_request_target gate is applied by the
+            # source-aware pattern above; build hits must also be executable
+            # run-step content rather than labels or action metadata.
             exclude=[
                 r"^\s*#",
                 _IGNORE_SCRIPTS_INSTALL_LINE_RE,
@@ -1489,10 +1593,7 @@ RULES: list[Rule] = [
                 # and documentation strings (e.g. Django's new_contributor_pr.yml pr-message: | block).
                 r"""\bmake\s+sure\b""",
             ],
-            # Suppress findings in jobs explicitly gated to non-PRT events.
-            # A job with `if: github.event_name == 'push'` (or schedule, workflow_dispatch,
-            # etc.) never runs under pull_request_target, so build tools there cannot
-            # be LOTP-exploited. Also covers `!= 'pull_request_target'` forms.
+            # Preserve the original gate for jobs known not to execute on PRT.
             anchor_job_exclude=(
                 r"if:.*github\.event_name\s*==\s*['\"]"
                 r"(?:push|schedule|workflow_dispatch|workflow_call|merge_group"
@@ -1501,8 +1602,8 @@ RULES: list[Rule] = [
             ),
         ),
         remediation=(
-            "Do not run build tools in pull_request_target workflows — they\n"
-            "execute lifecycle hooks from the PR source tree with your secrets.\n"
+            "Review which checkout and files the build actually consumes.\n"
+            "Keep PR-controlled build hooks out of privileged pull_request_target jobs.\n"
             "Use the two-workflow pattern: pull_request for build/test (no\n"
             "secrets), workflow_run for privileged operations that consume\n"
             "only the build artifact (never the PR code).\n"
@@ -1543,10 +1644,11 @@ RULES: list[Rule] = [
         ],
         stride=["E", "T"],
         threat_narrative=(
-            "Build tools like npm install, pip install ., and mvn execute lifecycle scripts defined "
-            "in attacker-controlled files (package.json, pyproject.toml, pom.xml) from the PR branch, "
-            "giving an external contributor arbitrary code execution in the privileged "
-            "pull_request_target context with write access and full secret exposure. "
+            "If build tools consume attacker-controlled lifecycle scripts or build files "
+            "from the PR branch, an external contributor can execute code with the job's "
+            "effective permissions. Missing or dynamic source identity, executable build "
+            "hooks and effective secret/write access require review; this candidate alone "
+            "does not establish those privileges. "
             "This pattern was exploited in the Ultralytics supply chain compromise (December 2024) "
             "via malicious postinstall hooks."
         ),

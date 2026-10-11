@@ -16,10 +16,13 @@ import re
 import shlex
 from collections import deque
 from collections.abc import Sequence
+from functools import lru_cache
+from textwrap import dedent
 
 from taintly.models import ContextPattern, Platform, Rule, Severity
 from taintly.parsers.gha_expr import ExprSyntaxError, context_paths, iter_expression_bodies
 from taintly.parsers.segmentation import JobSegment, StepSegment, for_each_job, for_each_step
+from taintly.parsers.structural import EventKind, walk_workflow
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 
@@ -68,8 +71,6 @@ _CHECKOUT_ACTION_RE = re.compile(
     r"^\s*(?:-\s*)?uses\s*:\s*['\"]?actions/checkout@", re.IGNORECASE | re.MULTILINE
 )
 _REF_LINE_RE = re.compile(r"^\s*ref\s*:\s*(.*?)\s*(?:#.*)?$", re.MULTILINE)
-_REPOSITORY_LINE_RE = re.compile(r"^\s*repository\s*:\s*(.*?)\s*(?:#.*)?$", re.MULTILINE)
-_CHECKOUT_PATH_LINE_RE = re.compile(r"^\s*path\s*:\s*(.*?)\s*(?:#.*)?$", re.MULTILINE)
 _WORKING_DIRECTORY_LINE_RE = re.compile(r"^\s*(?:-\s*)?working-directory\s*:\s*(.*?)\s*$")
 _SHELL_CD_RE = re.compile(
     r"(?:^\s*(?:-\s*)?run\s*:\s*|^\s*|[;&|]\s*)(?P<command>cd)\s+(?P<path>[^\s;&|]+)",
@@ -276,33 +277,135 @@ def _literal_workspace_path(value: str, base: str = ".") -> str | None:
     return path
 
 
-def _checkout_action_state(step: StepSegment) -> tuple[str, bool, str | None] | None:
-    """Return source state, repository provenance, and checkout path."""
+@lru_cache(maxsize=1024)
+def _checkout_input_fields(step: StepSegment) -> tuple[str, dict[str, str]] | None:
+    """Read direct checkout ``uses``/``with`` fields from structural events.
+
+    A small synthetic workflow gives the existing structural reader the exact
+    ``jobs.*.steps[*].with.{ref,repository,path}`` path shape. Ambiguous keys,
+    aliases, and parse degradation return ``None`` so callers retain unknown.
+    """
+
+    if re.search(
+        r"(?m)(?:^|\{)\s*(?:with\s*:\s*\*|<<\s*:\s*\*)\s*[A-Za-z_][A-Za-z0-9_-]*",
+        step.text,
+    ):
+        # A direct alias is structurally expanded but loses source ownership
+        # in the event stream. Keep it unknown rather than trusting expansion.
+        return None
+    body = dedent(step.text).splitlines()
+    wrapped = "jobs:\n  probe:\n    steps:\n" + "".join(f"      {line}\n" for line in body)
+    events = list(
+        walk_workflow(
+            "checkout-inputs.yml",
+            content=wrapped,
+            recover=True,
+            include_keys=True,
+            include_merge_origins=True,
+        )
+    )
+    if any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
+        return None
+
+    prefix = ("jobs", "probe", "steps", 0)
+    uses_keys = [
+        event
+        for event in events
+        if event.kind is EventKind.MAP_KEY and event.path == (*prefix, "uses")
+    ]
+    uses = [
+        event.value
+        for event in events
+        if event.kind is EventKind.LEAF_SCALAR
+        and event.path == (*prefix, "uses")
+        and event.value is not None
+    ]
+    if len(uses_keys) != 1 or len(uses) != 1 or any(event.merge_origins for event in uses_keys):
+        return None
+
+    with_keys = [
+        event
+        for event in events
+        if event.kind is EventKind.MAP_KEY and event.path == (*prefix, "with")
+    ]
+    with_leaves = [
+        event
+        for event in events
+        if event.kind is EventKind.LEAF_SCALAR and event.path == (*prefix, "with")
+    ]
+    if len(with_keys) > 1 or with_leaves or any(event.merge_origins for event in with_keys):
+        return None
+
+    fields: dict[str, str] = {}
+    for name in ("ref", "repository", "path"):
+        field_path = (*prefix, "with", name)
+        keys = [
+            event
+            for event in events
+            if event.kind is EventKind.MAP_KEY and event.path == field_path
+        ]
+        leaves = [
+            event
+            for event in events
+            if event.kind is EventKind.LEAF_SCALAR and event.path == field_path
+        ]
+        if (
+            len(keys) > 1
+            or len(leaves) > 1
+            or any(event.merge_origins for event in (*keys, *leaves))
+        ):
+            return None
+        if keys and not leaves:
+            # Null, nested, or otherwise non-scalar inputs cannot establish
+            # a checkout source or path.
+            return None
+        if leaves:
+            if len(keys) != 1 or leaves[0].value is None:
+                return None
+            fields[name] = leaves[0].value.strip().strip("'\"")
+    return uses[0].strip().strip("'\""), fields
+
+
+def _checkout_action_state(
+    step: StepSegment, *, default_trusted: bool = False
+) -> tuple[str, bool, str | None] | None:
+    """Return source state, repository provenance, and checkout path.
+
+    ``default_trusted`` is for rules whose event context proves that a default
+    checkout reads the base repository; generic LOTP rules retain the prior
+    conservative default unless they opt in.
+    """
 
     if not _CHECKOUT_ACTION_RE.search(step.text):
         return None
-    paths = [match.group(1) for match in _CHECKOUT_PATH_LINE_RE.finditer(step.text)]
-    path = "." if not paths else _literal_workspace_path(paths[0]) if len(paths) == 1 else None
-    repositories = [
-        match.group(1).strip().strip("'\"") for match in _REPOSITORY_LINE_RE.finditer(step.text)
-    ]
-    if repositories:
-        if len(repositories) != 1:
-            return _UNKNOWN, True, path
-        if _contains_pr_head_reference(repositories[0]):
+    structural = _checkout_input_fields(step)
+    if structural is None:
+        return _UNKNOWN, True, None
+    uses, fields = structural
+    if not re.match(r"^actions/checkout@", uses, re.IGNORECASE):
+        return None
+
+    path = "." if "path" not in fields else _literal_workspace_path(fields["path"])
+    repository = fields.get("repository")
+    foreign_repository = False
+    if repository is not None:
+        if _contains_pr_head_reference(repository):
             return _UNTRUSTED, True, path
-        if repositories[0] != "${{ github.repository }}":
-            # A fixed branch in another repository cannot prove base trust.
+        if repository != "${{ github.repository }}":
+            # A fixed or dynamic other repository cannot prove base trust.
             return _UNKNOWN, True, path
-    refs = [match.group(1).strip().strip("'\"") for match in _REF_LINE_RE.finditer(step.text)]
-    if any(
-        _contains_pr_head_reference(ref) or _WORKFLOW_RUN_HEAD_BRANCH_RE.search(ref) for ref in refs
-    ):
-        return _UNTRUSTED, False, path
-    if len(refs) == 1 and _STATIC_REF_RE.fullmatch(refs[0]):
+
+    ref = fields.get("ref")
+    if ref is not None:
+        if _contains_pr_head_reference(ref) or _WORKFLOW_RUN_HEAD_BRANCH_RE.search(ref):
+            return _UNTRUSTED, foreign_repository, path
+        if _STATIC_REF_RE.fullmatch(ref):
+            return _TRUSTED, foreign_repository, path
+        return _UNKNOWN, foreign_repository, path
+    if default_trusted and not foreign_repository:
         return _TRUSTED, False, path
-    # Default checkout and dynamic refs depend on the event and repository
-    # state.  Retain findings until that state can be proved.
+    # Generic LOTP consumers cannot assume what an event-default checkout
+    # selects. They keep the existing unknown result unless a rule opts in.
     return _UNKNOWN, False, path
 
 
@@ -311,11 +414,13 @@ def _checkout_may_use_pr_source(step: StepSegment) -> bool:
 
     if not _CHECKOUT_ACTION_RE.search(step.text):
         return False
-    values = [
-        match.group(1).strip().strip("'\"")
-        for pattern in (_REF_LINE_RE, _REPOSITORY_LINE_RE)
-        for match in pattern.finditer(step.text)
-    ]
+    structural = _checkout_input_fields(step)
+    if structural is None:
+        return True
+    uses, fields = structural
+    if not re.match(r"^actions/checkout@", uses, re.IGNORECASE):
+        return False
+    values = [fields[name] for name in ("ref", "repository") if name in fields]
     return any(
         _contains_pr_head_reference(value)
         or _WORKFLOW_RUN_HEAD_BRANCH_RE.search(value)
@@ -433,6 +538,15 @@ def _static_shell_script(line: str) -> str:
     return "".join(rendered)
 
 
+def _is_run_block_header(value: str) -> bool:
+    """Recognize YAML run block headers with chomp, indent and comments."""
+
+    return (
+        re.fullmatch(r"[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:[ \t]+(?:#.*)?)?", value.strip())
+        is not None
+    )
+
+
 def _run_shell_lines(
     step: StepSegment, child_scopes: dict[int, list[tuple[int, int]]] | None = None
 ) -> dict[int, str]:
@@ -456,7 +570,7 @@ def _run_shell_lines(
         if not match:
             continue
         body = match.group("body")
-        if body.strip() in {"|", "|-", "|+", ">", ">-", ">+"}:
+        if _is_run_block_header(body):
             for next_offset in range(offset + 1, len(step.body_lines)):
                 next_line = step.body_lines[next_offset]
                 if next_line.strip() and len(next_line) - len(next_line.lstrip()) <= indent:
@@ -1233,22 +1347,31 @@ def _git_source_changes(
     return changes
 
 
-def _run_may_select_pr_source(step: StepSegment) -> bool:
+def _run_may_select_pr_source(step: StepSegment, *, include_unknown: bool = False) -> bool:
     """Keep a job visible when executable Git text selects a PR source."""
 
     quote: str | None = None
     for _, line in sorted(_run_shell_lines(step).items()):
         mask, quote, _ = _shell_quote_mask(line, quote)
         if any(
-            state == _UNTRUSTED and not mask[column]
+            (state != _TRUSTED if include_unknown else state == _UNTRUSTED) and not mask[column]
             for column, state, _, _, _ in _git_source_changes(line, mask)
         ):
             return True
-        if any(state == _UNTRUSTED for _, state, _, _, _, _, _, _ in _git_fetch_events(line, mask)):
+        if any(
+            (state != _TRUSTED if include_unknown else state == _UNTRUSTED)
+            for _, state, _, _, _, _, _, _ in _git_fetch_events(line, mask)
+        ):
             return True
-        if any(state == _UNTRUSTED for _, _, state, _, _ in _git_remote_events(line, mask)):
+        if any(
+            (state != _TRUSTED if include_unknown else state == _UNTRUSTED)
+            for _, _, state, _, _ in _git_remote_events(line, mask)
+        ):
             return True
-        if any(state == _UNTRUSTED for _, state, _, _ in _git_clone_events(line, mask)):
+        if any(
+            (state != _TRUSTED if include_unknown else state == _UNTRUSTED)
+            for _, state, _, _ in _git_clone_events(line, mask)
+        ):
             return True
     return False
 
@@ -1272,6 +1395,8 @@ class _OrderedPrBuildPattern(ContextPattern):
             rf"(?:{_BUILD_TOOL_ANCHOR}|{_NPM_PREFIX_BUILD_ANCHOR}|{_PIP_INSTALL_ANCHOR})"
         ),
         exclude: list[str] | None = None,
+        *,
+        default_trusted_checkout: bool = False,
     ) -> None:
         super().__init__(
             anchor=anchor,
@@ -1281,6 +1406,7 @@ class _OrderedPrBuildPattern(ContextPattern):
             expr_augment_requires=True,
         )
         self._source_anchor_re = re.compile(anchor)
+        self._default_trusted_checkout = default_trusted_checkout
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         raw = super().check(content, lines)
@@ -1303,7 +1429,16 @@ class _OrderedPrBuildPattern(ContextPattern):
                 continue
             job_steps = [step for step in steps if step.job_name == job.name]
             if not any(
-                (_checkout_may_use_pr_source(step) or _run_may_select_pr_source(step))
+                (
+                    _checkout_may_use_pr_source(step)
+                    or _run_may_select_pr_source(
+                        step, include_unknown=self._default_trusted_checkout
+                    )
+                    or (
+                        self._default_trusted_checkout
+                        and _checkout_action_state(step, default_trusted=True) is not None
+                    )
+                )
                 and not _excludes_pr_path(_direct_if(step))
                 for step in job_steps
             ):
@@ -1335,7 +1470,9 @@ class _OrderedPrBuildPattern(ContextPattern):
                     line for line in job_lines if step.start_line <= line <= step.end_line
                 }
                 pr_excluded = _excludes_pr_path(_direct_if(step))
-                checkout_state = _checkout_action_state(step)
+                checkout_state = _checkout_action_state(
+                    step, default_trusted=self._default_trusted_checkout
+                )
                 cwd = _step_working_path(step, default_path)
                 child_scopes: dict[int, list[tuple[int, int]]] = {}
                 shell_lines = _run_shell_lines(step, child_scopes)

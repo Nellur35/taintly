@@ -14,11 +14,9 @@ Rules in this module:
                    (write-token via OIDC).  Severity CRITICAL.
                    GitLab analogue of GH's pwn-request → write-token
                    chain.
-  * CHAIN-GL-102 — SEC3-GL-002 shape (unpinned project include)
-                   + fork-reachable trigger anywhere in the corpus.
-                   Severity HIGH.  Supply-chain composition: a fork
-                   MR can land a payload that flows through a mutable
-                   include reference into a privileged downstream run.
+  * CHAIN-GL-102 — mutable project include with enabled or unknown
+                   root MR configuration. Severity HIGH, review needed:
+                   external include execution and privileges are unresolved.
   * CHAIN-GL-103 — TAINT-GL-001 shape (shallow-taint via variables:)
                    + fork-reachable trigger + id_tokens declared.
                    Severity HIGH.  Taint composition: a fork MR can
@@ -57,6 +55,8 @@ from taintly.gitlab_workflow_corpus import (
     GitLabWorkflowSummary,
 )
 from taintly.models import Platform, Rule, Severity
+from taintly.parsers.structural import Event, EventKind, walk_workflow
+from taintly.parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
 from taintly.workflow_corpus import TriggerFamily
 
 # ---------------------------------------------------------------------------
@@ -201,26 +201,116 @@ def _compose_chain_gl_101(corpus: GitLabWorkflowCorpus) -> GitLabCorpusFindings:
 # ---------------------------------------------------------------------------
 
 
+_MR_SOURCE_COMPARE = re.compile(r"""\$CI_PIPELINE_SOURCE\s*(==|!=)\s*(["'])([a-z_]+)\2""")
+_DEFAULT_BRANCH_COMPARE = re.compile(
+    r"(?:\$CI_COMMIT_BRANCH\s*==\s*\$CI_DEFAULT_BRANCH|"
+    r"\$CI_DEFAULT_BRANCH\s*==\s*\$CI_COMMIT_BRANCH)"
+)
+
+
+def _mr_rule_decision(events: list[Event], prefix: tuple[object, ...]) -> tuple[bool | None, bool]:
+    """Bounded first-match rules evaluation for an MR pipeline.
+
+    None is unknown, never proof of denial. The second value records a
+    matching literal MR-source predicate, rather than generic admission.
+    Unsupported predicates/fields and duplicate keys retain uncertainty.
+    """
+    rows: dict[int, dict[str, str]] = {}
+    keys: set[tuple[object, ...]] = set()
+    present = False
+    for event in events:
+        if event.path == prefix and event.kind is EventKind.MAP_KEY:
+            if present:
+                return None, False
+            present = True
+        if event.path[: len(prefix)] != prefix or len(event.path) <= len(prefix):
+            continue
+        tail = event.path[len(prefix) :]
+        if len(tail) != 2 or not isinstance(tail[0], int) or tail[1] not in {"if", "when"}:
+            return None, False
+        if event.kind is EventKind.MAP_KEY:
+            if event.path in keys:
+                return None, False
+            keys.add(event.path)
+            rows.setdefault(tail[0], {})
+        elif event.kind is EventKind.LEAF_SCALAR and event.value is not None:
+            rows.setdefault(tail[0], {})[str(tail[1])] = event.value
+    if not present or not rows:
+        return None, False
+    for index, row in sorted(rows.items()):
+        if any(prefix + (index, key) in keys and key not in row for key in ("if", "when")):
+            return None, False
+        condition = row.get("if")
+        explicit_mr = False
+        if condition is None:
+            matches: bool | None = True
+        elif match := _MR_SOURCE_COMPARE.fullmatch(condition.strip()):
+            is_mr = match[3] == "merge_request_event"
+            matches = is_mr if match[1] == "==" else not is_mr
+            explicit_mr = is_mr and match[1] == "=="
+        elif _DEFAULT_BRANCH_COMPARE.fullmatch(condition.strip()):
+            # CI_COMMIT_BRANCH is unavailable in merge-request pipelines.
+            matches = False
+        else:
+            matches = None
+        if matches is None:
+            return None, False
+        if not matches:
+            continue
+        when = row.get("when", "on_success")
+        if when not in {"never", "always", "on_success", "manual", "delayed"}:
+            return None, False
+        return when != "never", explicit_mr
+    return False, False
+
+
+def _root_mr_state(corpus: GitLabWorkflowCorpus) -> str:
+    """Use root configuration only; included job rules do not enable MR CI."""
+    root = corpus.by_filepath(corpus.entry_filepath) if corpus.entry_filepath else None
+    if root is None or root.content_truncated:
+        return "unknown"
+    try:
+        if any(token.kind is TokenKind.ALIAS for token in tokenize(root.content)):
+            return "unknown"
+    except TokenizerError:
+        return "unknown"
+    events = list(walk_workflow(root.filepath, content=root.content, include_keys=True))
+    if any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
+        return "unknown"
+    # Duplicate root mappings can replace policy or jobs; do not guess precedence.
+    root_keys: set[tuple[object, ...]] = set()
+    for event in events:
+        if event.kind is EventKind.MAP_KEY and len(event.path) == 1:
+            if event.path in root_keys:
+                return "unknown"
+            root_keys.add(event.path)
+    allowed, explicit = _mr_rule_decision(events, ("workflow", "rules"))
+    if allowed is False:
+        # GitLab's external GitHub PR integration ignores fork PRs; that
+        # distinct source alone does not establish this native-MR chain.
+        return "denied"
+    if allowed is True and explicit:
+        return "enabled"
+    if allowed is None and any(event.path == ("workflow", "rules") for event in events):
+        return "unknown"
+    for job in root.job_definitions:
+        if job.name.startswith("."):
+            continue
+        admitted, explicit = _mr_rule_decision(events, (job.name, "rules"))
+        if admitted is True and explicit:
+            return "enabled"
+    return "unknown"
+
+
 def _compose_chain_gl_102(corpus: GitLabWorkflowCorpus) -> GitLabCorpusFindings:
-    """Detect the SEC3-GL-002 + fork-reachable chain.
+    """Review candidate at the mutable include's actionable call site.
 
-    Threat shape: the corpus contains at least one unpinned
-    ``include: project:`` reference (SEC3-GL-002 shape) AND at least
-    one workflow in the corpus is fork-reachable.  Composition: a
-    project include's mutable ref means a contributor to the upstream
-    project (or anyone who can force-push the named tag/branch) can
-    silently land new YAML that the fork's MR pipeline immediately
-    executes — supply-chain compromise of the build path with the
-    fork-attacker as the realisation surface.
-
-    Citation: the include's call site (filepath + line) because that's
-    the actionable handle — pinning the include's ``ref:`` to a SHA
-    severs the chain.
+    Only a supported root workflow denial excludes the MR candidate.
+    Unresolved include bodies and inherited policy remain unknown.
     """
     findings: GitLabCorpusFindings = []
-    # Any fork-reachable workflow in the corpus is the join trigger.
-    any_fork_reachable = any(TriggerFamily.FORK_REACHABLE in w.triggers for w in corpus.all())
-    if not any_fork_reachable:
+    state = _root_mr_state(corpus)
+    if state == "denied":
         return findings
     seen: set[tuple[str, int]] = set()
     for w in corpus.all():
@@ -230,11 +320,11 @@ def _compose_chain_gl_102(corpus: GitLabWorkflowCorpus) -> GitLabCorpusFindings:
                 continue
             seen.add(key)
             snippet = (
-                f"CHAIN-GL-102: unpinned project include '{ref.target}' co-occurs with a "
-                "fork-reachable trigger in the corpus.  A contributor to the upstream "
-                "project (or anyone who can force-push the include's mutable ref) can "
-                "land new YAML that runs in the next MR pipeline, with the fork attacker "
-                "as the realisation surface."
+                f"CHAIN-GL-102: mutable project include '{ref.target}'; "
+                f"root MR configuration is {state}. The include body and activation rules "
+                "are unresolved; upstream modification authority and execution require review. "
+                "Fork MR pipelines normally use fork resources; parent-project execution "
+                "and secret access are not established by this finding."
             )
             findings.append((ref.filepath, ref.line, snippet))
     return findings
@@ -350,24 +440,19 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="CHAIN-GL-102",
-        title="CHAIN: unpinned project include + fork-reachable trigger",
+        title="CHAIN: mutable project include; MR execution context requires review",
         severity=Severity.HIGH,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-3",
         description=(
-            "The resolved GitLab CI corpus contains at least one unpinned "
-            "``include: project:`` reference (SEC3-GL-002's threat shape) AND at "
-            "least one fork-reachable trigger.  Composition: the include's mutable "
-            "ref (branch/tag, or omitted entirely) lets a contributor to the upstream "
-            "project — or anyone who can force-push the named ref — silently land "
-            "new YAML that the NEXT MR pipeline immediately executes.  The "
-            "fork-reachable trigger is the realisation surface: an attacker doesn't "
-            "need to compromise the local repo to land code in its build path; they "
-            "compromise the unpinned upstream and the local repo's MR pipeline "
-            "executes the change without review.  The single-rule SEC3-GL-002 fires "
-            "on every unpinned include regardless of trigger context; this CHAIN "
-            "rule pulls out the subset where the supply-chain compromise has an "
-            "attacker-controlled trigger."
+            "A mutable project include is present and the root configuration either "
+            "admits merge-request pipelines or leaves their reachability unknown. "
+            "Root workflow rules that prove MR denial exclude this candidate. Included "
+            "rules, comments and script strings do not establish root MR enablement. "
+            "External GitHub PR integration alone is outside this native-MR chain. "
+            "The external include body, conditional activation, upstream modification "
+            "authority and effective privileges require review. The independent "
+            "SEC3-GL-002 immutability warning remains applicable without MR reachability."
         ),
         pattern=GitLabCorpusPattern(callback=_compose_chain_gl_102),
         remediation=(
@@ -380,24 +465,23 @@ RULES: list[Rule] = [
             "  git ls-remote https://gitlab.com/my-group/my-project refs/heads/main\n"
             "Run `taintly --guide CHAIN-GL-102` for the full checklist."
         ),
-        reference="https://docs.gitlab.com/ci/yaml/includes/",
+        reference=(
+            "https://docs.gitlab.com/ci/yaml/includes/; "
+            "https://docs.gitlab.com/ci/pipelines/merge_request_pipelines/; "
+            "https://docs.gitlab.com/ci/ci_cd_for_external_repos/#known-issues"
+        ),
         test_positive=[],
         test_negative=[],
         stride=["T", "E"],
         threat_narrative=(
-            "An attacker who can commit to the upstream project — or anyone who "
-            "can force-push the include's named branch/tag — adds a payload to the "
-            "included YAML.  The local repo's next MR pipeline pulls the new "
-            "include body and executes it, with all the local pipeline's secret "
-            "scope.  No review of the local repo is required; the supply-chain "
-            "compromise is invisible at the local-PR layer."
+            "An actor with upstream modification authority could change the mutable "
+            "include. If that include is activated and its jobs execute, the change "
+            "could affect a consuming pipeline. Fork MR pipelines normally run with "
+            "fork resources; a separately authorized parent-project run has different "
+            "privileges. Neither execution nor parent secret access is proven here."
         ),
         confidence="medium",
-        # The MR-trigger amplification is concrete, but the upstream-compromise
-        # leg requires a separate primitive (commit access OR ref-push to the
-        # included project).  Composite still emits HIGH; review_needed remains
-        # False because the remediation (pin to SHA) is unambiguous.
-        review_needed=False,
+        review_needed=True,
         finding_family="supply_chain_immutability",
     ),
     Rule(

@@ -79,7 +79,7 @@
   "github/negative_corpus/safe_cache_checkout.yml": "ef9f92e94dbcc861b24f83bf3200497c66fb4b380cd3644af992909a25c162c8",
   "github/negative_corpus/safe_pr_cache_restore_only.yml": "926fe59c17000f1ff90b0f12cce9efa1a6529110e15dd66531bdbc49738ec115",
   "github/negative_corpus/safe_pr_checkout_persist_credentials_false.yml": "6e1f702cbc07fc9c22f3d3f762acf2d02fc758ac3b1065b9a3109454d7feef97",
-  "github/negative_corpus/safe_prt_cache_restore_only.yml": "55bd0288106d18dfeaa85fd1f8f78ec7b295f299ef59d7e16fb886eb300fa103",
+  "github/negative_corpus/safe_prt_cache_restore_only.yml": "846ae0642690c7e343d7563b39f0eb079fb8832e3cdaba25b3620527d6164b8a",
   "github/negative_corpus/safe_push_cache_restore_save_hashfiles.yml": "ef9f92e94dbcc861b24f83bf3200497c66fb4b380cd3644af992909a25c162c8",
   "github/negative_corpus/safe_push_checkout_no_persist_no_consumer.yml": "297135afe7598390650dc09500a38d5c634e21a3bba37161c3ff7ece3948e340",
   "github/negative_corpus/safe_push_hashfiles_cache.yml": "c5e259dc76be0ebb11a64517cef50dcff378c403816cf3871fa57a8f8efc2ebc",
