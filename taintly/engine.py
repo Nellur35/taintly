@@ -252,15 +252,15 @@ def scan_file(
     # context-aware exploitability tier for each finding.  The analyzer is
     # pure-regex (see workflow_context.py) so the cost is a few hundred
     # microseconds per file — comfortably below the per-rule scan budget.
-    # Surface coverage loss — but distinguish "scanned in chunks (coverage
-    # preserved)" from genuine loss. The ReDoS length cap in _safe_search
+    # Surface coverage loss only when a bound prevents full evaluation.
+    # The ReDoS length cap in _safe_search
     # skips regex on text > _MAX_SAFE_TEXT_LEN, so file-scope patterns
     # (AbsencePattern, ContextPattern requires) route through
-    # _safe_search_chunked, which windows oversize content and keeps FULL
-    # coverage up to _CHUNK_COVERAGE_CEILING (_MAX_CHUNKS x _MAX_SAFE_TEXT_LEN,
-    # ~1.31 MB). Past that ceiling the chunked search gives up — so the
-    # "coverage preserved" notice must NOT be stated there. Two tiers:
-    # past the ceiling => degraded; in the chunked band => benign notice.
+    # _safe_search_chunked, which windows oversize content. Files past
+    # _CHUNK_COVERAGE_CEILING receive an up-front warning. Below that ceiling,
+    # line-count, line-size or wall-clock bounds can still interrupt a search;
+    # the runtime tracker emits a separate ENGINE-ERR after rule evaluation.
+    # Exceeding one chunk's size alone does not establish coverage loss.
     # Per-line regex always works (individual YAML lines fit under the cap).
     if len(content) > _CHUNK_COVERAGE_CEILING:
         findings.append(
@@ -280,32 +280,6 @@ def scan_file(
                     "(ContextPattern requires / AbsencePattern) will not "
                     "report matches on this file. Per-line rules still run. "
                     "If this is a legitimate large CI config, split it via "
-                    "includes / reusable workflows."
-                ),
-                file=filepath,
-            )
-        )
-    elif len(content) > _MAX_SAFE_TEXT_LEN:
-        findings.append(
-            Finding(
-                rule_id="ENGINE-ERR",
-                severity=Severity.LOW,
-                title=(
-                    f"File size {len(content)} bytes exceeds scanner per-chunk "
-                    f"cap ({_MAX_SAFE_TEXT_LEN}); content scanned in chunks"
-                ),
-                description=(
-                    "To prevent regex denial-of-service on adversarial input, "
-                    "taintly's per-regex evaluation is bounded by a "
-                    f"{_MAX_SAFE_TEXT_LEN}-byte length cap. A chunked-search "
-                    "path lets file-scope rules (ContextPattern requires / "
-                    "AbsencePattern) still scan large workflows in "
-                    "line-windowed chunks with overlap, up to "
-                    f"{_CHUNK_COVERAGE_CEILING} bytes. Coverage is "
-                    "preserved; this notice surfaces "
-                    "only because the file is unusually large for a CI "
-                    "config. If you suspect a regex match that spans a "
-                    "chunk boundary was missed, split the workflow via "
                     "includes / reusable workflows."
                 ),
                 file=filepath,

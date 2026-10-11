@@ -81,23 +81,21 @@ def test_engine_err_survives_filter_severity(tmp_path):
     )
 
 
-def test_oversize_file_emits_engine_err_and_appears_in_text_banner(tmp_path):
-    """Field-test regression (gitlabhq's 129KB rules.gitlab-ci.yml,
-    wireshark's 68KB .gitlab-ci.yml): files larger than the per-regex
-    cap previously lost file-scope rule coverage silently.  Adding
-    chunked search restored coverage; ENGINE-ERR still emits as an
-    informational banner ("content scanned in chunks") AND the text
-    reporter shows a ``! Coverage degraded`` banner so the signal
-    stays visible."""
+def test_chunked_band_file_does_not_emit_engine_err_or_text_banner(tmp_path):
+    """Crossing the per-regex cap alone does not prove coverage loss.
+
+    Successful chunking must not set the report's error state or display a
+    degraded-coverage banner. Genuine bounds retain separate error controls.
+    """
     from taintly.models import AuditReport
     from taintly.reporters.text import format_text
 
     big_file = tmp_path / "big.yml"
-    # 60_000 chars > _MAX_SAFE_TEXT_LEN (50_000)
+    # Above the per-chunk limit, below the overall chunked-coverage ceiling.
     big_file.write_text("on: push\njobs:\n" + ("  comment: " + "x" * 50 + "\n") * 1500)
 
     findings = scan_file(str(big_file), rules=[])
-    assert any(f.rule_id == "ENGINE-ERR" and "per-chunk cap" in f.title for f in findings)
+    assert not any(f.rule_id == "ENGINE-ERR" for f in findings)
 
     report = AuditReport(repo_path="/test", platform="github")
     for f in findings:
@@ -105,11 +103,7 @@ def test_oversize_file_emits_engine_err_and_appears_in_text_banner(tmp_path):
     report.summarize()
 
     text = format_text(report, use_color=False)
-    assert "Coverage degraded" in text, (
-        "Text reporter must surface a coverage-degradation banner so the "
-        "signal isn't lost when a user pipes or saves the report (stderr "
-        "alone is too easy to miss). Got:\n" + text
-    )
+    assert "Coverage degraded" not in text
 
 
 def test_oversize_past_chunk_ceiling_states_degraded_not_preserved(tmp_path):

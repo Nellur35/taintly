@@ -166,19 +166,19 @@ def test_self_test_failure_exits_ten(tmp_path: Path, monkeypatch):
 
 
 def test_coverage_warning_exits_eleven(tmp_path: Path):
-    """A scan that completes but hits the ReDoS file-size cap emits
-    an ENGINE-ERR finding → exit 11.
+    """A scan past the actual chunked-coverage ceiling exits 11.
 
-    Trigger: a workflow file larger than _MAX_SAFE_TEXT_LEN (50KB).
-    The scanner runs per-line rules but skips full-content patterns,
-    surfacing an ENGINE-ERR finding.  No HIGH/CRITICAL findings, so
-    the exit-code path falls through to the coverage-warning branch.
+    The scanner still runs per-line rules, but file-scope searches cannot
+    cover content past the bounded ceiling. With no HIGH/CRITICAL findings,
+    the CLI must preserve its coverage-warning exit code.
     """
+    from taintly.models import _CHUNK_COVERAGE_CEILING
+
     wf_dir = tmp_path / ".github" / "workflows"
     wf_dir.mkdir(parents=True)
-    # Build a file > 50_000 bytes that's entirely benign comments
-    # plus a stub workflow header.  No real findings should fire.
-    big_comment = "# benign comment\n" * 4000  # ~68 KB
+    # Exceed the actual ceiling, rather than one successful chunk's size.
+    line = "# benign comment\n"
+    big_comment = line * (_CHUNK_COVERAGE_CEILING // len(line) + 100)
     (wf_dir / "huge.yml").write_text(
         big_comment
         + "on: push\n"
