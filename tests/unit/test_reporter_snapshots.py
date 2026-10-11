@@ -6,16 +6,12 @@ miss output-shape regressions: a reporter that silently drops a column,
 reorders fields, or changes a delimiter will pass every structural
 test while breaking downstream tooling that depends on the exact form.
 
-Snapshot tests close that gap.  Each format is rendered against a
-canonical AuditReport fixture and compared against a stored snapshot
-under ``tests/unit/_snapshots/reporters/``.  When a reporter's output
-changes intentionally, regenerate with::
-
-    python -m pytest tests/unit/test_reporter_snapshots.py \
-        --snapshot-update
-
-Then commit the regenerated snapshot files alongside the reporter
-change so the next CI run sees the new baseline.
+Snapshot tests close that gap. Each format is rendered against a canonical
+AuditReport fixture and compared against a stored snapshot
+under ``tests/unit/_snapshots/reporters/``. When output changes intentionally,
+review the rendered differences and update only the affected expected files.
+Normal test runs never write snapshots. The local assertion fixture keeps the
+contracts active without the optional snapshot plugin.
 
 Determinism guards:
   * The canonical report uses fixed strings — no paths, hostnames,
@@ -36,14 +32,29 @@ import pytest
 from taintly.models import AuditReport, Finding, Severity
 from taintly.scorer import DebtDimension, ScoreReport
 
-# pytest-snapshot ships the ``snapshot`` fixture; if it's not installed
-# (CI matrix that strips dev deps) skip the whole module rather than
-# error noisily.  Re-running locally with ``pip install -e ".[dev]"``
-# pulls in the dependency.
-pytest.importorskip("pytest_snapshot", reason="pytest-snapshot not installed")
+# The local snapshot fixture below keeps this module active without pytest-snapshot.
 
 
 SNAPSHOT_DIR = Path(__file__).parent / "_snapshots" / "reporters"
+
+
+class _Snapshot:
+    snapshot_dir = SNAPSHOT_DIR
+
+    def assert_match(self, rendered: str, name: str) -> None:
+        expected = (self.snapshot_dir / name).read_text(encoding="utf-8")
+        assert rendered.replace("\r\n", "\n") == expected, name
+
+
+@pytest.fixture
+def snapshot():
+    return _Snapshot()
+
+
+@pytest.fixture(autouse=True)
+def stable_relative_paths(monkeypatch):
+    """Exercise real SARIF fingerprints without depending on the checkout path."""
+    monkeypatch.chdir(Path.cwd().anchor)
 
 
 _FROZEN_TIMESTAMP = "2026-01-01T00:00:00"
@@ -138,9 +149,7 @@ def canonical_report() -> AuditReport:
             confidence="medium",
             exploitability="high",
             review_needed=False,
-            context_notes=[
-                "Exploitability may differ because external pull requests are blocked."
-            ],
+            context_notes=["Exploitability may differ because external pull requests are blocked."],
             context_tags=["external_prs:blocked"],
             triage_needed=True,
             suppression_reason="Dead-path siblings were removed before reporting.",

@@ -40,6 +40,7 @@ SHELL_EXECUTING_ACTION_SLOTS: frozenset[tuple[str, str]] = frozenset(
         ("azure/powershell", "inlinescript"),
         ("appleboy/ssh-action", "script"),
         ("garygrossgarten/github-action-ssh", "command"),
+        ("testdriverai/action", "prerun"),
     }
 )
 

@@ -67,7 +67,8 @@ _PER_PREFIX_BASELINE: dict[str, int] = {
     "SEC4-CB": 1,
     "SEC4-GL": 1,
     "SEC4-JK": 3,
-    "SEC6-GH": 1,
+    # Structural script scoping adds one non-applicable zero-space YAML probe.
+    "SEC6-GH": 2,
     "SEC6-JK": 1,
     "SEC7-GH": 1,
     "SEC7-JK": 1,

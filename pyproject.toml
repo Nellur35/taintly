@@ -34,14 +34,9 @@ dev = [
     # recommended. Tests fall back to pytest.importorskip when absent.
     "hypothesis>=6.100",
     "mypy>=1.14",
-    # Snapshot tests for the five reporter formats (text/JSON/CSV/SARIF/HTML).
-    # Output regressions are easy to introduce without anyone noticing
-    # because the structural assertions in test_reporters.py only check
-    # specific fields — pytest-snapshot pins the full rendered output so
-    # any formatting change is loud.  Re-run with --snapshot-update after
-    # an intentional reporter change.  Tests are gated on importorskip so
-    # the absence of pytest-snapshot in a minimal environment doesn't
-    # break the existing 886-test baseline.
+    # Retained optional fixture compatibility for external test suites.
+    # Built-in reporter snapshots run with standard pytest and read-only
+    # assertions; review rendered differences before editing expected files.
     "pytest-snapshot>=0.9",
     # SARIF 2.1.0 schema-conformance gate (Domain 6 / §8.3). Validates the
     # emitted SARIF against its published schema so a structural violation

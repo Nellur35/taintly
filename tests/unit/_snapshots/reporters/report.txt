@@ -11,9 +11,9 @@ Rules:      215
 
 Summary
   Files scanned:  4
-  Findings:       5
-  Distinct risks: 4 confirmed, 1 review-needed
-  By severity:    CRITICAL:1  HIGH:1  MEDIUM:1  LOW:2
+  Findings:       4
+  Distinct risks: 3 confirmed, 1 review-needed
+  By severity:    CRITICAL:1  HIGH:1  MEDIUM:1  LOW:1
   Repository identity: unknown (no git remote, no --github-repo) - repo-mismatch suppression disabled
 
 Top distinct risks
@@ -24,8 +24,6 @@ Top distinct risks
       Rules: PSE-GH-001
   [MEDIUM] Excessive Permissions (1 finding across 1 file)
       Rules: SEC2-GH-002
-  [LOW] File size 60000 bytes exceeds scanner cap (50000) (1 finding across 1 file)
-      Rules: ENGINE-ERR
 
 Review-needed patterns
   These patterns can be safe or dangerous depending on design intent - confirm with a human before acting.
@@ -45,7 +43,7 @@ Quick win
   .github/workflows/ci.yml:12
   Fix: Pin the action to a full 40-character commit SHA.
 
-=== Findings (5) ===
+=== Findings (5 = 4 security findings + 1 coverage warnings) ===
 
   [CRITICAL] SEC3-GH-001: Action referenced by mutable tag [exploitability:high]
     File: .github/workflows/ci.yml:12

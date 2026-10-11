@@ -36,6 +36,7 @@ from taintly.reporters.text import (
     _AUTO_FIXABLE_RULES,
     INVENTORY_RULE_IDS,
     _quick_win,
+    _security_findings,
 )
 
 if TYPE_CHECKING:
@@ -425,8 +426,8 @@ def _summary(
     # Split: vulnerability findings vs third-party inventory items.
     # Inventory items surface CI surface-area to review periodically
     # at the user's chosen cadence; they are not findings to fix.
-    vuln_findings = [f for f in report.findings if f.rule_id not in INVENTORY_RULE_IDS]
-    inventory_count = len(report.findings) - len(vuln_findings)
+    vuln_findings = _security_findings(report.findings)
+    inventory_count = sum(f.rule_id in INVENTORY_RULE_IDS for f in report.findings)
     parts.append('<div class="summary-stats">')
     parts.append(_stat(confirmed, "distinct risks"))
     if review:
@@ -502,7 +503,7 @@ def _score_section(score_report: ScoreReport) -> str:
 
 
 def _quick_win_section(report: AuditReport) -> str:
-    win = _quick_win(report.findings)
+    win = _quick_win(_security_findings(report.findings))
     if win is None:
         return ""
     auto = (
@@ -725,6 +726,21 @@ def _decision_tags(f: Finding) -> str:
     return " " + " ".join(f'<span class="tag">{_e(n)}</span>' for n in notes)
 
 
+def _coverage_section(report: AuditReport) -> str:
+    """Keep incomplete scans visible above risk summaries and score cards."""
+    errors = report.engine_errors()
+    if not errors:
+        return ""
+    items = "".join(f"<li><code>{_e(f.file)}</code>: {_e(f.title)}</li>" for f in errors)
+    affected_files = len({f.file for f in errors})
+    return (
+        '<section aria-labelledby="coverage-h"><h2 id="coverage-h">Scan incomplete</h2>'
+        f"<p>Coverage degraded on {_e(affected_files)} file(s). "
+        "Results may be incomplete; the score does not establish full scan coverage.</p>"
+        f"<ul>{items}</ul></section>"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -740,7 +756,7 @@ def format_html(
         report.summarize()
     heading = title or "TAINTLY REPORT"
 
-    clusters = cluster_findings(report.findings) if report.findings else []
+    clusters = cluster_findings(_security_findings(report.findings))
 
     parts: list[str] = []
     parts.append("<!DOCTYPE html>")
@@ -750,6 +766,7 @@ def format_html(
     parts.append(f"<style>{_CSS}</style>")
     parts.append("</head><body><main>")
     parts.append(_cover(report, heading))
+    parts.append(_coverage_section(report))
     if score_report is not None:
         # Banner only renders when a score is being shown.  Without a
         # score there's no threat-model assumption to disclose.

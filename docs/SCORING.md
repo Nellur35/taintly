@@ -131,3 +131,19 @@ The conditions for revisiting are concrete:
   rows.
 
 Until then, disclosure is what we ship.
+
+## Scan coverage and report counts
+
+A score describes the findings that were reported; it does not establish that
+every rule completed. Text and HTML reports show incomplete coverage above the
+risk summary. A scan failure (`ENGINE-ERR`) is a coverage diagnostic and is not a
+distinct security risk. Third-party inventory observations are also separate
+from security risk clusters. Review-needed security candidates remain visible.
+
+JSON reports and SARIF run properties expose `security_findings_count`,
+`engine_error_count` and `coverage_status` (`complete` or `incomplete`). These
+counts describe emitted records, not unique risks or affected files. Existing
+`findings_count` remains the legacy non-inventory record count, including
+`ENGINE-ERR`; `inventory_count` remains separate. Raw finding and error channels
+are retained. JSON `distinct_risk_count`, `review_needed_count` and `families`
+describe security clusters only, excluding inventory and coverage diagnostics.
