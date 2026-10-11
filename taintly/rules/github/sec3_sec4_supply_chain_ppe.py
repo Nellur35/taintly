@@ -5,6 +5,7 @@ These two categories cover the exact attack vectors used in documented supply ch
 
 import re
 
+from taintly.eventguard import event_guard_verdict
 from taintly.models import (
     CompromisedActionPattern,
     ContextPattern,
@@ -480,13 +481,51 @@ class _CheckoutDownstreamCredentialConsumerPattern:
         return results
 
 
-# ``on:`` fork-reachable trigger detector for SEC4-GH-005B.  The posture
-# sibling stays out of push-only release workflows where persisted credentials
-# are operator-controlled.
-_FORK_REACHABLE_TRIGGER_RE = re.compile(
-    r"(?ms)^on:\s*(?:\n\s+|\[?\s*|\{?\s*).*?"
-    r"(?:pull_request|pull_request_target|issue_comment|workflow_run)",
+# Keep this posture rule's documented event scope; workflow_run provenance
+# remains unknown without its parent workflow. Read declarations structurally.
+_CHECKOUT_POSTURE_EVENTS = frozenset(
+    {"pull_request", "pull_request_target", "issue_comment", "workflow_run"}
 )
+
+
+def _event_excluded_checkout_lines(content: str, events: frozenset[str]) -> set[int]:
+    """Prove exclusions only at unique structural checkout/job/guard owners."""
+    leaves = list(
+        walk_workflow(
+            "workflow.yml", content=content, include_keys=True, include_merge_origins=True
+        )
+    )
+    if any(leaf.kind in {EventKind.ERROR, EventKind.CUTOFF} for leaf in leaves):
+        return set()
+    keys: set[tuple[object, ...]] = set()
+    guards: dict[tuple[object, ...], str | None] = {}
+    checkouts: dict[int, tuple[object, ...]] = {}
+    for leaf in leaves:
+        if leaf.kind is EventKind.MAP_KEY:
+            if leaf.path in keys:
+                return set()
+            keys.add(leaf.path)
+        elif leaf.kind is EventKind.LEAF_SCALAR:
+            path = leaf.path
+            if len(path) < 3 or path[0] != "jobs":
+                continue
+            if path[-1] == "if" and (len(path) == 3 or (len(path) == 5 and path[2] == "steps")):
+                if leaf.merge_origins or path[:-1] in guards:
+                    return set()
+                guards[path[:-1]] = leaf.value
+            if len(path) == 5 and path[2] == "steps" and path[-1] == "uses":
+                if leaf.line in checkouts:
+                    return set()
+                checkouts[leaf.line] = path[:-1]
+    return {
+        line
+        for line, step in checkouts.items()
+        if all(
+            event_guard_verdict(guards.get(step[:2]), event) is False
+            or event_guard_verdict(guards.get(step), event) is False
+            for event in events
+        )
+    }
 
 
 class _CheckoutNoPersistPostureSiblingPattern:
@@ -495,8 +534,21 @@ class _CheckoutNoPersistPostureSiblingPattern:
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         from taintly.models import _split_into_job_segments
 
-        if not _FORK_REACHABLE_TRIGGER_RE.search(content):
+        # Workflow-level gate: must declare a fork-reachable trigger.
+        # Without this, a push-only release workflow that legitimately
+        # uses the persisted credential to push back to the repo
+        # would still fire — re-creating the FP-density noise the
+        # SEC4-GH-005 consumer detector was designed to eliminate.
+        incomplete = any(
+            leaf.kind in {EventKind.ERROR, EventKind.CUTOFF}
+            for leaf in walk_workflow("workflow.yml", content=content, include_keys=True)
+        )
+        events = (
+            _CHECKOUT_POSTURE_EVENTS if incomplete else triggers(content) & _CHECKOUT_POSTURE_EVENTS
+        )
+        if not events:
             return []
+        excluded_lines = _event_excluded_checkout_lines(content, events)
 
         results: list[tuple[int, str]] = []
         for seg_start, seg_lines in _split_into_job_segments(lines):
@@ -505,13 +557,19 @@ class _CheckoutNoPersistPostureSiblingPattern:
                 _GIT_PUSH_ACTION_RE.search(seg_text)
             )
             for j, line in enumerate(seg_lines):
+                if seg_start + j + 1 in excluded_lines:
+                    continue
                 if _LINE_COMMENT_RE.match(line):
                     continue
                 if not _CHECKOUT_USES_RE.search(line):
                     continue
+                # ``persist-credentials: false`` makes this checkout
+                # safe regardless of consumer presence.
                 window = "\n".join(seg_lines[j : j + 8])
                 if _PERSIST_FALSE_RE.search(window):
                     continue
+                # If a consumer exists DOWNSTREAM of this checkout,
+                # SEC4-GH-005 owns this finding — don't co-fire.
                 if seg_has_consumer:
                     downstream = _credential_consumer_surface(seg_lines[j + 1 :])
                     if _GIT_CREDENTIAL_OP_RE.search(downstream) or _GIT_PUSH_ACTION_RE.search(
@@ -1672,14 +1730,14 @@ RULES: list[Rule] = [
             # Fork-reachable trigger, checkout without persist-creds: false,
             # NO downstream consumer.  Posture sibling fires.
             (
-                "on:\n  pull_request: {}\n"
+                "on:\n  pull_request:\n"
                 "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: actions/checkout@v4\n"
                 "      - run: pytest\n"
             ),
             # pull_request_target — same shape, different trigger.
             (
-                "on:\n  pull_request_target: {}\n"
+                "on:\n  pull_request_target:\n"
                 "jobs:\n  triage:\n    runs-on: ubuntu-latest\n"
                 "    steps:\n      - uses: actions/checkout@v4\n"
                 "      - run: echo hello\n"
