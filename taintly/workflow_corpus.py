@@ -96,6 +96,13 @@ _FORK_REACHABLE_EVENTS: frozenset[str] = frozenset(
     }
 )
 
+# Fork-reachable events that do not receive the default read-only
+# GITHUB_TOKEN downgrade applied to fork-originated pull_request runs.
+# workflow_run is resolved through its named parent instead of treated as a
+# direct event here.
+_EXTERNAL_PRIVILEGED_EVENTS: frozenset[str] = _FORK_REACHABLE_EVENTS - {"pull_request"}
+_WORKFLOW_RUN_PARENT_VISIT_BUDGET = 256
+
 _PRIVILEGED_EVENTS: frozenset[str] = frozenset(
     {
         "push",
@@ -285,6 +292,8 @@ class WorkflowSummary:
     reusable_uses: tuple[ReusableRef, ...] = ()
     workflow_permissions: PermissionBlock | None = None
     job_permissions: tuple[PermissionBlock, ...] = ()
+    workflow_name: str = ""
+    workflow_run_parents: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +323,61 @@ class WorkflowCorpus:
 
     def by_filepath(self, filepath: str) -> WorkflowSummary | None:
         return self.workflows.get(filepath)
+
+    def workflow_run_parent_fork_reachable(self, workflow: WorkflowSummary) -> bool | None:
+        """Resolve whether a workflow_run parent has an external trigger.
+
+        ``None`` means the parent name is absent/unresolved or a cycle is
+        encountered, allowing security consumers to remain conservative.
+        """
+        by_name: dict[str, list[WorkflowSummary]] = {}
+        for candidate in self.workflows.values():
+            if candidate.workflow_name:
+                by_name.setdefault(candidate.workflow_name, []).append(candidate)
+        remaining_visits = [_WORKFLOW_RUN_PARENT_VISIT_BUDGET]
+
+        def reachable(candidate: WorkflowSummary, seen: frozenset[str]) -> bool | None:
+            if remaining_visits[0] <= 0:
+                return None
+            remaining_visits[0] -= 1
+            direct = candidate.raw_event_names & (_FORK_REACHABLE_EVENTS - {"workflow_run"})
+            if direct:
+                return True
+            if "workflow_run" not in candidate.raw_event_names:
+                return False
+            if candidate.filepath in seen or not candidate.workflow_run_parents:
+                return None
+            next_seen = seen | {candidate.filepath}
+            unresolved = False
+            for parent_name in candidate.workflow_run_parents:
+                matches = by_name.get(parent_name, [])
+                if not matches:
+                    unresolved = True
+                    continue
+                for parent in matches:
+                    result = reachable(parent, next_seen)
+                    if result is True:
+                        return True
+                    unresolved = unresolved or result is None
+            return None if unresolved else False
+
+        if "workflow_run" not in workflow.raw_event_names:
+            return False
+        return reachable(workflow, frozenset())
+
+    def has_external_privileged_trigger(self, workflow: WorkflowSummary) -> bool:
+        """Whether an external workflow trigger retains default write scope.
+
+        Direct privileged external events qualify. A workflow_run qualifies
+        only when its named parent is fork-reachable; unresolved ancestry
+        remains conservatively eligible.
+        """
+        direct = workflow.raw_event_names & (_EXTERNAL_PRIVILEGED_EVENTS - {"workflow_run"})
+        if direct:
+            return True
+        if "workflow_run" not in workflow.raw_event_names:
+            return False
+        return self.workflow_run_parent_fork_reachable(workflow) is not False
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +420,7 @@ def build_corpus(repo_path: str) -> WorkflowCorpus:
 def _summarize_workflow(filepath: str, content: str) -> WorkflowSummary:
     """Run every extractor against a single workflow file and return
     the assembled :class:`WorkflowSummary`."""
+    from .parsers.structural import EventKind, walk_workflow
     from .parsers.structural import triggers as _structural_triggers
 
     lines = content.splitlines()
@@ -366,6 +431,19 @@ def _summarize_workflow(filepath: str, content: str) -> WorkflowSummary:
     # never loses triggers the regex would have found.
     raw_events: set[str] = set(_structural_triggers(content)) or _extract_raw_events(content)
     classified = _classify_triggers(raw_events)
+    workflow_name = ""
+    workflow_run_parents: list[str] = []
+    for event in walk_workflow(filepath, content=content, recover=True):
+        if event.kind != EventKind.LEAF_SCALAR or not isinstance(event.value, str):
+            continue
+        if event.path == ("name",):
+            workflow_name = event.value.strip()
+        elif (
+            len(event.path) == 4
+            and event.path[:3] == ("on", "workflow_run", "workflows")
+            and isinstance(event.path[3], int)
+        ):
+            workflow_run_parents.append(event.value.strip())
     return WorkflowSummary(
         filepath=filepath,
         content=content,
@@ -378,6 +456,8 @@ def _summarize_workflow(filepath: str, content: str) -> WorkflowSummary:
         reusable_uses=tuple(_extract_reusable_refs(lines)),
         workflow_permissions=_extract_workflow_permissions(lines),
         job_permissions=tuple(_extract_job_permissions(lines)),
+        workflow_name=workflow_name,
+        workflow_run_parents=tuple(workflow_run_parents),
     )
 
 
