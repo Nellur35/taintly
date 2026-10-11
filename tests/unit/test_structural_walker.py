@@ -1,5 +1,5 @@
 """Walker test pack — path-tracking, leaf emission, cutoff
-recovery, and the anchor-merge-key contract.
+recovery, and the anchor/alias/merge-key contract.
 """
 
 from __future__ import annotations
@@ -171,6 +171,32 @@ def test_merge_key_replays_at_alias_line():
         f"merged leaf must report at the alias line; got lines "
         f"{[e.line for e in persist_credentials]}"
     )
+
+
+def test_bare_alias_replays_scalar_at_destination_and_alias_line():
+    src = (
+        "shared: &shared value\n"
+        "job:\n"
+        "  script: *shared\n"
+    )
+    leaves = _leaves(src, query="job.script")
+    assert [(event.path, event.value, event.line) for event in leaves] == [
+        (("job", "script"), "value", 3)
+    ]
+
+
+def test_outer_anchor_captures_nested_scalar_alias_for_later_replay():
+    src = (
+        "shared: &shared value\n"
+        "template: &template\n"
+        "  script: *shared\n"
+        "job:\n"
+        "  <<: *template\n"
+    )
+    leaves = _leaves(src, query="job.script")
+    assert [(event.path, event.value, event.line) for event in leaves] == [
+        (("job", "script"), "value", 5)
+    ]
 
 
 # ---------------------------------------------------------------------------

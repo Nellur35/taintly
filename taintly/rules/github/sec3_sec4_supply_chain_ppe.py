@@ -20,8 +20,10 @@ from taintly.parsers.gha_expr import (
     structural_expr_enabled,
 )
 from taintly.parsers.segmentation import for_each_step
+from taintly.parsers.structural import EventKind, triggers, walk_workflow
 from taintly.platform import github_archived_check, github_sha_verify
 from taintly.structural_pattern import StructuralPattern
+from taintly.workflow_aware_pattern import PredicateContext
 
 # ---------------------------------------------------------------------------
 # Regex-equivalent predicates the StructuralPattern rules call.
@@ -31,6 +33,224 @@ from taintly.structural_pattern import StructuralPattern
 
 _FULL_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
 _BRANCH_REF_NAMES = frozenset({"main", "master", "develop", "dev"})
+
+
+_PR_HEAD_REF_PATHS = frozenset(
+    {
+        "github.event.pull_request.head.sha",
+        "github.event.pull_request.head.ref",
+        "github.head_ref",
+    }
+)
+_SAFE_BASE_REF_PATHS = frozenset(
+    {
+        "github.ref",
+        "github.ref_name",
+        "github.sha",
+        "github.workflow_sha",
+        "github.base_ref",
+        "github.event.pull_request.base.sha",
+        "github.event.pull_request.base.ref",
+        "github.event.merge_group.base_sha",
+        "github.event.merge_group.base_ref",
+    }
+)
+_PR_HEAD_REF_RE = re.compile(
+    r"github\.event\.pull_request\.head\.(?:sha|ref)|github\.head_ref", re.IGNORECASE
+)
+
+
+def _expression_context_paths(value: str) -> tuple[set[str], bool]:
+    """Return canonical expression paths and whether parsing was uncertain."""
+    paths: set[str] = set()
+    uncertain = False
+    bodies = list(iter_expression_bodies(value))
+    if "${{" in value and not bodies:
+        uncertain = True
+    for body in bodies:
+        try:
+            paths.update(context_paths(body))
+        except ExprSyntaxError:
+            uncertain = True
+    if "${{" in value and _PR_HEAD_REF_RE.search(value):
+        # Preserve the existing literal form if the structural parser does not
+        # understand a future expression extension or malformed interpolation.
+        paths.add("github.event.pull_request.head.sha")
+    return paths, uncertain
+
+
+def _workflow_env_bindings(ctx: PredicateContext) -> dict[tuple[str, str], list[str]]:
+    """Index only workflow/job/step env scalars used by checkout refs."""
+    result: dict[tuple[str, str], list[str]] = {}
+    for event in ctx.leaves:
+        path = event.path
+        if len(path) == 2 and path[0] == "env":
+            scope = ("workflow", str(path[1]).lower())
+        elif len(path) == 4 and path[0] == "jobs" and path[2] == "env":
+            scope = (f"job:{path[1]}", str(path[3]).lower())
+        elif (
+            len(path) == 6
+            and path[0] == "jobs"
+            and path[2] == "steps"
+            and isinstance(path[3], int)
+            and path[4] == "env"
+        ):
+            scope = (f"step:{path[1]}:{path[3]}", str(path[5]).lower())
+        else:
+            continue
+        result.setdefault(scope, []).append(event.value or "")
+    return result
+
+
+def _checkout_ref_provenance(
+    value: str,
+    path: tuple[object, ...],
+    ctx: PredicateContext,
+    bindings: dict[tuple[str, str], list[str]],
+    visiting: frozenset[str] = frozenset(),
+    depth: int = 0,
+) -> str:
+    """Classify a ref as PR-derived, known base/default, or unresolved."""
+    if depth > 8:
+        return "unknown"
+    paths, malformed = _expression_context_paths(value)
+    if paths & _PR_HEAD_REF_PATHS:
+        return "untrusted"
+    unknown = malformed
+    job_id = str(path[1]) if len(path) >= 2 else ""
+    step_index = path[3] if len(path) >= 4 and isinstance(path[3], int) else -1
+    for context_path in paths:
+        if context_path in _SAFE_BASE_REF_PATHS:
+            continue
+        if context_path.startswith("env."):
+            variable = context_path.split(".", 1)[1]
+            if variable in visiting:
+                unknown = True
+                continue
+            candidates = (
+                (f"step:{job_id}:{step_index}", variable),
+                (f"job:{job_id}", variable),
+                ("workflow", variable),
+            )
+            binding_values: list[str] | None = None
+            for key in candidates:
+                if key in bindings:
+                    binding_values = bindings[key]
+                    break
+            if binding_values is None or len(binding_values) != 1:
+                unknown = True
+                continue
+            resolved = _checkout_ref_provenance(
+                binding_values[0],
+                path,
+                ctx,
+                bindings,
+                visiting | {variable},
+                depth + 1,
+            )
+            if resolved == "untrusted":
+                return "untrusted"
+            if resolved == "unknown":
+                unknown = True
+            continue
+        unknown = True
+    return "unknown" if unknown else "safe"
+
+
+def _has_pr_head_ref_source(ctx: PredicateContext) -> bool:
+    """Whether any parsed workflow scalar carries an explicit PR-head ref."""
+    for event in ctx.leaves:
+        parts = [event.value or ""]
+        if event.block_lines:
+            parts.extend(text for _, text in event.block_lines)
+        for value in parts:
+            paths, _ = _expression_context_paths(value)
+            if paths & _PR_HEAD_REF_PATHS:
+                return True
+    return False
+
+
+def _is_untrusted_checkout_ref(
+    value: str,
+    _value_kind: str,
+    path: tuple[object, ...],
+    ctx: PredicateContext,
+    bindings: dict[tuple[str, str], list[str]] | None = None,
+    has_head_source: bool | None = None,
+) -> bool:
+    """SEC4-GH-001 sink predicate, called only for exact ``with.ref`` paths."""
+    uses = ctx.step_uses(path)
+    if not uses or uses.split("@", 1)[0].strip().lower() != "actions/checkout":
+        return False
+    if bindings is None:
+        bindings = _workflow_env_bindings(ctx)
+    provenance = _checkout_ref_provenance(value, path, ctx, bindings)
+    if provenance == "untrusted":
+        return True
+    # Unknown or unsupported ref expressions stay conservative only when the
+    # workflow itself has an explicit PR-head source. This avoids turning an
+    # arbitrary dynamic checkout into a critical PRT finding without evidence.
+    if has_head_source is None:
+        has_head_source = _has_pr_head_ref_source(ctx)
+    return provenance == "unknown" and has_head_source
+
+
+class _PrivilegedPRCheckoutPattern:
+    """Bind PR-head provenance to a real checkout input in a privileged flow."""
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        # Read the root trigger structurally: scalar, flow/block list, mapping,
+        # and anchor/alias forms are equivalent. A string mention elsewhere is
+        # not a privileged trigger. Skip unrelated workflows cheaply, but keep
+        # walking when the trigger text is present so an earlier parser cutoff
+        # remains visible even if structural trigger parsing cannot reach it.
+        has_prt_trigger = "pull_request_target" in triggers(content)
+        if not has_prt_trigger and "pull_request_target" not in content:
+            return []
+        leaves = []
+        for event in walk_workflow("anonymous.yml", content=content, recover=True):
+            if event.kind == EventKind.CUTOFF:
+                cutoff_line = event.line
+                break
+            if event.kind == EventKind.LEAF_SCALAR:
+                leaves.append(event)
+        else:
+            cutoff_line = 0
+
+        ctx = PredicateContext(leaves=tuple(leaves))
+        results: list[tuple[int, str]] = []
+        if has_prt_trigger:
+            bindings = _workflow_env_bindings(ctx)
+            has_head_source = _has_pr_head_ref_source(ctx)
+            for event in leaves:
+                path = event.path
+                if not (
+                    len(path) == 6
+                    and path[0] == "jobs"
+                    and isinstance(path[1], str)
+                    and path[2] == "steps"
+                    and isinstance(path[3], int)
+                    and path[4] == "with"
+                    and path[5] == "ref"
+                ):
+                    continue
+                if not _is_untrusted_checkout_ref(
+                    event.value or "", "plain", path, ctx, bindings, has_head_source
+                ):
+                    continue
+                line = event.line
+                snippet = lines[line - 1].strip() if 0 < line <= len(lines) else event.value or ""
+                results.append((line, snippet))
+
+        if cutoff_line:
+            cutoff_marker = (
+                cutoff_line,
+                f"STRUCTURAL-CUTOFF: structural reader stopped at "
+                f"line {cutoff_line} (unsupported YAML construct); "
+                "rule cannot evaluate this file fully",
+            )
+            results.append(cutoff_marker)
+        return results
 
 
 def _is_pull_request_target_trigger(
@@ -1074,21 +1294,11 @@ RULES: list[Rule] = [
         owasp_cicd="CICD-SEC-4",
         description=(
             "Workflow uses pull_request_target AND checks out the PR author's code. "
-            "This is the exact attack vector used in the Trivy supply chain compromise (March 2026). "
             "Attacker-controlled code executes with access to repo secrets and write permissions. "
-            "The ``head.sha`` and ``head.ref`` checkout variants — explicitly checking out the "
-            "PR's head commit via ``actions/checkout`` with ``ref: ${{ github.event."
-            "pull_request.head.sha }}`` (or ``head.ref``) — produce the same imposter-trigger "
-            "shape and are covered by this rule's requires regex."
+            "The PR's head.sha/head.ref values are critical when bound to the exact with.ref "
+            "input of an actions/checkout step. Simple workflow/job/step env aliases are resolved."
         ),
-        pattern=ContextPattern(
-            anchor=r"pull_request_target",
-            requires=r"github\.event\.pull_request\.head\.(sha|ref)",
-            exclude=[r"^\s*#"],
-            # GH-B1: pure attacker-context requires — gha_expr-augmented so an
-            # index/bracket-encoded or context-cased head ref gates the rule.
-            expr_augment_requires=True,
-        ),
+        pattern=_PrivilegedPRCheckoutPattern(),
         remediation=(
             "Use 'pull_request' trigger instead. If secrets are required, use a two-workflow "
             "pattern: pull_request for build/test, workflow_run for privileged operations."

@@ -92,6 +92,15 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
 #
 # Each value documents the failure flavour and follow-up pointer.
 _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
+    ("SEC4-GH-001", "whitespace_pad"): (
+        "SEC4-GH-001 structurally requires a parsed actions/checkout uses: "
+        "mapping. The zero-space variant collapses uses: actions/checkout to "
+        "plain scalar text, so the transformed sample no longer contains a "
+        "parsed checkout step/ref. In scalar-trigger samples the same collapse "
+        "can also erase the on: trigger mapping. This is a non-applicable "
+        "malformed-shape probe, not a detector miss; regex fallback would "
+        "reintroduce false positives."
+    ),
     ("SEC4-GH-002", "whitespace_pad"): (
         "SEC4-GH-002 is a StructuralPattern reading the parsed "
         "``on:`` node. whitespace_pad's ``': ' -> ':'`` collapse turns "
