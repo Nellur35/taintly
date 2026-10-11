@@ -83,15 +83,22 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
 
 
 # Known (rule_id, mutation_operator) pairs where the rule's match is
-# currently fragile to the mutation. These are real rule-engineering
-# gaps, not test-harness bugs: the rule SHOULD be resilient to the
-# mutation in question. Listing them here turns the failure into a
+# currently fragile to the mutation, or where an operator changes
+# language semantics as explicitly documented below. Genuine rule gaps
+# should be resilient to the mutation. Listing them turns the failure into a
 # tracked gap (build stays green) instead of a gate that no PR can
 # pass. Remove entries as the underlying rules are hardened; never
 # add entries to paper over a newly-introduced regression.
 #
 # Each value documents the failure flavour and follow-up pointer.
 _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
+    ("LOTP-JK-003", "quote_swap"): (
+        "Mutation-framework limitation: swapping the positive examples' "
+        "sole Groovy PR-context GString to single quotes makes it inert "
+        "data, so no_trigger is correct. Installer quote changes retaining "
+        "executable PR context must still trigger; focused controls cover "
+        "both directions and ignore-scripts guards. Not a detection gap."
+    ),
     ("SEC6-GH-005", "whitespace_pad"): (
         "The structural script-sink rule requires a parsed run mapping. "
         "Removing required YAML separator spaces changes run: echo into "
