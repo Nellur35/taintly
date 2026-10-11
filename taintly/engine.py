@@ -50,7 +50,7 @@ from .workflow_context import (
     compute_exploitability,
 )
 from .workflow_context import analyze as analyze_workflow
-from .workflow_corpus import CorpusPattern, build_corpus, is_fork_reachable
+from .workflow_corpus import CorpusEvidence, CorpusPattern, build_corpus, is_fork_reachable
 
 # Hygiene families that ``classify_rule`` falls back to from broad OWASP
 # categories (CICD-SEC-1 → resource_controls, CICD-SEC-10 → logging_visibility).
@@ -2017,7 +2017,10 @@ def _run_corpus_rules(
                 # static rule title per-finding (e.g. XF-GH-004 names the
                 # specific pwn-request event that fired). mypy narrows the
                 # tuple union by length.
-                if len(hit) == 4:
+                evidence = hit if isinstance(hit, CorpusEvidence) else None
+                if isinstance(hit, CorpusEvidence):
+                    filepath, line_num, snippet, title = hit.file, hit.line, hit.snippet, hit.title
+                elif len(hit) == 4:
                     filepath, line_num, snippet, title = hit
                 else:
                     filepath, line_num, snippet = hit
@@ -2025,6 +2028,8 @@ def _run_corpus_rules(
                 family = rule.finding_family or classify_rule(rule.id, rule.owasp_cicd)
                 confidence = rule.confidence or default_confidence(rule.id)
                 review_needed = rule.review_needed or default_review_needed(rule.id)
+                if evidence is not None:
+                    review_needed = review_needed or evidence.review_needed
                 # Cross-file findings don't have a single workflow_context
                 # to derive exploitability from — the rule's own logic is
                 # the exploitability gate.  Default to "medium" so the
@@ -2038,7 +2043,9 @@ def _run_corpus_rules(
                         file=filepath,
                         line=line_num,
                         snippet=snippet,
-                        remediation=rule.remediation,
+                        remediation=evidence.remediation
+                        if evidence is not None
+                        else rule.remediation,
                         reference=rule.reference,
                         owasp_cicd=rule.owasp_cicd,
                         stride=rule.stride,
@@ -2050,6 +2057,11 @@ def _run_corpus_rules(
                         confidence=confidence,
                         exploitability="medium",
                         review_needed=review_needed,
+                        context_notes=list(evidence.context_notes) if evidence is not None else [],
+                        context_tags=list(evidence.context_tags) if evidence is not None else [],
+                        calibration_reason=evidence.calibration_reason
+                        if evidence is not None
+                        else "",
                     )
                 )
     return findings

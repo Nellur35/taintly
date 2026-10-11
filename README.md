@@ -14,7 +14,7 @@ Security scanner for CI/CD pipelines. Reads GitHub Actions, GitLab CI, Jenkins, 
 
 - Multi-stage taint analysis with provenance — traces attacker-controlled values through `env`, `$GITHUB_ENV`, `$GITHUB_OUTPUT`, and AI-agent step outputs across steps, with full source-to-sink chains.
 
-- Cross-artifact & cross-workflow taint — follows attacker-controlled inputs across composite `action.yml` boundaries and reusable-workflow calls, not just within a single file.
+- Cross-artifact and cross-workflow input-flow analysis across local composite `action.yml` and reusable-workflow calls. Findings describe configured local source-to-sink candidates; execution, checkout correspondence, token authority and secrets remain review questions.
 
 - Kill-chain composition — correlates findings that are individually lower-severity (e.g. a persisted checkout credential + a fork-reachable trigger + a write-scoped token) into a single CRITICAL composite when together they form an exploitable chain.
 
@@ -609,7 +609,7 @@ do not recompute risk.
 
 
 <!-- AUTOGEN:summary -->
-318 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+320 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 
@@ -620,7 +620,7 @@ do not recompute risk.
 | SEC-1 — Insufficient Flow Control | 6 | 3 | 2 | 0 |
 | SEC-2 — Inadequate IAM | 7 | 4 | 3 | 0 |
 | SEC-3 — Dependency Chain Abuse | 34 | 18 | 14 | 3 |
-| SEC-4 — Poisoned Pipeline Execution | 72 | 30 | 24 | 2 |
+| SEC-4 — Poisoned Pipeline Execution | 74 | 30 | 24 | 2 |
 | SEC-5 — Insufficient PBAC | 3 | 1 | 2 | 0 |
 | SEC-6 — Insufficient Credential Hygiene | 15 | 10 | 12 | 2 |
 | SEC-7 — Insecure System Configuration | 4 | 1 | 4 | 0 |

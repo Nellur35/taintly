@@ -156,7 +156,13 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from .models import _split_into_job_segments
-from .parsers.gha_expr import ExprSyntaxError, context_paths, structural_expr_enabled
+from .parsers.gha_expr import (
+    ExprSyntaxError,
+    context_paths,
+    iter_expression_bodies,
+    result_provenance_paths,
+    structural_expr_enabled,
+)
 from .parsers.structural import EventKind, walk_workflow
 from .taint_facts import Database, solve
 
@@ -726,6 +732,7 @@ class _TaintedOutput:
     sink on ``sink_idx > writer_idx``.
     """
 
+    job: str
     step_id: str
     name: str
     writer_idx: int
@@ -735,7 +742,7 @@ class _TaintedOutput:
     hops: list[TaintHop]
 
     def fact_key(self):
-        return (self.step_id, self.name)
+        return (self.job, self.step_id, self.name)
 
     def fact_rank(self):
         return (-self.seq, len(self.hops), _hop_rank(self.hops))
@@ -1263,7 +1270,34 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                         ),
                     )
                     continue
-            # (c) cross-job ${{ needs.X.outputs.Y }}.
+            # (c) A server-side step-output substitution in a step env.
+            # GitHub materializes GITHUB_OUTPUT after its writer step.
+            if ea.scope[0] == "step":
+                _, job, idx = ea.scope
+                for step_id, output_name in _step_output_refs_in_result(ea.raw):
+                    up = db.get(_R_TAINTED_OUTPUT, (job, step_id, output_name))
+                    if up is None or idx <= up.writer_idx:
+                        continue
+                    yield (
+                        _R_TAINTED_ENV,
+                        _TaintedEnv(
+                            ea.scope,
+                            ea.name,
+                            up.source_expr,
+                            up.source_line,
+                            up.hops
+                            + [
+                                TaintHop(
+                                    kind="env_indirect",
+                                    line=ea.line,
+                                    name=ea.name,
+                                    detail=f"env {ea.name} := ${{{{ steps.{step_id}.outputs.{output_name} }}}}",
+                                )
+                            ],
+                        ),
+                    )
+                    break
+            # (d) cross-job ${{ needs.X.outputs.Y }}.
             for nm in _NEEDS_OUTPUT_REF_RE.finditer(ea.raw):
                 up = db.get(_R_TAINTED_JOB_OUTPUT, (nm.group(1), nm.group(2)))
                 if up is not None:
@@ -1457,6 +1491,7 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                 yield (
                     _R_TAINTED_OUTPUT,
                     _TaintedOutput(
+                        ow.job,
                         ow.step_id,
                         ow.name,
                         ow.idx,
@@ -1483,6 +1518,7 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                     yield (
                         _R_TAINTED_OUTPUT,
                         _TaintedOutput(
+                            ow.job,
                             ow.step_id,
                             ow.name,
                             ow.idx,
@@ -1532,7 +1568,7 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                 continue
             sm = _STEP_OUTPUT_REF_RE.search(od.raw)
             if sm is not None:
-                up = db.get(_R_TAINTED_OUTPUT, (sm.group(1), sm.group(2)))
+                up = db.get(_R_TAINTED_OUTPUT, (od.job, sm.group(1), sm.group(2)))
                 if up is not None:
                     yield (
                         _R_TAINTED_JOB_OUTPUT,
@@ -1729,7 +1765,7 @@ def _analyze_uncached(content: str, lines: list[str]) -> list[TaintPath]:
                 if step.step_id is not None or any(s.step_id for s in job.steps):
                     for ref in _STEP_OUTPUT_REF_RE.finditer(line):
                         ref_id, ref_name = ref.group(1), ref.group(2)
-                        up = db.get(_R_TAINTED_OUTPUT, (ref_id, ref_name))
+                        up = db.get(_R_TAINTED_OUTPUT, (job_key, ref_id, ref_name))
                         info_opt: _TaintInfo | None = None
                         # A $GITHUB_OUTPUT write is only visible to a
                         # strictly later step (the runner materialises
@@ -1962,6 +1998,26 @@ def _extract_env_ref(value: str) -> str | None:
     """
     m = _ENV_REF_RE.fullmatch(value)
     return m.group(1) if m else None
+
+
+_STEP_OUTPUT_PATH_RE = re.compile(
+    r"^steps\.([A-Za-z_][A-Za-z0-9_-]*)\.outputs\.([A-Za-z_][A-Za-z0-9_-]*)$"
+)
+
+
+def _step_output_refs_in_result(value: str) -> list[tuple[str, str]]:
+    """Return step-output paths whose bytes can reach an expression result."""
+    refs: dict[tuple[str, str], None] = {}
+    for body in iter_expression_bodies(value):
+        try:
+            paths = result_provenance_paths(body)
+        except ExprSyntaxError:
+            continue
+        for path in paths:
+            match = _STEP_OUTPUT_PATH_RE.fullmatch(path)
+            if match:
+                refs.setdefault((match.group(1), match.group(2)), None)
+    return list(refs)
 
 
 def _collect_run_line_numbers(seg_lines: list[str], seg_start: int) -> list[int]:

@@ -11,6 +11,11 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 ## [Unreleased]
 
 ### Added
+- `XF-GH-005` and `XF-GH-006`: invocation-specific input-flow analysis through
+  local reusable workflows and composite actions, including mixed call chains.
+  Findings preserve source, hop and sink evidence and mark unresolved execution
+  context for review; configured flow does not prove runtime checkout bytes,
+  token grants, or secret availability.
 - `SEC6-GH-015`: review secret-bearing process output saved by GitHub Actions
   caches, with scoped environment, path, save-order and event-policy checks.
   See [the usage guide](docs/SECRET_CACHE.md) for supported tools and limits.

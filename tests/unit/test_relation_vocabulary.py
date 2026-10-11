@@ -115,11 +115,5 @@ def test_dead_extraction_is_advisory_not_a_build_failure():
     assert gate.main() == 0
 
 
-def test_public_dead_extraction_allowlist_is_empty():
-    # Public-repo divergence guard: the only upstream allowlist entry is for
-    # ``taintly/cross_workflow_facts.py`` (``call_edge``), a closure module the
-    # public repo does not ship. Listing an entry for an absent module would
-    # emit a spurious "stale — prune it" NOTE every run, so the allowlist is
-    # intentionally empty here. If a public closure module ever needs an entry,
-    # this guard documents why it was empty before.
+def test_dead_extraction_allowlist_is_empty():
     assert gate._KNOWN_DEAD_EXTRACTIONS == {}

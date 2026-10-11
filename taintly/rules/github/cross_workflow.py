@@ -37,6 +37,10 @@ could reference the old ID.
 
 from __future__ import annotations
 
+import os
+
+from taintly.cross_workflow_facts import find_cross_file_taint
+from taintly.local_call_graph import flow_evidence
 from taintly.models import Platform, Rule, Severity
 from taintly.workflow_corpus import (
     CorpusFindings,
@@ -1014,5 +1018,97 @@ RULES.append(
         # not review_needed.  Wild-scan validation pending.
         review_needed=False,
         finding_family="privileged_pr_trigger",
+    )
+)
+
+# XF-GH-005 — configured local input flow with per-path execution evidence.
+# ---------------------------------------------------------------------------
+
+
+def _xf_gh_005_callback(corpus: WorkflowCorpus) -> CorpusFindings:
+    """Caller -> reusable-workflow -> sink candidates with source evidence.
+
+    TAINT-GH-006 flags the callee side (a reusable workflow uses
+    ``${{ inputs.X }}`` — review-needed, the caller is unknown).
+    TAINT-GH-007 flags the caller side (a ``with:`` arg looks
+    attacker-controlled — review-needed, the callee is unknown).
+    Invocation traversal joins these halves across local workflow/action
+    calls. Known contracts, events, guards and shell source uses establish
+    a configured byte path. Unresolved contracts or execution semantics
+    retain explicit review state; token grants and secrets are separate.
+
+    The finding is cited at the caller's ``uses:`` line — that is
+    where the maintainer acts (stop forwarding the attacker context,
+    or sanitise it before the call).
+    """
+    findings: CorpusFindings = []
+    for flow in find_cross_file_taint(corpus):
+        chain = " -> ".join(f"{os.path.basename(c)}:{ln}" for c, ln, _ in flow.hop_chain)
+        snippet = (
+            f"{flow.source_expr} forwarded via {chain} into "
+            f"{os.path.basename(flow.callee)} input '{flow.input}', "
+            f"reaching sink {os.path.basename(flow.callee)}:"
+            f"{flow.sink_line}: {flow.sink_snippet}"
+        )
+        findings.append(flow_evidence(flow, snippet))
+    return findings
+
+
+RULES.append(
+    Rule(
+        id="XF-GH-005",
+        title="Configured cross-file input flow through a reusable workflow",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A workflow passes an attacker-controlled GitHub context "
+            "(`github.event.pull_request.title`, `github.head_ref`, "
+            "an issue / comment / review body, ...) as a `with:` "
+            "input to a local reusable workflow (`uses: "
+            "./.github/workflows/X.yml`), and that reusable workflow "
+            "launders the input through `env:` / `$GITHUB_ENV` / "
+            "`$GITHUB_OUTPUT` / a declared output into a shell sink.\n"
+            "\n"
+            "TAINT-GH-006 and TAINT-GH-017 flag the callee side and "
+            "TAINT-GH-007 the caller side — each as review-needed, "
+            "because in isolation neither file proves the other "
+            "half.  This rule closes the loop across the corpus: the "
+            "caller forwards an attacker context and the callee has a "
+            "configured shell-source or argument-use candidate. Each "
+            "invocation carries its own event, inputs and source lines "
+            "through local calls. Unknown guards, expression results "
+            "and command reinterpretation remain review-needed. "
+            "Resource limits produce incomplete-scan diagnostics."
+        ),
+        pattern=CorpusPattern(callback=_xf_gh_005_callback),
+        remediation=(
+            "Treat the forwarded context as untrusted at the call\n"
+            "site: do not pass `github.event.*` / `github.head_ref`\n"
+            "directly into a reusable workflow's `with:` inputs.\n"
+            "Either sanitise / allow-list the value before the call,\n"
+            "or change the reusable workflow to consume the input as\n"
+            'quoted data (bind it to an env var, reference `"$VAR"`)\n'
+            "rather than interpolating it into a shell command.  See\n"
+            "TAINT-GH-006 / TAINT-GH-007 / TAINT-GH-017 for the\n"
+            "single-file halves of this flow."
+        ),
+        reference="https://docs.github.com/en/actions/using-workflows/reusing-workflows",
+        # CorpusPattern rule — exercised by tests/unit/test_cross_workflow_rules.py
+        # (multi-file fixtures), not by single-YAML self-test samples.
+        stride=["T", "E"],
+        threat_narrative=(
+            "An attacker opens a PR whose title is a shell payload.  "
+            "A caller workflow forwards `github.event.pull_request."
+            "title` straight into a reusable workflow's `with:` "
+            "input, and the reusable workflow interpolates that "
+            "input into a `run:` block. The configured path may execute "
+            "attacker-supplied shell source if its input contract and guards "
+            "permit it. Argument uses without established reinterpretation "
+            "remain review-needed. Effective token grants and available secrets "
+            "require separate evidence. The source and sink span local files."
+        ),
+        finding_family="User-controlled input reaching shell execution",
+        confidence="medium",
     )
 )

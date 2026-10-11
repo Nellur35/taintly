@@ -1364,7 +1364,22 @@ def _parse_permission_block(lines: list[str], i: int, scope_what: str) -> Permis
 # the specific pwn-request event that actually fired rather than a
 # hardcoded ``pull_request_target``). When the 4th element is omitted
 # the engine falls back to ``rule.title``.
-CorpusFindings = list[tuple[str, int, str] | tuple[str, int, str, str]]
+@dataclass(frozen=True)
+class CorpusEvidence:
+    """Per-path evidence overrides; legacy tuple callbacks remain supported."""
+
+    file: str
+    line: int
+    snippet: str
+    title: str
+    remediation: str
+    review_needed: bool = True
+    context_notes: tuple[str, ...] = ()
+    context_tags: tuple[str, ...] = ()
+    calibration_reason: str = ""
+
+
+CorpusFindings = list[tuple[str, int, str] | tuple[str, int, str, str] | CorpusEvidence]
 
 
 @dataclass
