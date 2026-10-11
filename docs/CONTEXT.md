@@ -76,3 +76,29 @@ out. A candidate headline is not evidence that the workflow actually ran.
 Limited authority is not a certificate of harmlessness. These source-derived
 calibrations can affect the score through finding metadata; deployment notes
 from `.taintly-context.yml` retain their annotation-only behavior above.
+
+## Authority across local workflow and action calls
+
+For `XF-GH-005` and `XF-GH-006`, source-derived context follows each local call
+separately. Findings can connect attacker input and execution to configured token
+permissions and explicit credential bindings, with file/line witnesses.
+
+| Context tag | Meaning |
+|---|---|
+| `call-authority-configured` | Supported declarations and explicit token/secret references establish a configured access profile. |
+| `call-authority-limited` | The supported explicit token/binding profile is bounded; this does not establish globally credential-free execution. |
+| `call-authority-unresolved` | At least one permission, forwarding, credential provenance or environment link is unknown or unsupported. |
+
+Caller permissions bound called jobs; incompatible escalation leaves the
+invocation unresolved. Named secret/input aliases and per-hop inheritance retain
+their own source lines. A missing forwarding edge differs from a supplied value
+whose provenance is unknown. Caller workflow env resets at reusable workflow
+boundaries; composite steps use the owning job's effective env and overrides.
+Separate calls and jobs do not share credential evidence.
+
+These tags describe configuration. They do not prove the workflow ran, a secret
+was released, runtime action bytes match repository source, external credential
+privileges or a cloud role. Invalid invocation contracts retain execution review;
+ordinary authority uncertainty does not erase a supported input-to-sink path.
+HIGH severity and MEDIUM confidence are retained. Review the cited permission,
+forwarding and sink lines before deciding impact or remediation.

@@ -8,6 +8,7 @@ Unknown links remain review-needed; an execution observation is never removed.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from .eventguard import event_guard_verdict
@@ -84,10 +85,11 @@ class _Grants:
     writes: tuple[str, ...] = ()
     line: int = 0
     write_lines: tuple[int, ...] = ()
+    levels: tuple[tuple[str, str], ...] = ()
 
 
 class _Index:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, *, events: Iterable[Event] | None = None) -> None:
         self.content = content
         self.lines = content.splitlines()
         self.keys: dict[tuple[object, ...], Event] = {}
@@ -96,11 +98,14 @@ class _Index:
         self.environments: dict[tuple[object, ...], dict[str, Event]] = {}
         self.steps: dict[str, set[tuple[object, ...]]] = {}
         self.ambiguous = False
-        for count, event in enumerate(
-            walk_workflow(
+        source = (
+            events
+            if events is not None
+            else walk_workflow(
                 "workflow.yml", content=content, include_keys=True, include_merge_origins=True
             )
-        ):
+        )
+        for count, event in enumerate(source):
             if count >= _MAX_PROFILE_EVENTS:
                 self.ambiguous = True
                 break
@@ -165,19 +170,35 @@ class _Index:
         value = self.value(path)
         if path in self.leaves:
             if value == "read-all":
-                return _Grants(True, (), key.line)
+                return _Grants(
+                    True,
+                    (),
+                    key.line,
+                    (),
+                    tuple((s, "none" if s == "id-token" else "read") for s in sorted(_SCOPES)),
+                )
             if value == "write-all":
-                return _Grants(True, ("write-all",), key.line, (key.line,))
+                return _Grants(
+                    True,
+                    ("write-all",),
+                    key.line,
+                    (key.line,),
+                    tuple(
+                        (s, "read" if s == "vulnerability-alerts" else "write")
+                        for s in sorted(_SCOPES)
+                    ),
+                )
             return _Grants()
         children = self.children.get(path, [])
         if not children:
             # A null/unsupported scalar is not an explicit empty permission map.
             tail = self.lines[key.line - 1][key.column - 1 :].split(":", 1)[-1]
             if re.fullmatch(r"\s*\{\s*\}\s*(?:#.*)?", tail):
-                return _Grants(True, (), key.line)
+                return _Grants(True, (), key.line, (), tuple((s, "none") for s in sorted(_SCOPES)))
             return _Grants()
         writes = []
         write_lines = []
+        levels = dict.fromkeys(_SCOPES, "none")
         for child in children:
             scope = str(child[-1])
             grant = self.value(child)
@@ -192,7 +213,10 @@ class _Index:
             if grant == "write":
                 writes.append(scope)
                 write_lines.append(self.leaves[child].line)
-        return _Grants(True, tuple(writes), key.line, tuple(write_lines))
+            levels[scope] = grant
+        return _Grants(
+            True, tuple(writes), key.line, tuple(write_lines), tuple(sorted(levels.items()))
+        )
 
     def sink(self, line: int) -> tuple[object, ...] | None:
         owners = []
