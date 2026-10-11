@@ -51,6 +51,7 @@ from taintly.workflow_corpus import (
 )
 
 if TYPE_CHECKING:
+    from taintly.parsers.segmentation import JobSegment, StepSegment
     from taintly.taint_facts.relations import Database, Fact
 
 # ---------------------------------------------------------------------------
@@ -438,6 +439,81 @@ _NEEDS_OUTPUT_REF_RE = re.compile(
     r"\.outputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}"
 )
 
+# Observable uses of GitHub/package authority inside a write-capable job. The
+# list is deliberately structural and conservative: it proves that the job
+# actually exercises authority somewhere in the relevant step/scope, while the
+# rule remains review-needed until value-to-call argument provenance is known.
+_GITHUB_REST_WRITE_RE = re.compile(
+    r"\bgithub\.rest\.[A-Za-z0-9_]+\."
+    r"(?:add|cancel|close|create|delete|disable|dismiss|enable|lock|merge|"
+    r"remove|reopen|replace|request|rerun|set|submit|transfer|unlock|update)"
+    r"[A-Za-z0-9_]*\s*\(",
+    re.IGNORECASE,
+)
+_GITHUB_REQUEST_WRITE_RE = re.compile(
+    r"\bgithub\.request\s*\(\s*(?:"
+    r"[\"'`]\s*(?:POST|PUT|PATCH|DELETE)\b|"
+    r"\{(?:(?!\}\s*\)).){0,1000}?\bmethod\s*:\s*[\"'`]"
+    r"(?:POST|PUT|PATCH|DELETE)\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+_GITHUB_GRAPHQL_MUTATION_RE = re.compile(
+    r"\bgithub\.graphql\s*\(\s*[\"'`]?\s*mutation\b",
+    re.IGNORECASE,
+)
+_GH_CLI_WRITE_RE = re.compile(
+    r"\bgh\s+(?:"
+    r"issue\s+(?:close|comment|create|delete|edit|lock|pin|reopen|transfer|unlock)|"
+    r"pr\s+(?:close|comment|create|edit|lock|merge|ready|reopen|review|unlock)|"
+    r"release\s+(?:create|delete|edit|upload)|"
+    r"repo\s+(?:archive|create|delete|edit|fork|rename|sync)|"
+    r"run\s+(?:cancel|delete|rerun)|"
+    r"workflow\s+(?:disable|enable|run)"
+    r")\b",
+    re.IGNORECASE,
+)
+_GH_API_RE = re.compile(r"\bgh\s+api\b", re.IGNORECASE)
+_GH_API_WRITE_METHOD_RE = re.compile(
+    r"(?:--method(?:=|\s+)|-X\s*)(?:POST|PUT|PATCH|DELETE)\b", re.IGNORECASE
+)
+_GH_API_READ_METHOD_RE = re.compile(r"(?:--method(?:=|\s+)|-X\s*)(?:GET|HEAD)\b", re.IGNORECASE)
+_GH_API_IMPLICIT_POST_RE = re.compile(
+    r"(?:^|\s)(?:-f|-F|--field|--raw-field)(?:=|\s+)", re.IGNORECASE
+)
+_OTHER_AUTHORITY_OPERATION_RE = re.compile(
+    r"\bgit\s+push\b|"
+    r"\b(?:npm|pnpm|yarn)\s+publish\b|"
+    r"\b(?:twine\s+upload|docker\s+push)\b|"
+    r"\b(?:curl|wget)\b[^\n]*(?:"
+    r"\bapi\.github\.com\b[^\n]*(?:-X|--request)\s*"
+    r"(?:POST|PUT|PATCH|DELETE)\b|"
+    r"(?:-X|--request)\s*(?:POST|PUT|PATCH|DELETE)\b[^\n]*"
+    r"\bapi\.github\.com\b)",
+    re.IGNORECASE,
+)
+_ACTION_USES_RE = re.compile(r"^\s*(?:-\s*)?uses\s*:\s*([^\s#]+)", re.MULTILINE)
+_AUTHORITY_TOKEN_INPUT_RE = re.compile(
+    r"^\s*(?:github[_-]?token|token)\s*:\s*['\"]?"
+    r"\$\{\{\s*(?:secrets\.[A-Za-z_][A-Za-z0-9_]*|github\.token)\s*\}\}['\"]?",
+    re.IGNORECASE | re.MULTILINE,
+)
+_ENV_PARENT_RE = re.compile(r"^(\s*)env\s*:\s*(?:#.*)?$")
+_ENV_EDGE_RE = re.compile(
+    r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:\s*['\"]?"
+    r"\$\{\{\s*needs\.([A-Za-z_][A-Za-z0-9_-]*)\.outputs\."
+    r"([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}['\"]?\s*(?:#.*)?$"
+)
+_OBSERVABILITY_CALL_RE = re.compile(
+    r"\b(?:console\.(?:debug|error|info|log|warn)|"
+    r"core\.(?:debug|error|info|notice|warning))\s*\(",
+    re.IGNORECASE,
+)
+_CALL_LIKE_RE = re.compile(
+    r"\b[A-Za-z_$][A-Za-z0-9_$]*"
+    r"(?:\s*\.\s*[A-Za-z_$][A-Za-z0-9_$]*)*\s*\("
+)
+
 
 class _CrossJobEdge:
     """One producer→consumer cross-job output edge in a single file.
@@ -457,8 +533,8 @@ class _CrossJobEdge:
         self.output = output
 
 
-def _producer_jobs_in_file(file: str) -> set[str]:
-    """Return the set of job names in ``file`` that declare an
+def _producer_jobs_in_lines(lines: list[str]) -> set[str]:
+    """Return job names in ``lines`` that declare an
     ``outputs:`` block (the producers of cross-job output edges).
 
     A job declares outputs when an ``outputs:`` key appears at the
@@ -468,11 +544,6 @@ def _producer_jobs_in_file(file: str) -> set[str]:
     """
     from taintly.models import _split_into_job_segments
 
-    try:
-        with open(file, encoding="utf-8", errors="replace") as fh:
-            lines = fh.read().splitlines()
-    except OSError:
-        return set()
     producers: set[str] = set()
     for _start_idx, seg in _split_into_job_segments(lines):
         # The first line of a job segment is the ``<jobname>:`` key
@@ -495,9 +566,9 @@ def _producer_jobs_in_file(file: str) -> set[str]:
     return producers
 
 
-def _crossjob_edges_in_file(file: str) -> list[_CrossJobEdge]:
+def _crossjob_edges_in_content(content: str) -> list[_CrossJobEdge]:
     """Extract every ``needs.<producer>.outputs.<name>`` edge in
-    ``file``, attributing each reference to the consumer job whose
+    ``content``, attributing each reference to the consumer job whose
     segment contains it.
 
     Only edges whose producer actually declares an ``outputs:`` block
@@ -506,12 +577,8 @@ def _crossjob_edges_in_file(file: str) -> list[_CrossJobEdge]:
     """
     from taintly.models import _split_into_job_segments
 
-    try:
-        with open(file, encoding="utf-8", errors="replace") as fh:
-            lines = fh.read().splitlines()
-    except OSError:
-        return []
-    producers = _producer_jobs_in_file(file)
+    lines = content.splitlines()
+    producers = _producer_jobs_in_lines(lines)
     if not producers:
         return []
     edges: list[_CrossJobEdge] = []
@@ -542,6 +609,145 @@ def _crossjob_edges_in_file(file: str) -> list[_CrossJobEdge]:
     return edges
 
 
+def _scope_exercises_write_authority(text: str) -> bool:
+    """Whether a step/job contains an observable authority-bearing operation.
+
+    A declared write permission by itself is latent capability. CHAIN-GH-105
+    needs evidence that the consumer actually uses that capability. Direct API,
+    CLI, push, or publish calls qualify. An action step qualifies when it is
+    explicitly handed a GitHub/PAT token. The test is intentionally broader
+    than exploit proof; argument-level provenance remains a later layer.
+    """
+    if _GITHUB_REST_WRITE_RE.search(text) or _GH_CLI_WRITE_RE.search(text):
+        return True
+    if _GITHUB_REQUEST_WRITE_RE.search(text):
+        return True
+    if _GITHUB_GRAPHQL_MUTATION_RE.search(text):
+        return True
+    if _GH_API_RE.search(text):
+        if _GH_API_WRITE_METHOD_RE.search(text):
+            return True
+        if not _GH_API_READ_METHOD_RE.search(text) and _GH_API_IMPLICIT_POST_RE.search(text):
+            return True
+    if _OTHER_AUTHORITY_OPERATION_RE.search(text):
+        return True
+    return bool(_ACTION_USES_RE.search(text) and _AUTHORITY_TOKEN_INPUT_RE.search(text))
+
+
+def _balanced_call_spans(text: str, call_re: re.Pattern[str]) -> list[tuple[int, int]]:
+    """Return parenthesized call spans while ignoring quoted parentheses."""
+    spans: list[tuple[int, int]] = []
+    for match in call_re.finditer(text):
+        open_at = text.find("(", match.start(), match.end())
+        if open_at < 0:
+            continue
+        depth = 0
+        quote = ""
+        escaped = False
+        for index in range(open_at, len(text)):
+            char = text[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in {"'", '"', "`"}:
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    spans.append((match.start(), index + 1))
+                    break
+    return spans
+
+
+def _edge_env_name(content: str, edge: _CrossJobEdge) -> str | None:
+    """Return an env alias when the edge is a direct child of ``env:``."""
+    lines = content.splitlines()
+    if edge.line < 1 or edge.line > len(lines):
+        return None
+    match = _ENV_EDGE_RE.match(lines[edge.line - 1])
+    if not match or (match.group(3), match.group(4)) != (edge.producer, edge.output):
+        return None
+    child_indent = len(match.group(1))
+    for line in reversed(lines[: edge.line - 1]):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent >= child_indent:
+            continue
+        parent = _ENV_PARENT_RE.match(line)
+        return match.group(2) if parent and len(parent.group(1)) == indent else None
+    return None
+
+
+def _edge_is_observability_only(content: str, edge: _CrossJobEdge, step_text: str) -> bool:
+    """Prove a narrow negative: an env alias is used only by JS logging calls.
+
+    This intentionally recognizes only direct ``process.env.NAME`` reads. If
+    the alias is assigned, transformed, used through shell syntax, or embedded
+    as a GitHub expression, the proof fails open and the finding stays visible.
+    """
+    env_name = _edge_env_name(content, edge)
+    if not env_name:
+        return False
+    escaped_name = re.escape(env_name)
+    js_env_ref = re.compile(rf"\bprocess\.env(?:\.{escaped_name}\b|\[['\"]{escaped_name}['\"]\])")
+    refs = list(js_env_ref.finditer(step_text))
+    if not refs:
+        return False
+    if re.search(rf"\$\{{\{{\s*env\.{escaped_name}\b", step_text):
+        return False
+    if re.search(rf"(?<![\w.])\$(?:{escaped_name}\b|\{{{escaped_name}\}})", step_text):
+        return False
+    spans = _balanced_call_spans(step_text, _OBSERVABILITY_CALL_RE)
+    direct_log_spans = [
+        (start, end)
+        for start, end in spans
+        if len(_CALL_LIKE_RE.findall(step_text[start:end])) == 1
+    ]
+    return bool(direct_log_spans) and all(
+        any(start <= ref.start() < end for start, end in direct_log_spans) for ref in refs
+    )
+
+
+def _edge_has_authority_sink(
+    content: str,
+    edge: _CrossJobEdge,
+    steps: list[StepSegment],
+    jobs: list[JobSegment],
+    authority_cache: dict[tuple[str, int, int], bool],
+) -> bool:
+    """Require authority use in the edge's step, or its job-level scope.
+
+    Step-local references (the common ``env:`` / ``with:`` shape) cannot borrow
+    an unrelated privileged action from another step. A reference in job-level
+    ``env:`` or ``if:`` can feed later steps, so the whole consumer job is the
+    conservative scope.
+    """
+    for step in steps:
+        if step.job_name == edge.consumer and step.start_line <= edge.line <= step.end_line:
+            key = ("step", step.start_line, step.end_line)
+            if key not in authority_cache:
+                authority_cache[key] = _scope_exercises_write_authority(step.text)
+            if not authority_cache[key]:
+                return False
+            return not _edge_is_observability_only(content, edge, step.text)
+
+    for job in jobs:
+        if job.name == edge.consumer and job.start_line <= edge.line <= job.end_line:
+            key = ("job", job.start_line, job.end_line)
+            if key not in authority_cache:
+                authority_cache[key] = _scope_exercises_write_authority(job.text)
+            return authority_cache[key]
+    return False
+
+
 def _files_with_contexts(db: Database) -> set[str]:
     """The set of workflow files the composer seeded job contexts for.
 
@@ -560,23 +766,26 @@ def _files_with_contexts(db: Database) -> set[str]:
 
 
 def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
-    """Cross-job privilege escalation (P1.3) → HIGH.
+    """Cross-job privilege escalation (P1.3) → MEDIUM review candidate.
 
     A LOW-privilege producer job (``has_write_token=False``) declares
     an output that a HIGH-privilege consumer job
     (``has_write_token=True``) reads via
     ``${{ needs.<producer>.outputs.<name> }}``. The producer is the
-    exposed / attacker-influenceable surface; its output crossing into
-    a write-capable job is a privilege-escalation vector — the
-    write-capable job acts on data shaped in a context that was never
-    granted that authority.
+    exposed / attacker-influenceable surface. The relevant consumer
+    step or job scope must also contain an observable authority-bearing
+    operation, such as a mutating GitHub API/CLI call, a push/publish,
+    or an action explicitly handed a token.
 
     Distinct from TAINT-GH-009 (cross-job output → *shell* sink) and
-    from the severity-escalation / id-token co-occurrence rules: the
-    sink here is the *privilege boundary itself*, not a shell or a
-    specific dangerous statement. The composite fires only when the
-    privilege GRADIENT exists (read producer → write consumer); a
-    same-tier or high→low edge is benign data flow and is suppressed.
+    from the severity-escalation / id-token co-occurrence rules: this
+    rule accepts API and action sinks as well as shell operations. It
+    requires a privilege GRADIENT (read producer → write consumer) and
+    observable authority use. It remains review-needed because this
+    layer establishes co-scope provenance, not argument-level proof
+    that the transferred value controls the authority-bearing call. A
+    narrow negative proof suppresses a direct ``process.env.NAME`` alias
+    only when every read is confined to a console/core logging call.
 
     Per-job write-token resolution relies on each job declaring its
     own ``permissions:`` block (the only way the corpus can attribute
@@ -584,16 +793,42 @@ def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
     to the workflow-default wildcard, no gradient is observable and
     the rule conservatively does NOT fire — favouring precision, the
     whole point of the composer family.
+
+    A plain ``pull_request`` from a fork is not sufficient: GitHub normally
+    downgrades every declared write scope to read-only for that event. The
+    rule therefore also requires an externally-triggerable event that can
+    retain write authority (for example ``pull_request_target``, ``issues``,
+    or ``workflow_run`` whose named parent is externally reachable). A
+    push-only ``workflow_run`` parent is excluded; an unresolved parent fails
+    open as review-needed. Repository settings can opt private forks out of the
+    downgrade; without that deployment context, those remain outside the
+    statically confirmed rule contract.
     """
     files = _files_with_contexts(db)
     for file in sorted(files):
-        edges = _crossjob_edges_in_file(file)
+        try:
+            with open(file, encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError:
+            continue
+        edges = _crossjob_edges_in_content(content)
         if not edges:
             continue
+        from taintly.parsers.segmentation import for_each_job, for_each_step
+
+        steps = for_each_step(content)
+        jobs = for_each_job(content)
+        authority_cache: dict[tuple[str, int, int], bool] = {}
         for edge in edges:
             producer_ctx = context_for(db, file, edge.producer)
             consumer_ctx = context_for(db, file, edge.consumer)
             if producer_ctx is None or consumer_ctx is None:
+                continue
+            # A normal fork-originated pull_request token is forced read-only
+            # by GitHub, even when the YAML requests write. Without an event
+            # that can retain write authority, the claimed privilege gradient
+            # does not exist in the default execution model.
+            if not producer_ctx.external_privileged:
                 continue
             # Suppress when a trusted-bot gate restricts the workflow:
             # the producer surface isn't externally attacker-controlled.
@@ -604,6 +839,12 @@ def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
                 continue
             if not consumer_ctx.has_write_token:
                 continue
+            # A write scope is latent capability, not proof of a privileged
+            # operation. Summary/log-only consumers created the remaining
+            # field false positives, so require observable authority use in
+            # the relevant step (or job for job-level references).
+            if not _edge_has_authority_sink(content, edge, steps, jobs, authority_cache):
+                continue
             snippet = (
                 "CHAIN: cross-job privilege escalation. Low-privilege "
                 f"producer job `{edge.producer}` (read-only token) "
@@ -613,7 +854,8 @@ def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
                 "The producer is the exposed, attacker-influenceable "
                 "surface; its output crossing into a job that holds a "
                 "write-capable token (contents/id-token/packages write) "
-                "lets a value shaped under low authority drive an action "
+                "and the same consumer scope performs an authority-bearing "
+                "operation. Review whether the value reaches that operation "
                 "under high authority — a privilege-escalation gradient "
                 f"({edge.producer} → {edge.consumer})."
             )
@@ -873,7 +1115,7 @@ RULES: list[Rule] = [
         title=(
             "Composite: cross-job privilege escalation — low-privilege "
             "producer output flows into a write-capable consumer job "
-            "(needs.*.outputs + privilege gradient)"
+            "that exercises authority (needs.*.outputs + privilege gradient)"
         ),
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
@@ -885,22 +1127,33 @@ RULES: list[Rule] = [
             "(2) a consumer job reads that value via "
             "`${{ needs.<producer>.outputs.<name> }}`; (3) the consumer "
             "job holds a write-capable token (e.g. `contents: write`, "
-            "`id-token: write`).\n\n"
+            "`id-token: write`); (4) the relevant consumer step or job "
+            "scope performs an observable authority-bearing operation.\n\n"
             "The producer is the lower-privilege, attacker-influenceable "
-            "surface; its output crossing the job boundary into a "
-            "write-capable consumer is a privilege-escalation vector — a "
-            "value shaped under low authority drives an action under "
-            "high authority.\n\n"
+            "surface; its output crosses the job boundary into a consumer "
+            "that both holds and exercises write authority. This is a "
+            "candidate privilege-escalation path; argument-level provenance "
+            "still requires review.\n\n"
             "This is DISTINCT from TAINT-GH-009 (cross-job output "
-            "reaching a *shell* sink): the boundary crossed here is the "
-            "privilege gradient itself, not a specific dangerous "
-            "statement. The composite fires only when the gradient is "
-            "observable (read producer → write consumer); same-tier or "
+            "reaching a *shell* sink): this rule also recognizes mutating "
+            "GitHub API/CLI operations, pushes, publishes, and actions "
+            "explicitly handed a token. The composite fires only when the "
+            "gradient and authority use are observable; same-tier or "
             "high→low edges are benign data flow and are suppressed. "
+            "A direct `process.env.NAME` alias used exclusively by "
+            "console/core logging in the same JavaScript step is also "
+            "suppressed; assignments, transformations, and mixed sink use "
+            "remain review candidates. "
             "Per-job permission attribution requires each job to declare "
             "its own `permissions:` block; when both jobs inherit the "
             "workflow default, no gradient is observable and the rule "
-            "conservatively does not fire."
+            "conservatively does not fire. A plain fork-originated "
+            "`pull_request` is also excluded because GitHub normally "
+            "downgrades its declared write token scopes to read-only; an "
+            "external event that can retain write authority is required."
+            " For `workflow_run`, the named parent is resolved within the "
+            "repository: a push-only parent is excluded, while missing or "
+            "cyclic parent evidence fails open for review."
         ),
         pattern=CorpusPattern(callback=_make_chain_callback("CHAIN-GH-105")),
         remediation=(

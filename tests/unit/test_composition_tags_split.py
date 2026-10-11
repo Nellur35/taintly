@@ -116,7 +116,7 @@ _CHAIN_105_POSITIVE = (
     "      contents: write\n"
     "      id-token: write\n"
     "    steps:\n"
-    "      - run: echo ${{ needs.produce.outputs.val }}\n"
+    "      - run: gh issue edit 1 --add-label ${{ needs.produce.outputs.val }}\n"
 )
 
 
@@ -127,9 +127,7 @@ def test_composer_rule_fires_via_tag_routing(tmp_path: Path) -> None:
 
     rules = load_all_rules()
     reports = scan_repo(str(tmp_path), rules, Platform.GITHUB)
-    composer_findings = [
-        f for r in reports for f in r.findings if f.rule_id == "CHAIN-GH-105"
-    ]
+    composer_findings = [f for r in reports for f in r.findings if f.rule_id == "CHAIN-GH-105"]
     assert len(composer_findings) == 1
     f = composer_findings[0]
     # The emitted finding carries the routing tag (so post-composition steps

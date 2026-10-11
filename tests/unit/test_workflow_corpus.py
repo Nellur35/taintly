@@ -635,6 +635,57 @@ def test_build_corpus_indexes_triggers_per_workflow(tmp_path: Path) -> None:
     assert {Path(w.filepath).name for w in privileged_only} == {"main.yml"}
 
 
+def test_workflow_run_parent_resolution_uses_workflow_name(tmp_path: Path) -> None:
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "parent.yml").write_text(
+        "name: 'Trusted Build'\non: push\njobs: {}\n", encoding="utf-8"
+    )
+    (wf_dir / "child.yml").write_text(
+        "name: Child\non:\n  workflow_run:\n"
+        "    workflows: ['Trusted Build']\n    types: [completed]\njobs: {}\n",
+        encoding="utf-8",
+    )
+
+    corpus = build_corpus(str(tmp_path))
+    child = next(w for w in corpus.all() if Path(w.filepath).name == "child.yml")
+    assert child.workflow_name == "Child"
+    assert child.workflow_run_parents == ("Trusted Build",)
+    assert corpus.workflow_run_parent_fork_reachable(child) is False
+    assert corpus.has_external_privileged_trigger(child) is False
+
+
+def test_workflow_run_pull_request_parent_is_external_privileged(tmp_path: Path) -> None:
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "parent.yml").write_text(
+        "name: PR Build\non: pull_request\njobs: {}\n", encoding="utf-8"
+    )
+    (wf_dir / "child.yml").write_text(
+        "on:\n  workflow_run:\n    workflows: [PR Build]\njobs: {}\n",
+        encoding="utf-8",
+    )
+
+    corpus = build_corpus(str(tmp_path))
+    child = next(w for w in corpus.all() if Path(w.filepath).name == "child.yml")
+    assert corpus.workflow_run_parent_fork_reachable(child) is True
+    assert corpus.has_external_privileged_trigger(child) is True
+
+
+def test_workflow_run_unresolved_parent_fails_open(tmp_path: Path) -> None:
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "child.yml").write_text(
+        "on:\n  workflow_run:\n    workflows: [Missing Build]\njobs: {}\n",
+        encoding="utf-8",
+    )
+
+    corpus = build_corpus(str(tmp_path))
+    child = next(iter(corpus.all()))
+    assert corpus.workflow_run_parent_fork_reachable(child) is None
+    assert corpus.has_external_privileged_trigger(child) is True
+
+
 def test_build_corpus_indexes_cache_refs_per_workflow(tmp_path: Path) -> None:
     wf_dir = tmp_path / ".github" / "workflows"
     wf_dir.mkdir(parents=True)
