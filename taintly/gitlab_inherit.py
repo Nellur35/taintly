@@ -150,6 +150,18 @@ class _RawJob:
     # FILE overrides (GitLab include-merge "later wins").
     leaves: dict[RelPath, tuple[str, int, str]] = field(default_factory=dict)
     extends: list[str] = field(default_factory=list)
+    # Shell roots whose presence is structurally known, including explicit
+    # empty/null roots that have no scalar leaves.
+    script_roots: set[str] = field(default_factory=set)
+    # Disabled for incomplete effective views and same-name multi-file jobs.
+    replacement_eligible: bool = True
+
+
+@dataclass
+class _MergedJob:
+    leaves: dict[RelPath, ResolvedLeaf]
+    # Roots that this complete result replaces for a more-specific overlay.
+    script_replacements: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -194,6 +206,17 @@ def _extract_raw_jobs(filepath: str, content: str) -> dict[str, _RawJob]:
     for ev in effective.events:
         if ev.kind is EventKind.CUTOFF:
             break
+        if ev.kind is EventKind.MAP_KEY:
+            path = ev.path
+            if (
+                ev.value_kind != "merge_key"
+                and len(path) == 2
+                and isinstance(path[0], str)
+                and path[0] not in _RESERVED_TOP_KEYS
+                and path[1] in _SCRIPT_KEYS
+            ):
+                raw.setdefault(path[0], _RawJob(path[0], filepath)).script_roots.add(path[1])
+            continue
         if ev.kind is not EventKind.LEAF_SCALAR:
             continue
         path = ev.path
@@ -211,6 +234,8 @@ def _extract_raw_jobs(filepath: str, content: str) -> dict[str, _RawJob]:
         job = raw.setdefault(head, _RawJob(head, filepath))
         if not rest:
             continue
+        if len(rest) >= 1 and rest[0] in _SCRIPT_KEYS and ev.value is not None and ev.value.strip():
+            job.script_roots.add(rest[0])
         # extends: parent (scalar or list item).
         if rest[0] == "extends" and (
             len(rest) == 1 or (len(rest) == 2 and isinstance(rest[1], int))
@@ -230,6 +255,9 @@ def _extract_raw_jobs(filepath: str, content: str) -> dict[str, _RawJob]:
                 )
         else:
             job.leaves.setdefault(rest, (ev.value or "", ev.line, filepath))
+    if not effective.complete:
+        for job in raw.values():
+            job.replacement_eligible = False
     return raw
 
 
@@ -271,32 +299,58 @@ def _merge_job(
     *,
     visited: frozenset[str] = frozenset(),
     depth: int = 0,
-) -> dict[RelPath, ResolvedLeaf]:
+    allow_script_replacement: bool = False,
+) -> _MergedJob:
     """Deep-merge a job's effective leaves: ``extends:`` parents first
     (least specific), then the job's own body (most specific overrides),
     expanding ``!reference`` tags inline.
 
-    Returns ``{rel_path: ResolvedLeaf}``.  Cycle-safe via ``visited``;
+    Returns effective leaves plus proven whole-root shell replacements.
+    Cycle-safe via ``visited``;
     the GitLab "more specific wins" rule is modelled by letting a later
     write (the job's own leaf) overwrite an earlier (parent) leaf for
     the same ``rel_path``.
     """
     if name in visited or depth > _MAX_EXTENDS_DEPTH:
-        return {}
+        return _MergedJob({})
     src = raw_by_name.get(name)
     if src is None:
-        return {}
+        return _MergedJob({})
     merged: dict[RelPath, ResolvedLeaf] = {}
+    script_replacements: set[str] = set()
+
+    def _replace_script_root(root: str) -> None:
+        for path in tuple(merged):
+            if path and path[0] == root:
+                del merged[path]
+
     # 1. Parents, in declaration order (left-most lowest precedence per
     #    GitLab's documented extends merge order).
     for parent in src.extends:
-        for rel, leaf in _merge_job(
-            parent, raw_by_name, visited=visited | {name}, depth=depth + 1
-        ).items():
+        parent_job = _merge_job(
+            parent,
+            raw_by_name,
+            visited=visited | {name},
+            depth=depth + 1,
+            allow_script_replacement=allow_script_replacement,
+        )
+        if allow_script_replacement:
+            for root in parent_job.script_replacements:
+                _replace_script_root(root)
+                script_replacements.add(root)
+        for rel, leaf in parent_job.leaves.items():
             # Re-tag the inherited leaf's resolution edge as "extends"
             # so the consumer can see it crossed an inheritance boundary;
             # keep the parent's source file/line (where the bytes live).
             merged[rel] = ResolvedLeaf(rel, leaf.value, leaf.file, leaf.line, "extends")
+
+    # A known root replaces its entire previous value, not only leaves that
+    # happen to share an index. Empty roots therefore need a MAP_KEY marker.
+    if allow_script_replacement:
+        for root in src.script_roots:
+            _replace_script_root(root)
+            script_replacements.add(root)
+
     # 2. The job's own leaves, overriding parents; expand !reference.
     for rel, (val, line, leaf_file) in src.leaves.items():
         ref_leaves = _resolve_references_in_value(val, raw_by_name)
@@ -315,7 +369,51 @@ def _merge_job(
                 )
         else:
             merged[rel] = ResolvedLeaf(rel, val, leaf_file, line, "own")
-    return merged
+    return _MergedJob(merged, script_replacements)
+
+
+def _script_replacement_ancestry_complete(
+    name: str,
+    raw_by_name: dict[str, _RawJob],
+    *,
+    visited: frozenset[str] = frozenset(),
+    depth: int = 0,
+    memo: dict[tuple[str, int], bool] | None = None,
+) -> bool:
+    """Whether this target's entire inheritance chain supports replacement.
+
+    Preflighting the full ancestry avoids deleting an early parent's shell
+    leaves before discovering a later incomplete or ambiguous ancestor. One
+    uncertain edge disables pruning for the target; legacy leaf merging then
+    runs without partial deletion.
+    """
+    if name in visited or depth > _MAX_EXTENDS_DEPTH:
+        return False
+    if memo is None:
+        memo = {}
+    memo_key = (name, depth)
+    if memo_key in memo:
+        return memo[memo_key]
+    src = raw_by_name.get(name)
+    if src is None or not src.replacement_eligible:
+        memo[memo_key] = False
+        return False
+    for path, (value, _line, _filepath) in src.leaves.items():
+        if path and path[0] in _SCRIPT_KEYS and value.strip().startswith("!reference"):
+            memo[memo_key] = False
+            return False
+    complete = all(
+        _script_replacement_ancestry_complete(
+            parent,
+            raw_by_name,
+            visited=visited | {name},
+            depth=depth + 1,
+            memo=memo,
+        )
+        for parent in src.extends
+    )
+    memo[memo_key] = complete
+    return complete
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +445,9 @@ def resolve_pipeline(files: list[tuple[str, str]]) -> _ResolvedGraph:
             else:
                 # The same job name defined across files: GitLab merges
                 # them (later include wins on conflict).  Merge leaves
-                # (later file overrides) and concatenate extends.
+                # (later file overrides) and concatenate extends. Replacement
+                # provenance is ambiguous across these definitions.
+                existing.replacement_eligible = False
                 for rel, lv in rawjob.leaves.items():
                     existing.leaves[rel] = lv
                 existing.extends.extend(rawjob.extends)
@@ -361,10 +461,18 @@ def resolve_pipeline(files: list[tuple[str, str]]) -> _ResolvedGraph:
             cascade[rel] = ResolvedLeaf(rel, val, leaf_file, line, "own")
 
     jobs: dict[str, ResolvedJob] = {}
+    replacement_memo: dict[tuple[str, int], bool] = {}
     for name, rawjob in raw_by_name.items():
         if name == "" or name in _RESERVED_TOP_KEYS or name.startswith("."):
             continue
-        merged = _merge_job(name, raw_by_name)
+        replacement_allowed = _script_replacement_ancestry_complete(
+            name, raw_by_name, memo=replacement_memo
+        )
+        merged = _merge_job(
+            name,
+            raw_by_name,
+            allow_script_replacement=replacement_allowed,
+        ).leaves
         # Overlay the top-level variables cascade UNDER the job's own /
         # inherited variables (job-level wins), so a sink in an inherited
         # script can still see a top-level tainted cascade var.
