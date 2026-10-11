@@ -11,6 +11,9 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 ## [Unreleased]
 
 ### Added
+- Local workflow/action input tracing now follows declared job outputs through
+  direct `needs` dependencies. Evidence quotes the output declaration and retains
+  review status when its writer, execution, or propagation is unresolved.
 - `XF-GH-005` and `XF-GH-006`: invocation-specific input-flow analysis through
   local reusable workflows and composite actions, including mixed call chains.
   Findings preserve source, hop and sink evidence and mark unresolved execution
@@ -31,6 +34,11 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- Cross-workflow cache warnings now check the owning job, event, access mode,
+  ref isolation, and lookup-only behavior. Primary-key prefix matches are included.
+  Package/build cache names indicate potential impact and require review; they
+  do not prove saved attacker content or execution. Reusable cache ceilings and
+  provider/version-dependent behavior remain unresolved.
 - Jenkins installer warnings now require executable shell commands and live PR
   context, with command-local `--ignore-scripts` handling. Declarative agent labels
   are distinguished from unrestricted scripted nodes, and pipeline cleanup checks

@@ -19,7 +19,12 @@ from .parsers.gha_expr import ExprSyntaxError, iter_expression_bodies, result_pr
 from .parsers.shell_words import shell_words_with_expansion
 from .parsers.structural import Event, EventKind, triggers, walk_workflow
 from .path_safety import is_within_repo
-from .taint import _TAINTED_IN_EXPR_RE, _shell_quote_context_at, _sink_is_bare_assignment
+from .taint import (
+    _TAINTED_IN_EXPR_RE,
+    _shell_quote_context_at,
+    _sink_is_bare_assignment,
+    analyze_job_outputs,
+)
 from .taint import analyze as analyze_taint
 from .workflow_corpus import CorpusEvidence, WorkflowCorpus
 
@@ -31,7 +36,9 @@ _MAX_BYTES = 400_000
 _MAX_FLOWS = 8192
 _MAX_BINDINGS = 16_384
 _INPUT = re.compile(r"inputs\.([a-z_][a-z0-9_-]*)\Z", re.I)
-_FALLBACK_PATH = re.compile(r"(?:inputs\.[\w-]+|github(?:\.[\w-]+)+)", re.I)
+_NEEDS = re.compile(r"needs\.([a-z_][a-z0-9_-]*)\.outputs\.([a-z_][a-z0-9_-]*)\Z", re.I)
+_STEP_OUTPUT = re.compile(r"steps\.([a-z_][a-z0-9_-]*)\.outputs\.([a-z_][a-z0-9_-]*)\Z", re.I)
+_FALLBACK_PATH = re.compile(r"(?:inputs\.[\w-]+|needs(?:\.[\w-]+)+|github(?:\.[\w-]+)+)", re.I)
 
 
 class LocalGraphLimitError(ValueError):
@@ -104,6 +111,7 @@ class _Value:
     hops: tuple[tuple[str, int, str], ...]
     arguments: tuple[tuple[str, int, str], ...]
     notes: tuple[str, ...] = ()
+    propagation: tuple[tuple[str, int, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -480,6 +488,248 @@ class _Document:
             }
             yield owner, leaf, kind, args
 
+    def needs(self, consumer: str, producer: str) -> bool:
+        """Only explicit direct dependencies supply the needs context."""
+        path = ("jobs", consumer, "needs")
+        if self.value(path) == producer:
+            return True
+        return any(
+            p[:-1] == path and isinstance(p[-1], int) and e.value == producer
+            for p, e in self.leaves.items()
+        )
+
+    def output_route(self, ref: str, owner: tuple[object, ...], event: str):
+        """Validate a symbolic solver witness in this invocation's context.
+
+        The solver deliberately includes influence-only facts. Reject boolean
+        results and unavailable contracts; retain uncertain writers explicitly
+        for review instead of promoting them to configured byte-flow proofs.
+        """
+        match = _NEEDS.fullmatch(ref)
+        if self.kind != "workflow" or not match or owner[:1] != ("jobs",):
+            return None
+        producer, output = match.groups()
+        if producer == owner[1] or not self.needs(str(owner[1]), producer):
+            return None
+        facts = analyze_job_outputs(self.content, self.content.splitlines())
+        bindings = {(b.job, b.name): b for b in facts.bindings}
+        binding = bindings.get((producer, output))
+        if binding is None:
+            return None
+        notes = list(self.notes)
+        visited: set[tuple[str, str]] = set()
+
+        def validate(job: str, name: str) -> bool:
+            key = (job, name)
+            if key in visited:
+                raise LocalGraphLimitError("Cyclic job-output provenance; coverage incomplete")
+            visited.add(key)
+            if len(visited) > _MAX_DEPTH:
+                raise LocalGraphLimitError("Job-output depth limit; coverage incomplete")
+            current = bindings.get(key)
+            if current is None:
+                return False
+            job_path = ("jobs", job)
+            if job_path not in self.keys:
+                return False
+            refs, unknown = _paths(current.declaration)
+            notes.extend(unknown)
+            if not refs and not unknown:
+                return False
+            if job_path + ("uses",) in self.keys or any(
+                p[:4] == job_path + ("strategy", "matrix") for p in self.keys
+            ):
+                notes.append(
+                    f"Output producer {job} uses a reusable workflow or matrix; writer selection is unresolved."
+                )
+            for path in refs:
+                if upstream := _NEEDS.fullmatch(path):
+                    parent, parent_name = upstream.groups()
+                    if (
+                        parent == job
+                        or not self.needs(job, parent)
+                        or not validate(parent, parent_name)
+                    ):
+                        return False
+                elif step := _STEP_OUTPUT.fullmatch(path):
+                    step_id, output_name = step.groups()
+                    owners = [
+                        p[:-1]
+                        for p, e in self.leaves.items()
+                        if p[:3] == job_path + ("steps",) and p[-1] == "id" and e.value == step_id
+                    ]
+                    if not owners:
+                        return False
+                    writers = [
+                        w
+                        for w in facts.writers
+                        if w.job == job and w.step_id == step_id and w.name == output_name
+                    ]
+                    if len(owners) != 1 or len(writers) != 1:
+                        notes.append(
+                            f"Output {job}.{step_id}.{output_name} has multiple or unsupported writers; binding state is unresolved."
+                        )
+                    for step_owner in owners:
+                        run = self.leaves.get(step_owner + ("run",))
+                        if run is None:
+                            notes.append(
+                                f"Output writer {job}.{step_id} is an action with an unresolved output contract."
+                            )
+                            continue
+                        shell = (
+                            self.value(step_owner + ("shell",))
+                            or self.value(job_path + ("defaults", "run", "shell"))
+                            or self.value(("defaults", "run", "shell"))
+                        )
+                        runner = self.value(job_path + ("runs-on",)) or ""
+                        if shell not in {"bash", "sh"} and not (
+                            shell is None and runner.startswith(("ubuntu-", "macos-"))
+                        ):
+                            notes.append(
+                                f"Output writer shell at {self.file}:{run.line} is unresolved."
+                            )
+                        text = run.value or ""
+                        for statement in text.splitlines():
+                            words = shell_words_with_expansion(
+                                statement, re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^}]+\})")
+                            )
+                            if words and (words[0][0] != "echo" or any(sep for _, _, sep in words)):
+                                notes.append(
+                                    f"Output writer script at {self.file}:{run.line} contains commands outside the simple echo profile; binding state is unresolved."
+                                )
+                        step_writers = [
+                            w
+                            for w in facts.writers
+                            if w.job == job and w.step_index == step_owner[-1]
+                        ]
+                        target_mentions = len(re.findall(r"GITHUB_OUTPUT|::set-output\b", text))
+                        if target_mentions != len(step_writers):
+                            notes.append(
+                                f"Output writer script at {self.file}:{run.line} has unmodeled output mutations; binding state is unresolved."
+                            )
+                        if re.search(
+                            r"(?:^|[;\n])\s*(?:if|for|while|until|case|function)\b|&&|\|\||\w+\s*\(\)\s*\{",
+                            text,
+                        ):
+                            notes.append(
+                                f"Output writer command control at {self.file}:{run.line} requires review."
+                            )
+                        if re.search(r"\$\(|`|\$\{[A-Za-z_][A-Za-z0-9_]*[:/%#?+-]", text):
+                            notes.append(
+                                f"Output writer transformation at {self.file}:{run.line} requires review."
+                            )
+                        for writer in writers:
+                            statement = next(
+                                (
+                                    t
+                                    for n, t in run.block_lines or ((run.line, text),)
+                                    if n == writer.line
+                                ),
+                                "",
+                            )
+                            simple_write = (
+                                r"echo\s+(?P<quote>['\"]?)"
+                                + re.escape(writer.name + "=" + writer.value)
+                                + r"(?P=quote)\s*>>\s*(?P<target_quote>\"?)\$(?:GITHUB_OUTPUT|\{GITHUB_OUTPUT\})(?P=target_quote)\s*(?:#.*)?"
+                            )
+                            if not re.fullmatch(simple_write, statement.strip()):
+                                notes.append(
+                                    f"Output write at {self.file}:{writer.line} is outside the direct echo/redirect profile; exact writer execution is unresolved."
+                                )
+                            writer_refs, writer_unknown = _paths(writer.value)
+                            notes.extend(writer_unknown)
+                            if (
+                                "${{" in writer.value
+                                and not writer_refs
+                                and not writer_unknown
+                                and not re.search(r"\$(?:[A-Za-z_]|\{[A-Za-z_])", writer.value)
+                            ):
+                                return False
+                            prior = "\n".join(
+                                t
+                                for n, t in run.block_lines or ((run.line, text),)
+                                if n <= writer.line
+                            )
+                            if re.search(
+                                r"(?:^|[;\s])(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=", prior
+                            ):
+                                notes.append(
+                                    f"Shell-local assignments before output write at {self.file}:{writer.line} require binding-state review."
+                                )
+                elif path != current.source_expr.lower() and not path.startswith("env."):
+                    notes.append(f"Output expression {path} requires value-provenance review.")
+            visited.remove(key)
+            return True
+
+        if not validate(producer, output):
+            return None
+        # Every expression-bearing source/bridge must carry result values,
+        # rather than merely mention a source in a comparison or predicate.
+        source_found = False
+        for hop in binding.hops:
+            line = hop.line
+            if hop.kind == "step_output":
+                # Values are checked above against the exact output write;
+                # another expression in this run scalar cannot donate bytes.
+                leaves = []
+                for writer in facts.writers:
+                    if writer.line == line and f"{writer.step_id}.{writer.name}" == hop.name:
+                        writer_refs, _ = _paths(writer.value)
+                        if binding.source_expr.lower() in writer_refs:
+                            source_found = True
+                continue
+            leaves = [
+                e
+                for p, e in self.leaves.items()
+                if e.line == line
+                and (
+                    (
+                        hop.kind in {"env_static", "env_indirect"}
+                        and p[-1] == hop.name
+                        and "env" in p
+                    )
+                    or (
+                        hop.kind == "job_output"
+                        and len(p) == 4
+                        and p[:1] == ("jobs",)
+                        and p[2] == "outputs"
+                        and f"{p[1]}.{p[3]}" == hop.name
+                    )
+                )
+            ]
+            if not leaves and hop.kind not in {"env_static", "env_indirect", "job_output"}:
+                notes.append(
+                    f"Propagation {hop.kind} at {self.file}:{line} requires value-state review."
+                )
+            for leaf in leaves:
+                value = leaf.value or ""
+                refs, unknown = _paths(value)
+                notes.extend(unknown)
+                if line == binding.source_line and binding.source_expr.lower() in refs:
+                    source_found = True
+                if "${{" in value and not refs and not unknown:
+                    return None
+        if not source_found:
+            notes.append(
+                f"Source result provenance at {self.file}:{binding.source_line} is unresolved."
+            )
+        allowed, guards = self.provenance_guards(
+            [binding.source_line, *(hop.line for hop in binding.hops)], event
+        )
+        if not allowed:
+            return None
+        notes.extend(guards)
+        if any(
+            re.search(r"\b(?:BASH_ENV|ENV|BASH_FUNC_[A-Za-z0-9_]*)\b", str(p[-1]))
+            for p in self.leaves
+            if "env" in p
+        ):
+            notes.append(
+                "Shell startup environment may alter output writers; execution requires review."
+            )
+        propagation = tuple((self.file, hop.line, hop.kind, hop.detail) for hop in binding.hops)
+        return binding, tuple(dict.fromkeys(notes)), propagation
+
     def runs(self):
         for path, leaf in self.leaves.items():
             if path[-1] == "run" and (owner := self.owner(path)) is not None and len(owner) > 2:
@@ -711,7 +961,7 @@ def find_local_flows(corpus: WorkflowCorpus) -> list[LocalFlow]:
                         value.arguments,
                         reasons,
                         event,
-                        sink.propagation,
+                        value.propagation + sink.propagation,
                         impact,
                     )
                 )
@@ -792,6 +1042,49 @@ def find_local_flows(corpus: WorkflowCorpus) -> list[LocalFlow]:
                                     value.hops + ((doc.file, call.line, ref),),
                                     value.arguments + ((doc.file, arg.line, name),),
                                     value.notes + call_notes + unknown + contract_notes,
+                                    value.propagation,
+                                ),
+                            )
+                    elif _NEEDS.fullmatch(ref):
+                        route = doc.output_route(ref, owner, event)
+                        if route is None:
+                            continue
+                        output, output_notes, propagation = route
+                        source = output.source_expr.lower()
+                        source_values: list[_Value] = []
+                        if _TAINTED_IN_EXPR_RE.fullmatch(source):
+                            available = _available(source, event)
+                            if available is False:
+                                continue
+                            reason = (
+                                ()
+                                if available is True
+                                else (
+                                    "Source availability for the originating event is unresolved.",
+                                )
+                            )
+                            source_values = [
+                                _Value(source, doc.file, output.source_line, trail, (), reason)
+                            ]
+                        elif symbolic := _INPUT.fullmatch(source):
+                            source_values = inputs.get(symbolic[1].lower(), [])
+                        for value in source_values:
+                            bind(
+                                name,
+                                _Value(
+                                    value.source,
+                                    value.file,
+                                    value.line,
+                                    value.hops + ((doc.file, call.line, ref),),
+                                    value.arguments + ((doc.file, arg.line, name),),
+                                    value.notes
+                                    + call_notes
+                                    + unknown
+                                    + contract_notes
+                                    + output_notes,
+                                    value.propagation
+                                    + propagation
+                                    + ((doc.file, arg.line, "needs_ref", ref),),
                                 ),
                             )
             # Traverse untainted calls as well: a nested workflow/action may
