@@ -58,6 +58,16 @@ the budget. The fallback retains the existing raw consumer limitations,
 including first-writer inheritance misses; it does not resolve unknown YAML.
 Merge lists and `extends` array replacement are outside this change.
 
+The inheritance resolver applies whole-value replacement only to the
+`script`, `before_script`, and `after_script` roots. It requires a complete,
+unambiguous effective view across the target's full `extends` ancestry and a
+structurally observed explicit root; empty and null roots are supported when
+their mapping key is directly visible. Missing parents, cycles, depth limits,
+same-name jobs accumulated from multiple files, incomplete views, and shell
+roots containing `!reference` retain the legacy leaf merge for the entire
+target ancestry. Empty roots hidden inside whole-job anchor replay are not
+proved. `variables` and other roots keep their existing merge behavior.
+
 ## Supported features
 
 Each supported feature has at least one named test in
