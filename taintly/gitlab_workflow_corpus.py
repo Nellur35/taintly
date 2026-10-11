@@ -33,7 +33,8 @@ exposes per-file:
     that lack a 40-char SHA ref.  Used by CHAIN-GL-102.
 
 Design constraints:
-  * Pure-Python regex extraction — no PyYAML dep (zero-dep design).
+  * Pure-Python extraction uses the structural reader for local include
+    paths and bounded regex summaries for the remaining fields; no PyYAML.
   * Idempotent: extractors return value objects, no side-effects.
   * Bounded recursion (max depth, max files) to handle pathological
     ``include`` cycles safely.
@@ -53,6 +54,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .models import _MAX_SAFE_TEXT_LEN
+from .parsers.structural import EventKind, walk_workflow
+from .parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
+from .path_safety import is_within_repo, resolve_local_include
 from .workflow_corpus import TriggerFamily
 
 # ---------------------------------------------------------------------------
@@ -308,7 +312,7 @@ def _locate_entry_file(repo_path: str) -> str | None:
         os.path.join(repo_path, ".gitlab-ci.yml"),
         os.path.join(repo_path, ".gitlab", ".gitlab-ci.yml"),
     ):
-        if os.path.isfile(candidate):
+        if os.path.isfile(candidate) and is_within_repo(repo_path, candidate):
             return candidate
     return None
 
@@ -355,12 +359,9 @@ def _walk_includes(
     # relative to the project root"), NOT relative to the including
     # file's directory.
     for target in _extract_local_include_paths(content):
-        # The leading "/" in `include: local: /ci/foo.yml` is rooted
-        # at the project root; lstrip it so os.path.join doesn't treat
-        # it as an absolute path on POSIX.
-        rel = target.lstrip("/")
-        sub = os.path.join(corpus.repo_path, rel)
-        if os.path.isfile(sub):
+        # The shared resolver handles root-relative syntax, globs, and
+        # real-path containment before this reader opens a target.
+        for sub in resolve_local_include(corpus.repo_path, target, expand_globs=True):
             _walk_includes(corpus, sub, depth=depth + 1)
 
 
@@ -368,17 +369,13 @@ def _walk_includes(
 # Include extraction — local vs cross-project
 # ---------------------------------------------------------------------------
 
-# A bare-string local include: `include: 'local-file.yml'` OR
-# `include: ['a.yml', 'b.yml']` OR a list of strings at top level.
-# Cross-project / remote / template / component all use the BLOCK form
-# (a mapping under the include item) so they're not matched by these
-# string regexes.
-_INCLUDE_STRING_LINE_RE = re.compile(
-    r"^\s*(?:-\s*)?include\s*:\s*(?P<rest>.+)$",
-)
+# Root-level include blocks are isolated before parsing so an unrelated
+# unsupported YAML feature elsewhere in the file cannot hide local includes.
+_ROOT_INCLUDE_LINE_RE = re.compile(r"^(?:include|'include'|\"include\")\s*:")
+_ROOT_KEY_LINE_RE = re.compile(r"^(?:[A-Za-z_$][A-Za-z0-9_.-]*|\"[^\"]+\"|'[^']+')\s*:")
+_DOCUMENT_BOUNDARY_LINE_RE = re.compile(r"^(?:---|\.\.\.)(?:\s+#.*)?\s*$")
 
-# A `local:` key inside a block include item.
-_LOCAL_KEY_RE = re.compile(r"^\s*local\s*:\s*['\"]?(?P<value>[^\s'\"#]+)['\"]?\s*(?:#.*)?$")
+_LOCAL_INCLUDE_PROVIDER_KEYS = frozenset({"project", "remote", "template", "component"})
 
 # Cross-project / remote / template / component keys inside a block
 # include item.  Each one shifts the include's kind classification.
@@ -397,69 +394,153 @@ _SHA40_RE = re.compile(r"^[a-f0-9]{40}$")
 
 
 def _extract_local_include_paths(content: str) -> list[str]:
-    """Return a list of repo-relative file paths from ``include: local:``
-    entries — both the inline-string shape and the block-mapping shape.
+    """Extract direct local include values from the first root include block.
 
-    Used by the include walker; the cross-project /
-    remote / template / component refs are captured separately by
-    :func:`_extract_cross_project_includes`.
+    Accepted values are a bare include scalar, a bare scalar item in the
+    include list, or a direct ``local:`` field on an include mapping. Nested
+    values such as a project include's ``file: [..]`` are not local paths.
+    Duplicate root include keys are invalid/unsupported. Cross-project refs
+    are captured separately by :func:`_extract_cross_project_includes`.
     """
-    out: list[str] = []
     lines = content.splitlines()
-    # Find the top-level `include:` key (indent 0) and walk its
-    # children.  Bare `include: ./file.yml` on one line is the inline-
-    # string shape; block items follow under a list.
-    in_include_block = False
-    for line in lines:
-        stripped = line.lstrip()
-        if not stripped or stripped.startswith("#"):
+    for start, line in enumerate(lines):
+        if _ROOT_INCLUDE_LINE_RE.match(line):
+            end = _include_block_end(lines, start)
+            block = "\n".join(lines[start:end])
+            return _local_paths_from_include_block(block) if block else []
+    return []
+
+
+def _include_block_end(lines: list[str], start: int) -> int:
+    """Find the exclusive line bound of one root ``include`` block.
+
+    Flow tokens keep keys inside multiline collections from looking like
+    sibling root keys. The tokenizer skips document markers, so raw lines are
+    checked only across gaps in its token stream.
+    """
+    flow_closers: list[TokenKind] = []
+    suffix = "\n".join(lines[start:])
+    last_line = 1
+    current_token_line = 0
+    line_has_root_dash = False
+
+    def document_boundary(first: int, last: int) -> int | None:
+        for suffix_line in range(first, last + 1):
+            source_index = start + suffix_line - 1
+            if source_index < len(lines) and _DOCUMENT_BOUNDARY_LINE_RE.match(lines[source_index]):
+                return source_index
+        return None
+
+    try:
+        for token in tokenize(suffix):
+            boundary = document_boundary(last_line + 1, token.line - 1)
+            if boundary is not None:
+                # A separator inside an open flow is invalid YAML. End the
+                # isolated slice there so a later document cannot be treated
+                # as a continuation of this include.
+                return boundary
+            if token.line != current_token_line:
+                current_token_line = token.line
+                line_has_root_dash = False
+            if token.kind is TokenKind.SEQUENCE_DASH and token.indent == 0:
+                line_has_root_dash = True
+            if (
+                token.line > 1
+                and token.kind is TokenKind.KEY
+                and token.indent == 0
+                and not flow_closers
+                and not line_has_root_dash
+            ):
+                return start + token.line - 1
+            if token.kind is TokenKind.FLOW_OPEN_SEQ:
+                flow_closers.append(TokenKind.FLOW_CLOSE_SEQ)
+            elif token.kind is TokenKind.FLOW_OPEN_MAP:
+                flow_closers.append(TokenKind.FLOW_CLOSE_MAP)
+            elif token.kind in (TokenKind.FLOW_CLOSE_SEQ, TokenKind.FLOW_CLOSE_MAP):
+                if flow_closers and flow_closers[-1] is token.kind:
+                    flow_closers.pop()
+            last_line = max(last_line, token.line)
+    except TokenizerError as exc:
+        boundary = document_boundary(last_line + 1, exc.line - 1)
+        if boundary is not None:
+            return boundary
+        source_index = start + exc.line - 1
+        if (
+            not flow_closers
+            and source_index > start
+            and source_index < len(lines)
+            and _ROOT_KEY_LINE_RE.match(lines[source_index])
+        ):
+            return source_index
+
+    boundary = document_boundary(last_line + 1, len(lines) - start)
+    return len(lines) if boundary is None else boundary
+
+
+def _local_paths_from_include_block(block: str) -> list[str]:
+    """Extract direct local/bare include scalars from an isolated block."""
+    events = list(
+        walk_workflow(
+            ".gitlab-ci.yml",
+            schema="gitlab_ci",
+            content=block,
+            include_keys=True,
+        )
+    )
+    providers: dict[int | None, set[str]] = {}
+    local_key_counts: dict[int | None, int] = {}
+
+    def direct_item(path: tuple[object, ...]) -> tuple[bool, int | None]:
+        if path and path[0] == "include":
+            if len(path) == 2 and isinstance(path[1], str):
+                return True, None
+            if len(path) == 3 and isinstance(path[1], int) and isinstance(path[2], str):
+                return True, path[1]
+        return False, None
+
+    for event in events:
+        if event.kind is not EventKind.MAP_KEY or event.value_kind == "merge_key":
             continue
-        indent = len(line) - len(stripped)
-        if indent == 0 and re.match(r"^include\s*:\s*(.*)$", line):
-            m = re.match(r"^include\s*:\s*(?P<rest>.*)$", line)
-            assert m is not None  # nosec B101
-            rest = m.group("rest").strip()
-            if rest and not rest.startswith("#"):
-                # Inline string: `include: 'file.yml'` (uncommon).
-                # Filter to local-looking strings — relative paths
-                # without a URL scheme and not bare keywords.
-                inline = rest.strip("'\"").strip()
-                if inline and "://" not in inline and not inline.startswith("["):
-                    out.append(inline)
-                # `include: ['a.yml', 'b.yml']` — flow-list of strings.
-                if inline.startswith("["):
-                    inside = inline.strip("[]")
-                    for tok in inside.split(","):
-                        s = tok.strip().strip("'\"")
-                        if s and "://" not in s:
-                            out.append(s)
-            in_include_block = True
+        if not event.path or event.path[0] != "include" or not isinstance(event.value, str):
             continue
-        if in_include_block:
-            if indent == 0:
-                in_include_block = False
+        is_direct, item = direct_item(event.path)
+        if not is_direct:
+            continue
+        if event.value == "local":
+            local_key_counts[item] = local_key_counts.get(item, 0) + 1
+        elif event.value in _LOCAL_INCLUDE_PROVIDER_KEYS:
+            providers.setdefault(item, set()).add(event.value)
+
+    paths: list[str] = []
+    for event in events:
+        if event.kind is not EventKind.LEAF_SCALAR or event.value is None:
+            continue
+        path = event.path
+        if path == ("include",):
+            item = None
+        elif len(path) == 2 and path[0] == "include" and isinstance(path[1], int):
+            item = path[1]
+        elif (
+            len(path) == 3
+            and path[0] == "include"
+            and isinstance(path[1], int)
+            and path[2] == "local"
+        ):
+            item = path[1]
+            if local_key_counts.get(item, 0) != 1:
                 continue
-            # Look for `- local: ...` shorthand and `local: ...` inside
-            # a block item.  Either way we extract the value.
-            m_local = _LOCAL_KEY_RE.match(line) or re.match(
-                r"^\s*-\s*local\s*:\s*['\"]?(?P<value>[^\s'\"#]+)['\"]?\s*(?:#.*)?$",
-                line,
-            )
-            if m_local:
-                out.append(m_local.group("value"))
+        elif path == ("include", "local"):
+            item = None
+            if local_key_counts.get(item, 0) != 1:
                 continue
-            # Shorthand: a bare `- "path/to/file.yml"` list item directly
-            # under `include:` is treated as a local include per the
-            # GitLab docs.
-            m_bare = re.match(
-                r"^\s*-\s*['\"]?(?P<value>[^\s'\"#:]+\.ya?ml)['\"]?\s*(?:#.*)?$", line
-            )
-            if m_bare:
-                val = m_bare.group("value")
-                if "://" not in val:
-                    out.append(val)
-                continue
-    return out
+        else:
+            continue
+        if providers.get(item):
+            continue
+        value = event.value.strip()
+        if value and "://" not in value:
+            paths.append(value)
+    return paths
 
 
 def _extract_cross_project_includes(filepath: str, content: str) -> list[GitLabIncludeRef]:
