@@ -19,9 +19,10 @@ composer's output).
 Initial three rules (all conjunctive; the join is what the engine
 layer can't do):
 
-* CHAIN-GH-101 — SEC4-GH-005 + fork-reachable + write-token =
-  CRITICAL. The actions/checkout step persists a write-capable
-  GITHUB_TOKEN onto a runner that any fork PR can execute code on.
+* CHAIN-GH-101 — SEC4-GH-005 + fork-reachable + an externally-triggered
+  event that retains write-token scope + write-token = CRITICAL. The
+  actions/checkout step persists a write-capable GITHUB_TOKEN onto a
+  runner that can execute attacker-influenced code.
 * CHAIN-GH-102 — SEC3-GH-001 + fork-reachable = HIGH. An unpinned
   third-party action in a workflow attackers can fire; a single
   upstream compromise → arbitrary code in the fork-reachable job.
@@ -59,7 +60,7 @@ if TYPE_CHECKING:
 
 
 def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
-    """SEC4-GH-005 + fork-reachable + write-token → CRITICAL.
+    """SEC4-GH-005 + fork-reachable + retained external write scope → CRITICAL.
 
     The pwn-request shape, derived from existing finding output rather
     than re-detected from YAML. Anchors at the SEC4-GH-005 finding's
@@ -75,6 +76,16 @@ def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
     noise the May-17 SEC4-GH-005 precision tune eliminated.  The
     composer's input set is intentionally limited to confirmed-
     consumer findings (SEC4-GH-005 only).
+
+    Trigger eligibility follows GitHub's default public-repository
+    GITHUB_TOKEN model: a fork-originated ``pull_request`` run is downgraded
+    to read-only, even when the workflow also has a trusted ``push`` trigger
+    or declares write permissions. ``pull_request_target``, ``issue_comment``,
+    and ``workflow_run`` with an external parent retain write scope. Unresolved
+    workflow_run parents remain conservatively eligible. Static YAML cannot
+    determine private-repository settings that grant fork PR write tokens, nor
+    whether checkout uses a custom PAT; this chain specifically describes the
+    GITHUB_TOKEN and does not infer those repository-level overrides.
     """
     for f in findings_by_rule(db, "SEC4-GH-005"):
         if not f.job:
@@ -83,6 +94,8 @@ def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
         if ctx is None:
             continue
         if not ctx.fork_reachable:
+            continue
+        if not ctx.external_privileged:
             continue
         if not ctx.has_write_token:
             continue
@@ -679,10 +692,18 @@ RULES: list[Rule] = [
             "CHAIN-GH-101 composes three findings/contexts: "
             "(1) SEC4-GH-005 fires on an actions/checkout step that "
             "doesn't set `persist-credentials: false`; "
-            "(2) the workflow's trigger is fork-reachable "
-            "(`pull_request`, `pull_request_target`, `issue_comment`, "
-            "`workflow_run`, ...); "
-            "(3) the job holds a write-capable GITHUB_TOKEN.\n\n"
+            "(2) an external trigger can start the job with retained "
+            "write scope (`pull_request_target`, `issue_comment`, or "
+            "`workflow_run` whose named parent is externally reachable); "
+            "and (3) the job holds a write-capable GITHUB_TOKEN. A plain "
+            "`pull_request` run is downgraded to read-only by default, and "
+            "adding a trusted `push` trigger does not upgrade that PR run.\n\n"
+            "This uses GitHub's default public-repository token policy. "
+            "Static workflow YAML cannot identify private-repository settings "
+            "that grant fork PRs write tokens or prove that checkout receives "
+            "a custom PAT; custom credentials are outside this GITHUB_TOKEN "
+            "chain. An unresolved workflow_run parent remains conservatively "
+            "eligible.\n\n"
             "Individually each is MEDIUM/HIGH at most; combined, an "
             "external PR can execute code with the persisted "
             "write-token — the canonical pwn-request RCE shape."
