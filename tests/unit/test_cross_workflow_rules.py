@@ -41,7 +41,7 @@ def test_xf_gh_001_fires_on_fork_write_privileged_restore_key_match(tmp_path: Pa
     fork = _write_workflow(
         tmp_path,
         "pr.yml",
-        "on: pull_request\n"
+        "on: pull_request_target\ncache-mode: write\n"
         "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
         "      - uses: actions/cache@v3\n"
         "        with:\n"
@@ -107,7 +107,7 @@ def test_xf_gh_001_does_not_fire_when_prefixes_disjoint(tmp_path: Path) -> None:
     _write_workflow(
         tmp_path,
         "pr.yml",
-        "on: pull_request\n"
+        "on: pull_request_target\ncache-mode: write\n"
         "jobs:\n  b:\n    steps:\n"
         "      - uses: actions/cache@v3\n"
         "        with:\n          key: pr-build-${{ github.sha }}\n",
@@ -125,22 +125,8 @@ def test_xf_gh_001_does_not_fire_when_prefixes_disjoint(tmp_path: Path) -> None:
     assert _xf_findings(tmp_path, "XF-GH-001") == []
 
 
-def test_xf_gh_001_fires_on_dual_trigger_workflow(tmp_path: Path) -> None:
-    """The dominant real-world cache-poisoning shape: ONE workflow
-    file `on: [push, pull_request]` runs on both trigger types and
-    shares the cache namespace.  The PR-event run writes, the
-    push-event run reads — the rule MUST fire on this case.
-
-    Adnan Khan (2024) documents this as the primary cache-poisoning
-    pattern.  An earlier version of this rule wrongly skipped
-    dual-trigger workflows; the wild scan against flask, transformers,
-    and openai-cookbook produced 0 hits exactly because of that
-    guard.  Removing the guard recovers all the real-world TPs.
-
-    The cache block carries ``restore-keys:`` because the practically
-    reachable cross-privilege poisoning chain depends on prefix-match
-    restoration — the rule's gate skips exact-match-only caches.
-    """
+def test_xf_gh_001_isolates_ordinary_pr_in_dual_trigger_workflow(tmp_path: Path) -> None:
+    """Ordinary PR writes remain merge-ref isolated even in a dual push/PR file."""
     wf = _write_workflow(
         tmp_path,
         "tests.yml",
@@ -153,8 +139,8 @@ def test_xf_gh_001_fires_on_dual_trigger_workflow(tmp_path: Path) -> None:
         "          path: ./.mypy_cache\n",
     )
     findings = _xf_findings(tmp_path, "XF-GH-001")
-    assert len(findings) == 1
-    assert findings[0].file == str(wf)
+    assert findings == []
+    assert wf.exists()
 
 
 def test_xf_gh_001_skips_template_at_start_of_restore_key(tmp_path: Path) -> None:
@@ -163,7 +149,7 @@ def test_xf_gh_001_skips_template_at_start_of_restore_key(tmp_path: Path) -> Non
     _write_workflow(
         tmp_path,
         "pr.yml",
-        "on: pull_request\n"
+        "on: pull_request_target\ncache-mode: write\n"
         "jobs:\n  b:\n    steps:\n"
         "      - uses: actions/cache@v3\n"
         "        with:\n          key: shared-${{ github.sha }}\n",
@@ -188,7 +174,7 @@ def test_xf_gh_001_fires_on_bare_actions_cache_in_privileged_path(tmp_path: Path
     _write_workflow(
         tmp_path,
         "pr.yml",
-        "on: pull_request\n"
+        "on: pull_request_target\ncache-mode: write\n"
         "jobs:\n  b:\n    steps:\n"
         "      - uses: actions/cache@v3\n"
         "        with:\n          key: linux-${{ github.sha }}\n",
@@ -214,7 +200,7 @@ def test_xf_gh_001_does_not_fire_on_save_only_in_privileged(tmp_path: Path) -> N
     _write_workflow(
         tmp_path,
         "pr.yml",
-        "on: pull_request\n"
+        "on: pull_request_target\ncache-mode: write\n"
         "jobs:\n  b:\n    steps:\n"
         "      - uses: actions/cache@v3\n"
         "        with:\n          key: linux-${{ github.sha }}\n",
@@ -233,10 +219,7 @@ def test_xf_gh_001_does_not_fire_on_save_only_in_privileged(tmp_path: Path) -> N
 def test_xf_gh_001_does_not_fire_when_privileged_cache_has_no_restore_keys(
     tmp_path: Path,
 ) -> None:
-    """Without ``restore-keys:``, GitHub requires an exact key match
-    on restoration — the prefix-overlap chain this rule detects is
-    not reachable, so no finding is emitted.
-    """
+    """Ordinary PR cache writes are isolated independently of restore-key presence."""
     _write_workflow(
         tmp_path,
         "pr.yml",
@@ -259,11 +242,7 @@ def test_xf_gh_001_does_not_fire_when_privileged_cache_has_no_restore_keys(
 def test_xf_gh_001_does_not_fire_when_privileged_key_is_per_ref_scoped(
     tmp_path: Path,
 ) -> None:
-    """Per-ref-scoped privileged-side keys (containing
-    ``${{ github.ref }}``) draw from a runtime namespace partitioned
-    by ref — the fork PR's writes land in a different keyspace and
-    cannot overlap.
-    """
+    """Ordinary PR merge-ref isolation holds even with broad fallback keys; a ref-bearing key alone is not a general protection."""
     _write_workflow(
         tmp_path,
         "pr.yml",
@@ -288,10 +267,7 @@ def test_xf_gh_001_does_not_fire_when_privileged_key_is_per_ref_scoped(
 def test_xf_gh_001_does_not_fire_when_fork_write_is_per_ref_scoped(
     tmp_path: Path,
 ) -> None:
-    """Per-ref-scoped fork-side writes (key embeds
-    ``${{ github.ref }}``) cannot poison main's namespace — the
-    runtime keyspace is partitioned per-ref.
-    """
+    """Ordinary PR merge-ref writes cannot poison push caches; target-event ref-bearing keys are covered separately."""
     _write_workflow(
         tmp_path,
         "pr.yml",
@@ -313,20 +289,294 @@ def test_xf_gh_001_does_not_fire_when_fork_write_is_per_ref_scoped(
     assert _xf_findings(tmp_path, "XF-GH-001") == []
 
 
+def test_xf_gh_001_does_not_fire_when_fork_write_is_main_gated(
+    tmp_path: Path,
+) -> None:
+    """Original push/ordinary-PR shape remains quiet due to merge-ref isolation."""
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: [push, pull_request]\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: linux-build-\n"
+        "      - uses: actions/cache/save@v4\n"
+        "        if: github.ref == 'refs/heads/main'\n"
+        "        with:\n"
+        "          key: linux-build-${{ github.sha }}\n",
+    )
+    assert _xf_findings(tmp_path, "XF-GH-001") == []
+
+
+def test_xf_gh_001_still_fires_when_fork_write_save_is_ungated(
+    tmp_path: Path,
+) -> None:
+    """Explicit-write target-event cache candidate; cached byte control and execution still require review."""
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: [push, pull_request_target]\ncache-mode: write\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: linux-build-\n"
+        "      - uses: actions/cache/save@v4\n"
+        "        with:\n"
+        "          key: linux-build-${{ github.sha }}\n",
+    )
+    assert len(_xf_findings(tmp_path, "XF-GH-001")) == 1
+
+
+def test_xf_gh_001_does_not_fire_when_fork_write_gated_on_push_event(
+    tmp_path: Path,
+) -> None:
+    """``if: github.event_name == 'push'`` also restricts a write to a
+    privileged run — a fork PR is always a ``pull_request`` event.
+    """
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: [push, pull_request_target]\ncache-mode: write\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: linux-build-\n"
+        "      - uses: actions/cache/save@v4\n"
+        "        if: github.event_name == 'push'\n"
+        "        with:\n"
+        "          key: linux-build-${{ github.sha }}\n",
+    )
+    assert _xf_findings(tmp_path, "XF-GH-001") == []
+
+
+def test_xf_gh_001_honors_if_declared_before_uses(tmp_path: Path) -> None:
+    """The step ``if:`` may be declared before ``uses:`` (after a
+    ``- name:``) — the corpus extractor scans backward to the step
+    start to capture it.
+    """
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: [push, pull_request_target]\ncache-mode: write\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: linux-build-\n"
+        "      - name: save cache\n"
+        "        if: github.event_name == 'push'\n"
+        "        uses: actions/cache/save@v4\n"
+        "        with:\n"
+        "          key: linux-build-${{ github.sha }}\n",
+    )
+    assert _xf_findings(tmp_path, "XF-GH-001") == []
+
+
+def test_xf_gh_001_still_fires_when_main_gate_is_inside_a_disjunction(
+    tmp_path: Path,
+) -> None:
+    """Explicit-write target-event cache candidate; cached byte control and execution still require review."""
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: [push, pull_request_target]\ncache-mode: write\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: linux-build-\n"
+        "      - uses: actions/cache/save@v4\n"
+        "        if: \"github.event_name == 'pull_request_target' || "
+        "github.ref == 'refs/heads/main'\"\n"
+        "        with:\n"
+        "          key: linux-build-${{ github.sha }}\n",
+    )
+    assert len(_xf_findings(tmp_path, "XF-GH-001")) == 1
+
+
+def test_xf_gh_001_still_fires_when_ref_gate_is_negated(tmp_path: Path) -> None:
+    """Explicit-write target-event cache candidate; cached byte control and execution still require review."""
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: [push, pull_request_target]\ncache-mode: write\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: linux-build-\n"
+        "      - uses: actions/cache/save@v4\n"
+        "        if: \"!(github.ref == 'refs/heads/main')\"\n"
+        "        with:\n"
+        "          key: linux-build-${{ github.sha }}\n",
+    )
+    assert len(_xf_findings(tmp_path, "XF-GH-001")) == 1
+
+
+def test_xf_gh_001_still_fires_when_push_event_gate_is_negated(
+    tmp_path: Path,
+) -> None:
+    """Explicit-write target-event cache candidate; cached byte control and execution still require review."""
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: [push, pull_request_target]\ncache-mode: write\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: linux-build-\n"
+        "      - uses: actions/cache/save@v4\n"
+        "        if: \"! github.event_name == 'push'\"\n"
+        "        with:\n"
+        "          key: linux-build-${{ github.sha }}\n",
+    )
+    assert len(_xf_findings(tmp_path, "XF-GH-001")) == 1
+
+
+def test_xf_gh_001_does_not_inherit_prior_step_if_guard(tmp_path: Path) -> None:
+    """Explicit-write target-event cache candidate; cached byte control and execution still require review."""
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: [push, pull_request_target]\ncache-mode: write\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: linux-build-\n"
+        "      - uses: actions/setup-node@v4\n"
+        "        if: github.ref == 'refs/heads/main'\n"
+        "      - uses: actions/cache/save@v4\n"
+        "        with:\n"
+        "          key: linux-build-${{ github.sha }}\n",
+    )
+    assert len(_xf_findings(tmp_path, "XF-GH-001")) == 1
+
+
+def test_xf_gh_001_does_not_inherit_prior_dash_if_step(tmp_path: Path) -> None:
+    """Explicit-write target-event cache candidate; cached byte control and execution still require review."""
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: [push, pull_request_target]\ncache-mode: write\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: linux-build-\n"
+        "      - if: github.ref == 'refs/heads/main'\n"
+        "        run: echo prep\n"
+        "      - uses: actions/cache/save@v4\n"
+        "        with:\n"
+        "          key: linux-build-${{ github.sha }}\n",
+    )
+    assert len(_xf_findings(tmp_path, "XF-GH-001")) == 1
+
+
+def test_xf_gh_001_does_not_fire_when_fork_write_gated_on_ref_name(
+    tmp_path: Path,
+) -> None:
+    """Original ordinary-PR writes remain merge-ref isolated regardless of this ref-name guard."""
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: [push, pull_request]\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: linux-build-\n"
+        "      - uses: actions/cache/save@v4\n"
+        "        if: github.ref_name == 'main'\n"
+        "        with:\n"
+        "          key: linux-build-${{ github.sha }}\n",
+    )
+    assert _xf_findings(tmp_path, "XF-GH-001") == []
+
+
+def test_xf_gh_001_still_fires_with_top_level_or_and_precedence(
+    tmp_path: Path,
+) -> None:
+    """Explicit-write target-event cache candidate; cached byte control and execution still require review."""
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: [push, pull_request_target]\ncache-mode: write\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: linux-build-\n"
+        "      - uses: actions/cache/save@v4\n"
+        "        if: \"github.event_name == 'pull_request_target' || "
+        "runner.os == 'Linux' && github.ref == 'refs/heads/main'\"\n"
+        "        with:\n"
+        "          key: linux-build-${{ github.sha }}\n",
+    )
+    assert len(_xf_findings(tmp_path, "XF-GH-001")) == 1
+
+
+def test_xf_gh_001_still_fires_with_amp_inside_string_literal(
+    tmp_path: Path,
+) -> None:
+    """Explicit-write target-event cache candidate; cached byte control and execution still require review."""
+    _write_workflow(
+        tmp_path,
+        "ci.yml",
+        "on: [push, pull_request_target]\ncache-mode: write\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: linux-build-\n"
+        "      - uses: actions/cache/save@v4\n"
+        "        if: \"github.ref == 'refs/heads/main' && "
+        "contains(github.event.head_commit.message, 'a && b') || "
+        "github.event_name == 'pull_request_target'\"\n"
+        "        with:\n"
+        "          key: linux-build-${{ github.sha }}\n",
+    )
+    assert len(_xf_findings(tmp_path, "XF-GH-001")) == 1
+
+
 # ---------------------------------------------------------------------------
 # XF-GH-001A — Executable-content cache poisoning (HIGH split)
 # ---------------------------------------------------------------------------
 
 
+def test_xf_gh_001a_does_not_fire_on_deno_shaped_main_gated_cargo_cache(
+    tmp_path: Path,
+) -> None:
+    """Original Deno-shaped push/ordinary-PR cargo cache cannot share PR merge-ref saves with its push consumer."""
+    _write_workflow(
+        tmp_path,
+        "ci.generated.yml",
+        "on:\n  push:\n    branches: [main]\n  pull_request:\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/cache/restore@v4\n"
+        "        with:\n"
+        "          key: never_saved\n"
+        "          restore-keys: 112-cargo-home-linux-x86_64-\n"
+        "      - uses: actions/cache/save@v4\n"
+        "        if: \"!startsWith(github.ref, 'refs/tags/') && "
+        "github.ref == 'refs/heads/main'\"\n"
+        "        with:\n"
+        "          key: 112-cargo-home-linux-x86_64-${{ github.sha }}\n",
+    )
+    assert _xf_findings(tmp_path, "XF-GH-001A") == []
+
+
 def test_xf_gh_001a_fires_on_pnpm_store_cache(tmp_path: Path) -> None:
-    """`pnpm-store-` matches the executable-cache allowlist —
-    poisoning installs attacker-supplied package contents into the
-    privileged build.  HIGH severity, no review_needed.
-    """
+    """Explicit-write target-event cache candidate; cached byte control and execution still require review."""
     _write_workflow(
         tmp_path,
         "pr.yml",
-        "on: pull_request\n"
+        "on: pull_request_target\ncache-mode: write\n"
         "jobs:\n  b:\n    steps:\n"
         "      - uses: actions/cache@v3\n"
         "        with:\n          key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}\n",
@@ -345,8 +595,8 @@ def test_xf_gh_001a_fires_on_pnpm_store_cache(tmp_path: Path) -> None:
     generic_findings = _xf_findings(tmp_path, "XF-GH-001")
     assert len(a_findings) == 1
     assert a_findings[0].file == str(privileged)
-    assert "executable-content cache" in a_findings[0].snippet
-    assert a_findings[0].review_needed is False
+    assert "Cache query prefix" in a_findings[0].snippet
+    assert a_findings[0].review_needed is True
     # The same match must NOT also fire the generic rule —
     # the high-blast-radius case is routed exclusively to XF-GH-001A.
     assert generic_findings == []
@@ -356,7 +606,7 @@ def test_xf_gh_001a_fires_on_node_modules_cache(tmp_path: Path) -> None:
     _write_workflow(
         tmp_path,
         "pr.yml",
-        "on: pull_request\n"
+        "on: pull_request_target\ncache-mode: write\n"
         "jobs:\n  b:\n    steps:\n"
         "      - uses: actions/cache@v3\n"
         "        with:\n          key: linux-node_modules-${{ github.sha }}\n",
@@ -376,17 +626,11 @@ def test_xf_gh_001a_fires_on_node_modules_cache(tmp_path: Path) -> None:
 
 
 def test_xf_gh_001a_does_not_fire_on_generic_cache(tmp_path: Path) -> None:
-    """A `mypy|` prefix is not in the executable-cache allowlist —
-    XF-GH-001A stays silent; XF-GH-001 (generic) fires.
-
-    The cache block carries ``restore-keys:`` so the prefix-match
-    poisoning chain is reachable — without it the rule's gate would
-    skip the entry as exact-match-only.
-    """
+    """Explicit-write target-event cache candidate; cached byte control and execution still require review."""
     _write_workflow(
         tmp_path,
         "tests.yml",
-        "on: [push, pull_request]\n"
+        "on: [push, pull_request_target]\ncache-mode: write\n"
         "jobs:\n  b:\n    steps:\n"
         "      - uses: actions/cache@v3\n"
         "        with:\n"

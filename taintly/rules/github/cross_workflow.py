@@ -11,9 +11,8 @@ Rules in this module:
   * XF-GH-001  — Generic cache poisoning across privilege tiers
                  (MEDIUM, review_needed — exploit chain depends on
                  what the cache is used for).
-  * XF-GH-001A — Executable-content cache poisoning (HIGH, no
-                 review_needed — package-store / runtime-module
-                 caches restore executable code).
+  * XF-GH-001A — Package/build cache sharing (HIGH, review_needed;
+                 names indicate potential impact, not execution proof).
   * XF-GH-002  — Concurrency-cancel cross-workflow (LOW —
                  wild-scan-rare antipattern; kept as a defensive
                  lint).
@@ -38,11 +37,14 @@ could reference the old ID.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
+from taintly.cache_context import CacheSite, cache_sites
 from taintly.cross_workflow_facts import find_cross_file_taint
 from taintly.local_call_graph import flow_evidence
 from taintly.models import Platform, Rule, Severity
 from taintly.workflow_corpus import (
+    CorpusEvidence,
     CorpusFindings,
     CorpusPattern,
     TriggerFamily,
@@ -54,16 +56,9 @@ from taintly.workflow_corpus import (
 # XF-GH-001 — Cache poisoning across privilege tiers
 # ---------------------------------------------------------------------------
 
-# Cache-prefix patterns that restore EXECUTABLE CONTENT — package
-# stores, compiled toolchains, runtime modules.  Poisoning these
-# entries lets an attacker inject backdoored code into the next
-# privileged build that restores from the prefix.  Curated from the
-# wild scan of next.js (`pnpm-store-v2-`) and react
-# (`*-node_modules-v*-`); extend conservatively as the corpus grows.
-#
-# Match is case-insensitive substring against the cache prefix,
-# anchored with `-` separators where appropriate to avoid matching
-# arbitrary identifiers that happen to contain these tokens.
+# Names associated with package/build caches indicate potential impact only.
+# They do not establish saved content, attacker control or subsequent execution.
+# Retain the existing severity split with review required in both families.
 _HIGH_BLAST_RADIUS_CACHE_TOKENS: tuple[str, ...] = (
     "node_modules",
     "pnpm-store",
@@ -88,234 +83,222 @@ def _cache_prefix_is_high_blast_radius(prefix: str) -> bool:
     """Return True when the cache prefix names an executable-cache
     pattern (package store, compiled toolchain, runtime module dir).
 
-    Used to split XF-GH-001 findings into two severity tiers: HIGH
-    for executable caches (the wild-scan TPs in next.js / react),
-    MEDIUM-with-review for everything else (mypy / mkdocs / hypothesis
-    caches whose poisoning is theoretical).
+    HIGH means conditional package/build impact; both tiers require review.
     """
     p = prefix.lower()
     return any(tok in p for tok in _HIGH_BLAST_RADIUS_CACHE_TOKENS)
 
 
-def _key_is_per_ref_scoped(key: str) -> bool:
-    """Return True when the cache key embeds the workflow's ref so the
-    runtime cache namespace is partitioned per-ref.
+@dataclass(frozen=True)
+class _CacheMatch:
+    file: str
+    reader: CacheSite
+    prefix: str
+    writer_file: str
+    writer: CacheSite
+    writer_prefix: str
+    notes: tuple[str, ...]
 
-    GitHub's Actions cache namespace is per-repository, but a key that
-    embeds ``${{ github.ref }}`` (or ``github.ref_name``) writes and
-    reads under a ref-scoped subnamespace.  A fork PR's
-    ``github.ref`` resolves to ``refs/pull/N/merge``; a privileged
-    push's resolves to ``refs/heads/main`` (or similar).  The runtime
-    keyspaces never overlap, so prefix-match poisoning across the
-    fork→privileged boundary cannot happen even when the literal-
-    prefix portion of the key is identical on both sides.
 
-    Substring check on ``github.ref`` matches both ``github.ref`` and
-    ``github.ref_name``; no other GitHub Actions context expression
-    contains that token.
+def _collect_xf_gh_001_matches(corpus: WorkflowCorpus) -> list[_CacheMatch]:
+    """Join possible direct cache operations; never certify content execution.
+
+    Ordinary PR saves are merge-ref isolated from base/push readers. Other
+    external events require owning guards and access mode; unknown scope or
+    evaluated keys remain review evidence. Primary keys also prefix-match.
     """
-    return "github.ref" in key
-
-
-def _collect_xf_gh_001_matches(
-    corpus: WorkflowCorpus,
-) -> list[tuple[str, int, str, str, str, int]]:
-    """Return all cross-workflow cache-poisoning matches.
-
-    Each entry is ``(privileged_filepath, privileged_line, rk_prefix,
-    fork_filepath, fork_prefix, fork_line)``.  Callers split this list
-    by :func:`_cache_prefix_is_high_blast_radius` to assign severity.
-
-    Match rule (informal):
-
-      * WRITE-side candidates: every cache step (role in
-        {"write", "both"}) in any workflow whose trigger set includes
-        FORK_REACHABLE — including DUAL-TRIGGER workflows
-        (``on: [push, pull_request]``) which are the dominant
-        real-world shape.  The GitHub Actions cache namespace is
-        scoped per-repo, not per-trigger: a PR-event run and a
-        push-event run of the same workflow share state.
-      * READ-side candidates: every cache step (role in
-        {"read", "both"}) in any workflow whose trigger set
-        includes PRIVILEGED.  Same dual-trigger reasoning applies.
-      * Match: a privileged-read literal-prefix STARTS WITH a
-        fork-write literal-prefix → the privileged read will match
-        cache entries the fork-side write produced.
-
-    Per-(filepath, prefix) dedup so a single workflow with multiple
-    cache steps reading the same vulnerable prefix surfaces once.
-    """
-    matches: list[tuple[str, int, str, str, str, int]] = []
-
-    fork_writes: list[tuple[str, int, str]] = []
-    for w in corpus.by_trigger(TriggerFamily.FORK_REACHABLE):
-        for c in w.cache_keys:
-            if c.role not in ("write", "both") or not c.prefix:
+    writes: list[tuple[str, CacheSite, str, tuple[str, ...]]] = []
+    for workflow in corpus.by_trigger(TriggerFamily.FORK_REACHABLE):
+        for event in sorted(workflow.raw_event_names):
+            if event not in {
+                "pull_request_target",
+                "issue_comment",
+                "issues",
+                "discussion",
+                "discussion_comment",
+                "fork",
+                "watch",
+                "workflow_run",
+            }:
                 continue
-            # Per-ref-scoped fork writes land in a different runtime
-            # keyspace from privileged-side reads — they can't poison
-            # across the trigger boundary even when the literal prefix
-            # overlaps.
-            if _key_is_per_ref_scoped(c.key):
-                continue
-            fork_writes.append((w.filepath, c.line, c.prefix))
-
-    if not fork_writes:
-        return matches
-
-    seen: set[tuple[str, str]] = set()
-    for w in corpus.by_trigger(TriggerFamily.PRIVILEGED):
-        for c in w.cache_keys:
-            if c.role not in ("read", "both"):
-                continue
-            # Without ``restore-keys``, GitHub Actions requires an
-            # exact key match on restoration.  The cross-privilege
-            # cache-poisoning chain this rule detects relies on
-            # prefix-overlap matching, which is only available via
-            # ``restore-keys``.  Cache entries with no fallback keys
-            # are not the threat shape.
-            if not c.restore_keys:
-                continue
-            # Per-ref-scoped reads pull from a disjoint runtime
-            # namespace from any fork-side writes — even an identical
-            # literal prefix maps to a different evaluated key.
-            if _key_is_per_ref_scoped(c.key) or any(
-                _key_is_per_ref_scoped(rk) for rk in c.restore_keys
+            if (
+                event == "workflow_run"
+                and corpus.workflow_run_parent_fork_reachable(workflow) is False
             ):
                 continue
-            read_queries = [c.key, *list(c.restore_keys)]
-            fired = False
-            for rk in read_queries:
-                if fired:
-                    break
-                rk_prefix = _cache_key_prefix(rk)
-                if not rk_prefix:
+            for site in cache_sites(workflow):
+                if site.role not in {"write", "both"}:
                     continue
-                for fpath, fline, fprefix in fork_writes:
-                    if fprefix.startswith(rk_prefix):
-                        dedup_key = (w.filepath, rk_prefix)
-                        if dedup_key in seen:
-                            fired = True
-                            break
-                        seen.add(dedup_key)
-                        matches.append((w.filepath, c.line, rk_prefix, fpath, fprefix, fline))
-                        fired = True
+                allowed, notes = site.access(event, save=True)
+                prefix = _cache_key_prefix(site.key)
+                if allowed is not False and prefix:
+                    writes.append((workflow.filepath, site, prefix, notes))
+
+    matches: list[_CacheMatch] = []
+    writes.sort(
+        key=lambda item: (
+            not _cache_prefix_is_high_blast_radius(item[2]),
+            item[1].mode not in {"write", "write-only"},
+            item[0],
+            item[1].line,
+            item[3],
+        )
+    )
+    seen: set[tuple[str, int]] = set()
+    for workflow in corpus.all():
+        for event in sorted(
+            workflow.raw_event_names
+            & {
+                "push",
+                "release",
+                "deployment",
+                "deployment_status",
+                "registry_package",
+                "branch_protection_rule",
+                "create",
+                "delete",
+                "page_build",
+                "status",
+                "milestone",
+                "label",
+                "project",
+                "project_card",
+                "project_column",
+                "schedule",
+                "workflow_dispatch",
+                "repository_dispatch",
+                "workflow_run",
+            }
+        ):
+            for site in cache_sites(workflow):
+                if site.role not in {"read", "both"}:
+                    continue
+                allowed, reader_notes = site.access(event, save=False)
+                if allowed is False:
+                    continue
+                for query in (site.key, *site.restore_keys):
+                    prefix = _cache_key_prefix(query)
+                    if not prefix:
+                        continue
+                    for file, writer, writer_prefix, writer_notes in writes:
+                        # A dynamic writer suffix may complete a longer query prefix.
+                        overlap = writer_prefix.startswith(prefix) or (
+                            writer_prefix != writer.key and prefix.startswith(writer_prefix)
+                        )
+                        if not overlap or (workflow.filepath, site.line) in seen:
+                            continue
+                        seen.add((workflow.filepath, site.line))
+                        notes = (
+                            f"Writer: {file}:{writer.line}.",
+                            *writer_notes,
+                            f"Reader: {workflow.filepath}:{site.line}.",
+                            *reader_notes,
+                            "Representative matching writer/event evidence; other candidate paths may exist.",
+                            "Current GitHub.com cache policy profile; provider/version applicability must be verified.",
+                            "Evaluated keys, branch/default-ref compatibility, cache version (paths/compression), save success and restore selection remain unverified.",
+                            "External event reachability does not prove attacker control over cached files or downstream execution/authority. Reusable invocation cache ceilings are not resolved by this direct-job profile.",
+                        )
+                        matches.append(
+                            _CacheMatch(
+                                workflow.filepath, site, prefix, file, writer, writer_prefix, notes
+                            )
+                        )
                         break
     return matches
 
 
-def _xf_gh_001_callback(corpus: WorkflowCorpus) -> CorpusFindings:
-    """Cross-workflow cache poisoning — GENERIC (non-executable) caches.
+def _cache_evidence(match: _CacheMatch, executable_name: bool) -> CorpusEvidence:
+    title = (
+        "Possible package/build cache sharing needs poisoning review"
+        if executable_name
+        else "Possible cross-workflow cache sharing needs poisoning review"
+    )
+    return CorpusEvidence(
+        match.file,
+        match.reader.line,
+        f"Cache query prefix '{match.prefix}' may overlap saved prefix '{match.writer_prefix}' at {match.writer_file}:{match.writer.line}",
+        title,
+        f"Review cache save at {match.writer_file}:{match.writer.line} and restore at {match.file}:{match.reader.line}. "
+        "Keep externally triggered jobs read-only (cache-mode: read or none) where supported. "
+        "Verify branch scope, cache version, attacker control of saved paths and subsequent use before treating this as an exploit. "
+        "If sharing is required, separate trust domains in evaluated primary keys and every fallback; removing restore-keys alone does not prevent primary-key prefix matching. "
+        "If poisoning is verified, clear affected caches and assess exposed credentials/artifacts.",
+        True,
+        match.notes,
+        ("cache-sharing-review", "direct-cache-context"),
+        "Key overlap is a candidate, not proof of attacker-controlled restored or executed bytes.",
+    )
 
-    Fires on cache prefixes that don't match the executable-cache
-    allowlist (mypy / hypothesis / mkdocs / generic data caches).
-    Severity MEDIUM, ``review_needed=True`` — the threat is real but
-    the exploit chain depends on what the cache is used for.
-    Use XF-GH-001A for the executable-cache (HIGH-confidence) variant.
-    """
-    findings: CorpusFindings = []
-    for wf, wl, rk_prefix, fpath, fprefix, fline in _collect_xf_gh_001_matches(corpus):
-        if _cache_prefix_is_high_blast_radius(fprefix) or _cache_prefix_is_high_blast_radius(
-            rk_prefix
-        ):
-            continue  # Routed to XF-GH-001A.
-        snippet = (
-            f"restore-key '{rk_prefix}' matches fork-poisonable "
-            f"prefix '{fprefix}' from {fpath}:{fline}"
+
+def _xf_gh_001_callback(corpus: WorkflowCorpus) -> CorpusFindings:
+    return [
+        _cache_evidence(match, False)
+        for match in _collect_xf_gh_001_matches(corpus)
+        if not (
+            _cache_prefix_is_high_blast_radius(match.writer_prefix)
+            or _cache_prefix_is_high_blast_radius(match.prefix)
         )
-        findings.append((wf, wl, snippet))
-    return findings
+    ]
 
 
 def _xf_gh_001a_callback(corpus: WorkflowCorpus) -> CorpusFindings:
-    """Cross-workflow cache poisoning — EXECUTABLE-CONTENT caches.
-
-    Fires on cache prefixes that name a package store, compiled
-    toolchain, or runtime module dir (see
-    :data:`_HIGH_BLAST_RADIUS_CACHE_TOKENS`).  Poisoning these caches
-    injects backdoored code into the next privileged build.  Severity
-    HIGH, no ``review_needed`` — the wild-scan TPs (next.js
-    ``pnpm-store-v2-``, react ``*-node_modules-v*-``) are the
-    canonical examples.
-    """
-    findings: CorpusFindings = []
-    for wf, wl, rk_prefix, fpath, fprefix, fline in _collect_xf_gh_001_matches(corpus):
-        if not (
-            _cache_prefix_is_high_blast_radius(fprefix)
-            or _cache_prefix_is_high_blast_radius(rk_prefix)
-        ):
-            continue
-        snippet = (
-            f"executable-content cache '{rk_prefix}' matches fork-poisonable "
-            f"prefix '{fprefix}' from {fpath}:{fline} — restoring this cache "
-            f"installs attacker-supplied package contents into the privileged build"
-        )
-        findings.append((wf, wl, snippet))
-    return findings
+    return [
+        _cache_evidence(match, True)
+        for match in _collect_xf_gh_001_matches(corpus)
+        if _cache_prefix_is_high_blast_radius(match.writer_prefix)
+        or _cache_prefix_is_high_blast_radius(match.prefix)
+    ]
 
 
 RULES: list[Rule] = [
-    # XF-GH-001A — executable-content cache (HIGH, no review_needed).
+    # XF-GH-001A — package/build cache candidate (HIGH, review_needed).
     # The package-store / runtime-module variant of cross-workflow
     # cache poisoning.  Calls into the same _collect_xf_gh_001_matches
     # collector but only emits findings whose prefix names an
     # executable cache (pnpm-store, node_modules, pip-, cargo-, etc.).
     Rule(
         id="XF-GH-001A",
-        title="Executable-cache poisoning across privilege tiers",
+        title="Possible package/build cache sharing across privilege tiers",
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-3",
         description=(
-            "A privileged workflow (push / release / deployment) restores a "
-            "cache whose key prefix names an EXECUTABLE-CONTENT store — "
-            "package-manager caches (pnpm / yarn / npm / pip / cargo / go-mod / "
-            "gradle / maven / bundler / composer), node_modules directories, "
-            "or compiled-toolchain layers — and a fork-reachable workflow "
-            "(pull_request / pull_request_target / issue_comment) writes "
-            "to the same prefix.  Per Adnan Khan (2024), GitHub Actions "
-            "caches are scoped per-repository: a malicious PR can install "
-            "backdoored package contents under the shared prefix, and the "
-            "next privileged build silently restores them verbatim.  Unlike "
-            "the generic XF-GH-001 case, restoring an executable cache "
-            "directly executes attacker-controlled code in the privileged "
-            "build's environment — the published artefact is what the "
-            "attacker wrote.  The fix is to scope caches by trigger "
-            "(`key: ${{ github.event_name }}-...`) or drop restore-keys "
-            "from the privileged path so a cache miss rebuilds from "
-            "lockfile rather than restoring fork-state."
+            "Direct cache save and restore sites have potentially overlapping key prefixes across "
+            "an externally triggered workflow and a privileged consumer. Ordinary pull_request saves "
+            "are merge-ref isolated from base-branch consumers. Current GitHub.com default-branch "
+            "low-trust saves are read-only unless explicitly overridden; owning job mode and guards "
+            "matter. Unknown branch identity and policy applicability remain review-needed. "
+            "Matching names do not prove cache-version compatibility, attacker control of saved "
+            "files, restore selection, subsequent execution or credential access. Primary keys "
+            "also participate in prefix matching without restore-keys."
         ),
         pattern=CorpusPattern(callback=_xf_gh_001a_callback),
         remediation=(
-            "Either (a) scope the cache key by trigger so fork and\n"
-            "privileged builds never share a prefix:\n"
-            "    key: ${{ github.event_name }}-pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}\n"
-            "    restore-keys: ${{ github.event_name }}-pnpm-store-\n"
-            "or (b) drop restore-keys from the privileged workflow\n"
-            "entirely so a miss rebuilds from the lockfile.  Run\n"
-            "`taintly --guide XF-GH-001A` for the full checklist."
+            "Keep externally triggered cache writers read-only or disabled where supported. "
+            "Verify owning event/guards, effective cache-mode, branch scope, evaluated key and "
+            "path/compression version at both sites. Separate trust domains in primary keys "
+            "and every fallback; removing restore-keys alone is insufficient. Establish "
+            "attacker control and downstream use before assessing impact; clear affected "
+            "caches if poisoning is verified."
         ),
         reference=(
             "https://adnanthekhan.com/2024/05/06/the-monsters-in-your-build-cache-github-actions-cache-poisoning/; "
-            "https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#matching-a-cache-key"
+            "https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching"
         ),
         test_positive=[],
         test_negative=[],
         stride=["T", "E"],
         threat_narrative=(
-            "An attacker opens a PR that triggers a fork-reachable "
-            "workflow building under `pnpm-store-v2-${{ github.sha }}`. "
-            "The PR's pnpm install step writes a poisoned package store "
-            "(a transitive dep replaced with a malicious tarball).  When "
-            "a maintainer pushes to main, the privileged build's "
-            "`restore-keys: pnpm-store-v2-` restores the attacker's "
-            "store — every npm `require()` in the resulting build runs "
-            "the attacker's code.  The published artefact ships the "
-            "backdoor; CI is green."
+            "If an externally triggered job can save attacker-controlled files into a cache "
+            "namespace and version a privileged consumer can restore, poisoned content may "
+            "cross the trust boundary. Code execution additionally requires subsequent use as "
+            "code; a package/build-looking cache name alone cannot establish that step. "
+            "Ordinary pull_request merge-ref writes are unavailable to base-branch runs. "
+            "Cache scope, access overrides and the originating event must be verified."
         ),
-        confidence="high",
-        # Executable-cache hits are unambiguous — no review_needed.
-        review_needed=False,
+        confidence="medium",
+        # Name-based impact remains conditional; require review.
+        review_needed=True,
         finding_family="script_injection",
     ),
     # XF-GH-001 — generic data cache (MEDIUM, review_needed=True).
@@ -324,42 +307,32 @@ RULES: list[Rule] = [
     # what the cache is used for.
     Rule(
         id="XF-GH-001",
-        title="Generic cache poisoning across privilege tiers (cross-workflow)",
+        title="Possible cache sharing across privilege tiers (cross-workflow)",
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-3",
         description=(
-            "A privileged workflow (push / release / deployment) restores a "
-            "cache via a `key` or `restore-keys` prefix that a fork-reachable "
-            "workflow (pull_request / pull_request_target / issue_comment) "
-            "writes to.  GitHub Actions caches are scoped per-repository, "
-            "not per-trigger: a malicious PR can install a poisoned entry "
-            "under the prefix the privileged build later restores from, and "
-            "the privileged build silently picks up attacker-controlled "
-            "files (compiled artefacts, dependency lockfiles, build "
-            "toolchain binaries) at the next push to main.  The prefix-"
-            "matching semantics of `restore-keys` mean an attacker need not "
-            "need to guess the exact key — any cache whose key STARTS WITH "
-            "the privileged workflow's restore-key prefix is a candidate.  "
-            "The fix is to scope caches by trigger (a key suffix that "
-            "diverges between fork-reachable and privileged paths), or to "
-            "drop `restore-keys` from the privileged path entirely so a "
-            "miss simply rebuilds rather than restoring fork-state."
+            "Direct cache save and restore sites have potentially overlapping key prefixes across "
+            "an externally triggered workflow and a privileged consumer. Ordinary pull_request saves "
+            "are merge-ref isolated from base-branch consumers. Current GitHub.com default-branch "
+            "low-trust saves are read-only unless explicitly overridden; owning job mode and guards "
+            "matter. Unknown branch identity and policy applicability remain review-needed. "
+            "Matching names do not prove cache-version compatibility, attacker control of saved "
+            "files, restore selection, subsequent execution or credential access. Primary keys "
+            "also participate in prefix matching without restore-keys."
         ),
         pattern=CorpusPattern(callback=_xf_gh_001_callback),
         remediation=(
-            "Either (a) scope the cache key by trigger so fork and\n"
-            "privileged builds never share a prefix:\n"
-            "    key: ${{ github.event_name }}-build-${{ hashFiles(...) }}\n"
-            "    restore-keys: ${{ github.event_name }}-build-\n"
-            "or (b) drop restore-keys from the privileged workflow\n"
-            "entirely.  A cache miss is rebuild cost, not a security\n"
-            "incident.  Run `taintly --guide XF-GH-001` for the full\n"
-            "checklist."
+            "Keep externally triggered cache writers read-only or disabled where supported. "
+            "Verify owning event/guards, effective cache-mode, branch scope, evaluated key and "
+            "path/compression version at both sites. Separate trust domains in primary keys "
+            "and every fallback; removing restore-keys alone is insufficient. Establish "
+            "attacker control and downstream use before assessing impact; clear affected "
+            "caches if poisoning is verified."
         ),
         reference=(
             "https://adnanthekhan.com/2024/05/06/the-monsters-in-your-build-cache-github-actions-cache-poisoning/; "
-            "https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#matching-a-cache-key"
+            "https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching"
         ),
         # Self-test samples are full repos, not single-file YAML —
         # CorpusPattern rules are exercised by the integration tests
@@ -369,16 +342,12 @@ RULES: list[Rule] = [
         test_negative=[],
         stride=["T", "E"],
         threat_narrative=(
-            "An attacker opens a PR that triggers a fork-reachable "
-            "workflow building under cache key `linux-build-${{ "
-            "github.sha }}`.  The PR's compile step stores poisoned "
-            "binaries under that key.  When a maintainer pushes to "
-            "main, the privileged build's `restore-keys: linux-build-` "
-            "restores the attacker's poisoned binaries verbatim — the "
-            "binary that ships is what the attacker wrote, not what "
-            "was just compiled.  No code review caught this because "
-            "the PR's CI passed and the privileged workflow's diff is "
-            "only on main."
+            "If an externally triggered job can save attacker-controlled files into a cache "
+            "namespace and version a privileged consumer can restore, poisoned content may "
+            "cross the trust boundary. Code execution additionally requires subsequent use as "
+            "code; a package/build-looking cache name alone cannot establish that step. "
+            "Ordinary pull_request merge-ref writes are unavailable to base-branch runs. "
+            "Cache scope, access overrides and the originating event must be verified."
         ),
         confidence="medium",
         # Cross-workflow rules need design review: a legitimate "shared

@@ -1668,13 +1668,59 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
 
 
 _ANALYZE_CACHE_MAXSIZE = 64
+
+
+@dataclass(frozen=True)
+class OutputWitness:
+    """Immutable symbolic provenance; influence alone is not a byte-flow proof."""
+
+    kind: str
+    line: int
+    name: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class OutputWriter:
+    job: str
+    step_index: int
+    step_id: str
+    name: str
+    value: str
+    line: int
+    quoted_single: bool
+
+
+@dataclass(frozen=True)
+class JobOutputBinding:
+    job: str
+    name: str
+    declaration: str
+    declaration_line: int
+    source_expr: str
+    source_line: int
+    hops: tuple[OutputWitness, ...]
+
+
+@dataclass(frozen=True)
+class JobOutputFacts:
+    bindings: tuple[JobOutputBinding, ...]
+    writers: tuple[OutputWriter, ...]
+
+
+@dataclass(frozen=True)
+class _Analysis:
+    paths: list[TaintPath]
+    outputs: JobOutputFacts
+
+
 # Content-keyed LRU so all callers (the 12 GitHub TaintPattern rules + the
 # combination / cross-workflow fact builders) share ONE taint fixpoint per file
 # instead of recomputing it once per rule. Mirrors
 # ``parsers.structural.api._full_walk`` (walk-once, #163). The result is a pure
 # function of (content, backend); ``lines`` is derived from ``content`` by every
 # caller, so it is NOT part of the key. Callers treat the result as read-only.
-_analyze_cache: OrderedDict[tuple[str, str], list[TaintPath]] = OrderedDict()
+_analyze_cache: OrderedDict[tuple[str, str], _Analysis] = OrderedDict()
 
 
 def clear_analyze_cache() -> None:
@@ -1685,17 +1731,30 @@ def clear_analyze_cache() -> None:
 def analyze(content: str, lines: list[str]) -> list[TaintPath]:
     """Cached entry point — return every env-mediated taint flow in ``content``.
 
-    A thin content-keyed LRU over :func:`_analyze_uncached`, so the (expensive,
+    A thin content-keyed LRU over :func:`_build_analysis`, so the (expensive,
     super-linear) fixpoint is computed once per file and shared across every
     taint rule rather than re-run per rule. Callers MUST treat the returned list
     and its ``TaintPath`` items as read-only.
     """
+    return _analysis(content, lines).paths
+
+
+def analyze_job_outputs(content: str, lines: list[str]) -> JobOutputFacts:
+    """Reuse the path solver's cached symbolic job-output facts.
+
+    Consumers must validate result bytes, dependencies, writers and guards for
+    their invocation. No event, input value or authority is cached here.
+    """
+    return _analysis(content, lines).outputs
+
+
+def _analysis(content: str, lines: list[str]) -> _Analysis:
     key = (content, _taint_backend())
     cached = _analyze_cache.get(key)
     if cached is not None:
         _analyze_cache.move_to_end(key)
         return cached
-    result = _analyze_uncached(content, lines)
+    result = _build_analysis(content, lines)
     _analyze_cache[key] = result
     _analyze_cache.move_to_end(key)
     if len(_analyze_cache) > _ANALYZE_CACHE_MAXSIZE:
@@ -1704,6 +1763,11 @@ def analyze(content: str, lines: list[str]) -> list[TaintPath]:
 
 
 def _analyze_uncached(content: str, lines: list[str]) -> list[TaintPath]:
+    """Compatibility projection without using or populating the shared cache."""
+    return _build_analysis(content, lines).paths
+
+
+def _build_analysis(content: str, lines: list[str]) -> _Analysis:
     """Return every env-mediated taint flow found in ``content``.
 
     Each returned path carries ``kind``:
@@ -1883,7 +1947,44 @@ def _analyze_uncached(content: str, lines: list[str]) -> list[TaintPath]:
                             sink_kind=site.kind,
                         )
                     )
-    return out
+    # The symbolic API quotes the actual declaration. Preserve the legacy path
+    # projection, including its historical display spelling, for compatibility.
+    output_details = {
+        (
+            "job_output",
+            f"{decl.job}.{decl.name}",
+            decl.line,
+        ): f"job {decl.job} declared output {decl.name} := {decl.raw}"
+        for decl in db.all(_R_OUTPUT_DECL)
+    }
+    bindings = []
+    for binding in db.all(_R_TAINTED_JOB_OUTPUT):
+        declaration = db.get(_R_OUTPUT_DECL, (binding.job, binding.name))
+        if declaration is not None:
+            bindings.append(
+                JobOutputBinding(
+                    binding.job,
+                    binding.name,
+                    declaration.raw,
+                    declaration.line,
+                    binding.source_expr,
+                    binding.source_line,
+                    tuple(
+                        OutputWitness(
+                            h.kind,
+                            h.line,
+                            h.name,
+                            output_details.get((h.kind, h.name, h.line), h.detail),
+                        )
+                        for h in binding.hops
+                    ),
+                )
+            )
+    writers = tuple(
+        OutputWriter(w.job, w.idx, w.step_id, w.name, w.value, w.line, w.quoted_single)
+        for w in db.all(_R_OUTPUT_WRITE)
+    )
+    return _Analysis(out, JobOutputFacts(tuple(bindings), writers))
 
 
 def _collect_all_env_assignments(
