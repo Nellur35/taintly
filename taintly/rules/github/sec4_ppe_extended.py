@@ -28,6 +28,7 @@ from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePatter
 from taintly.workflow_corpus import is_fork_reachable
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
+from ._job_output_domains import build_workflow_output_view
 from ._workflow_input_sinks import is_workflow_input_executable_sink
 from .sec3_sec4_supply_chain_ppe import _DANGEROUS_GITHUB_CONTEXT_RE
 
@@ -823,8 +824,56 @@ class NeedsOutputShellInterpolationPattern(_OutputToRunShellPattern):
     """
 
     _OUTPUT_RE = re.compile(
-        r"\$\{\{\s*needs\.[\w-]+\.outputs(?:\.[\w-]+|\[['\"][^'\"]+['\"]\])\s*\}\}"
+        r"\$\{\{\s*needs\.(?P<producer>[\w-]+)\.outputs"
+        r"(?:\.(?P<dot>[\w-]+)|\[['\"](?P<bracket>[^'\"]+)['\"]\])\s*\}\}"
     )
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        candidates = [
+            (line_num, snippet, source, list(self._OUTPUT_RE.finditer(source)))
+            for line_num, snippet, source in _iter_run_shell_lines(lines)
+            if self._OUTPUT_RE.search(source)
+        ]
+        if not candidates:
+            return []
+
+        view = build_workflow_output_view(content)
+        if view is None:
+            return [(line_num, snippet) for line_num, snippet, _, _ in candidates]
+
+        jobs = for_each_job(content)
+        proof_cache: dict[tuple[str, str, str], bool] = {}
+        results: list[tuple[int, str]] = []
+        for line_num, snippet, source, refs in candidates:
+            # Do not let proof of one recognized reference erase a cue on a
+            # line that also contains an unsupported or differently encoded
+            # GitHub expression.
+            if source.count("${{") != len(refs):
+                results.append((line_num, snippet))
+                continue
+            consumer = next(
+                (
+                    job.name
+                    for job in jobs
+                    if job.name and job.start_line <= line_num <= job.end_line
+                ),
+                None,
+            )
+            all_safe = bool(consumer)
+            for ref in refs:
+                if not consumer:
+                    all_safe = False
+                    break
+                output_name = ref.group("dot") or ref.group("bracket")
+                cache_key = (consumer, ref.group("producer"), output_name)
+                if cache_key not in proof_cache:
+                    proof_cache[cache_key] = view.proves(*cache_key)
+                if not proof_cache[cache_key]:
+                    all_safe = False
+                    break
+            if not all_safe:
+                results.append((line_num, snippet))
+        return results
 
 
 # Command-argument-style ``with:`` input keys: an action receiving one of
