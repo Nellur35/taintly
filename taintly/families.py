@@ -224,7 +224,8 @@ _FAMILIES: tuple[FindingFamily, ...] = (
         id="resource_controls",
         title="Missing job resource / timeout controls",
         why=(
-            "Jobs without explicit timeout-minutes can hang indefinitely, "
+            "Jobs without explicit timeout-minutes can run until the platform-imposed "
+            "limit is reached, "
             "tying up runner capacity. In combination with a prompt-"
             "injection or DoS-triggering input, this becomes a cost and "
             "availability issue."

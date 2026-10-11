@@ -1,11 +1,11 @@
 """GitHub Actions SEC-10 rules — Insufficient Logging and Visibility.
 
 Covers pipeline configurations that reduce the auditability of builds:
-missing job timeouts (allowing indefinite runtime), and workflows that
+missing explicit job timeouts, and workflows that
 produce build outputs without retaining them for post-incident review.
 
-A job that runs without a timeout can silently exfiltrate data for hours
-if a step is compromised. A build that never uploads artefacts leaves no
+A job without an explicit timeout may run until platform limits end it.
+A build that never uploads artefacts leaves no
 evidence trail for forensics after a supply chain incident.
 """
 
@@ -17,20 +17,15 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC10-GH-001",
-        title="GitHub Actions job has no timeout — unlimited runtime allowed",
+        title="GitHub Actions job has no explicit timeout-minutes",
         severity=Severity.LOW,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-10",
         description=(
-            "A GitHub Actions job does not set 'timeout-minutes'. Without a timeout, "
-            "a compromised or hung step can run up to the GitHub-imposed caps: 6 hours "
-            "per job on GitHub-hosted runners, 5 days per job on self-hosted runners "
-            "(since April 2024; previously 35 days), and 35 days for any single "
-            "workflow run end-to-end. An attacker who achieves code execution in a "
-            "step could exfiltrate secrets, interact with downstream systems, or mine "
-            "cryptocurrency for the full duration without triggering any time-based "
-            "alert. Setting an explicit timeout bounds the impact and makes "
-            "anomalous run durations immediately visible in the Actions UI."
+            "A GitHub Actions job does not set 'timeout-minutes' explicitly. GitHub "
+            "uses a 360-minute default, subject to runner execution limits. A hung or "
+            "compromised step may continue longer than the repository intends. An "
+            "explicit per-job timeout can set a shorter bound."
         ),
         pattern=ContextPattern(
             # Anchor: any job-level 'runs-on:' (marks a real job)
@@ -43,15 +38,15 @@ RULES: list[Rule] = [
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Set an explicit 'timeout-minutes' on each job (or at workflow level):\n\n"
+            "Set an explicit 'timeout-minutes' on each job:\n\n"
             "jobs:\n"
             "  build:\n"
             "    runs-on: ubuntu-latest\n"
             "    timeout-minutes: 30   # Fail the job if it exceeds 30 minutes\n"
             "    steps:\n"
             "      - ...\n\n"
-            "Choose a timeout that is at least 2x your typical build duration. "
-            "GitHub's default is 360 minutes (6 hours) — far too long for most jobs."
+            "Choose a timeout that allows the job to finish under expected conditions "
+            "while limiting the duration of an unexpected run."
         ),
         reference="https://docs.github.com/en/actions/writing-workflows/workflow-syntax-for-github-actions#jobsjob_idtimeout-minutes",
         test_positive=[
@@ -62,12 +57,9 @@ RULES: list[Rule] = [
         ],
         stride=["D", "R"],
         threat_narrative=(
-            "Without a timeout, a compromised step can run up to GitHub's caps — "
-            "6 hours per job on GitHub-hosted runners, 5 days per job on self-hosted — "
-            "exfiltrating secrets, interacting with downstream systems, or mining "
-            "cryptocurrency before any time-based alert fires. An explicit timeout "
-            "bounds the impact and makes anomalous build durations immediately "
-            "visible in the Actions UI."
+            "Without an explicit timeout, the job uses GitHub's 360-minute default, "
+            "subject to runner execution limits. A shorter per-job limit can bound "
+            "how long a hung or compromised step continues running."
         ),
     ),
     # =========================================================================
