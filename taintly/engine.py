@@ -36,6 +36,7 @@ from .models import (
 )
 from .parsers.anchor_expander import expand_anchors
 from .parsers.segmentation import for_each_job, job_at_line
+from .path_safety import iter_files_within_repo, resolve_local_include
 from .pse_enrichment import enrich_pse_findings
 from .staticguard import WorkflowContext as StaticGuardContext
 from .staticguard import (
@@ -1348,17 +1349,10 @@ def _resolve_local_include(repo_path: str, ref: str) -> list[str]:
 
     GitLab resolves ``local:`` paths from the REPO ROOT — a leading ``/`` is
     repo-root-absolute, not filesystem-absolute.  Globs (``*``/``**``/``?``)
-    are expanded the way GitLab expands them.  Returns matching existing files
-    (absolute paths); empty when the ref is a URL or matches nothing.
+    are expanded the way GitLab expands them.  Returns matching existing
+    files (absolute paths); empty when the ref is a URL or matches nothing.
     """
-    ref = ref.strip().strip("'\"")
-    if not ref or "://" in ref:
-        return []
-    rel = ref.lstrip("/")
-    base = os.path.join(repo_path, *rel.split("/"))
-    if any(ch in rel for ch in "*?["):
-        return [p for p in glob.glob(base, recursive=True) if os.path.isfile(p)]
-    return [base] if os.path.isfile(base) else []
+    return resolve_local_include(repo_path, ref, expand_globs=True)
 
 
 def _discover_gitlab_include_graph(
@@ -1404,58 +1398,40 @@ def _discover_gitlab_entry_files(repo_path: str) -> list[str]:
     files: list[str] = []
     for name in _GITLAB_ENTRY_FILENAMES:
         root_entry = os.path.join(repo_path, name)
-        if os.path.isfile(root_entry):
+        if os.path.isfile(root_entry) and _is_within_repo(repo_path, root_entry):
             files.append(root_entry)
         hidden_entry = os.path.join(repo_path, ".gitlab", name)
-        if os.path.isfile(hidden_entry):
+        if os.path.isfile(hidden_entry) and _is_within_repo(repo_path, hidden_entry):
             files.append(hidden_entry)
     return files
 
 
 def _discover_gitlab_files(repo_path: str) -> tuple[list[str], int]:
-    """Find GitLab CI entry files plus local include candidates.
+    """Find repository-local GitLab CI files, including hidden canonical names.
 
-    Entry files and explicit ``ci/`` includes are strong signals, admitted
-    unconditionally.  ``.gitlab/`` YAML is a weak signal — the directory also
-    holds non-CI tool configs (GitLab Duo, issue templates), so those pickups
-    are content-gated via :func:`_gitlab_yaml_looks_like_ci`.  Entry files are
-    never gated, so an ``include:``-only fragment can never be dropped.
-
-    Returns ``(files, n_dynamic)`` where ``n_dynamic`` counts ``include:
-    local:`` refs that interpolate a runtime variable and so could not be
-    resolved statically — surfaced by :func:`scan_repo` as a coverage
-    disclosure so "scan clean" isn't overstated when there is pipeline behind
-    an unresolvable include.
+    Preserve public discovery policy: YAML under ci/ is admitted; other
+    .gitlab/ YAML must pass the content gate unless its basename is canonical.
+    Runtime-dependent local includes remain counted for coverage disclosure.
     """
-    entry_files = _discover_gitlab_entry_files(repo_path)
-    files = list(entry_files)
-    entry_set = {os.path.normpath(p) for p in entry_files}
-
-    # Strong signal: an explicit ``ci/`` include directory — admit all.
-    for pattern in ("ci/*.yml", "ci/**/*.yml", "ci/*.yaml", "ci/**/*.yaml"):
-        files.extend(glob.glob(os.path.join(repo_path, pattern), recursive=True))
-
-    # Weak signal: ``.gitlab/`` also carries non-CI tool configs, so gate on
-    # content (e.g. ``.gitlab/duo/agent-config.yml`` must not parse as CI).
-    for pattern in (
-        ".gitlab/*.yml",
-        ".gitlab/**/*.yml",
-        ".gitlab/*.yaml",
-        ".gitlab/**/*.yaml",
-    ):
-        for cand in glob.glob(os.path.join(repo_path, pattern), recursive=True):
-            if os.path.normpath(cand) in entry_set:
+    files = _discover_gitlab_entry_files(repo_path)
+    seen = {os.path.normpath(path) for path in files}
+    for relative_root in ("ci", ".gitlab"):
+        for candidate in iter_files_within_repo(repo_path, relative_root):
+            if not candidate.endswith((".yml", ".yaml")):
                 continue
-            if _gitlab_yaml_looks_like_ci(cand):
-                files.append(cand)
-    # Include-graph closure: follow ``include: local:`` refs transitively so
-    # fragments OUTSIDE ci/ and .gitlab/ (e.g. ``templates/build.yml``) are
-    # scanned too. An explicit include is authoritative CI, so these skip the
-    # content-shape gate.
-    seen = {os.path.normpath(p) for p in files}
-    include_files, n_dynamic = _discover_gitlab_include_graph(repo_path, list(files), seen)
-    files.extend(include_files)
-    return files, n_dynamic
+            normalized = os.path.normpath(candidate)
+            if normalized in seen:
+                continue
+            if (
+                relative_root == "ci"
+                or os.path.basename(candidate) in _GITLAB_ENTRY_FILENAMES
+                or _gitlab_yaml_looks_like_ci(candidate)
+            ):
+                files.append(candidate)
+                seen.add(normalized)
+    included, dynamic = _discover_gitlab_include_graph(repo_path, list(files), seen)
+    files.extend(included)
+    return files, dynamic
 
 
 def _discovery_confidence(repo_path: str, platform: Platform, files: list[str]) -> dict[str, str]:

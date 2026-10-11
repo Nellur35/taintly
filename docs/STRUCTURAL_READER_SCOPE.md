@@ -197,3 +197,16 @@ Lookup is linear iteration over the schema dict's entries
 (~80 entries) and typical workflow depth, this is negligible.  If
 profiling ever reveals it as a hot path, a path-trie representation
 (O(depth) per leaf) is the natural escape hatch.
+
+## GitLab local include discovery
+
+The GitLab corpus extractor isolates the first root-level `include:` block
+and uses the structural reader to classify its direct values. It resolves a
+bare include scalar, a bare scalar item in the include list, or a direct
+`local:` field on an include mapping. Values nested under `file:` on a
+project include are not local includes. Direct project/remote/template/
+component provider keys prevent a conflicting `local:` field from being
+treated as local. Multiple root `include:` keys and aliases whose anchors are
+outside the isolated block are unsupported; they do not receive regex-based
+fallback classification. Existing path containment and include-depth/file
+limits still apply after extraction.
