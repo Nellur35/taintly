@@ -101,8 +101,8 @@ class scan_session:
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
             if self._installed:
-                signal.alarm(0)  # type: ignore[attr-defined]
-                signal.signal(signal.SIGALRM, self._old_handler)  # type: ignore[attr-defined]
+                signal.alarm(0)  # type: ignore[attr-defined,unused-ignore]
+                signal.signal(signal.SIGALRM, self._old_handler)  # type: ignore[attr-defined,unused-ignore]
         finally:
             _JOB_SEGMENT_CACHE.reset(self._job_segment_cache_token)
 
