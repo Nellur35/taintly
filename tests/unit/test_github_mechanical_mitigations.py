@@ -288,8 +288,9 @@ def test_lotp_gh_001_stays_critical_on_pull_request_target_with_single_head_sha(
 
     assert findings, "LOTP-GH-001 must fire on the canonical attack shape"
     assert {f.severity for f in findings} == {Severity.CRITICAL}
-    # Sanity: calibration_reason should be empty / unset — no downgrade applied.
-    assert all(not (f.calibration_reason or "") for f in findings)
+    # Authority defaults are unresolved; that annotation is not a severity downgrade.
+    assert all("authority-unresolved" in f.context_tags and f.review_needed for f in findings)
+    assert all("Maintainer-gated trigger path" not in f.calibration_reason for f in findings)
 
 
 def test_lotp_gh_001_stays_critical_when_fallback_present_but_trigger_is_pull_request(

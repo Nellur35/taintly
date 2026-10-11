@@ -2086,7 +2086,10 @@ RULES: list[Rule] = [
             "`cmdclass` handlers in setup.py, `build.rs` in Rust, "
             "//go:generate directives in Go, plugin execution via pom.xml, "
             "RUN directives in a Dockerfile — so the attacker's code runs "
-            "with the workflow's permissions and secrets. This is the pattern "
+            "with authority available to that execution. Token and secret "
+            "access depend on event policy, effective grants, credential "
+            "bindings and checkout behavior; Taintly records these separately. "
+            "This is the pattern "
             "that compromised Ultralytics YOLO in December 2024: a workflow "
             "checked out a fork PR and ran `pip install`, which executed "
             "setup.py from the fork. Taintly follows explicit checkout and "
@@ -2100,8 +2103,9 @@ RULES: list[Rule] = [
             "Do not run build tools in a job that has checked out untrusted "
             "PR code alongside your secrets. Apply one of the following:\n"
             "\n"
-            "1. Split the workflow: use `pull_request` (no secrets, no write "
-            "   token) to build and test fork code; use a separate workflow "
+            "1. Split the workflow: build/test fork code with `pull_request`, "
+            "   explicit read/none permissions and no credential bindings; "
+            "   check repository fork-policy overrides. Use a separate workflow "
             "   gated on `workflow_run` or a protected branch push to run "
             "   the privileged steps — and have that privileged workflow "
             "   check out the BASE repo SHA, not the fork head.\n"
@@ -2155,9 +2159,11 @@ RULES: list[Rule] = [
             "build tool reads (package.json, setup.py, Makefile, pom.xml, "
             "Dockerfile, etc.). When the workflow checks out the PR head and "
             "runs the build tool, the manifest's lifecycle hooks execute "
-            "with the workflow's full permissions and bound secrets — "
-            "typically a write-scoped GITHUB_TOKEN, cloud OIDC tokens, and "
-            "any repo/org secrets the job can see."
+            "with credentials and capabilities accessible at that execution. "
+            "A configured write token needs an access mechanism such as "
+            "checkout persistence or an environment binding. External secret "
+            "existence/release and cloud trust policies require separate "
+            "evidence; untrusted execution alone does not establish them."
         ),
         incidents=["Ultralytics (Dec 2024)"],
     ),
@@ -2244,12 +2250,13 @@ RULES: list[Rule] = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "npm's default lifecycle-script execution is the single most "
-            "exploited LOTP vector. An attacker can trigger the workflow "
+            "npm lifecycle-script execution can run attacker-controlled "
+            "package hooks. An attacker may trigger a reachable workflow "
             "by opening a PR that edits package.json's `postinstall` "
             "field; npm runs the attacker's command during `npm install` "
-            "before any test or lint step ever executes, so the payload "
-            "runs regardless of what the rest of the workflow does."
+            "when installation reaches the enabled hook. Guards, installation "
+            "success and tool configuration affect execution; accessible "
+            "credentials and privileges are evaluated separately."
         ),
         incidents=["Ultralytics (Dec 2024)"],
     ),

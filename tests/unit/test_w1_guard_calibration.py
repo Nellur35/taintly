@@ -208,6 +208,7 @@ def _leg(
         origin="file",
         exploitability=exploitability,
         calibration_reason=calibration_reason,
+        context_tags=["guard-calibration"],
         finding_family="credential_persistence",
     )
 
@@ -238,6 +239,16 @@ def test_a0_composite_inherits_calibrated_leg():
     assert "author-association" in comp.calibration_reason
     # PROPAGATE, not suppress — severity untouched, finding still present.
     assert comp.severity == Severity.CRITICAL
+
+
+def test_authority_calibration_is_not_guard_provenance():
+    leg, comp = _leg(), _composite()
+    leg.rule_id = "LOTP-GH-001"
+    leg.context_tags = ["authority-limited"]
+    leg.calibration_reason = "Explicitly limited execution; no guard proof."
+    _propagate_guard_calibration_to_composites([leg, comp])
+    assert comp.exploitability == "medium"
+    assert comp.calibration_reason == ""
 
 
 def test_a0_composite_on_uncalibrated_leg_untouched():
