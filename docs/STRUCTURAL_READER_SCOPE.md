@@ -16,16 +16,20 @@ Walks a CI YAML file and yields a stream of events:
 - **`LEAF_SCALAR`** — a scalar value at a fully-resolved structural
   path.  Path components are strings (mapping keys) or integers
   (sequence indices).
-- **`CUTOFF`** — the underlying tokenizer hit an unsupported
-  construct.  Events for what was parsed before the cutoff are
-  valid; no further events follow.
+- **`CUTOFF`** — the reader hit an unsupported construct, active
+  alias recursion, or its anchor-work limit. Events for what was parsed
+  before the cutoff are valid; no further events follow.
 - **`ERROR`** — a recoverable parse-time problem the walker
   surfaces but continues past (e.g., a dangling alias).
 
 ## What the reader does NOT do
 
-- **Does not produce a full YAML AST.**  Event-streaming, not
+- **Does not produce a full YAML AST.** Event-streaming, not
   tree-building.
+- **Does not resolve effective merge precedence.** Inherited defaults and
+  explicit overrides can emit multiple events at one path. Consumers must
+  retain uncertainty for duplicate bindings rather than select an arbitrary
+  first or last value.
 - **Does not round-trip.**  Read-only.  `--fix` stays regex-based.
 - **Does not introduce a YAML library dependency.**  Hand-rolled
   reader; the project's zero-runtime-dependency promise is
@@ -130,17 +134,20 @@ exit-11 path:
 
 ## Anchor / alias / merge-key behaviour
 
-- **Anchor capture** (`&name`) records every leaf encountered
-  inside the anchor's body.  Capture stops when the walker
-  returns to the indent of the anchor's defining line.
-- **Bare alias** (`*name` outside a merge-key context) surfaces
-  as an `ERROR` event without expanding.  Bare aliases are
-  uncommon in CI YAML in practice.
-- **Merge key** (`<<: *name`) — every captured leaf under the
-  named anchor is replayed at the alias's line under the alias's
-  current path.  This matches the line a rule's report should
-  cite: the alias is what the maintainer wrote, the anchor is a
-  helper definition above.
+- **Anchor capture** (`&name`) records leaves under every active anchor,
+  including nested anchors. Capture stops at the defining line's indent.
+- **Bare alias** (`*name`) replays captured leaves at the alias destination
+  and line. Scalar aliases replay at the exact destination path. Unresolved
+  aliases surface as `ERROR`; recursive aliases and exhausted shared replay
+  work surface as terminal `CUTOFF` events.
+- **Merge key** (`<<: *name`) replays mapping leaves beneath the current path.
+  A scalar anchor used as a merge source surfaces as `ERROR`. Replay uses a
+  snapshot so nested aliases cannot mutate their source template while it is
+  being expanded.
+- **Expansion limits:** all capture appends and alias emissions share a
+  100,000-unit per-walk budget, charged as `1 + len(path)`. Recursion into an
+  active anchor or exhausted work terminates recovery with one `CUTOFF`;
+  strict mode raises `TokenizerError`. No trailing events are emitted.
 
 ## Jenkinsfile
 

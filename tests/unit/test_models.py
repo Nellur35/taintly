@@ -353,7 +353,6 @@ def test_expr_augment_handles_brace_wrapped_requires():
 # Keep in sync with the ``expr_augment_requires=True`` flags in the rule modules.
 # (LOTP-GH-001/003 use a ``ref:``-anchored requires here and are NOT migrated.)
 _GH_B1_MIGRATED = {
-    "SEC4-GH-001": "github['event']['pull_request']['head']['sha']",
     "AI-GH-005": "github['event']['pull_request']['title']",
     "AI-GH-008": "github['event']['pull_request']['head']['sha']",
     "AI-GH-021": "github['event']['pull_request']['head']['sha']",
@@ -378,6 +377,237 @@ def test_gh_b1_migrated_rule_requires_is_obfuscation_invariant(all_rules, rule_i
         "the augmentation would not be load-bearing"
     )
     assert pat._requires_hit(wrapped), f"{rule_id} augmentation failed to catch {obf!r}"
+
+
+def _sec4_gh_001(all_rules):
+    return next(rule for rule in all_rules if rule.id == "SEC4-GH-001").pattern
+
+
+def _prt_checkout(ref: str, trigger: str = "pull_request_target", extra: str = "") -> str:
+    return (
+        f"on: {trigger}\n"
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n"
+        f"          ref: {ref}\n"
+        f"{extra}"
+    )
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "${{ github.event.pull_request.head.sha }}",
+        "${{ github.event.pull_request['head']['ref'] }}",
+        "${{ GITHUB['EVENT']['PULL_REQUEST']['HEAD']['SHA'] }}",
+    ],
+)
+def test_sec4_gh_001_binds_obfuscated_pr_head_to_checkout_ref(all_rules, ref):
+    pattern = _sec4_gh_001(all_rules)
+    content = _prt_checkout(ref)
+    matches = pattern.check(content, content.splitlines())
+
+    assert len(matches) == 1
+    assert matches[0][1] == f"ref: {ref}"
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        "pull_request_target",
+        "[push, pull_request_target]",
+        "{pull_request_target: {}}",
+    ],
+)
+def test_sec4_gh_001_recognizes_root_trigger_encodings(all_rules, trigger):
+    pattern = _sec4_gh_001(all_rules)
+    content = _prt_checkout("${{ github.event.pull_request.head.ref }}", trigger=trigger)
+
+    assert pattern.check(content, content.splitlines())
+
+
+def test_sec4_gh_001_recognizes_scalar_aliased_root_trigger(all_rules):
+    pattern = _sec4_gh_001(all_rules)
+    content = (
+        "trigger_name: &prt pull_request_target\n"
+        "on: *prt\n"
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n"
+        "          ref: ${{ github.event.pull_request.head.sha }}\n"
+    )
+
+    assert pattern.check(content, content.splitlines())
+
+
+def test_sec4_gh_001_ignores_metadata_and_default_checkout(all_rules):
+    pattern = _sec4_gh_001(all_rules)
+    content = (
+        "on: pull_request_target\n"
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - run: gh run list --commit ${{ github.event.pull_request.head.sha }}\n"
+    )
+
+    assert pattern.check(content, content.splitlines()) == []
+
+
+def test_sec4_gh_001_resolves_env_aliases_with_step_precedence(all_rules):
+    pattern = _sec4_gh_001(all_rules)
+    content = (
+        "on: pull_request_target\n"
+        "env:\n"
+        "  REF_VALUE: ${{ github.event.pull_request.head.sha }}\n"
+        "jobs:\n"
+        "  build:\n"
+        "    env:\n"
+        "      REF_VALUE: ${{ github.ref }}\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n"
+        "          ref: ${{ env.REF_VALUE }}\n"
+        "      - uses: actions/checkout@v4\n"
+        "        env:\n"
+        "          REF_VALUE: ${{ github.event.pull_request.head.ref }}\n"
+        "        with:\n"
+        "          ref: ${{ env.REF_VALUE }}\n"
+    )
+
+    matches = pattern.check(content, content.splitlines())
+
+    assert len(matches) == 1
+    assert matches[0][1] == "ref: ${{ env.REF_VALUE }}"
+
+
+def test_sec4_gh_001_resolves_nested_scalar_alias_in_checkout_mapping(all_rules):
+    pattern = _sec4_gh_001(all_rules)
+    content = (
+        "on: pull_request_target\n"
+        'env:\n  PR_HEAD: &pr_head "${{ github.event.pull_request.head.sha }}"\n'
+        "jobs:\n"
+        "  build:\n"
+        "    env: &checkout_inputs\n"
+        "      ref: *pr_head\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with: *checkout_inputs\n"
+        "      - run: make test\n"
+    )
+
+    matches = pattern.check(content, content.splitlines())
+
+    assert len(matches) == 1
+    assert matches[0][1] == "with: *checkout_inputs"
+
+
+def test_sec4_gh_001_checks_full_multiline_ref_value(all_rules):
+    pattern = _sec4_gh_001(all_rules)
+    content = (
+        "on: pull_request_target\n"
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n"
+        "          ref: |\n"
+        "            ${{ github.event.pull_request.head.sha }}\n"
+    )
+
+    matches = pattern.check(content, content.splitlines())
+
+    assert len(matches) == 1
+    assert matches[0][1] == "ref: |"
+
+
+def test_sec4_gh_001_unknown_ref_is_conservative_only_with_head_source(all_rules):
+    pattern = _sec4_gh_001(all_rules)
+    unknown_ref = "${{ steps.resolve.outputs.ref }}"
+    without_source = _prt_checkout(unknown_ref)
+    with_source = _prt_checkout(
+        unknown_ref,
+        extra="      - run: echo ${{ github.event.pull_request.head.sha }}\n",
+    )
+
+    assert pattern.check(without_source, without_source.splitlines()) == []
+    assert pattern.check(with_source, with_source.splitlines())
+
+    malformed_ref = _prt_checkout("${{ env.REF")
+    malformed_with_source = _prt_checkout(
+        "${{ env.REF",
+        extra="      - run: echo ${{ github.event.pull_request.head.sha }}\n",
+    )
+    plain_text_ref = _prt_checkout("github.event.pull_request.head.sha")
+    assert pattern.check(malformed_ref, malformed_ref.splitlines()) == []
+    assert pattern.check(malformed_with_source, malformed_with_source.splitlines())
+    assert pattern.check(plain_text_ref, plain_text_ref.splitlines()) == []
+
+
+@pytest.mark.parametrize(
+    "base_ref",
+    [
+        "${{ github.event.merge_group.base_ref }}",
+        "${{ github.event.merge_group.base_sha }}",
+    ],
+)
+def test_sec4_gh_001_treats_merge_group_base_as_safe_checkout_ref(all_rules, base_ref):
+    pattern = _sec4_gh_001(all_rules)
+    content = _prt_checkout(
+        base_ref,
+        extra="      - run: echo ${{ github.event.pull_request.head.sha }}\n",
+    )
+
+    assert pattern.check(content, content.splitlines()) == []
+
+
+def test_sec4_gh_001_keeps_merge_group_head_ref_unknown(all_rules):
+    pattern = _sec4_gh_001(all_rules)
+    content = _prt_checkout(
+        "${{ github.event.merge_group.head_ref }}",
+        extra="      - run: echo ${{ github.event.pull_request.head.sha }}\n",
+    )
+
+    assert pattern.check(content, content.splitlines())
+
+
+def test_sec4_gh_001_ignores_push_workflow_cutoff_without_prt_text(all_rules):
+    pattern = _sec4_gh_001(all_rules)
+    content = (
+        "on: push\n"
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n"
+        "          ref: main\n"
+        "broken: !custom unsupported\n"
+    )
+
+    assert pattern.check(content, content.splitlines()) == []
+
+
+def test_sec4_gh_001_preserves_cutoff_before_parsed_root_trigger(all_rules):
+    pattern = _sec4_gh_001(all_rules)
+    content = (
+        "%YAML 1.2\n"
+        "on: pull_request_target\n"
+        "jobs:\n"
+        "  build:\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n"
+        "          ref: ${{ github.event.pull_request.head.sha }}\n"
+    )
+
+    matches = pattern.check(content, content.splitlines())
+
+    assert len(matches) == 1
+    assert matches[0][1].startswith("STRUCTURAL-CUTOFF:")
 
 
 # =============================================================================

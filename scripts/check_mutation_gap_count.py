@@ -61,7 +61,9 @@ _PER_PREFIX_BASELINE: dict[str, int] = {
     "SEC10-GH": 3,
     "SEC10-GL": 1,
     "SEC3-GH": 2,
-    "SEC4-GH": 5,
+    # SEC4-GH-001 adds one non-applicable zero-space colon-collapse probe.
+    # Earlier structural SEC4-GH-026/026A work retired two gaps.
+    "SEC4-GH": 6,
     "SEC4-CB": 1,
     "SEC4-GL": 1,
     "SEC4-JK": 3,

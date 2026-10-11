@@ -39,6 +39,8 @@ from enum import Enum
 
 from .tokenizer import Token, TokenizerError, TokenKind, tokenize
 
+MAX_ANCHOR_WORK = 100_000
+
 
 class EventKind(Enum):
     LEAF_SCALAR = "leaf_scalar"
@@ -155,6 +157,15 @@ class _Anchor:
     root_indent: int = -1
 
 
+@dataclass(frozen=True)
+class _Capture:
+    """One active anchor capture; nested anchors keep their parent active."""
+
+    name: str
+    root_indent: int
+    root_path_len: int
+
+
 def walk(
     content: str,
     *,
@@ -212,8 +223,8 @@ class _Walker:
         self._block_path: tuple[object, ...] = ()
         # Anchor capture.
         self._anchors: dict[str, _Anchor] = {}
-        self._capturing: str | None = None
-        self._capture_root_path_len = 0
+        self._captures: list[_Capture] = []
+        self._anchor_work = 0
         # Set immediately after a SEQUENCE_DASH: the next KEY (on
         # the same line as the dash) attaches to the element frame
         # regardless of its line-indent.  Cleared by the next
@@ -228,6 +239,14 @@ class _Walker:
     # ------------------------------------------------------------------
 
     def run(self) -> Iterator[Event]:
+        try:
+            yield from self._walk()
+        except TokenizerError as e:
+            if not self._recover:
+                raise
+            yield Event(EventKind.CUTOFF, (), e.line, 1, message=str(e))
+
+    def _walk(self) -> Iterator[Event]:
         try:
             tokens = list(tokenize(self._content))
         except TokenizerError as e:
@@ -302,11 +321,11 @@ class _Walker:
                 # Begin capture rooted at the current open-key's
                 # path (or the current frame if no open key).
                 name = tok.value.lstrip("&")
-                self._capturing = name
                 self._anchors[name] = _Anchor(root_indent=tok.indent)
-                self._capture_root_path_len = len(self._current_path())
+                root_path_len = len(self._current_path())
                 if self._open_key is not None:
-                    self._capture_root_path_len += 1
+                    root_path_len += 1
+                self._captures.append(_Capture(name, tok.indent, root_path_len))
                 i += 1
                 continue
 
@@ -320,42 +339,12 @@ class _Walker:
                     j += 1
                 if j < len(tokens) and tokens[j].kind == TokenKind.ALIAS:
                     name = tokens[j].value.lstrip("*")
-                    anchor = self._anchors.get(name)
-                    if anchor is None:
-                        yield Event(
-                            EventKind.ERROR,
-                            self._current_path(),
-                            tok.line,
-                            tok.column,
-                            message=f"unresolved merge alias: *{name}",
+                    if self._open_key is not None and tok.indent > self._open_key.indent:
+                        self._stack.append(
+                            _Frame(key=self._open_key.value, indent=tok.indent, container="mapping")
                         )
-                    else:
-                        # The merge key's effective path includes
-                        # the surrounding open key (the key whose
-                        # value is the merged mapping).  Push a
-                        # frame for that open key so the replay
-                        # base reflects what the maintainer
-                        # actually wrote.
-                        if self._open_key is not None and tok.indent > self._open_key.indent:
-                            self._stack.append(
-                                _Frame(
-                                    key=self._open_key.value,
-                                    indent=tok.indent,
-                                    container="mapping",
-                                )
-                            )
-                            self._open_key = None
-                        base = self._current_path()
-                        for rel_path, value, value_kind in anchor.leaves:
-                            full = base + rel_path
-                            yield Event(
-                                EventKind.LEAF_SCALAR,
-                                full,
-                                tok.line,
-                                tok.column,
-                                value=value,
-                                value_kind=value_kind,
-                            )
+                        self._open_key = None
+                    yield from self._replay_alias(name, self._current_path(), tok, merge=True)
                     i = j + 1
                     continue
                 yield Event(
@@ -369,13 +358,11 @@ class _Walker:
                 continue
 
             if tok.kind == TokenKind.ALIAS:
-                yield Event(
-                    EventKind.ERROR,
-                    self._current_path(),
-                    tok.line,
-                    tok.column,
-                    message=f"bare alias not expanded: {tok.value}",
-                )
+                base = self._current_path()
+                if self._open_key is not None:
+                    base += (self._open_key.value,)
+                    self._open_key = None
+                yield from self._replay_alias(tok.value.lstrip("*"), base, tok)
                 i += 1
                 continue
 
@@ -447,10 +434,8 @@ class _Walker:
         # indent at or shallower than the anchor's defining line.
         # The anchor's body lives at deeper indents; once we reach
         # the anchor's level (or an ancestor), the body is over.
-        if self._capturing is not None:
-            anchor = self._anchors.get(self._capturing)
-            if anchor is not None and indent <= anchor.root_indent:
-                self._capturing = None
+        while self._captures and indent <= self._captures[-1].root_indent:
+            self._captures.pop()
 
     def _handle_key(self, tok: Token) -> Iterator[Event]:
         # Same-line-as-dash case: the dash just pushed an element
@@ -553,7 +538,7 @@ class _Walker:
                 # this bare scalar IS the element's value.  Replace
                 # the frame's key with the index path and emit.
                 path = self._current_path()
-                self._record_anchor_leaf(path, value, value_kind)
+                self._record_anchor_leaf(path, value, value_kind, tok.line)
                 return Event(
                     EventKind.LEAF_SCALAR,
                     path,
@@ -567,7 +552,7 @@ class _Walker:
         path = self._current_path() + (self._open_key.value,)
         line = self._open_key.line
         self._open_key = None
-        self._record_anchor_leaf(path, value, value_kind)
+        self._record_anchor_leaf(path, value, value_kind, line)
         return Event(
             EventKind.LEAF_SCALAR,
             path,
@@ -609,7 +594,7 @@ class _Walker:
         line = self._block_anchor_line
         self._block_buffer = None
         self._block_path = ()
-        self._record_anchor_leaf(path, body, "block_literal")
+        self._record_anchor_leaf(path, body, "block_literal", line)
         return Event(
             EventKind.LEAF_SCALAR,
             path,
@@ -629,20 +614,77 @@ class _Walker:
         path: tuple[object, ...],
         value: str,
         value_kind: str,
+        line: int,
     ) -> None:
-        if self._capturing is None:
+        if not self._captures:
             return
-        anchor = self._anchors.get(self._capturing)
-        if anchor is None:
-            return
-        # Capture relative to the anchor's root.
-        if len(path) >= self._capture_root_path_len:
-            rel = path[self._capture_root_path_len :]
-        else:
-            rel = path
-        if rel:
+        for capture in self._captures:
+            anchor = self._anchors.get(capture.name)
+            if anchor is None:
+                continue
+            # Capture relative to every active anchor's root. Nested anchors
+            # do not terminate their parent template's capture.
+            if len(path) >= capture.root_path_len:
+                rel = path[capture.root_path_len :]
+            else:
+                rel = path
+            self._charge_anchor_work(path, line)
+            # An empty relative path is a scalar anchor (e.g. ``REF: &ref
+            # value``). It must be replayed at the alias's exact destination;
+            # dropping it made valid scalar aliases disappear from structural
+            # consumers such as checkout-ref provenance.
             anchor.leaves.append((rel, value, value_kind))
-        # If we've left the anchor's frame depth, stop capturing.
+
+    def _charge_anchor_work(self, path: tuple[object, ...], line: int) -> None:
+        self._anchor_work += 1 + len(path)
+        if self._anchor_work > MAX_ANCHOR_WORK:
+            raise TokenizerError(line, "anchor alias expansion exceeded the structural work limit")
+
+    def _replay_alias(
+        self,
+        name: str,
+        base: tuple[object, ...],
+        tok: Token,
+        *,
+        merge: bool = False,
+    ) -> Iterator[Event]:
+        """Replay a captured anchor at a mapping or sequence alias site."""
+        anchor = self._anchors.get(name)
+        if anchor is None:
+            prefix = "unresolved merge alias" if merge else "unresolved alias"
+            yield Event(
+                EventKind.ERROR,
+                base,
+                tok.line,
+                tok.column,
+                message=f"{prefix}: *{name}",
+            )
+            return
+        if any(capture.name == name for capture in self._captures):
+            raise TokenizerError(tok.line, f"recursive anchor alias is unsupported: *{name}")
+        if merge and any(not rel_path for rel_path, _, _ in anchor.leaves):
+            yield Event(
+                EventKind.ERROR,
+                base,
+                tok.line,
+                tok.column,
+                message=f"merge alias must reference a mapping, not scalar: *{name}",
+            )
+            return
+        # Snapshot before replay: replayed leaves are captured by any active
+        # enclosing anchors, and must not mutate this source template in place.
+        for rel_path, value, value_kind in tuple(anchor.leaves):
+            path = base + rel_path
+            self._record_anchor_leaf(path, value, value_kind, tok.line)
+            self._charge_anchor_work(path, tok.line)
+            yield Event(
+                EventKind.LEAF_SCALAR,
+                path,
+                tok.line,
+                tok.column,
+                value=value,
+                value_kind=value_kind,
+            )
 
     # ------------------------------------------------------------------
     # Flow style
@@ -752,7 +794,7 @@ class _Walker:
                     value=t.value,
                     value_kind=vk,
                 )
-                self._record_anchor_leaf(path, t.value, vk)
+                self._record_anchor_leaf(path, t.value, vk, t.line)
             i += 1
 
         # Pop the flow container frame and record where the caller
