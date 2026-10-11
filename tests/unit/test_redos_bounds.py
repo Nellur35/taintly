@@ -22,6 +22,7 @@ import time
 
 import pytest
 
+from taintly.rules.github.taint import _GITHUB_SCRIPT_SOURCE_RE
 from taintly.rules.registry import load_all_rules
 
 # rule_id -> (adversarial payload that stresses backtracking,
@@ -55,7 +56,12 @@ _MAX_MS = 500.0
 @pytest.fixture(scope="module")
 def shipped_patterns() -> dict[str, str]:
     rules = {r.id: r for r in load_all_rules()}
-    return {rid: rules[rid].pattern.match for rid in _CASES}
+    # GH-013 now owns its source scalar structurally; the predicate retains
+    # this exact shipped compiled regex rather than a BlockPattern.match.
+    return {
+        rid: _GITHUB_SCRIPT_SOURCE_RE.pattern if rid == "TAINT-GH-013" else rules[rid].pattern.match
+        for rid in _CASES
+    }
 
 
 @pytest.mark.parametrize("rule_id", list(_CASES))
@@ -75,3 +81,21 @@ def test_true_positive_still_matches(rule_id: str, shipped_patterns: dict[str, s
     rx = shipped_patterns[rule_id]
     _, tp = _CASES[rule_id]
     assert re.search(rx, tp), f"{rule_id}: bounding the span dropped a true positive"
+
+
+@pytest.mark.parametrize("unsafe", [False, True])
+def test_github_script_structural_rule_retains_redos_contract(unsafe: bool):
+    """Exercise the real structural entrypoint as well as its shipped source regex."""
+    rule = next(r for r in load_all_rules() if r.id == "TAINT-GH-013")
+    adversarial, positive = _CASES[rule.id]
+    value = positive if unsafe else adversarial
+    source = (
+        "on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - uses: actions/github-script@v7\n"
+        "        with:\n          script: |\n            " + value + "\n"
+    )
+    start = time.perf_counter()
+    findings = rule.pattern.check(source, source.splitlines())
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    assert bool(findings) is unsafe
+    assert elapsed_ms < _MAX_MS, f"GH-013 structural scan took {elapsed_ms:.0f} ms"

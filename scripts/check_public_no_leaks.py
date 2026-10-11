@@ -47,6 +47,7 @@ ALLOWED_FILES: dict[str, str] = {
     "requirements-dev.lock": "hash-pinned dev/CI toolchain lock (uv-generated)",
     # User-facing docs (explicit allow-list — docs/ is NOT a free directory)
     "docs/AI_TRIAGE.md": "user-facing AI-triage guide",
+    "docs/BATCH_SCANNING.md": "user-facing core batch API usage and error contract",
     "docs/CO_FIRES.md": "user-facing co-fire matrix",
     "docs/CONTEXT.md": "user-facing context-file format reference",
     "docs/JENKINSFILE_READER_SCOPE.md": "user-facing parser-scope contract for the optional [jenkins-structural] extra",

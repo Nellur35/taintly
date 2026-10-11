@@ -31,6 +31,9 @@ from .self_test import TestResult
 _SKIP_PATTERN_TYPES: frozenset[str] = frozenset(
     {
         "AbsencePattern",
+        # A shell # inside a JavaScript scalar is not a valid JS comment.
+        # The comment-only simulator cannot benignise this exact pattern.
+        "GithubScriptInterpolationPattern",
         "_NoExplicitPermissionsPattern",
         "_OverbroadWorkflowPermissionsPattern",
     }

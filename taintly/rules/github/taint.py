@@ -44,14 +44,19 @@ safely-quoted lint companion, and github-script JS injection.)
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
-from taintly.models import BlockPattern, ContextPattern, Platform, RegexPattern, Rule, Severity
+from taintly.models import ContextPattern, Platform, RegexPattern, Rule, Severity
 from taintly.taint import TaintPath, _sink_is_safely_quoted
 from taintly.taint import analyze as taint_analyze
 from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
 
-from ._workflow_input_sinks import is_workflow_input_executable_sink
+from ._workflow_input_sinks import (
+    _action_name,
+    _is_step_execution_path,
+    is_workflow_input_executable_sink,
+)
 
 # ---------------------------------------------------------------------------
 # Pattern adapter
@@ -202,6 +207,37 @@ def _is_reusable_input_executable_sink(
     return ctx.is_reusable_workflow() and is_workflow_input_executable_sink(
         value, value_kind, path, ctx
     )
+
+
+# Keep the existing bounded public source policy while narrowing ownership.
+_GITHUB_SCRIPT_SOURCE_RE = re.compile(
+    "\\${{[^}]{0,512}(?:github\\.event\\.|inputs\\.|github\\.head_ref\\b|github\\.actor\\b|needs\\.[a-zA-Z0-9_-]+\\.outputs|steps\\.[a-zA-Z0-9_-]+\\.outputs|matrix\\.)[^}]{0,512}}}"
+)
+
+
+def _is_github_script_interpolation(
+    value: str,
+    _value_kind: str,
+    path: tuple[object, ...],
+    ctx: PredicateContext,
+) -> bool:
+    """Match expressions only in github-script's executable script input."""
+    if (
+        len(path) != 6
+        or path[0] != "jobs"
+        or path[2] != "steps"
+        or path[4] != "with"
+        or path[5] != "script"
+        or not _is_step_execution_path(path, ctx)
+    ):
+        return False
+    return _action_name(ctx.step_uses(path) or "") == "actions/github-script" and bool(
+        _GITHUB_SCRIPT_SOURCE_RE.search(value)
+    )
+
+
+class GithubScriptInterpolationPattern(WorkflowAwarePattern):
+    """Structural matcher for expressions in executable github-script bodies."""
 
 
 # ---------------------------------------------------------------------------
@@ -2325,54 +2361,10 @@ RULES = [
             "intended string literal and execute arbitrary JS with the "
             "step's GitHub-API client and bound secrets."
         ),
-        pattern=BlockPattern(
-            # The block opens at the ``- uses: actions/github-script@``
-            # line; matched lines extend through the step body until
-            # indent drops back to the step level.
-            block_anchor=r"^\s*(?:-\s*)?uses:\s*actions/github-script@",
-            # Narrow match: only ``${{ ... }}`` interpolations that
-            # reference an attacker-controllable token (not pure
-            # system contexts like ``${{ github.repository }}`` or
-            # ``${{ github.run_id }}``).  Requires the expression
-            # body to reference at least one
-            # attacker-controllable token: github.event.*, inputs.*,
-            # github.head_ref, github.actor, needs.*.outputs.*, or
-            # steps.*.outputs.* (fork-reachable upstream output).
-            # System-controlled refs (github.repository, run_id,
-            # sha-on-push, etc.) and secrets.*/vars.* (caller-set)
-            # cannot be poisoned via this surface.
-            match=(
-                # Spans bounded ({0,512}) to prevent quadratic backtracking
-                # on an adversarial ${{-heavy blob; real Actions expressions
-                # are far shorter, so true positives are unaffected.
-                r"\${{[^}]{0,512}"
-                r"(?:"
-                r"github\.event\."
-                r"|inputs\."
-                r"|github\.head_ref\b"
-                r"|github\.actor\b"
-                r"|needs\.[a-zA-Z0-9_-]+\.outputs"
-                r"|steps\.[a-zA-Z0-9_-]+\.outputs"
-                # ``matrix.*`` can be derived from ``fromJSON(inputs.*)``;
-                # without semantic analysis we conservatively treat it as
-                # potentially attacker-influenceable.
-                r"|matrix\."
-                r")"
-                r"[^}]{0,512}}}"
-            ),
-            exclude=[
-                r"^\s*#",
-                # Standard actions/github-script with: keys whose
-                # values aren't part of the JS source.  ``script:`` is
-                # NOT excluded — that's the sink.
-                r"^\s*github-token\s*:",
-                r"^\s*previews\s*:",
-                r"^\s*debug\s*:",
-                r"^\s*user-agent\s*:",
-                r"^\s*retries\s*:",
-                r"^\s*retry-exempt-status-codes\s*:",
-                r"^\s*result-encoding\s*:",
-            ],
+        pattern=GithubScriptInterpolationPattern(
+            path="jobs.*.steps[*].with.script",
+            predicate=_is_github_script_interpolation,
+            requires="${{",
         ),
         remediation=(
             "Pass the expression through an environment variable and "
@@ -2395,69 +2387,62 @@ RULES = [
         ),
         test_positive=[
             (
+                "on:\n"
+                "  pull_request:\n"
                 "jobs:\n"
                 "  bot:\n"
-                "    runs-on: ubuntu-latest\n"
+                "    runs-on:\tubuntu-latest\n"
                 "    steps:\n"
-                "      - uses: actions/github-script@v7\n"
+                "      - uses:\tactions/github-script@v7\n"
                 "        with:\n"
-                "          script: |\n"
+                "          script:\t|\n"
                 "            console.log('${{ github.event.pull_request.title }}')\n"
             ),
             (
+                "on:\n"
+                "  pull_request:\n"
                 "jobs:\n"
                 "  bot:\n"
-                "    runs-on: ubuntu-latest\n"
+                "    runs-on:\tubuntu-latest\n"
                 "    steps:\n"
-                "      - uses: actions/github-script@v7\n"
+                "      - uses:\tactions/github-script@v7\n"
                 "        with:\n"
-                "          github-token: ${{ secrets.TOKEN }}\n"
-                "          script: |\n"
+                "          github-token:\t${{ secrets.TOKEN }}\n"
+                "          script:\t|\n"
                 "            const branch = '${{ matrix.branch }}';\n"
                 "            await github.rest.repos.listCommits({sha: branch})\n"
             ),
         ],
         test_negative=[
-            # github-script with ONLY trusted with: keys — no
-            # interpolation in the script body.
-            (
-                "jobs:\n"
-                "  bot:\n"
-                "    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - uses: actions/github-script@v7\n"
-                "        with:\n"
-                "          github-token: ${{ secrets.TOKEN }}\n"
-                "          script: |\n"
-                "            const { data } = await github.rest.repos.get(context.repo)\n"
-                "            console.log(data.name)\n"
-            ),
-            # No github-script step — no scope.
-            (
-                "jobs:\n"
-                "  build:\n"
-                "    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - run: echo '${{ github.event.pull_request.title }}'\n"
-            ),
-            # System-controlled contexts are NOT
-            # attacker-influenceable.  ``${{ github.repository }}``
-            # is the repo's own slug; ``${{ github.run_id }}`` is
-            # the runner-assigned ID.  Issue-body templates that
-            # interpolate only these system contexts must not fire.
-            # This fixture pins that boundary.
-            (
-                "jobs:\n"
-                "  notify:\n"
-                "    runs-on: ubuntu-latest\n"
-                "    steps:\n"
-                "      - uses: actions/github-script@v7\n"
-                "        with:\n"
-                "          script: |\n"
-                "            await github.rest.issues.create({\n"
-                "              body: 'Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}',\n"
-                "            })\n"
-            ),
+            "on:\n"
+            "  pull_request:\n"
+            "jobs:\n"
+            "  bot:\n"
+            "    runs-on:\tubuntu-latest\n"
+            "    steps:\n"
+            "      - uses:\tactions/github-script@v7\n"
+            "        with:\n"
+            "          github-token:\t${{ secrets.TOKEN }}\n"
+            "          script:\t|\n"
+            "            const { data } = await github.rest.repos.get(context.repo)\n"
+            "            console.log(data.name)\n",
+            "on:\n"
+            "  pull_request:\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on:\tubuntu-latest\n"
+            "    steps:\n"
+            "      - run:\techo '${{ github.event.pull_request.title }}'\n",
+            "jobs:\n"
+            "  notify:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/github-script@v7\n"
+            "        with:\n"
+            "          script: |\n"
+            "            await github.rest.issues.create({\n"
+            "              body: 'Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}',\n"
+            "            })\n",
         ],
         stride=["E", "I"],
         threat_narrative=(
