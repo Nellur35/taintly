@@ -12,6 +12,8 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
+from .authority_context import _Index
+from .call_authority import AuthorityInvocation, CallAuthorityEvidence, CallAuthorityResolver
 from .eventguard import event_guard_verdict
 from .parsers.gha_expr import ExprSyntaxError, iter_expression_bodies, result_provenance_paths
 from .parsers.shell_words import shell_words_with_expansion
@@ -53,6 +55,7 @@ class LocalFlow:
     review_notes: tuple[str, ...] = ()
     event: str = ""
     propagation_lines: tuple[tuple[str, int, str, str], ...] = ()
+    authority: CallAuthorityEvidence = field(default_factory=CallAuthorityEvidence)
 
 
 def flow_evidence(flow: LocalFlow, snippet: str) -> CorpusEvidence:
@@ -65,7 +68,7 @@ def flow_evidence(flow: LocalFlow, snippet: str) -> CorpusEvidence:
             for file, line, kind, detail in flow.propagation_lines
         ),
         f"Configured sink: {flow.callee}:{flow.sink_line}.",
-        "Token permissions, available secrets and cloud authority are not established by this input-flow proof.",
+        *flow.authority.context_notes(),
         *flow.review_notes,
     )
     review = bool(flow.review_notes)
@@ -88,7 +91,7 @@ def flow_evidence(flow: LocalFlow, snippet: str) -> CorpusEvidence:
         remediation,
         review,
         notes,
-        ("configured-input-flow",),
+        ("configured-input-flow", "call-authority-" + flow.authority.state),
         "; ".join(flow.review_notes),
     )
 
@@ -348,6 +351,7 @@ class _Document:
     keys: set[tuple[object, ...]] = field(default_factory=set)
     key_lines: dict[tuple[object, ...], int] = field(default_factory=dict)
     notes: tuple[str, ...] = ()
+    events: list[Event] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if len(self.content) > _MAX_BYTES:
@@ -368,6 +372,7 @@ class _Document:
                 )
             if item.merge_origins:
                 ambiguous = True
+            self.events.append(item)
             if item.kind == EventKind.MAP_KEY:
                 if item.path in self.keys:
                     ambiguous = True
@@ -551,6 +556,16 @@ def find_local_flows(corpus: WorkflowCorpus) -> list[LocalFlow]:
     flows: list[LocalFlow] = []
     frames = 0
     binding_count = 0
+    authority_indexes: dict[str, _Index] = {}
+
+    def authority_index(file: str) -> _Index:
+        key = os.path.normcase(os.path.abspath(file))
+        if key not in authority_indexes:
+            document = docs[key]
+            authority_indexes[key] = _Index(document.content, events=document.events)
+        return authority_indexes[key]
+
+    authority_resolver = CallAuthorityResolver(authority_index)
 
     def load(path: str, kind: str) -> _Document:
         key = os.path.normcase(os.path.abspath(path))
@@ -571,6 +586,7 @@ def find_local_flows(corpus: WorkflowCorpus) -> list[LocalFlow]:
         trail: tuple[tuple[str, int, str], ...],
         seen: tuple[str, ...],
         inherited: tuple[str, ...],
+        authority: AuthorityInvocation,
     ) -> None:
         nonlocal frames, binding_count
         frames += 1
@@ -672,8 +688,13 @@ def find_local_flows(corpus: WorkflowCorpus) -> list[LocalFlow]:
             allowed, guards = doc.guard(sink.owner, event)
             if not allowed:
                 continue
+            impact = authority_resolver.sink(authority, doc.file, doc.kind, sink.owner, event)
             for value in inputs.get(sink.name.lower(), []):
                 reasons = tuple(dict.fromkeys(value.notes + notes + guards + sink.notes))
+                if impact.invocation_unresolved:
+                    reasons += (
+                        "Local invocation validity is unresolved; inspect the authority/contract witnesses.",
+                    )
                 flows.append(
                     LocalFlow(
                         value.hops[0][0],
@@ -691,6 +712,7 @@ def find_local_flows(corpus: WorkflowCorpus) -> list[LocalFlow]:
                         reasons,
                         event,
                         sink.propagation,
+                        impact,
                     )
                 )
                 if len(flows) > _MAX_FLOWS:
@@ -781,6 +803,9 @@ def find_local_flows(corpus: WorkflowCorpus) -> list[LocalFlow]:
                 trail + ((doc.file, call.line, "local call"),),
                 seen + (key,),
                 call_notes,
+                authority_resolver.call(
+                    authority, doc.file, doc.kind, owner, callee.file, kind, call.line
+                ),
             )
 
     for doc in tuple(docs.values()):
@@ -789,7 +814,15 @@ def find_local_flows(corpus: WorkflowCorpus) -> list[LocalFlow]:
         if not events:
             roots = ["?"]
         for event in roots:
-            visit(doc, event, {}, (), (os.path.normcase(os.path.abspath(doc.file)),), ())
+            visit(
+                doc,
+                event,
+                {},
+                (),
+                (os.path.normcase(os.path.abspath(doc.file)),),
+                (),
+                AuthorityInvocation(),
+            )
     # Direct and env propagation can describe the same sink; preserve independent
     # call sites/sources, not duplicate projections of one proof.
     unique: dict[tuple[object, ...], LocalFlow] = {}
