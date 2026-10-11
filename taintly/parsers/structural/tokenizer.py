@@ -689,7 +689,11 @@ class _Tokenizer:
                     not self._value_position
                     and trailing < n
                     and raw[trailing] == ":"
-                    and (trailing + 1 == n or raw[trailing + 1] in (" ", "\t"))
+                    and (
+                        self._flow_depth > 0
+                        or trailing + 1 == n
+                        or raw[trailing + 1] in (" ", "\t")
+                    )
                 ):
                     yield Token(
                         TokenKind.KEY,

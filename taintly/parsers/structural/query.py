@@ -7,8 +7,8 @@ don't re-derive shape-fragile regexes.
 
 from __future__ import annotations
 
+from .api import walk_workflow
 from .walker import EventKind
-from .walker import walk as _walk
 
 __all__ = ["triggers"]
 
@@ -34,7 +34,7 @@ def triggers(content: str) -> frozenset[str]:
     ``workflow_corpus._classify_triggers``.
     """
     events: set[str] = set()
-    for ev in _walk(content, include_keys=True):
+    for ev in walk_workflow("workflow.yml", content=content, include_keys=True, recover=True):
         path = ev.path
         if ev.kind is EventKind.MAP_KEY:
             # Immediate child key of ``on:`` → a mapping-form event name.

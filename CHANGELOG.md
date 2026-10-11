@@ -11,6 +11,9 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 ## [Unreleased]
 
 ### Added
+- `SEC6-GH-015`: review secret-bearing process output saved by GitHub Actions
+  caches, with scoped environment, path, save-order and event-policy checks.
+  See [the usage guide](docs/SECRET_CACHE.md) for supported tools and limits.
 - Multi-stage taint analysis with provenance across GitHub Actions, GitLab CI, and Jenkins.
 - Cross-artifact and cross-workflow taint tracking (composite actions, reusable workflows).
 - Kill-chain composition — individually-lower-severity findings correlated into an exploitable-chain
@@ -23,6 +26,9 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- Trigger queries reuse the bounded structural parse cache. GitHub expression
+  boundaries respect quoted strings, and compact quoted flow-mapping keys
+  retain their structural paths.
 - Refined CI findings with job-level permission coverage, ordered PR-source checks,
   executable reusable-workflow input sinks, and same-job output value proofs.
 - `SEC9-GL-001` now requires a strongly sensitive artifact path and still asks for

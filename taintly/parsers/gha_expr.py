@@ -491,10 +491,33 @@ def result_provenance_paths(body: str) -> list[str]:
     return list(seen)
 
 
-_EXPR_BODY_RE = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
-
-
 def iter_expression_bodies(text: str) -> Iterator[str]:
-    """Yield the inner body of every ``${{ ... }}`` occurrence in ``text``."""
-    for m in _EXPR_BODY_RE.finditer(text):
-        yield m.group(1)
+    """Yield GitHub Actions expression bodies, respecting string literals.
+
+    ``}}`` ends an expression only outside a single-quoted expression string.
+    GitHub Actions escapes a quote within a string as ``''``.
+    """
+    start = 0
+    while (open_at := text.find("${{", start)) >= 0:
+        i = open_at + 3
+        in_string = False
+        while i < len(text):
+            if in_string:
+                if text[i] == "'":
+                    if i + 1 < len(text) and text[i + 1] == "'":
+                        i += 2
+                        continue
+                    in_string = False
+                i += 1
+                continue
+            if text[i] == "'":
+                in_string = True
+                i += 1
+                continue
+            if text.startswith("}}", i):
+                yield text[open_at + 3 : i]
+                start = i + 2
+                break
+            i += 1
+        else:
+            return
