@@ -46,7 +46,6 @@ _MODULES = [
     "taintly/gitlab_taint.py",
     "taintly/attack_path.py",
     "taintly/combination_facts.py",
-    "taintly/cross_workflow_facts.py",
     "taintly/permissions_facts.py",
     "taintly/validation_facts.py",
 ]
@@ -63,12 +62,6 @@ _DB_RECEIVERS = {"db"}
 # clean — only NEW, unexplained dead extractions are flagged for review.  Remove
 # an entry once the relation is consumed (the gate will tell you it's stale).
 #
-# Public-repo note: the only allowlisted entry upstream is for
-# ``taintly/cross_workflow_facts.py`` (``call_edge``), a closure module the
-# public repo does not ship.  Listing an entry for an absent module would emit a
-# spurious "stale — prune it" NOTE on every run (the module is skipped, so its
-# dead extraction is never observed), so the allowlist is intentionally empty
-# here.  Add an entry only for a module that is actually present in this repo.
 _KNOWN_DEAD_EXTRACTIONS: dict[tuple[str, str], str] = {}
 
 

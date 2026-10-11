@@ -210,3 +210,12 @@ treated as local. Multiple root `include:` keys and aliases whose anchors are
 outside the isolated block are unsupported; they do not receive regex-based
 fallback classification. Existing path containment and include-depth/file
 limits still apply after extraction.
+# Local workflow and action call graph (XF-GH-005/006)
+
+The scanner follows statically configured local reusable-workflow and composite-action
+calls, preserving invocation-specific inputs, guards, source locations and shell sinks.
+Findings describe configured input-flow candidates. They do not establish that a
+workflow ran, that a checked-out action matches the inspected local metadata, or what
+token permissions and secrets were available at runtime. Unknown inputs, guards,
+expression semantics and shell reinterpretation remain review-needed. Resource limits
+are reported as incomplete coverage rather than treated as proof of no flow.
