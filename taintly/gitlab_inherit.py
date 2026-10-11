@@ -51,13 +51,14 @@ import os
 import re
 from dataclasses import dataclass, field
 
+from ._gitlab_effective import walk_gitlab_effective
 from .gitlab_taint import (
     _TAINTED_REF_RE,
     TaintHop,
     _extract_var_ref,
     _references_var,
 )
-from .parsers.structural import EventKind, walk_workflow
+from .parsers.structural import EventKind
 
 # Reserved top-level keys that are NOT jobs (mirror of the set in
 # ``gitlab_taint`` / ``gitlab_workflow_corpus``; kept local to avoid a
@@ -189,7 +190,8 @@ def _extract_raw_jobs(filepath: str, content: str) -> dict[str, _RawJob]:
     synthetic name ``""`` so the cascade is modelled by the caller.
     """
     raw: dict[str, _RawJob] = {}
-    for ev in walk_workflow(filepath, content=content):
+    effective = walk_gitlab_effective(filepath, content=content)
+    for ev in effective.events:
         if ev.kind is EventKind.CUTOFF:
             break
         if ev.kind is not EventKind.LEAF_SCALAR:

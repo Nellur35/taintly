@@ -31,14 +31,15 @@ from .walker import walk as _walk
 # ---------------------------------------------------------------------------
 # Parse memoization.
 #
-# The FULL walk is a PURE function of (content, recover, include_keys) — the
-# schema lookup is not consumed and the filepath only feeds it, and ``query`` is
+# The FULL walk is a PURE function of (content, recover, include_keys,
+# include_merge_origins) — the schema lookup is not consumed and the filepath
+# only feeds it, and ``query`` is
 # just a post-filter over the yielded events (see ``walk()``).  A single
 # ``scan_file`` calls ``walk_workflow`` hundreds-to-tens-of-thousands of times on
 # the SAME content (one call per structural rule / query / taint fact-build).
-# Keying the cache by (content, recover, include_keys) and applying ``query`` as
+# Keying the cache by all four values and applying ``query`` as
 # an in-memory filter means all those distinct-query calls share ONE walk
-# (≤4 per file, the recover/include_keys combos) instead of re-walking per query.
+# (≤8 per file, the recover/include_keys/include_merge_origins combos) instead of re-walking per query.
 #
 # Bounded LRU: the dominant redundancy is *within* one file's scan (same
 # content, a handful of query/flag variants), so a small cap captures nearly all
@@ -57,19 +58,32 @@ def clear_walk_cache() -> None:
     _walk_cache.clear()
 
 
-def _full_walk(content: str, recover: bool, include_keys: bool) -> tuple[Event, ...]:
+def _full_walk(
+    content: str,
+    recover: bool,
+    include_keys: bool,
+    include_merge_origins: bool,
+) -> tuple[Event, ...]:
     """One materialised FULL (``query=None``) walk per (content, recover,
-    include_keys), so the many distinct-query calls on one file share a single
-    walk.  ``query`` is applied as a cheap in-memory post-filter in
+    include_keys, include_merge_origins), so the many distinct-query calls on
+    one file share a single walk. ``query`` is applied as a cheap in-memory post-filter in
     :func:`walk_workflow`; ``walk()`` already treats the query as a pure
     post-filter, so filtering the full stream is byte-identical to a per-query
     walk."""
-    key = (content, recover, include_keys)
+    key = (content, recover, include_keys, include_merge_origins)
     cached = _walk_cache.get(key)
     if cached is not None:
         _walk_cache.move_to_end(key)
         return cached
-    events = tuple(_walk(content, query=None, recover=recover, include_keys=include_keys))
+    events = tuple(
+        _walk(
+            content,
+            query=None,
+            recover=recover,
+            include_keys=include_keys,
+            include_merge_origins=include_merge_origins,
+        )
+    )
     _walk_cache[key] = events
     _walk_cache.move_to_end(key)
     if len(_walk_cache) > _WALK_CACHE_MAXSIZE:
@@ -85,6 +99,7 @@ def walk_workflow(
     content: str | None = None,
     recover: bool = True,
     include_keys: bool = False,
+    include_merge_origins: bool = False,
 ) -> Iterator[Event]:
     """Walk a CI YAML file, yielding events.
 
@@ -107,6 +122,9 @@ def walk_workflow(
             mapping keys (incl. keys with empty/null/nested-map values
             that produce no ``LEAF_SCALAR``).  Default False keeps the
             event stream byte-identical for leaf-only consumers.
+        include_merge_origins: if True, attach merge-destination provenance
+            to replayed leaves and expose merge-site markers. Default False
+            leaves existing event streams and anchor-work charging unchanged.
 
     The schema name is accepted for forward compatibility; the
     walker currently treats every path as ``ValueShape.UNKNOWN``
@@ -118,13 +136,14 @@ def walk_workflow(
     # is preserved so a future schema-consultation hook wires in
     # here without touching the call sites.
     _ = schema or detect_schema_for_path(filepath)
-    # Walk ONCE per (content, recover, include_keys) — cached full event stream —
+    # Walk ONCE per (content, recover, include_keys, include_merge_origins) —
+    # cached full event stream —
     # then apply ``query`` as a cheap in-memory post-filter.  ``walk()`` already
     # treats query as a pure post-filter over LEAF_SCALAR/MAP_KEY events
     # (CUTOFF/ERROR always pass through), so this is byte-identical to a per-query
     # walk while collapsing the many distinct-query walks/file to ≤4.  filepath /
     # schema do not affect the event stream.
-    events = _full_walk(content, recover, include_keys)
+    events = _full_walk(content, recover, include_keys, include_merge_origins)
     if query is None:
         return iter(events)
     segments = _glob_to_segments(query)

@@ -26,7 +26,7 @@ Walks a CI YAML file and yields a stream of events:
 
 - **Does not produce a full YAML AST.** Event-streaming, not
   tree-building.
-- **Does not resolve effective merge precedence.** Inherited defaults and
+- **The default stream does not resolve effective merge precedence.** Inherited defaults and
   explicit overrides can emit multiple events at one path. Consumers must
   retain uncertainty for duplicate bindings rather than select an arbitrary
   first or last value.
@@ -34,6 +34,29 @@ Walks a CI YAML file and yields a stream of events:
 - **Does not introduce a YAML library dependency.**  Hand-rolled
   reader; the project's zero-runtime-dependency promise is
   preserved.
+
+### GitLab effective merge values
+
+The GitLab single-file taint extractor and inheritance resolver share
+`taintly/_gitlab_effective.py`. It applies explicit-over-merged precedence
+for supported single mapping-alias merges, regardless of source order.
+An explicit key replaces the whole child subtree, including an empty or
+null value. This follows [GitLab's YAML optimization documentation](https://docs.gitlab.com/ci/yaml/yaml_optimization/).
+
+The internal `include_merge_origins=True` walker option records each merged
+leaf's defining mapping and immediate child key. Nested anchor capture and
+bare aliases preserve those original coordinates. This is opt-in; ordinary
+raw consumers retain their existing event stream. Origin-chain copying and
+storage are charged to the same structural work budget, and the parse cache
+separates this option from ordinary walks.
+
+Repeated explicit keys or merge sites, unsupported flow aliases/merges,
+non-mapping merges, errors and cutoffs make the effective view incomplete.
+The view then returns the ordinary raw stream without new precedence
+suppression. This also retains old detections if metadata alone exhausts
+the budget. The fallback retains the existing raw consumer limitations,
+including first-writer inheritance misses; it does not resolve unknown YAML.
+Merge lists and `extends` array replacement are outside this change.
 
 ## Supported features
 

@@ -105,8 +105,9 @@ import os
 import re
 from dataclasses import dataclass, field
 
+from ._gitlab_effective import walk_gitlab_effective
 from .models import _split_into_job_segments
-from .parsers.structural import EventKind, walk_workflow
+from .parsers.structural import EventKind
 from .taint_facts import Database, solve
 
 # ---------------------------------------------------------------------------
@@ -688,7 +689,8 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
             and not name.startswith(".")
         )
 
-    for ev in walk_workflow(".gitlab-ci.yml", content=content):
+    effective = walk_gitlab_effective(".gitlab-ci.yml", content=content)
+    for ev in effective.events:
         if ev.kind is EventKind.CUTOFF:
             break
         if ev.kind is not EventKind.LEAF_SCALAR:
