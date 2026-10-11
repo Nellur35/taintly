@@ -774,6 +774,7 @@ def _annotate_guarded_findings(findings: list[Finding], content: str) -> None:
             "verify it dominates this finding's step before treating it as exploitable."
         )
         f.exploitability = "low"
+        f.context_tags.append("guard-calibration")
         f.calibration_reason = (
             f"{f.calibration_reason} {note}".strip() if f.calibration_reason else note
         )
@@ -805,7 +806,10 @@ def _propagate_guard_calibration_to_composites(findings: list[Finding]) -> None:
     calibrated_legs = {
         (f.file, f.line): f
         for f in findings
-        if f.origin == "file" and f.exploitability == "low" and f.calibration_reason
+        if f.origin == "file"
+        and f.exploitability == "low"
+        and f.calibration_reason
+        and "guard-calibration" in f.context_tags
     }
     if not calibrated_legs:
         return
@@ -837,12 +841,21 @@ def _guard_calibration_postprocessor(findings: list[Finding], ctx: _PostProcessC
     _annotate_guarded_findings(findings, ctx.content)
 
 
+def _lotp_authority_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
+    if not any(f.rule_id in {"LOTP-GH-001", "LOTP-GH-003"} for f in findings):
+        return
+    from .authority_context import calibrate_lotp_authority
+
+    calibrate_lotp_authority(findings, ctx.content)
+
+
 POST_PROCESSORS: tuple[_PostProcessor, ...] = (
     _github_dead_postprocessor,
     _gitlab_dead_postprocessor,
     _jenkins_dead_postprocessor,
     _maintainer_downgrade_postprocessor,
     _guard_calibration_postprocessor,
+    _lotp_authority_postprocessor,
 )
 
 
