@@ -10,34 +10,6 @@
           "informationUri": "https://github.com/Nellur35/taintly",
           "rules": [
             {
-              "id": "SEC3-GH-001",
-              "name": "SEC3_GH_001",
-              "shortDescription": {
-                "text": "Action referenced by mutable tag"
-              },
-              "fullDescription": {
-                "text": "An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action's repo can move the tag to a malicious commit; every consumer pinned by tag picks up the new code on the next workflow run."
-              },
-              "defaultConfiguration": {
-                "level": "error"
-              },
-              "properties": {
-                "tags": [
-                  "CICD-SEC-3",
-                  "STRIDE:T"
-                ],
-                "severity": "CRITICAL",
-                "threat_narrative": "Tag-based pinning lets the upstream maintainer (or anyone who compromises their account) hot-swap the action contents without changing the workflow file.",
-                "incidents": [
-                  "tj-actions/changed-files (CVE-2025-30066)"
-                ]
-              },
-              "helpUri": "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions",
-              "help": {
-                "text": "Pin the action to a full 40-character commit SHA."
-              }
-            },
-            {
               "id": "PSE-GH-001",
               "name": "PSE_GH_001",
               "shortDescription": {
@@ -63,6 +35,25 @@
               "helpUri": "https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/",
               "help": {
                 "text": "Break at least one leg of the triangle:"
+              }
+            },
+            {
+              "id": "ENGINE-ERR",
+              "name": "ENGINE_ERR",
+              "shortDescription": {
+                "text": "File size 60000 bytes exceeds scanner cap (50000)"
+              },
+              "fullDescription": {
+                "text": "Per-line rules still ran but file-scope coverage degraded."
+              },
+              "defaultConfiguration": {
+                "level": "note"
+              },
+              "properties": {
+                "tags": [],
+                "severity": "LOW",
+                "threat_narrative": "",
+                "incidents": []
               }
             },
             {
@@ -93,6 +84,34 @@
               }
             },
             {
+              "id": "SEC3-GH-001",
+              "name": "SEC3_GH_001",
+              "shortDescription": {
+                "text": "Action referenced by mutable tag"
+              },
+              "fullDescription": {
+                "text": "An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action's repo can move the tag to a malicious commit; every consumer pinned by tag picks up the new code on the next workflow run."
+              },
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "tags": [
+                  "CICD-SEC-3",
+                  "STRIDE:T"
+                ],
+                "severity": "CRITICAL",
+                "threat_narrative": "Tag-based pinning lets the upstream maintainer (or anyone who compromises their account) hot-swap the action contents without changing the workflow file.",
+                "incidents": [
+                  "tj-actions/changed-files (CVE-2025-30066)"
+                ]
+              },
+              "helpUri": "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions",
+              "help": {
+                "text": "Pin the action to a full 40-character commit SHA."
+              }
+            },
+            {
               "id": "TAINT-GH-001",
               "name": "TAINT_GH_001",
               "shortDescription": {
@@ -116,58 +135,11 @@
               "help": {
                 "text": "Quote the variable in the run: block."
               }
-            },
-            {
-              "id": "ENGINE-ERR",
-              "name": "ENGINE_ERR",
-              "shortDescription": {
-                "text": "File size 60000 bytes exceeds scanner cap (50000)"
-              },
-              "fullDescription": {
-                "text": "Per-line rules still ran but file-scope coverage degraded."
-              },
-              "defaultConfiguration": {
-                "level": "note"
-              },
-              "properties": {
-                "tags": [],
-                "severity": "LOW",
-                "threat_narrative": "",
-                "incidents": []
-              }
             }
           ]
         }
       },
       "results": [
-        {
-          "ruleId": "SEC3-GH-001",
-          "level": "error",
-          "message": {
-            "text": "An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action's repo can move the tag to a malicious commit; every consumer pinned by tag picks up the new code on the next workflow run."
-          },
-          "locations": [
-            {
-              "physicalLocation": {
-                "artifactLocation": {
-                  "uri": ".github/workflows/ci.yml",
-                  "uriBaseId": "%SRCROOT%"
-                },
-                "region": {
-                  "startLine": 12,
-                  "snippet": {
-                    "text": "      - uses: actions/checkout@v4"
-                  }
-                }
-              }
-            }
-          ],
-          "properties": {
-            "finding_family": "supply_chain_immutability",
-            "confidence": "high",
-            "exploitability": "high"
-          }
-        },
         {
           "ruleId": "PSE-GH-001",
           "level": "error",
@@ -190,6 +162,9 @@
               }
             }
           ],
+          "partialFingerprints": {
+            "taintlyFingerprintV1": "e1962eac171011e27321482c7cbd7d8ddeffc6c3fe1074a277f2e472ded50a9d"
+          },
           "properties": {
             "finding_family": "agent_credential_chain",
             "confidence": "medium",
@@ -203,6 +178,33 @@
             "triage_needed": true,
             "suppression_reason": "Dead-path siblings were removed before reporting.",
             "calibration_reason": "Maintainer-only trigger path lowers exploitability."
+          }
+        },
+        {
+          "ruleId": "ENGINE-ERR",
+          "level": "note",
+          "message": {
+            "text": "Per-line rules still ran but file-scope coverage degraded."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/big.yml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "taintlyFingerprintV1": "3dc5728475fad62ddd313d4792cabd0cb8234249159be782a380c8bbed049c98"
+          },
+          "properties": {
+            "confidence": "high",
+            "exploitability": "medium"
           }
         },
         {
@@ -227,10 +229,44 @@
               }
             }
           ],
+          "partialFingerprints": {
+            "taintlyFingerprintV1": "c6b9d07127325b0bcabb9ed1476fbc608f80c415d0ab7fe996ff581e52656906"
+          },
           "properties": {
             "finding_family": "excessive_permissions",
             "confidence": "high",
             "exploitability": "medium"
+          }
+        },
+        {
+          "ruleId": "SEC3-GH-001",
+          "level": "error",
+          "message": {
+            "text": "An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action's repo can move the tag to a malicious commit; every consumer pinned by tag picks up the new code on the next workflow run."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/ci.yml",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 12,
+                  "snippet": {
+                    "text": "      - uses: actions/checkout@v4"
+                  }
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "taintlyFingerprintV1": "d9b08160316517280cd62880113ee805fc3e91f15035917525da1267c52a1696"
+          },
+          "properties": {
+            "finding_family": "supply_chain_immutability",
+            "confidence": "high",
+            "exploitability": "high"
           }
         },
         {
@@ -255,45 +291,18 @@
               }
             }
           ],
+          "partialFingerprints": {
+            "taintlyFingerprintV1": "3a716696b78cc404781a4434c35afe81976ef7c6288ffa9126cfcc3dcbe8c35a"
+          },
           "properties": {
             "finding_family": "taint_to_run_block",
             "confidence": "medium",
             "exploitability": "medium",
             "review_needed": true
           }
-        },
-        {
-          "ruleId": "ENGINE-ERR",
-          "level": "note",
-          "message": {
-            "text": "Per-line rules still ran but file-scope coverage degraded."
-          },
-          "locations": [
-            {
-              "physicalLocation": {
-                "artifactLocation": {
-                  "uri": ".github/workflows/big.yml",
-                  "uriBaseId": "%SRCROOT%"
-                },
-                "region": {
-                  "startLine": 1
-                }
-              }
-            }
-          ],
-          "properties": {
-            "confidence": "high",
-            "exploitability": "medium"
-          }
         }
       ],
       "artifacts": [
-        {
-          "location": {
-            "uri": ".github/workflows/ci.yml",
-            "uriBaseId": "%SRCROOT%"
-          }
-        },
         {
           "location": {
             "uri": ".github/workflows/agent.yml",
@@ -303,6 +312,12 @@
         {
           "location": {
             "uri": ".github/workflows/big.yml",
+            "uriBaseId": "%SRCROOT%"
+          }
+        },
+        {
+          "location": {
+            "uri": ".github/workflows/ci.yml",
             "uriBaseId": "%SRCROOT%"
           }
         }
@@ -335,7 +350,10 @@
       ],
       "properties": {
         "findings_count": 5,
-        "inventory_count": 0
+        "inventory_count": 0,
+        "security_findings_count": 4,
+        "engine_error_count": 1,
+        "coverage_status": "incomplete"
       }
     }
   ]

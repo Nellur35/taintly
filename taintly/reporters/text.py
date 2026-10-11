@@ -30,6 +30,13 @@ INVENTORY_RULE_IDS: frozenset[str] = frozenset(
 )
 
 
+def _security_findings(findings: list[Finding]) -> list[Finding]:
+    """Risk candidates exclude inventory observations and scan diagnostics."""
+    return [
+        f for f in findings if f.rule_id not in INVENTORY_RULE_IDS and f.rule_id != "ENGINE-ERR"
+    ]
+
+
 COLORS = {
     Severity.CRITICAL: "\033[91m",
     Severity.HIGH: "\033[93m",
@@ -197,7 +204,7 @@ def _format_top_distinct_risks(
     if not report.findings:
         return out
 
-    all_clusters = cluster_findings(report.findings)
+    all_clusters = cluster_findings(_security_findings(report.findings))
     confirmed = [cl for cl in all_clusters if not cl.review_needed]
     review = [cl for cl in all_clusters if cl.review_needed]
 
@@ -298,7 +305,7 @@ def _format_executive_summary(
     # Split: vulnerability findings vs third-party inventory items.
     # Inventory items surface CI surface-area to review periodically at
     # the user's chosen cadence; they are not findings to fix.
-    vuln_findings = [f for f in report.findings if f.rule_id not in INVENTORY_RULE_IDS]
+    vuln_findings = _security_findings(report.findings)
     inventory_findings = [f for f in report.findings if f.rule_id in INVENTORY_RULE_IDS]
     out.append(f"  Findings:       {len(vuln_findings)}")
     if inventory_findings:
@@ -344,7 +351,7 @@ def _format_executive_summary(
     # readers see the clustered picture first.
     out.extend(_format_top_distinct_risks(report, c, r, b, dim))
 
-    top = _top_issues(report.findings, n=3)
+    top = _top_issues(vuln_findings, n=3)
     if top:
         out.append(f"{b}Top 3 issues{r}")
         for rule_id, count, sev, title in top:
@@ -354,7 +361,7 @@ def _format_executive_summary(
             )
         out.append("")
 
-    risk = _top_risk(report.findings)
+    risk = _top_risk(vuln_findings)
     if risk is not None:
         out.append(f"{b}Top risk{r}")
         out.append(
@@ -363,7 +370,7 @@ def _format_executive_summary(
         out.append(f"  {dim}{_safe(risk.file)}:{risk.line}{r}")
         out.append("")
 
-    win = _quick_win(report.findings)
+    win = _quick_win(vuln_findings)
     if win is not None:
         auto = " (auto-fixable via --fix)" if win.rule_id in _AUTO_FIXABLE_RULES else ""
         out.append(f"{b}Quick win{r}")
@@ -416,7 +423,8 @@ def format_text(
     engine_errors = report.engine_errors()
     if engine_errors:
         warn_color = c.get(Severity.HIGH, "") if use_color else ""
-        out.append(f"{warn_color}{b}! Coverage degraded on {len(engine_errors)} file(s){r}")
+        affected_files = len({f.file for f in engine_errors})
+        out.append(f"{warn_color}{b}! Coverage degraded on {affected_files} file(s){r}")
         for f in engine_errors[:5]:
             out.append(f"  {arrow_char()} {_safe(f.file)}: {f.title}")
         if len(engine_errors) > 5:
@@ -428,7 +436,10 @@ def format_text(
         out.append("")
 
     if not report.findings or all(f.rule_id == "ENGINE-ERR" for f in report.findings):
-        out.append(f"  {check_char()} No findings.")
+        if engine_errors:
+            out.append("  No security findings reported; scan incomplete.")
+        else:
+            out.append(f"  {check_char()} No findings.")
         # Even on a clean scan, surface trust events that affected the
         # scope of what was checked: a "no findings" report on a config
         # that excludes rules is meaningfully different from "no
@@ -456,9 +467,14 @@ def format_text(
 
     total = len(report.findings)
     inventory_count = sum(1 for f in report.findings if f.rule_id in INVENTORY_RULE_IDS)
-    vuln_count = total - inventory_count
-    if inventory_count:
-        header_count = f"{total} = {vuln_count} to fix + {inventory_count} inventory"
+    vuln_count = len(_security_findings(report.findings))
+    if inventory_count or engine_errors:
+        parts = [f"{vuln_count} security findings"]
+        if inventory_count:
+            parts.append(f"{inventory_count} inventory")
+        if engine_errors:
+            parts.append(f"{len(engine_errors)} coverage warnings")
+        header_count = f"{total} = {' + '.join(parts)}"
     else:
         header_count = str(total)
     out.append(f"{b}{sep * 3} Findings ({header_count}) {sep * 3}{r}")

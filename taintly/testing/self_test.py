@@ -92,6 +92,13 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
 #
 # Each value documents the failure flavour and follow-up pointer.
 _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
+    ("SEC6-GH-005", "whitespace_pad"): (
+        "The structural script-sink rule requires a parsed run mapping. "
+        "Removing required YAML separator spaces changes run: echo into "
+        "plain scalar text run:echo, so no executable run field remains. "
+        "This non-applicable mutant is not a working workflow evasion; "
+        "valid added-space variants remain covered by explicit contracts."
+    ),
     ("SEC4-GH-001", "whitespace_pad"): (
         "SEC4-GH-001 structurally requires a parsed actions/checkout uses: "
         "mapping. The zero-space variant collapses uses: actions/checkout to "

@@ -12,7 +12,10 @@
   },
   "findings_count": 5,
   "inventory_count": 0,
-  "distinct_risk_count": 4,
+  "security_findings_count": 4,
+  "engine_error_count": 1,
+  "coverage_status": "incomplete",
+  "distinct_risk_count": 3,
   "review_needed_count": 1,
   "families": [
     {
@@ -58,20 +61,6 @@
       "top_exploitability": "medium"
     },
     {
-      "family_id": "ENGINE-ERR",
-      "title": "File size 60000 bytes exceeds scanner cap (50000)",
-      "why": "",
-      "finding_count": 1,
-      "rule_ids": [
-        "ENGINE-ERR"
-      ],
-      "affected_files": [
-        ".github/workflows/big.yml"
-      ],
-      "review_needed": false,
-      "top_exploitability": "medium"
-    },
-    {
       "family_id": "taint_to_run_block",
       "title": "Taint To Run Block",
       "why": "",
@@ -87,36 +76,6 @@
     }
   ],
   "findings": [
-    {
-      "rule_id": "SEC3-GH-001",
-      "severity": "CRITICAL",
-      "title": "Action referenced by mutable tag",
-      "description": "An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action's repo can move the tag to a malicious commit; every consumer pinned by tag picks up the new code on the next workflow run.",
-      "file": ".github/workflows/ci.yml",
-      "line": 12,
-      "snippet": "      - uses: actions/checkout@v4",
-      "match_text": "- uses: actions/checkout@v4",
-      "remediation": "Pin the action to a full 40-character commit SHA.\nUse `gh action pin` or `taintly --fix`.",
-      "reference": "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions",
-      "owasp_cicd": "CICD-SEC-3",
-      "stride": [
-        "T"
-      ],
-      "threat_narrative": "Tag-based pinning lets the upstream maintainer (or anyone who compromises their account) hot-swap the action contents without changing the workflow file.",
-      "incidents": [
-        "tj-actions/changed-files (CVE-2025-30066)"
-      ],
-      "origin": "file",
-      "finding_family": "supply_chain_immutability",
-      "confidence": "high",
-      "exploitability": "high",
-      "review_needed": false,
-      "context_notes": [],
-      "context_tags": [],
-      "triage_needed": false,
-      "suppression_reason": "",
-      "calibration_reason": ""
-    },
     {
       "rule_id": "PSE-GH-001",
       "severity": "HIGH",
@@ -138,6 +97,7 @@
       "incidents": [],
       "origin": "file",
       "finding_family": "agent_credential_chain",
+      "composition_tags": [],
       "confidence": "medium",
       "exploitability": "high",
       "review_needed": false,
@@ -150,6 +110,33 @@
       "triage_needed": true,
       "suppression_reason": "Dead-path siblings were removed before reporting.",
       "calibration_reason": "Maintainer-only trigger path lowers exploitability."
+    },
+    {
+      "rule_id": "ENGINE-ERR",
+      "severity": "LOW",
+      "title": "File size 60000 bytes exceeds scanner cap (50000)",
+      "description": "Per-line rules still ran but file-scope coverage degraded.",
+      "file": ".github/workflows/big.yml",
+      "line": 0,
+      "snippet": "",
+      "match_text": "",
+      "remediation": "",
+      "reference": "",
+      "owasp_cicd": "",
+      "stride": [],
+      "threat_narrative": "",
+      "incidents": [],
+      "origin": "file",
+      "finding_family": "",
+      "composition_tags": [],
+      "confidence": "high",
+      "exploitability": "medium",
+      "review_needed": false,
+      "context_notes": [],
+      "context_tags": [],
+      "triage_needed": false,
+      "suppression_reason": "",
+      "calibration_reason": ""
     },
     {
       "rule_id": "SEC2-GH-002",
@@ -171,8 +158,40 @@
       "incidents": [],
       "origin": "file",
       "finding_family": "excessive_permissions",
+      "composition_tags": [],
       "confidence": "high",
       "exploitability": "medium",
+      "review_needed": false,
+      "context_notes": [],
+      "context_tags": [],
+      "triage_needed": false,
+      "suppression_reason": "",
+      "calibration_reason": ""
+    },
+    {
+      "rule_id": "SEC3-GH-001",
+      "severity": "CRITICAL",
+      "title": "Action referenced by mutable tag",
+      "description": "An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action's repo can move the tag to a malicious commit; every consumer pinned by tag picks up the new code on the next workflow run.",
+      "file": ".github/workflows/ci.yml",
+      "line": 12,
+      "snippet": "      - uses: actions/checkout@v4",
+      "match_text": "- uses: actions/checkout@v4",
+      "remediation": "Pin the action to a full 40-character commit SHA.\nUse `gh action pin` or `taintly --fix`.",
+      "reference": "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions",
+      "owasp_cicd": "CICD-SEC-3",
+      "stride": [
+        "T"
+      ],
+      "threat_narrative": "Tag-based pinning lets the upstream maintainer (or anyone who compromises their account) hot-swap the action contents without changing the workflow file.",
+      "incidents": [
+        "tj-actions/changed-files (CVE-2025-30066)"
+      ],
+      "origin": "file",
+      "finding_family": "supply_chain_immutability",
+      "composition_tags": [],
+      "confidence": "high",
+      "exploitability": "high",
       "review_needed": false,
       "context_notes": [],
       "context_tags": [],
@@ -199,35 +218,10 @@
       "incidents": [],
       "origin": "file",
       "finding_family": "taint_to_run_block",
+      "composition_tags": [],
       "confidence": "medium",
       "exploitability": "medium",
       "review_needed": true,
-      "context_notes": [],
-      "context_tags": [],
-      "triage_needed": false,
-      "suppression_reason": "",
-      "calibration_reason": ""
-    },
-    {
-      "rule_id": "ENGINE-ERR",
-      "severity": "LOW",
-      "title": "File size 60000 bytes exceeds scanner cap (50000)",
-      "description": "Per-line rules still ran but file-scope coverage degraded.",
-      "file": ".github/workflows/big.yml",
-      "line": 0,
-      "snippet": "",
-      "match_text": "",
-      "remediation": "",
-      "reference": "",
-      "owasp_cicd": "",
-      "stride": [],
-      "threat_narrative": "",
-      "incidents": [],
-      "origin": "file",
-      "finding_family": "",
-      "confidence": "high",
-      "exploitability": "medium",
-      "review_needed": false,
       "context_notes": [],
       "context_tags": [],
       "triage_needed": false,
@@ -253,6 +247,7 @@
       "incidents": [],
       "origin": "file",
       "finding_family": "",
+      "composition_tags": [],
       "confidence": "high",
       "exploitability": "medium",
       "review_needed": false,
@@ -264,6 +259,7 @@
     }
   ],
   "score": {
+    "applicable": true,
     "total": 72,
     "grade": "C",
     "distinct_risks": 2,

@@ -37,6 +37,9 @@ _INCOMPLETE_CHUNKED_SEARCH = _IncompleteChunkedSearch()
 _CHUNKED_SEARCH_INCOMPLETE: ContextVar[bool] = ContextVar(
     "taintly_chunked_search_incomplete", default=False
 )
+_JOB_SEGMENT_CACHE: ContextVar[dict[int, tuple[list[str], list[tuple[int, list[str]]]]] | None] = (
+    ContextVar("taintly_job_segment_cache", default=None)
+)
 
 
 def _reset_chunked_search_coverage() -> None:
@@ -76,11 +79,16 @@ class scan_session:
     Outside the session, _safe_search falls back to its own
     swap-and-restore path so ad-hoc callers still get correctness.
 
-    No-op off POSIX main-thread.
+    Job-segment reuse is scoped to this same context so parsing results do
+    not retain workflow contents after the file's rule loop completes.
+
+    The SIGALRM timeout optimization is a no-op off POSIX main-thread; the
+    context-local job-segment cache remains active on every platform.
     """
 
     def __enter__(self):
         self._installed = False
+        self._job_segment_cache_token = _JOB_SEGMENT_CACHE.set({})
         if os.name != "posix":
             return self
         try:
@@ -91,10 +99,12 @@ class scan_session:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if not self._installed:
-            return
-        signal.alarm(0)  # type: ignore[attr-defined,unused-ignore]
-        signal.signal(signal.SIGALRM, self._old_handler)  # type: ignore[attr-defined,unused-ignore]
+        try:
+            if self._installed:
+                signal.alarm(0)  # type: ignore[attr-defined]
+                signal.signal(signal.SIGALRM, self._old_handler)  # type: ignore[attr-defined]
+        finally:
+            _JOB_SEGMENT_CACHE.reset(self._job_segment_cache_token)
 
 
 _MATCH_TEXT_MAX_LEN = 200
@@ -759,7 +769,7 @@ def _looks_like_jenkinsfile(lines: list[str]) -> bool:
     return False
 
 
-def _split_into_job_segments(lines: list[str]) -> list[tuple[int, list[str]]]:
+def _compute_job_segments(lines: list[str]) -> list[tuple[int, list[str]]]:
     """Split a CI/CD config into per-job segments for scoped ContextPattern checks.
 
     Returns a list of (start_line_index, segment_lines) pairs where start_line_index
@@ -897,6 +907,34 @@ def _split_into_job_segments(lines: list[str]) -> list[tuple[int, list[str]]]:
         segments = filtered
 
     return segments if len(segments) > 1 else [(0, lines)]
+
+
+def _split_into_job_segments(lines: list[str]) -> list[tuple[int, list[str]]]:
+    """Reuse a file's job segmentation only during its active scan session.
+
+    ContextPattern rules repeatedly ask for the same segmentation while the
+    engine evaluates many rules against one immutable ``lines`` list. Its
+    consumers only read the returned segments. The scan-session cache is
+    context-local and limited to the original plus anchor-expanded line lists;
+    direct callers outside a session retain the uncached behavior.
+    """
+    cache = _JOB_SEGMENT_CACHE.get()
+    if cache is None:
+        return _compute_job_segments(lines)
+
+    key = id(lines)
+    cached = cache.get(key)
+    if cached is not None and cached[0] is lines:
+        return cached[1]
+
+    segments = _compute_job_segments(lines)
+    # A scan normally uses the original lines and, for anchor-aware rules,
+    # one expanded copy. Bound retained content even if a caller uses this
+    # session for additional independent line lists.
+    if len(cache) >= 2:
+        del cache[next(iter(cache))]
+    cache[key] = (lines, segments)
+    return segments
 
 
 def _split_into_step_segments(content: str) -> list[tuple[int, list[str]]]:

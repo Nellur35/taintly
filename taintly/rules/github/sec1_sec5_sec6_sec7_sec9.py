@@ -5,6 +5,7 @@ These were entirely missing from initial implementation.
 """
 
 import re
+from bisect import bisect_right
 
 from taintly.models import (
     _YAML_BOOL_FALSE,
@@ -20,7 +21,10 @@ from taintly.models import (
     _safe_search,
 )
 from taintly.parsers.segmentation import for_each_step
+from taintly.parsers.structural import EventKind, walk_workflow
 from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
+
+from ._workflow_input_sinks import SHELL_EXECUTING_ACTION_SLOTS, _action_name
 
 # ---------------------------------------------------------------------------
 # SEC1-GH-001 — job-scoped variant of SequencePattern
@@ -541,6 +545,91 @@ class PyPiPublishLongLivedTokenPattern:
                 if _PYPI_PASSWORD_INPUT_RE.match(line):
                     results.append((step.start_line + offset, line.strip()))
                     break
+        return results
+
+
+_SECRET_INTERPOLATION_RE = re.compile(r"\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}")
+_LEGACY_SECRET_INTERPOLATION_PATTERN = RegexPattern(
+    match=r"\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}",
+    exclude=[
+        r"^\s*#",
+        r"""^\s*[\w.-]+:\s*["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
+        r"""^\s*(?:-\s*)?["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
+        r"^\s*(?!run\s*:|script\s*:)[\w._-]+:\s*\S",
+    ],
+)
+
+
+class SecretInterpolationInShellPattern:
+    """Find direct secret interpolation in supported executable script values.
+
+    Structural parser uncertainty retains the legacy line-based result. A
+    complete parse restricts this rule to step run scalars and documented action
+    script inputs, scanning whole values so folded expressions are visible.
+    """
+
+    @staticmethod
+    def _is_run_scalar(path: tuple[object, ...]) -> bool:
+        return (
+            len(path) == 5
+            and path[0] == "jobs"
+            and path[2] == "steps"
+            and isinstance(path[3], int)
+            and path[4] == "run"
+        )
+
+    @classmethod
+    def _is_shell_sink(cls, path: tuple[object, ...], context: PredicateContext) -> bool:
+        if cls._is_run_scalar(path):
+            return True
+        if (
+            len(path) != 6
+            or path[0] != "jobs"
+            or path[2] != "steps"
+            or not isinstance(path[3], int)
+            or path[4] != "with"
+            or not isinstance(path[5], str)
+        ):
+            return False
+        action = _action_name(context.step_uses(path) or "")
+        return (action, path[5].lower()) in SHELL_EXECUTING_ACTION_SLOTS
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        events = list(
+            walk_workflow("workflow.yml", content=content, include_keys=True, recover=True)
+        )
+        if any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
+            return _LEGACY_SECRET_INTERPOLATION_PATTERN.check(content, lines)
+
+        leaves = tuple(event for event in events if event.kind is EventKind.LEAF_SCALAR)
+        context = PredicateContext(leaves=leaves)
+        results: list[tuple[int, str]] = []
+        for event in events:
+            if event.kind is not EventKind.LEAF_SCALAR or not self._is_shell_sink(
+                event.path, context
+            ):
+                continue
+
+            if event.block_lines is not None:
+                source = "\n".join(text for _, text in event.block_lines)
+                line_numbers = [line for line, _ in event.block_lines]
+            else:
+                source = event.value or ""
+                line_numbers = [event.line + offset for offset in range(source.count("\n") + 1)]
+            newline_positions = [index for index, char in enumerate(source) if char == "\n"]
+
+            for match in _SECRET_INTERPOLATION_RE.finditer(source):
+                line_offset = bisect_right(newline_positions, match.start())
+                if line_offset >= len(line_numbers):
+                    continue
+                line_number = line_numbers[line_offset]
+                source_line = lines[line_number - 1] if 0 < line_number <= len(lines) else ""
+                if source_line.lstrip().startswith("#"):
+                    continue
+                snippet = source_line.strip() or match.group(0)
+                result = (line_number, snippet)
+                if result not in results:
+                    results.append(result)
         return results
 
 
@@ -1091,55 +1180,22 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC6-GH-005",
-        title="Secret interpolated directly into shell command (not via env var)",
+        title="Secret interpolated directly into executable script (not via env var)",
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-6",
         description=(
-            "A ${{ secrets.X }} expression is used inline in a context beyond a simple "
-            "YAML key-value assignment. When secrets are interpolated directly into shell "
-            "commands, the value is written to the generated script file on disk before "
-            "execution, increasing exposure risk. It may also appear in shell history or "
-            "process listings. Prefer mediation through an env: variable."
+            "A ${{ secrets.X }} expression is interpolated into a step's `run:` script "
+            "or a documented action input that executes script code. For `run:` blocks, "
+            "the expression is substituted before the shell executes; action behavior "
+            "depends on the consuming action. Prefer mediation through an environment "
+            "variable and the script's supported runtime environment access."
         ),
-        pattern=RegexPattern(
-            # Anchor on ${{ secrets.X }} directly (O(n) scan).
-            # The old pattern `[^:]*\$\{\{` had O(n²) catastrophic backtracking on
-            # lines without ${{ because the leading quantifier retried every position.
-            match=r"\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}",
-            exclude=[
-                r"^\s*#",
-                # Exclude YAML key: ${{ secrets.X }} assignments — both unquoted and quoted forms.
-                # `token: ${{ secrets.GITHUB_TOKEN }}` and `token: "${{ secrets.GITHUB_TOKEN }}"` are
-                # safe: the value is passed as a string parameter to an action (with:) or set as an
-                # environment variable (env:). The dangerous pattern is embedding ${{ }} inside a
-                # larger shell string (e.g. inside a `run:` command).
-                r"""^\s*[\w.-]+:\s*["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
-                # Exclude lines whose entire content is a bare
-                # ``${{ secrets.X }}`` reference (possibly quoted,
-                # possibly with a hyphen prefix for YAML list
-                # items).  This is the block-scalar
-                # action-input shape (e.g. ``secret-ids: |`` body
-                # lines in aws-actions/configure-aws-credentials):
-                # the value passes through to the action as a
-                # plain string, the same path covered by the
-                # ``key: ${{ secrets.X }}`` form above.  Sample-
-                # and-label found 4 fires of this exact shape in
-                # the corpus baseline; no neighboring TPs are at
-                # risk because real shell-injection contexts always
-                # carry other tokens on the same line.
-                r"""^\s*(?:-\s*)?["']?\$\{\{\s*secrets\.[a-zA-Z0-9_]+\s*\}\}["']?\s*(#.*)?$""",
-                # Exclude env-block assignments where the secret is
-                # embedded in a larger value.  The risk this rule
-                # owns is literal secret interpolation into
-                # generated shell script bodies, not runner-managed
-                # env.
-                r"^\s*(?!run\s*:|script\s*:)[\w._-]+:\s*\S",
-            ],
-        ),
+        pattern=SecretInterpolationInShellPattern(),
         remediation=(
-            "Route the secret through an env: variable so it never reaches "
-            "the generated step script file on disk:\n"
+            "Keep the secret out of executable code by passing it through an "
+            "environment variable and reading it through the shell or the "
+            "action's documented runtime interface:\n"
             "env:\n  API_TOKEN: ${{ secrets.API_TOKEN }}\n"
             'run: curl -H "Authorization: Bearer $API_TOKEN" https://api.example.com\n'
             "Most publish tools accept an env-var form of their credential "
@@ -1150,22 +1206,20 @@ RULES: list[Rule] = [
         ),
         reference="https://woodruffw.github.io/zizmor/audits/secrets-outside-env/",
         test_positive=[
-            '        run: curl -H "Authorization: Bearer ${{ secrets.API_TOKEN }}" https://api.example.com',
-            "        run: ./deploy.sh ${{ secrets.DEPLOY_KEY }}",
+            "on: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n"
+            '      - run: curl -H "Authorization: Bearer ${{ secrets.API_TOKEN }}" https://api.example.com',
+            "on: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: ./deploy.sh ${{ secrets.DEPLOY_KEY }}",
         ],
         test_negative=[
-            "        env:\n          API_TOKEN: ${{ secrets.API_TOKEN }}",
-            "        with:\n          token: ${{ secrets.GITHUB_TOKEN }}",
-            '        with:\n          repoToken: "${{ secrets.GITHUB_TOKEN }}"',
-            "        # run: curl ${{ secrets.TOKEN }}",
-            # Block-scalar list-item shape.  ``secret-ids: |`` body
-            # lines pass each secret to the action as a literal
-            # string, same trust path as the ``key: ${{ secrets.X }}``
-            # form.
-            "        with:\n          secret-ids: |\n            ${{ secrets.AWS_KEY_1 }}\n            ${{ secrets.AWS_KEY_2 }}",
-            # Same shape with a YAML list-item dash prefix.
-            "        with:\n          tokens:\n            - ${{ secrets.GH_TOKEN }}\n            - ${{ secrets.NPM_TOKEN }}",
-            "        env:\n          AWS_ENDPOINT_URL: https://${{ secrets.MIRROR_R2_ACCOUNT_ID }}.r2.example.com",
+            "on: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - env:\n          API_TOKEN: ${{ secrets.API_TOKEN }}\n"
+            "        run: curl https://api.example.com/$API_TOKEN",
+            "on: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - uses: example/action@v1\n        with:\n"
+            "          token: ${{ secrets.GITHUB_TOKEN }}",
+            "on: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n"
+            "      - run: |\n          # curl ${{ secrets.TOKEN }}\n          echo done",
         ],
         stride=["I", "R"],
         threat_narrative=(

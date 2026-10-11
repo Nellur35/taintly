@@ -8,7 +8,7 @@ from typing import Any
 from taintly import __version__
 from taintly.baseline import fingerprint
 from taintly.models import AuditReport, Severity
-from taintly.reporters.text import INVENTORY_RULE_IDS
+from taintly.reporters.text import INVENTORY_RULE_IDS, _security_findings
 
 
 def _finding_sort_key(f: Any) -> tuple[str, int, str, str]:
@@ -213,6 +213,9 @@ def format_sarif(report: AuditReport) -> str:
                 "properties": {
                     "findings_count": findings_count,
                     "inventory_count": inventory_count,
+                    "security_findings_count": len(_security_findings(report.findings)),
+                    "engine_error_count": len(report.engine_errors()),
+                    "coverage_status": "incomplete" if report.engine_errors() else "complete",
                 },
             }
         ],

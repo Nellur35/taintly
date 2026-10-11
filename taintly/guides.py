@@ -338,14 +338,22 @@ REFERENCES:
 """,
     "SEC6-GH-005": """
 ═══════════════════════════════════════════════════════════════════════════════
-REMEDIATION GUIDE: Secret interpolated directly into shell (SEC6-GH-005)
+REMEDIATION GUIDE: Secret interpolated into executable script (SEC6-GH-005)
 ═══════════════════════════════════════════════════════════════════════════════
 Severity: HIGH
 OWASP:    CICD-SEC-6 — Insufficient Credential Hygiene
-Risk:     ${{ secrets.X }} inside a run: block is written to the generated
-          step script file on disk. Every later step on the same runner
-          (including third-party action code) can read that file, plus the
-          value appears in process-listing output (ps / /proc).
+Risk:     ${{ secrets.X }} becomes executable script source before execution.
+          For run: this includes the generated step script file; storage for
+          action-owned scripts depends on the action. Process arguments and
+          diagnostics can also expose values, depending on how they are used.
+
+SCOPE:
+  This rule checks run: scripts and documented executable action inputs,
+  including github-script's script, Azure inlineScript and SSH commands.
+  Ordinary action data inputs, such as image tags and authorization values,
+  do not establish script exposure. Unknown action behavior is outside this
+  static contract; a quiet result does not establish that an action is safe.
+  Incomplete parsing retains conservative matching and coverage warnings.
 
 WHY THIS CAN'T BE AUTO-FIXED:
   The replacement shape depends on what the shell command is doing. A
@@ -365,6 +373,10 @@ STEP-BY-STEP REMEDIATION:
          TOKEN: ${{ secrets.TOKEN }}
        run: |
          curl -H "Authorization: Bearer $TOKEN" https://api.example.com
+
+     For actions/github-script, set the step env: the same way and use
+     process.env.TOKEN inside script: instead of ${{ secrets.TOKEN }}.
+     Use the corresponding environment-variable access for other runtimes.
 
   3. WHERE AVAILABLE, USE THE TOOL'S ENV-VAR FORM INSTEAD OF --flag
      Many package/publish tools read a conventional env var and skip

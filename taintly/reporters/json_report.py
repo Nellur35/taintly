@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from taintly.families import cluster_findings
 from taintly.models import AuditReport
 from taintly.reporters.sarif import _finding_sort_key
-from taintly.reporters.text import INVENTORY_RULE_IDS
+from taintly.reporters.text import INVENTORY_RULE_IDS, _security_findings
 
 if TYPE_CHECKING:
     from taintly.scorer import ScoreReport
@@ -16,7 +16,8 @@ if TYPE_CHECKING:
 
 def format_json(report: AuditReport, score_report: ScoreReport | None = None) -> str:
     """Render an AuditReport as pretty-printed JSON."""
-    clusters = cluster_findings(report.findings)
+    security_findings = _security_findings(report.findings)
+    clusters = cluster_findings(security_findings)
     confirmed_clusters = [cl for cl in clusters if not cl.review_needed]
     review_clusters = [cl for cl in clusters if cl.review_needed]
 
@@ -41,6 +42,9 @@ def format_json(report: AuditReport, score_report: ScoreReport | None = None) ->
         "summary": report.summary,
         "findings_count": findings_count,
         "inventory_count": inventory_count,
+        "security_findings_count": len(security_findings),
+        "engine_error_count": len(report.engine_errors()),
+        "coverage_status": "incomplete" if report.engine_errors() else "complete",
         "distinct_risk_count": len(confirmed_clusters),
         "review_needed_count": len(review_clusters),
         "families": [cl.to_dict() for cl in clusters],
