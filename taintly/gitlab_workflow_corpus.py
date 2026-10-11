@@ -235,6 +235,7 @@ class GitLabWorkflowSummary:
     job_definitions: tuple[GitLabJobSummary, ...] = ()
     cross_project_includes: tuple[GitLabIncludeRef, ...] = ()
     unpinned_project_includes: tuple[GitLabIncludeRef, ...] = ()
+    content_truncated: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +257,7 @@ class GitLabWorkflowCorpus:
 
     repo_path: str
     workflows: dict[str, GitLabWorkflowSummary] = field(default_factory=dict)
+    entry_filepath: str | None = None
 
     def all(self) -> list[GitLabWorkflowSummary]:
         return list(self.workflows.values())
@@ -297,6 +299,7 @@ def build_gitlab_corpus(repo_path: str) -> GitLabWorkflowCorpus:
     if entry is None:
         return corpus
 
+    corpus.entry_filepath = entry
     _walk_includes(corpus, entry, depth=0)
     return corpus
 
@@ -345,13 +348,15 @@ def _walk_includes(
             content = f.read()
     except OSError:
         return
-    if len(content) > _MAX_SAFE_TEXT_LEN:
+    truncated = len(content) > _MAX_SAFE_TEXT_LEN
+    if truncated:
         # Truncate beyond the cap.  The extractors are line-driven and
         # bounded, but the byte-length cap is the shared invariant so
         # one pathological file can't blow up corpus build time.
         content = content[:_MAX_SAFE_TEXT_LEN]
 
     summary = _summarize_gitlab_file(norm, content)
+    summary.content_truncated = truncated
     corpus.workflows[norm] = summary
 
     # Recurse into local include targets.  Targets are resolved

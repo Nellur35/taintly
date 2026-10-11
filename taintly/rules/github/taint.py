@@ -2170,6 +2170,7 @@ RULES = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         confidence="low",
+        review_needed=True,
         finding_family="script_injection",
         description=(
             "A tainted GitHub-Actions context (PR title/body, comment "

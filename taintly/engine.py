@@ -425,6 +425,20 @@ def scan_file(
                     exploitability = compute_exploitability(family, finding_ctx)
                     ctx_notes: list[str] = []
                     ctx_tags: list[str] = []
+                    if rule.id == "TAINT-GH-012" and exploitability == "high":
+                        # This rule is a review lint for a safely quoted shell
+                        # value: the sink does not re-tokenise the value, so
+                        # privileged workflow context alone must not make the
+                        # lint itself appear highly exploitable. Possible
+                        # downstream re-parsing remains uncertain and is why
+                        # TAINT-GH-012 stays review-needed at low confidence.
+                        exploitability = "medium"
+                        ctx_notes.append(
+                            "TAINT-GH-012 safely-quoted shell lint: direct shell "
+                            "injection at this sink is not possible; downstream "
+                            "re-parsing remains for review."
+                        )
+                        ctx_tags.append("safe-shell-lint-review")
                     if (
                         finding_ctx.has_harden_runner_egress_block
                         and family in HARDEN_RUNNER_TEMPERED_FAMILIES
