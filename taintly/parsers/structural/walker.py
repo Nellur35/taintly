@@ -74,6 +74,10 @@ class Event:
     # (scalar emitter, flow handler, merge-key replay, error path)
     # continue to construct events without modification.
     block_lines: tuple[tuple[int, str], ...] | None = None
+    # Opt-in provenance for YAML merge replay. Each pair identifies the
+    # destination mapping and its immediate child key that introduced this
+    # inherited leaf. The default stream remains unchanged for other readers.
+    merge_origins: tuple[tuple[tuple[object, ...], object], ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +157,16 @@ class _Anchor:
     the alias's line under the alias's current path.
     """
 
-    leaves: list[tuple[tuple[object, ...], str, str]] = field(default_factory=list)
+    leaves: list[
+        tuple[
+            tuple[object, ...],
+            str,
+            str,
+            tuple[tuple[tuple[object, ...], object], ...],
+        ]
+    ] = field(default_factory=list)
     root_indent: int = -1
+    root_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -172,9 +184,15 @@ def walk(
     query: str | None = None,
     recover: bool = True,
     include_keys: bool = False,
+    include_merge_origins: bool = False,
 ) -> Iterator[Event]:
     glob_segments = _glob_to_segments(query) if query else None
-    walker = _Walker(content, recover=recover, include_keys=include_keys)
+    walker = _Walker(
+        content,
+        recover=recover,
+        include_keys=include_keys,
+        include_merge_origins=include_merge_origins,
+    )
     for ev in walker.run():
         # LEAF_SCALAR and (opt-in) MAP_KEY are path-addressable and so are
         # glob-filtered; CUTOFF/ERROR always pass through.  When
@@ -205,10 +223,18 @@ class _Walker:
         non-block token or EOF.
     """
 
-    def __init__(self, content: str, *, recover: bool, include_keys: bool = False) -> None:
+    def __init__(
+        self,
+        content: str,
+        *,
+        recover: bool,
+        include_keys: bool = False,
+        include_merge_origins: bool = False,
+    ) -> None:
         self._content = content
         self._recover = recover
         self._include_keys = include_keys
+        self._include_merge_origins = include_merge_origins
         self._stack: list[_Frame] = [_Frame(key=None, indent=-1, container="mapping")]
         self._open_key: Token | None = None
         # Block-scalar state.  Each buffer entry is
@@ -344,6 +370,15 @@ class _Walker:
                             _Frame(key=self._open_key.value, indent=tok.indent, container="mapping")
                         )
                         self._open_key = None
+                    if self._include_merge_origins:
+                        yield Event(
+                            EventKind.MAP_KEY,
+                            self._current_path() + ("<<",),
+                            tok.line,
+                            tok.column,
+                            value="<<",
+                            value_kind="merge_key",
+                        )
                     yield from self._replay_alias(name, self._current_path(), tok, merge=True)
                     i = j + 1
                     continue
@@ -477,6 +512,14 @@ class _Walker:
             )
 
     def _enter_sequence(self, indent: int) -> None:
+        sequence_root_path = self._current_path()
+        if self._open_key is not None:
+            sequence_root_path += (self._open_key.value,)
+        for capture in self._captures:
+            if len(sequence_root_path) == capture.root_path_len:
+                anchor = self._anchors.get(capture.name)
+                if anchor is not None:
+                    anchor.root_kind = "sequence"
         # If a previous element's mapping frame is open at deeper
         # indent than the new dash, pop it (the new dash starts a
         # sibling element).  An element frame's indent is dash+1
@@ -615,6 +658,7 @@ class _Walker:
         value: str,
         value_kind: str,
         line: int,
+        merge_origins: tuple[tuple[tuple[object, ...], object], ...] = (),
     ) -> None:
         if not self._captures:
             return
@@ -628,15 +672,18 @@ class _Walker:
                 rel = path[capture.root_path_len :]
             else:
                 rel = path
-            self._charge_anchor_work(path, line)
+            self._charge_anchor_work(path, line, len(merge_origins))
             # An empty relative path is a scalar anchor (e.g. ``REF: &ref
             # value``). It must be replayed at the alias's exact destination;
             # dropping it made valid scalar aliases disappear from structural
             # consumers such as checkout-ref provenance.
-            anchor.leaves.append((rel, value, value_kind))
+            anchor.leaves.append((rel, value, value_kind, merge_origins))
 
-    def _charge_anchor_work(self, path: tuple[object, ...], line: int) -> None:
-        self._anchor_work += 1 + len(path)
+    def _charge_anchor_work(
+        self, path: tuple[object, ...], line: int, merge_origin_count: int = 0
+    ) -> None:
+        metadata_work = merge_origin_count if self._include_merge_origins else 0
+        self._anchor_work += 1 + len(path) + metadata_work
         if self._anchor_work > MAX_ANCHOR_WORK:
             raise TokenizerError(line, "anchor alias expansion exceeded the structural work limit")
 
@@ -662,7 +709,13 @@ class _Walker:
             return
         if any(capture.name == name for capture in self._captures):
             raise TokenizerError(tok.line, f"recursive anchor alias is unsupported: *{name}")
-        if merge and any(not rel_path for rel_path, _, _ in anchor.leaves):
+        if merge and (
+            (self._include_merge_origins and anchor.root_kind == "sequence")
+            or any(
+                not rel_path or (self._include_merge_origins and not isinstance(rel_path[0], str))
+                for rel_path, _, _, _ in anchor.leaves
+            )
+        ):
             yield Event(
                 EventKind.ERROR,
                 base,
@@ -673,10 +726,13 @@ class _Walker:
             return
         # Snapshot before replay: replayed leaves are captured by any active
         # enclosing anchors, and must not mutate this source template in place.
-        for rel_path, value, value_kind in tuple(anchor.leaves):
+        for rel_path, value, value_kind, prior_origins in tuple(anchor.leaves):
             path = base + rel_path
-            self._record_anchor_leaf(path, value, value_kind, tok.line)
-            self._charge_anchor_work(path, tok.line)
+            origins = prior_origins
+            if merge and self._include_merge_origins:
+                origins = (*origins, (base, rel_path[0]))
+            self._record_anchor_leaf(path, value, value_kind, tok.line, origins)
+            self._charge_anchor_work(path, tok.line, len(origins))
             yield Event(
                 EventKind.LEAF_SCALAR,
                 path,
@@ -684,6 +740,7 @@ class _Walker:
                 tok.column,
                 value=value,
                 value_kind=value_kind,
+                merge_origins=origins if self._include_merge_origins else (),
             )
 
     # ------------------------------------------------------------------
@@ -730,6 +787,13 @@ class _Walker:
         container = "sequence" if first.kind == TokenKind.FLOW_OPEN_SEQ else "mapping"
         self._stack.append(_Frame(key=base_key, indent=first.indent, container=container))
         my_frame = self._stack[-1]
+        if container == "sequence" and self._include_merge_origins:
+            sequence_root_path = self._current_path()
+            for capture in self._captures:
+                if len(sequence_root_path) == capture.root_path_len:
+                    anchor = self._anchors.get(capture.name)
+                    if anchor is not None:
+                        anchor.root_kind = "sequence"
         i = start + 1
         flow_pending_key: str | None = None
 
@@ -739,6 +803,17 @@ class _Walker:
                 i += 1
                 break
             if t.kind in (TokenKind.INDENT, TokenKind.COMMENT, TokenKind.FLOW_COMMA):
+                i += 1
+                continue
+            if t.kind in (TokenKind.ANCHOR, TokenKind.ALIAS, TokenKind.MERGE_KEY):
+                if self._include_merge_origins:
+                    yield Event(
+                        EventKind.ERROR,
+                        self._current_path(),
+                        t.line,
+                        t.column,
+                        message="flow aliases are unsupported for merge provenance",
+                    )
                 i += 1
                 continue
             if t.kind == TokenKind.KEY:
