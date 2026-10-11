@@ -52,6 +52,7 @@ ALLOWED_FILES: dict[str, str] = {
     "docs/JENKINSFILE_READER_SCOPE.md": "user-facing parser-scope contract for the optional [jenkins-structural] extra",
     "docs/JENKINS_POSTURE_TESTING.md": "user-facing Jenkins runbook",
     "docs/SCORING.md": "user-facing scoring model",
+    "docs/SECRET_CACHE.md": "user-facing secret-bearing cache usage and triage guide",
     "docs/STRUCTURAL_READER_SCOPE.md": "user-facing parser-scope contract",
     # Ephemeral dev fixture (kept minimal)
     "dev/jenkins-test/docker-compose.yml": "Jenkins test-fixture compose file",

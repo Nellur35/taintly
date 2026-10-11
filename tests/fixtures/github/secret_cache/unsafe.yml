@@ -1,0 +1,20 @@
+name: Secret-bearing build cache usage
+on:
+  push:
+    branches: [main]
+permissions: {contents: read}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: build-v1
+      - run: cargo miri test
+        env:
+          TOKEN: ${{ secrets.SERVICE_TOKEN }}
+      - run: env > target/environment.txt
+        env:
+          TOKEN: ${{ secrets.SERVICE_TOKEN }}

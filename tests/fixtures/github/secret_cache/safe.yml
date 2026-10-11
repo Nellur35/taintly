@@ -1,0 +1,18 @@
+name: Secrets scoped away from build cache
+on:
+  push:
+    branches: [main]
+permissions: {contents: read}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: build-v1
+      - run: cargo miri test
+      - run: ./publish.sh
+        env:
+          TOKEN: ${{ secrets.SERVICE_TOKEN }}

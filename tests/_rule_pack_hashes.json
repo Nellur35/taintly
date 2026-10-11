@@ -101,6 +101,8 @@
   "github/safe/reusable_workflow_call_only.yml": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "github/safe/secret_in_with_but_also_env.yml": "a0e026694cfb1d7f4f46d049e5c2b13043390d4a5f4b2d856eb70a3d8f887c94",
   "github/safe/with_input_no_secret.yml": "4f0127c4ad7c7ca174181cdaae055dca12d7524ecc86466f31ba2e5859bddd69",
+  "github/secret_cache/safe.yml": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "github/secret_cache/unsafe.yml": "9d04bd9e98caecb6643e6ce0620fe03d294db118528bce10735f9d65a115dc90",
   "github/vulnerable/ai_agent_cli_on_pr.yml": "d4635a2567aa32596a80186223823cf3afaf448d29a569ee77fd06399cfd7d80",
   "github/vulnerable/ai_agent_dangerous_flags.yml": "5819f9fd39fefe36e6361ab854f7829e646b094beee78bd94bd738b05efaa8fe",
   "github/vulnerable/ai_agent_on_pr.yml": "59bd1dba0ca0bcde33c66bffb569ebac48678556a715d7cab1cb0120150485c2",
