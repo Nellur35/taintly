@@ -1,0 +1,485 @@
+[
+  {
+    "name": "ai-gh-012-unguarded",
+    "rule": "AI-GH-012",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          mcp_config: server-filesystem\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-012-own-equality",
+    "rule": "AI-GH-012",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          mcp_config: server-filesystem\n",
+    "expected": false,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-012-own-inequality",
+    "rule": "AI-GH-012",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name != github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          mcp_config: server-filesystem\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-012-own-or-true",
+    "rule": "AI-GH-012",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository || true\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          mcp_config: server-filesystem\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-012-own-false",
+    "rule": "AI-GH-012",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: false\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          mcp_config: server-filesystem\n",
+    "expected": false,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-012-comment",
+    "rule": "AI-GH-012",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          mcp_config: server-filesystem\n# if: github.event.pull_request.head.repo.full_name == github.repository\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-012-sibling-job",
+    "rule": "AI-GH-012",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          mcp_config: server-filesystem\n  unrelated:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    steps:\n      - run: echo unrelated\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-012-sibling-step",
+    "rule": "AI-GH-012",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          mcp_config: server-filesystem\n      - if: github.event.pull_request.head.repo.full_name == github.repository\n        run: echo unrelated\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-012-mixed-event",
+    "rule": "AI-GH-012",
+    "source": "on: [pull_request_target, issue_comment]\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          mcp_config: server-filesystem\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-012-unknown",
+    "rule": "AI-GH-012",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: inputs.run_agent\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          mcp_config: server-filesystem\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-013-unguarded",
+    "rule": "AI-GH-013",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - run: claude -p 'review'\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-013-own-equality",
+    "rule": "AI-GH-013",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - run: claude -p 'review'\n",
+    "expected": false,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-013-own-inequality",
+    "rule": "AI-GH-013",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name != github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - run: claude -p 'review'\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-013-own-or-true",
+    "rule": "AI-GH-013",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository || true\n    runs-on: ubuntu-latest\n    steps:\n      - run: claude -p 'review'\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-013-own-false",
+    "rule": "AI-GH-013",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: false\n    runs-on: ubuntu-latest\n    steps:\n      - run: claude -p 'review'\n",
+    "expected": false,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-013-comment",
+    "rule": "AI-GH-013",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - run: claude -p 'review'\n# if: github.event.pull_request.head.repo.full_name == github.repository\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-013-sibling-job",
+    "rule": "AI-GH-013",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - run: claude -p 'review'\n  unrelated:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    steps:\n      - run: echo unrelated\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-013-sibling-step",
+    "rule": "AI-GH-013",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - run: claude -p 'review'\n      - if: github.event.pull_request.head.repo.full_name == github.repository\n        run: echo unrelated\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-013-mixed-event",
+    "rule": "AI-GH-013",
+    "source": "on: [pull_request_target, issue_comment]\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - run: claude -p 'review'\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-013-unknown",
+    "rule": "AI-GH-013",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: inputs.run_agent\n    runs-on: ubuntu-latest\n    steps:\n      - run: claude -p 'review'\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-015-unguarded",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-015-own-equality",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": false,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-015-own-inequality",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name != github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-015-own-or-true",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository || true\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-015-own-false",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: false\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": false,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-015-comment",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n# if: github.event.pull_request.head.repo.full_name == github.repository\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-015-sibling-job",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n  unrelated:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    steps:\n      - run: echo unrelated\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-015-sibling-step",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n      - if: github.event.pull_request.head.repo.full_name == github.repository\n        run: echo unrelated\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-015-mixed-event",
+    "rule": "AI-GH-015",
+    "source": "on: [pull_request_target, issue_comment]\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-015-unknown",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: inputs.run_agent\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-019-unguarded",
+    "rule": "AI-GH-019",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view 1 --json title,body\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Source integrity is independent of trigger identity."
+  },
+  {
+    "name": "ai-gh-019-own-equality",
+    "rule": "AI-GH-019",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view 1 --json title,body\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Source integrity is independent of trigger identity."
+  },
+  {
+    "name": "ai-gh-019-own-inequality",
+    "rule": "AI-GH-019",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name != github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view 1 --json title,body\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Source integrity is independent of trigger identity."
+  },
+  {
+    "name": "ai-gh-019-own-or-true",
+    "rule": "AI-GH-019",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository || true\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view 1 --json title,body\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Source integrity is independent of trigger identity."
+  },
+  {
+    "name": "ai-gh-019-own-false",
+    "rule": "AI-GH-019",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: false\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view 1 --json title,body\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": false,
+    "reason": "Source integrity is independent of trigger identity."
+  },
+  {
+    "name": "ai-gh-019-comment",
+    "rule": "AI-GH-019",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view 1 --json title,body\n      - uses: anthropics/claude-code-action@v1\n# if: github.event.pull_request.head.repo.full_name == github.repository\n",
+    "expected": true,
+    "reason": "Source integrity is independent of trigger identity."
+  },
+  {
+    "name": "ai-gh-019-sibling-job",
+    "rule": "AI-GH-019",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view 1 --json title,body\n      - uses: anthropics/claude-code-action@v1\n  unrelated:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    steps:\n      - run: echo unrelated\n",
+    "expected": true,
+    "reason": "Source integrity is independent of trigger identity."
+  },
+  {
+    "name": "ai-gh-019-sibling-step",
+    "rule": "AI-GH-019",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view 1 --json title,body\n      - uses: anthropics/claude-code-action@v1\n      - if: github.event.pull_request.head.repo.full_name == github.repository\n        run: echo unrelated\n",
+    "expected": true,
+    "reason": "Source integrity is independent of trigger identity."
+  },
+  {
+    "name": "ai-gh-019-mixed-event",
+    "rule": "AI-GH-019",
+    "source": "on: [pull_request_target, issue_comment]\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view 1 --json title,body\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Source integrity is independent of trigger identity."
+  },
+  {
+    "name": "ai-gh-019-unknown",
+    "rule": "AI-GH-019",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: inputs.run_agent\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view 1 --json title,body\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Source integrity is independent of trigger identity."
+  },
+  {
+    "name": "ai-gh-020-unguarded",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-020-own-equality",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": false,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-020-own-inequality",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name != github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-020-own-or-true",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository || true\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-020-own-false",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: false\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": false,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-020-comment",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n# if: github.event.pull_request.head.repo.full_name == github.repository\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-020-sibling-job",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n  unrelated:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    steps:\n      - run: echo unrelated\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-020-sibling-step",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n      - if: github.event.pull_request.head.repo.full_name == github.repository\n        run: echo unrelated\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-020-mixed-event",
+    "rule": "AI-GH-020",
+    "source": "on: [pull_request_target, issue_comment]\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "ai-gh-020-unknown",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    if: inputs.run_agent\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Only own guards excluding every outside-trigger event can remove this candidate."
+  },
+  {
+    "name": "policy-deprecated",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          allowed_tools: Read,Grep\n",
+    "expected": true,
+    "reason": "Policy must restrict tools at this action; approval markers and legacy keys are not proof."
+  },
+  {
+    "name": "policy-wildcard",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          claude_args: '--allowedTools *'\n",
+    "expected": true,
+    "reason": "Policy must restrict tools at this action; approval markers and legacy keys are not proof."
+  },
+  {
+    "name": "policy-autoapproval",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          claude_args: '--allowedTools Read,Grep'\n",
+    "expected": true,
+    "reason": "Policy must restrict tools at this action; approval markers and legacy keys are not proof."
+  },
+  {
+    "name": "policy-deny-read",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          claude_args: '--disallowedTools Read'\n",
+    "expected": true,
+    "reason": "Policy must restrict tools at this action; approval markers and legacy keys are not proof."
+  },
+  {
+    "name": "policy-closed-builtins",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          claude_args: '--tools Read,Grep --disallowedTools mcp__*'\n",
+    "expected": false,
+    "reason": "Policy must restrict tools at this action; approval markers and legacy keys are not proof."
+  },
+  {
+    "name": "policy-shell-tools",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          claude_args: '--tools Read,Bash --disallowedTools mcp__*'\n",
+    "expected": true,
+    "reason": "Policy must restrict tools at this action; approval markers and legacy keys are not proof."
+  },
+  {
+    "name": "policy-dynamic",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          claude_args: '--tools ${{ inputs.tools }}'\n",
+    "expected": true,
+    "reason": "Policy must restrict tools at this action; approval markers and legacy keys are not proof."
+  },
+  {
+    "name": "policy-duplicate",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          claude_args: '--tools Read --tools Bash --disallowedTools mcp__*'\n",
+    "expected": true,
+    "reason": "Policy must restrict tools at this action; approval markers and legacy keys are not proof."
+  },
+  {
+    "name": "policy-unknown-tool",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        with:\n          claude_args: '--tools UnknownTool --disallowedTools mcp__*'\n",
+    "expected": true,
+    "reason": "Policy must restrict tools at this action; approval markers and legacy keys are not proof."
+  },
+  {
+    "name": "policy-gemini-core",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: google-github-actions/run-gemini-cli@v1\n        with:\n          settings: '{\"tools\":{\"core\":[\"read_file\",\"grep_search\"]}}'\n",
+    "expected": true,
+    "reason": "Gemini core restricts built-ins but does not close the MCP/extension registry; absence of a local MCP declaration is insufficient."
+  },
+  {
+    "name": "policy-gemini-shell",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: google-github-actions/run-gemini-cli@v1\n        with:\n          settings: '{\"tools\":{\"core\":[\"run_shell_command\"]}}'\n",
+    "expected": true,
+    "reason": "Policy must restrict tools at this action; approval markers and legacy keys are not proof."
+  },
+  {
+    "name": "policy-gemini-legacy",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: google-github-actions/run-gemini-cli@v1\n        with:\n          settings: '{\"coreTools\":[\"read_file\"]}'\n",
+    "expected": true,
+    "reason": "Policy must restrict tools at this action; approval markers and legacy keys are not proof."
+  },
+  {
+    "name": "policy-sibling",
+    "rule": "AI-GH-020",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n      - uses: anthropics/claude-code-action@v1\n        with:\n          claude_args: '--tools Read --disallowedTools mcp__*'\n",
+    "expected": true,
+    "reason": "Sibling restriction cannot constrain the first action."
+  },
+  {
+    "name": "permission-empty",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    permissions: {}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": false,
+    "reason": "Job permissions replace workflow permissions."
+  },
+  {
+    "name": "permission-read",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions:\n  contents: write\njobs:\n  review:\n    permissions: {contents: read}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": false,
+    "reason": "Job permissions replace workflow permissions."
+  },
+  {
+    "name": "permission-sibling",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions:\n  contents: read\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n  writer:\n    permissions:\n      contents: write\n    steps:\n      - run: echo unrelated\n",
+    "expected": false,
+    "reason": "A sibling write grant does not reach this agent."
+  },
+  {
+    "name": "permission-write-all",
+    "rule": "AI-GH-015",
+    "source": "on: pull_request_target\npermissions: write-all\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Explicit write-all grants write capability."
+  },
+  {
+    "name": "fresh-owner",
+    "rule": "AI-GH-019",
+    "source": "on: issue_comment\npermissions:\n  contents: write\njobs:\n  review:\n    if: github.event.comment.author_association == 'OWNER'\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view 1 --json title,body\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "A trusted commenter can trigger a fetch of another author's editable PR."
+  },
+  {
+    "name": "fresh-dispatch",
+    "rule": "AI-GH-019",
+    "source": "on: workflow_dispatch\npermissions:\n  contents: write\njobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view 1 --json title,body\n      - uses: anthropics/claude-code-action@v1\n",
+    "expected": true,
+    "reason": "Dispatch does not freeze remote title/body."
+  }
+]
