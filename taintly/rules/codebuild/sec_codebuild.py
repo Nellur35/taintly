@@ -1389,11 +1389,7 @@ RULES: list[Rule] = [
             "`ABORT`, stops the build instead. A security or quality gate "
             "that cannot stop configured later phases is validation theatre: "
             "the check runs, can fail, and deployment or publication commands "
-            "in later phases still execute. The final build status may remain failed.\n"
-            "\n"
-            "Mirrors the existing THEATRE-GH-001/GL-001 'check exists but "
-            "cannot block' shape, adapted to a single-file YAML flag rather "
-            "than cross-file discovery-convention analysis."
+            "in later phases still execute. The final build status may remain failed."
         ),
         pattern=_TheatreOnFailureContinuePattern(),
         remediation=(
