@@ -15,6 +15,7 @@ arrive in follow-up work.
 import re
 from pathlib import Path
 
+from taintly.agentguards import AgentGuardIndex
 from taintly.models import (
     ContextPattern,
     Platform,
@@ -47,6 +48,51 @@ from taintly.workflow_aware_pattern import (
     WorkflowAwarePattern,
     _current_filepath,
 )
+
+
+class _OwningAgentForkPattern(ContextPattern):
+    """Exclude only candidates with structurally owned execution proofs."""
+
+    def _excluded(self, index: AgentGuardIndex, owner: tuple[object, ...]) -> bool:
+        return index.excludes(owner)
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        candidates = super().check(content, lines)
+        if not candidates:
+            return candidates
+        index = AgentGuardIndex(content)
+        return [
+            candidate
+            for candidate in candidates
+            if (owner := index.owner(candidate[0])) is None or not self._excluded(index, owner)
+        ]
+
+
+class _WriteAgentForkPattern(_OwningAgentForkPattern):
+    def _excluded(self, index: AgentGuardIndex, owner: tuple[object, ...]) -> bool:
+        return super()._excluded(index, owner) or index.permissions_write(owner) is False
+
+
+class _MutableAgentReadPattern(_OwningAgentForkPattern):
+    def _excluded(self, index: AgentGuardIndex, owner: tuple[object, ...]) -> bool:
+        return index.excludes(owner, outside_actor=False)
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        candidates = super().check(content, lines)
+        if not candidates:
+            return candidates
+        index = AgentGuardIndex(content)
+        return [
+            candidate
+            for candidate in candidates
+            if not index.read_selects_only_metadata(candidate[0])
+        ]
+
+
+class _ScopedAgentToolsPattern(_OwningAgentForkPattern):
+    def _excluded(self, index: AgentGuardIndex, owner: tuple[object, ...]) -> bool:
+        return super()._excluded(index, owner) or index.builtin_tools_closed(owner)
+
 
 # ---------------------------------------------------------------------------
 # Neutralizing fork-trust guard — shared suppression arm for the
@@ -1525,7 +1571,7 @@ RULES: list[Rule] = [
             "permissions are tightly scoped, should be triaged as "
             "review-needed rather than as a confirmed breach."
         ),
-        pattern=ContextPattern(
+        pattern=_OwningAgentForkPattern(
             # Same AI-agent-action keyword set as AI-GH-005, kept in sync
             # deliberately: if a new agent action should be tracked, add
             # it to both anchors.
@@ -1540,10 +1586,6 @@ RULES: list[Rule] = [
                 r"|\[\s*[^\]]*"
                 r"(?:pull_request|issue_comment|issues|discussion|workflow_run)[^\]]*\])"
             ),
-            # A fork-identity / actor-allowlist guard makes the
-            # outside-attacker precondition false — suppress.  See
-            # ``_NEUTRALIZING_FORK_GUARD``.
-            requires_absent=_NEUTRALIZING_FORK_GUARD,
             scope="file",
             exclude=[r"^\s*#"],
         ),
@@ -1618,8 +1660,7 @@ RULES: list[Rule] = [
                 "      # - uses: anthropics/claude-code-action@v1\n"
                 "      - run: echo hi"
             ),
-            # Fork-identity guard neutralises the outside-attacker reach —
-            # suppressed by ``_NEUTRALIZING_FORK_GUARD``.
+            # The owning job's fork-identity guard is evaluated structurally.
             (
                 "on: pull_request\n"
                 "jobs:\n  review:\n"
@@ -2195,27 +2236,9 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A workflow loads an MCP server with a known-"
-            "privileged tool surface — ``server-filesystem`` (file "
-            "write), ``server-github`` (gh write), "
-            "``server-postgres`` / ``server-sqlite`` (SQL), "
-            "``server-bash`` / ``server-shell`` (shell exec), "
-            "``server-docker`` / ``server-puppeteer`` (container / "
-            "browser control) — AND the workflow trigger list "
-            "includes a fork-controllable event. "
-            "MCP 'privileged' here means any primitive the agent "
-            "could abuse with the workflow's token if its prompt "
-            "was steered. Stacking that surface on a fork-triggerable "
-            "event is the precondition for the agent-privilege-"
-            "escalation path — AI-GH-005 / AI-GH-006 / AI-GH-009 "
-            "describe the steering; this rule describes the tools "
-            "being steered. "
-            "Pair with review of ``allowedTools`` scoping — an "
-            "MCP server loaded with a single narrow allowedTool is "
-            "categorically different from the same server with "
-            "wildcard scope."
+            "A recognized MCP server or tool-name declaration co-occurs with an outside-trigger workflow. These names suggest filesystem, API, SQL, shell, container or browser capabilities that require review. The scanner has not proved the server is loaded, its actual capabilities or credentials, or attacker-input flow into a tool call. Inspect this declaration's owning step and effective tool policy. Claude --allowedTools controls automatic approval; a narrow value alone does not remove other MCP tools."
         ),
-        pattern=ContextPattern(
+        pattern=_OwningAgentForkPattern(
             anchor=(
                 r"(?:"
                 # Named privileged MCP servers as npm/pypi package names.
@@ -2245,30 +2268,11 @@ RULES: list[Rule] = [
                 r"|\[\s*[^\]]*"
                 r"(?:pull_request|issue_comment|issues|discussion|workflow_run)[^\]]*\])"
             ),
-            # A fork-identity / actor-allowlist guard neutralises the
-            # outside-attacker reach to the MCP-armed agent — suppress.
-            requires_absent=_NEUTRALIZING_FORK_GUARD,
             scope="file",
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Tighten the MCP tool surface or isolate it from fork "
-            "triggers:\n"
-            "\n"
-            "1. Replace wildcard MCP scope with a named-tool "
-            "   allowlist. For claude-code-action:\n"
-            '     --allowedTools "mcp__github_inline_comment__create_inline_comment"\n'
-            "   (one tool, not the whole ``mcp__github__`` namespace).\n"
-            "\n"
-            "2. Gate the MCP-enabled job on fork identity:\n"
-            "     if: github.event.pull_request.head.repo.full_name "
-            "== github.repository\n"
-            "\n"
-            "3. For the shell / filesystem / docker families "
-            "   specifically, consider removing the MCP server "
-            "   entirely from PR-triggered paths. Keep them on "
-            "   workflow_dispatch with a protected environment if "
-            "   they're needed for maintainer-triggered automation."
+            "Inspect the MCP server actually loaded by this invocation and remove unnecessary servers or dangerous tools. For Claude, --disallowedTools mcp__* denies MCP tools; --tools restricts built-ins separately. --allowedTools configures automatic approval and is not a complete availability restriction.\n\nAn owning same-repository guard can exclude external PR execution. It does not protect comment, issue or workflow_run paths automatically, and a maintainer trigger does not make fetched content trusted. Minimize server credentials, isolate execution and verify the exact approved input."
         ),
         reference="https://github.com/modelcontextprotocol/servers",
         test_positive=[
@@ -2357,20 +2361,9 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A workflow invokes an agentic CLI directly via a "
-            "``run:`` step — ``claude -p ...`` (Claude Code), "
-            "``aider`` (Aider), ``openhands`` (OpenHands), "
-            "``swe-agent`` — AND the workflow trigger list "
-            "includes a fork-controllable event. "
-            "Same agent-in-CI threat as AI-GH-006 (action-based "
-            "agents) but for the binary-invocation shape that "
-            "AI-GH-006's ``uses:``-anchored pattern cannot see. "
-            "The agent carries the workflow's full GITHUB_TOKEN "
-            "and default environment into whatever tools it "
-            "decides to call, and attacker-controlled PR / issue "
-            "/ comment content steers those tool calls."
+            "A recognized agent CLI is declared in a workflow with an outside-trigger event. Only a guard on its own job or step can exclude the outside-trigger candidate. The workflow file alone does not prove that attacker-authored text reaches the model, which credentials the CLI receives, or whether its tools execute. Review the prompt source, effective environment, tool restrictions and token permissions at the cited invocation."
         ),
-        pattern=ContextPattern(
+        pattern=_OwningAgentForkPattern(
             anchor=(
                 r"\b(?:run|script)\s*:\s*[^\n#]*?"
                 r"\b(?:claude\s+-p|aider\s|openhands\s|swe-agent\s|cursor-agent\s)"
@@ -2382,30 +2375,11 @@ RULES: list[Rule] = [
                 r"|\[\s*[^\]]*"
                 r"(?:pull_request|issue_comment|issues|discussion|workflow_run)[^\]]*\])"
             ),
-            # Fork-identity / actor-allowlist guard neutralises the
-            # outside-attacker reach to the CLI agent — suppress.
-            requires_absent=_NEUTRALIZING_FORK_GUARD,
             scope="file",
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Follow the same playbook as AI-GH-006 but for the "
-            "CLI shape:\n"
-            "\n"
-            "1. Gate on fork identity with an ``if:`` clause that "
-            "   compares ``github.event.pull_request.head.repo."
-            "full_name`` to ``github.repository``.\n"
-            "\n"
-            "2. Scope the CLI's tools explicitly — every agentic "
-            "   CLI accepts a restrict-tools flag. For Claude "
-            '   Code: ``claude -p ... --allowedTools "bash:ls"``. '
-            "   For Aider: ``--yes-always`` scoped to a pinned "
-            "   diff.\n"
-            "\n"
-            "3. Split the agentic step into its own workflow "
-            "   triggered by ``workflow_run`` from a protected "
-            "   branch so fork contributors cannot reach the "
-            "   write-scoped token."
+            "Keep attacker-authored content separate from privileged agent execution.\n\n1. For PR events, a job/step condition comparing github.event.pull_request.head.repo.full_name == github.repository can exclude outside-fork triggers. It does not protect issue_comment or workflow_run paths automatically.\n2. Restrict tools using the vendor's actual tool-availability controls. Claude --allowedTools approves calls; --tools controls built-in availability and does not restrict MCP tools.\n3. Minimize credentials, bind any approval to the exact content consumed, and isolate execution. workflow_run alone is not a trust boundary; validate its source run, ref and artifacts."
         ),
         reference="https://docs.anthropic.com/claude-code",
         test_positive=[
@@ -2456,6 +2430,7 @@ RULES: list[Rule] = [
             "back to the repo with the workflow's GITHUB_TOKEN."
         ),
         confidence="medium",
+        review_needed=True,
     ),
     # =========================================================================
     # AI-GH-014: Agent-action step output flows into a shell interpreter or
@@ -2609,26 +2584,9 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A workflow invokes an AI coding agent on a fork-reachable "
-            "trigger AND grants the job repository-write access "
-            "(``contents: write`` / ``pull-requests: write`` / "
-            "``issues: write`` / ``actions: write``).  "
-            "Prompt injection in the PR / issue / comment body steers the "
-            "agent; the write permission lets the agent push code, open "
-            "PRs, comment, or flip labels on the attacker's behalf.  "
-            "Distinct from AI-GH-006 (agent on fork trigger, severity "
-            "HIGH — escalation vector is the OIDC / secrets the job "
-            "holds) and PSE-GH-001 (agent + OIDC + fork).  This rule is "
-            "the third leg of the triangle: the write permission turns "
-            "a steered agent into a direct code-pushing primitive. "
-            "Documented in the wild: supermemoryai/supermemory "
-            "claude-auto-fix-ci.yml (workflow_run + Bash(*) + "
-            "contents:write), trycua/cua claude-auto-fix.yml "
-            "(pull_request labeled + contents:write), "
-            "Provenance-Emu/Provenance kimi-agent.yml (workflow_dispatch "
-            "+ contents:write + pull-requests:write)."
+            "An AI-agent anchor and a declared repository-write grant co-occur on an outside-trigger workflow. Known effective read-only or empty job permissions override a workflow write grant and remove that candidate; sibling grants do not establish the agent's effective token. Unresolved permission structure remains review-needed. Depending on the actual granted scopes and prompt/tool flow, a steered agent could modify contents, PRs, issues, packages or deployments. This is a conditional risk, not proof that a fork receives a write token or that arbitrary code can be pushed."
         ),
-        pattern=ContextPattern(
+        pattern=_WriteAgentForkPattern(
             anchor=_AI_AGENT_ANCHOR,
             # Three file-level preconditions AND'd.  Same lookahead-
             # anchored-at-\A shape as PSE-GH-001: O(N) on the file,
@@ -2638,28 +2596,17 @@ RULES: list[Rule] = [
                 r"(?=[\s\S]*?" + _FORK_REACHABLE_TRIGGER + r")"
                 # Write permission in any form: dedicated `permissions:`
                 # block or inline permissions scoped at job level.
-                r"(?=[\s\S]*?"
+                r"(?=[\s\S]*?(?:"
                 r"(?:contents|pull-requests|issues|actions|packages|deployments)"
                 r":\s*write\b"
-                r")"
+                r"|permissions:\s*write-all\b"
+                r"))"
             ),
-            # Fork-identity / actor-allowlist guard neutralises the
-            # outside-attacker reach even with write perms — suppress.
-            requires_absent=_NEUTRALIZING_FORK_GUARD,
             scope="file",
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "An agent with `contents: write` and a fork-reachable trigger\n"
-            "is an autonomous-code-push primitive for anyone who can open\n"
-            "a PR.  Either (1) drop the write permissions and have the\n"
-            "agent report via read-only comment, (2) gate the job by\n"
-            "same-repo identity so fork PRs can't reach it (`if:\n"
-            "github.event.pull_request.head.repo.full_name ==\n"
-            "github.repository`), OR (3) require a collaborator check\n"
-            "(call the `permission` API, fail if actor < write).  zama-\n"
-            "ai/fhevm's claude-review.yml is a reasonable reference.\n"
-            "Run `taintly --guide AI-GH-015` for the full checklist."
+            "Inspect this agent's effective job permissions and actual credentials.\n\nRemove unnecessary write scopes and publish its report as a job summary or artifact. If a privileged follow-up must write, keep it separate and validate the exact approved content before acting. A PR trigger alone does not establish that a fork gets a write token.\n\nFor external PR execution, an owning job or step same-repository condition can exclude that trigger path. For comment/issue triggers, authenticate the initiating author explicitly. Neither check makes later fetched content trusted; restrict tools and verify the approved snapshot."
         ),
         reference=(
             "https://github.com/supermemoryai/supermemory/blob/main/.github/workflows/claude-auto-fix-ci.yml; "
@@ -2721,9 +2668,7 @@ RULES: list[Rule] = [
                 "      # - uses: anthropics/claude-code-action@v1\n"
                 "      - run: echo placeholder"
             ),
-            # Fork-reachable + write + agent BUT fork-identity guarded —
-            # an outside attacker can't trigger it; suppressed by
-            # ``_NEUTRALIZING_FORK_GUARD``.
+            # A same-job fork-identity guard excludes this outside trigger.
             (
                 "on: pull_request\n"
                 "permissions:\n  contents: write\n  pull-requests: write\n"
@@ -2753,6 +2698,7 @@ RULES: list[Rule] = [
             "Eriksen pull_request_target campaign (Apr 2026)",
             "Aikido PromptPwnd disclosure",
         ],
+        review_needed=True,
     ),
     # =========================================================================
     # AI-GH-016: Custom LLM-provider BASE_URL override in workflow env.
@@ -3479,22 +3425,9 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A workflow fetches PR / issue content at step-runtime via "
-            "``gh pr view`` / ``gh issue view`` / ``gh api`` calls to "
-            "``/repos/.../pulls`` or ``/repos/.../issues``, or via a "
-            "``github-script`` ``rest.pulls.get`` / ``rest.issues.get`` "
-            "/ ``rest.issues.listComments`` call, AND the same file "
-            "invokes an AI agent CLI or action.  The title / body / "
-            "comment that the agent then sees is whatever the PR says "
-            "WHEN THE STEP RUNS, not when the workflow was triggered.  "
-            "That timing gap is the TOCTOU that Stawinski's 'Trusting "
-            "Claude With a Knife' (2026) exploits: a maintainer fires "
-            "the workflow on a benign PR title, the attacker edits the "
-            "title to a prompt-injection payload while the workflow "
-            "starts, and the agent reads the edited text.  Anthropic "
-            "rated the concrete Claude Code flow at CVSS 7.7 (High)."
+            "A runtime PR/issue read and an AI-agent anchor co-occur in this workflow. If the fetched title, body or comments reach the agent, an author may edit them after a maintainer's approval or trigger. A same-repository or trusted-actor condition does not freeze remote content. A proved execution exclusion or a supported fixed gh selector requesting only recognized non-content fields removes that read candidate. Its operand must be literal or have proved provider numeric-or-empty provenance; this does not prove a valid positive identifier or successful lookup. Unknown arguments, fields and unsupported commands remain review-needed. The scanner has not established the data flow from this read to the agent; inspect the selected fields and actual consumer before confirming the timing attack."
         ),
-        pattern=ContextPattern(
+        pattern=_MutableAgentReadPattern(
             # Anchor: fresh re-read patterns.
             anchor=(
                 r"(?:"
@@ -3513,10 +3446,6 @@ RULES: list[Rule] = [
             # same file.  Reuse the shared _AI_AGENT_ANCHOR as the
             # file-level requirement.
             requires=_AI_AGENT_ANCHOR,
-            # A fork-identity / actor-allowlist guard means an outside
-            # attacker can't trigger the workflow, so there's no
-            # mutable-source TOCTOU window to exploit — suppress.
-            requires_absent=_NEUTRALIZING_FORK_GUARD,
             scope="file",
             exclude=[
                 r"^\s*#",
@@ -3547,29 +3476,7 @@ RULES: list[Rule] = [
             ],
         ),
         remediation=(
-            "Two mitigations, either sufficient:\n"
-            "\n"
-            "(1) Capture the PR title / body AT TRIGGER TIME and feed\n"
-            "    THAT value to the agent — never re-read at step time:\n"
-            "\n"
-            "        env:\n"
-            "          PR_TITLE: ${{ github.event.pull_request.title }}\n"
-            "          PR_BODY:  ${{ github.event.pull_request.body }}\n"
-            '        run: claude -p "$PR_TITLE"\n'
-            "\n"
-            "    ``github.event.pull_request.*`` is snapshotted at\n"
-            "    trigger time; even if the attacker edits the title\n"
-            "    after the run starts, the workflow sees the original.\n"
-            "\n"
-            "(2) Pin the head SHA before any fresh read.  Fetch the PR\n"
-            "    metadata once into a shell variable, then run the\n"
-            "    agent against that variable's value — NOT against a\n"
-            "    second ``gh pr view`` call later.\n"
-            "\n"
-            "If the workflow genuinely needs fresh data (e.g., a long-\n"
-            "running queue that polls for state), add a step that\n"
-            "asserts the head SHA still matches the value captured at\n"
-            "trigger time, and fail if it changed."
+            "Bind approval and execution to the exact content consumed.\n\n1. Capture the relevant title/body/comments into a fixed snapshot, review that snapshot, and pass exactly those bytes to the agent. Trigger-time event data prevents later edits changing that snapshot, but is still attacker-authored and must be handled accordingly.\n2. If fresh reads are necessary, hash the approved content and verify the exact fetched fields against that digest before use; fail on a difference. Do not reread after verification.\n3. A head commit SHA pins code, not PR titles, bodies or comments. A maintainer-only trigger or unchanged head SHA is insufficient for mutable metadata. Minimize tools and credentials independently."
         ),
         reference=(
             "https://johnstawinski.com/2026/02/05/trusting-claude-with-"
@@ -3621,15 +3528,13 @@ RULES: list[Rule] = [
             ),
             # Comment
             "# gh pr view + anthropics/claude-code-action",
-            # Fresh re-read + agent BUT fork-identity guarded — no
-            # outside-attacker TOCTOU window; suppressed by
-            # ``_NEUTRALIZING_FORK_GUARD``.
+            # A fixed selector requesting only metadata is outside this rule.
             (
                 "on: pull_request\n"
                 "jobs:\n  review:\n"
                 "    if: github.event.pull_request.head.repo.full_name == github.repository\n"
                 "    runs-on: ubuntu-latest\n    steps:\n"
-                "      - run: gh pr view ${{ github.event.pull_request.number }} --json title\n"
+                "      - run: gh pr view ${{ github.event.pull_request.number }} --json number\n"
                 "      - uses: anthropics/claude-code-action@v1"
             ),
         ],
@@ -3651,6 +3556,7 @@ RULES: list[Rule] = [
         incidents=[
             "Stawinski — Trusting Claude With a Knife (Feb 2026)",
         ],
+        review_needed=True,
     ),
     # =========================================================================
     # AI-GH-020: AI coding agent invoked on a fork-triggerable event without
@@ -3666,34 +3572,14 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="AI-GH-020",
-        title=(
-            "AI coding agent on a fork-triggerable event without a "
-            "tool allowlist (Bash / shell reachable)"
-        ),
+        title="AI agent on an outside-trigger path without verified tool restrictions",
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A workflow triggered by ``pull_request`` / "
-            "``pull_request_target`` / ``issue_comment`` / ``issues`` / "
-            "``workflow_run`` invokes an AI coding agent action "
-            "(``anthropics/claude-code-action``, "
-            "``google-github-actions/run-gemini-cli``, "
-            "``github/copilot-*-action``, Aider, OpenHands, "
-            "CodeRabbit) WITHOUT constraining the tool surface via "
-            "``allowed_tools:`` / ``claude_args: --allowed-tools=...`` "
-            "/ ``--disallowed-tools=Bash,Shell``.  Without an explicit "
-            "allowlist the agent has Bash / shell access; a single "
-            "prompt-injection payload in the PR title, body, or a "
-            "review comment turns the agent into a remote code "
-            "execution primitive with the workflow's ``GITHUB_TOKEN``, "
-            "OIDC credentials, and ``withCredentials``-style scope. "
-            "Aonan Guan's 'Comment and Control' (April 2026) "
-            "demonstrated the chain across three major agents; the "
-            "fix is to scope the allowlist to the narrowest tool the "
-            "workflow actually needs."
+            "A recognized AI-agent action is declared on an outside-trigger workflow, and its own literal configuration does not establish the supported restrictive tool profile. Unrelated settings, deprecated input names, wildcard policies and permission-approval flags are not exclusion proofs. Claude --allowedTools controls automatic approval, whereas --tools controls built-in availability and does not remove MCP tools. The bounded Claude profile uses only named read-only built-ins and explicitly denies MCP tools; a Gemini tools.core list does not close its MCP/extension registry and remains review-needed. Dynamic, unsupported or conflicting configuration remains review-needed. This finding does not prove shell execution or exploitation."
         ),
-        pattern=ContextPattern(
+        pattern=_ScopedAgentToolsPattern(
             # Anchor on the agent action invocation.
             anchor=(
                 r"(?i:uses:\s+[^@\s/]+/[^@\s]*"
@@ -3704,10 +3590,8 @@ RULES: list[Rule] = [
                 r"ai-code-review|ai-review|gpt-pr|ai-pull-request)"
                 r"[^@\s]*@)"
             ),
-            # Requires: fork-reachable trigger is on the file AND the
-            # file contains NO allowed-tools / allow-list constraint.
-            # We encode "no allowlist" via the requires_absent arm so
-            # the rule explicitly needs BOTH conditions.
+            # Requires a fork-reachable event; scoped tool profiles are
+            # evaluated at the owning action step.
             requires=(
                 r"(?:"
                 r"pull_request_target"
@@ -3717,74 +3601,11 @@ RULES: list[Rule] = [
                 r"(?:pull_request|issue_comment|issues|discussion|workflow_run)[^\]]*\]"
                 r")"
             ),
-            requires_absent=(
-                r"(?:"
-                # Explicit allow-list forms across the supported actions.
-                r"\ballowed[_-]tools\s*:"
-                r"|\ballowedTools\s*:"
-                # Gemini CLI Action declares its tool surface via
-                # ``coreTools`` (a JSON array inside the ``settings:``
-                # input), e.g.
-                #   "coreTools": ["run_shell_command(echo)",
-                #                 "run_shell_command(gh issue view)"]
-                # That IS a narrow allowlist — without this arm
-                # google-github-actions/run-gemini-cli workflows that
-                # ARE properly scoped produced a hard FP
-                # (google-gemini/gemini-cli automated-issue-dedup).
-                r"|[\"']?core[_-]?[Tt]ools[\"']?\s*[:=]"
-                # claude_args sometimes carries it inline
-                r"|--allowed-tools\b"
-                r"|--allowedTools\b"
-                # Disallow tools is also an acceptable scoping signal
-                r"|--disallowed-tools\b"
-                r"|\bdisallowed_tools\s*:"
-                # A fork-identity / actor-allowlist guard also neutralises
-                # the outside-attacker reach (shares the cluster's
-                # suppression idiom — see ``_NEUTRALIZING_FORK_GUARD``).
-                r"|github\.event\.pull_request\.head\.repo\.full_name\s*"
-                r"(?:==|!=)\s*github\.repository"
-                r"|\.author_association\s*==\s*['\"]?(?:OWNER|MEMBER|COLLABORATOR)\b"
-                r"|fromJSON\(\s*['\"]\s*\[\s*['\"]?(?:OWNER|MEMBER|COLLABORATOR)\b"
-                # Copilot's equivalent
-                r"|\btools[_-]whitelist\s*:"
-                # FP-audit class E (P5b): claude-code-action's newer
-                # schema declares allowlist via ``settings:`` JSON
-                # containing ``permissions.allow`` / ``permissions.deny``.
-                # Without this arm, workflows using the new schema
-                # produce hard FPs even though they ARE properly scoped.
-                # The JSON-key shape covers both inline and heredoc
-                # forms of the ``settings:`` input.
-                r"|(?:[\"']?permissions[\"']?\s*:\s*\{[^}]*[\"']?(?:allow|deny)[\"']?\s*:)"
-                r"|(?:[\"']?(?:allow|deny)[\"']?\s*:\s*\[)"
-                r")"
-            ),
             scope="file",
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Scope the agent's tool surface to the narrowest set the\n"
-            "workflow actually needs.  For claude-code-action:\n\n"
-            "    - uses: anthropics/claude-code-action@<sha>\n"
-            "      with:\n"
-            '        allowed_tools: "mcp__github_inline_comment__create_inline_comment"\n'
-            "\n"
-            "(One named tool — the agent can post review comments, but\n"
-            "cannot shell out, edit files, or call arbitrary ``gh api``.)\n"
-            "\n"
-            "For Gemini CLI Action: set ``--allowed-tools`` explicitly\n"
-            "(not ``--yolo`` / ``--approval-mode=yolo``).\n"
-            "\n"
-            "For Copilot Agent actions: set the tool whitelist input\n"
-            "to the specific tool surface required, never wildcard.\n"
-            "\n"
-            "If the agent genuinely needs Bash for the use case, at\n"
-            "minimum gate the step on same-project identity:\n\n"
-            "    if: github.event.pull_request.head.repo.full_name\n"
-            "        == github.repository\n\n"
-            "Fork PRs are skipped; maintainer-same-project PRs have a\n"
-            "different trust model (still exploitable via compromised\n"
-            "maintainer account, but the attack surface is narrower).\n"
-            "Run `taintly --guide AI-GH-020` for the full checklist."
+            "Review the tool configuration on this exact action invocation.\n\nFor Claude Code Action v1, use claude_args with actual tool-availability restrictions, for example --tools Read,Grep --disallowedTools mcp__*. Do not treat --allowedTools as a complete tool restriction or rely on the removed allowed_tools input. Settings, MCP, plugins and bypass modes need separate review.\n\nFor Gemini, declare a literal settings.tools.core list of required non-shell tools, such as read_file and grep_search; top-level coreTools or shell-command patterns are not covered by this exclusion proof.\n\nUse least-privilege credentials and isolation. An owning same-repository guard can exclude an outside-fork trigger, but does not make later mutable content safe. See the official CLI/action documentation for the deployed version."
         ),
         reference=(
             "https://oddguan.com/blog/comment-and-control-prompt-"
@@ -3812,36 +3633,18 @@ RULES: list[Rule] = [
             ),
         ],
         test_negative=[
-            # Scoped allow-list — agent has narrow tool surface.
+            # Scoped built-ins with an explicit MCP deny.
             (
                 "on: pull_request_target\n"
                 "jobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n"
                 "      - uses: anthropics/claude-code-action@v1\n"
-                '        with:\n          allowed_tools: "mcp__github__create_issue_comment"'
-            ),
-            # claude_args with --allowed-tools inline
-            (
-                "on: pull_request_target\n"
-                "jobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: anthropics/claude-code-action@v1\n"
-                "        with:\n          claude_args: '--allowed-tools=Read,Grep'"
+                "        with:\n          claude_args: '--tools Read,Grep --disallowedTools mcp__*'"
             ),
             # Same action on a NON-fork-triggerable event.
             (
                 "on:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n"
                 "jobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n"
                 "      - uses: anthropics/claude-code-action@v1"
-            ),
-            # Gemini CLI Action scoped via a ``coreTools`` JSON allowlist
-            # inside the ``settings:`` input — a narrow tool surface, NOT
-            # the unconstrained-Bash shape this rule targets.  Field FP:
-            # google-gemini/gemini-cli automated-issue-dedup.yml.
-            (
-                "on: issues\n"
-                "jobs:\n  ai:\n    runs-on: ubuntu-latest\n    steps:\n"
-                "      - uses: google-github-actions/run-gemini-cli@v1\n"
-                "        with:\n          settings: |-\n"
-                '            { "coreTools": ["run_shell_command(echo)", "run_shell_command(gh issue view)"] }'
             ),
             # Fork-identity guarded — outside attacker can't reach it.
             (
@@ -3873,6 +3676,7 @@ RULES: list[Rule] = [
         incidents=[
             "Aonan Guan / SecurityWeek — Comment and Control (April 2026)",
         ],
+        review_needed=True,
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-022 — Agent invoked with a permission/sandbox-skip flag

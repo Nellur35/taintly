@@ -10,8 +10,7 @@ versa) and surprise a user at the next scan.
 
 from __future__ import annotations
 
-from taintly.workflow_context import analyze, compute_exploitability
-
+from taintly.workflow_context import analyze, analyze_job_contexts, compute_exploitability
 
 # ---------------------------------------------------------------------------
 # Signal detection
@@ -169,23 +168,22 @@ def test_unknown_family_defaults_to_medium():
 def test_detects_fork_identity_guard_equality():
     """The canonical Anthropic-Cookbook idiom: run the job only if the
     PR head lives in the same repo as the base."""
-    ctx = analyze(
-        "jobs:\n"
+    ctx = analyze_job_contexts(
+        "on: pull_request\njobs:\n"
         "  review:\n"
         "    if: github.event.pull_request.head.repo.full_name == github.repository\n"
-    )
+    )["review"]
     assert ctx.has_fork_identity_guard is True
 
 
 def test_detects_fork_identity_guard_negation():
-    """Inverted form (`!=`, used in skip-if conditions) is the same guard
-    shape from the attacker's perspective — still prevents fork runs."""
-    ctx = analyze(
-        "jobs:\n"
+    """An inequality admits fork runs and supplies no exclusion proof."""
+    ctx = analyze_job_contexts(
+        "on: pull_request\njobs:\n"
         "  review:\n"
         "    if: github.event.pull_request.head.repo.full_name != github.repository\n"
-    )
-    assert ctx.has_fork_identity_guard is True
+    )["review"]
+    assert ctx.has_fork_identity_guard is False
 
 
 def test_no_fork_identity_guard_when_absent():
@@ -208,9 +206,9 @@ def test_ai_family_low_when_fork_identity_guard_present():
         "    steps:\n"
         "      - uses: anthropics/claude-code-action@v1\n"
     )
-    ctx = analyze(content)
+    ctx = analyze_job_contexts(content)["review"]
     assert ctx.has_fork_identity_guard is True
-    assert compute_exploitability("ai_ml_model_risk", ctx) == "low"
+    assert compute_exploitability("ai_ml_model_risk", ctx, rule_id="AI-GH-013") == "low"
 
 
 def test_ai_family_high_on_pr_target_without_guard():

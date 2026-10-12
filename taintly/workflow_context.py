@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any
 
+from .agentguards import AgentGuardIndex
 from .parsers.segmentation import for_each_job
 from .parsers.structural import triggers
 from .workflow_corpus import _extract_job_permissions, _extract_workflow_permissions
@@ -117,19 +118,9 @@ _RE_JENKINS_PARAMS = re.compile(
     r"\bparameters\s*\{|\bparams\s*\.\s*\w+|\benv\.(GIT_BRANCH|BRANCH_NAME|CHANGE_\w+|TAG_NAME)\b"
 )
 
-# Fork-identity guard: the Anthropic Cookbook / claude-code-action idiom
-# that allows a job to run only when the PR head lives in the same
-# repository as the base. The literal expression is
-#   github.event.pull_request.head.repo.full_name == github.repository
-# and it's the canonical mitigation against the "fork PR can trigger a
-# privileged workflow" threat model that AI-GH-005/006/008/009/012/013
-# flag on. Presence downgrades AI exploitability; absence doesn't escalate.
-_RE_FORK_IDENTITY_GUARD = re.compile(
-    r"github\.event\.pull_request\.head\.repo\.full_name\s*"
-    r"(?:==|!=)\s*github\.repository"
-)
-
-
+# Owning-job fork identity proofs can temper AI-GH-006/012/013/015/020.
+# File-level contexts do not carry an ownership proof, and the rule-specific
+# set deliberately excludes mutable-source reads and unrelated AI findings.
 # step-security/harden-runner with ``egress-policy: block`` is a mitigating
 # control: it pins the runner's outbound network to an allowlist and blocks
 # (not just audits) everything else, plus monitors file/process tampering.
@@ -281,7 +272,8 @@ def analyze(content: str, file: str = "") -> WorkflowContext:
         runs_self_hosted=bool(
             _RE_SELF_HOSTED.search(content) or _RE_SELF_HOSTED_GROUP.search(content)
         ),
-        has_fork_identity_guard=bool(_RE_FORK_IDENTITY_GUARD.search(content)),
+        # File fallback lacks an owning-job proof and must remain conservative.
+        has_fork_identity_guard=False,
         has_harden_runner_egress_block=bool(
             _RE_HARDEN_RUNNER.search(content)
             and _RE_EGRESS_BLOCK.search(content)
@@ -349,6 +341,7 @@ def analyze_job_contexts(content: str, file: str = "") -> dict[str, WorkflowCont
     workflow_permissions = _extract_workflow_permissions(lines)
     job_permissions = {block.scope_what: block for block in _extract_job_permissions(lines)}
     contexts: dict[str, WorkflowContext] = {}
+    guard_index = AgentGuardIndex(content)
     for job in for_each_job(content):
         if not job.name:
             continue
@@ -373,7 +366,7 @@ def analyze_job_contexts(content: str, file: str = "") -> dict[str, WorkflowCont
             has_explicit_permissions=permissions is not None,
             is_release_workflow=(globals_ctx.is_release_workflow or local_ctx.is_release_workflow),
             runs_self_hosted=local_ctx.runs_self_hosted,
-            has_fork_identity_guard=local_ctx.has_fork_identity_guard,
+            has_fork_identity_guard=guard_index.excludes(("jobs", job.name)),
             has_harden_runner_egress_block=local_ctx.has_harden_runner_egress_block,
             is_github=True,
         )
@@ -393,7 +386,7 @@ _MEDIUM = "medium"
 _LOW = "low"
 
 
-def compute_exploitability(family_id: str, ctx: WorkflowContext) -> str:
+def compute_exploitability(family_id: str, ctx: WorkflowContext, *, rule_id: str = "") -> str:
     """Combine family + workflow context into an exploitability tier.
 
     Never escalates above ``high`` and never raises a finding's policy
@@ -513,14 +506,19 @@ def compute_exploitability(family_id: str, ctx: WorkflowContext) -> str:
 
     # AI / ML model and agent risk — exploitability tracks "can the
     # attacker reach this file in a way that steers the model or feeds
-    # a poisoned model to it?" The fork-identity guard mitigates the
-    # prompt-injection / agent paths (AI-GH-005/006/008/009/012/013)
-    # so heavily that those findings should be review-needed rather
-    # than confirmed top-alarm; the model-deserialisation rules
+    # a poisoned model to it?" A proven owning-job fork identity guard
+    # tempers only AI-GH-006/012/013/015/020; mutable-source reads and
+    # other AI rules retain their own preconditions. The model-deserialisation rules
     # (AI-GH-001/003/010) track privilege the same way supply-chain
     # rules do.
     if family_id == "ai_ml_model_risk":
-        if ctx.has_fork_identity_guard:
+        if ctx.has_fork_identity_guard and rule_id in {
+            "AI-GH-006",
+            "AI-GH-012",
+            "AI-GH-013",
+            "AI-GH-015",
+            "AI-GH-020",
+        }:
             # Maintainer-only execution path; the agent / model still
             # carries whatever token the job binds, but an outside
             # attacker can't trigger the workflow at all.

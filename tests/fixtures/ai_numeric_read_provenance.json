@@ -1,0 +1,146 @@
+[
+  {
+    "name": "direct_pull_request_number",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ github.event.pull_request.number }}\" --json number\n",
+    "expected_ai019_review": false,
+    "reason": "Direct provider-owned PR number is numeric-or-empty; selector is explicitly number-only. This proves neither positive ID nor overall workflow safety."
+  },
+  {
+    "name": "direct_issue_number",
+    "source_yaml": "name: typed-read-control\non: issues\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh issue view \"${{ github.event.issue.number }}\" --json number\n",
+    "expected_ai019_review": false,
+    "reason": "Direct provider-owned issue number with explicit number-only selector; no positive-ID or broader safety claim."
+  },
+  {
+    "name": "declared_number_input",
+    "source_yaml": "name: typed-read-control\non:\n  workflow_dispatch:\n    inputs:\n      pr_number:\n        type: number\n        required: true\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ inputs.pr_number }}\" --json number\n",
+    "expected_ai019_review": false,
+    "reason": "Workflow input is declared type:number; numeric-text provenance only, not a valid positive PR ID proof."
+  },
+  {
+    "name": "earlier_unique_pure_echo_output",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - id: pr\n        run: echo \"number=${{ github.event.pull_request.number }}\" >> \"$GITHUB_OUTPUT\"\n      - run: gh pr view \"${{ steps.pr.outputs.number }}\" --json number\n",
+    "expected_ai019_review": false,
+    "reason": "Unique earlier same-job producer has one quoted pure typed echo; operand is numeric-or-empty and selector number-only."
+  },
+  {
+    "name": "bounded_event_name_if_else_typed_outputs",
+    "source_yaml": "name: typed-read-control\non:\n  pull_request:\n  issues:\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - id: subject\n        run: |\n          if [ \"${{ github.event_name }}\" = \"pull_request\" ]; then\n            echo \"number=${{ github.event.pull_request.number }}\" >> \"$GITHUB_OUTPUT\"\n          else\n            echo \"number=${{ github.event.issue.number }}\" >> \"$GITHUB_OUTPUT\"\n          fi\n      - run: gh pr view \"${{ steps.subject.outputs.number }}\" --json number\n",
+    "expected_ai019_review": false,
+    "reason": "Both bounded event-name branches emit only provider-typed numeric-or-empty values. No claim the selected PR/issue operation is semantically appropriate."
+  },
+  {
+    "name": "skipped_producer_empty_operand",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - id: pr\n        if: ${{ false }}\n        run: echo \"number=${{ github.event.pull_request.number }}\" >> \"$GITHUB_OUTPUT\"\n      - run: gh pr view \"${{ steps.pr.outputs.number }}\" --json number\n",
+    "expected_ai019_review": false,
+    "reason": "Skipped producer yields an empty operand; selector remains fixed. This is not a claim that the workflow executes safely or succeeds."
+  },
+  {
+    "name": "negative_number_input",
+    "source_yaml": "name: typed-read-control\non:\n  workflow_dispatch:\n    inputs:\n      pr_number:\n        type: number\n        default: -1\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ inputs.pr_number }}\" --json number\n",
+    "expected_ai019_review": false,
+    "reason": "Negative typed numeric value remains numeric text, not arbitrary selector text; it may be rejected. No positive-ID proof."
+  },
+  {
+    "name": "fractional_number_input",
+    "source_yaml": "name: typed-read-control\non:\n  workflow_dispatch:\n    inputs:\n      pr_number:\n        type: number\n        default: 1.5\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ inputs.pr_number }}\" --json number\n",
+    "expected_ai019_review": false,
+    "reason": "Fractional typed number may fail as an identifier; no valid positive-integer ID claim."
+  },
+  {
+    "name": "exponent_number_input",
+    "source_yaml": "name: typed-read-control\non:\n  workflow_dispatch:\n    inputs:\n      pr_number:\n        type: number\n        default: 1e3\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ inputs.pr_number }}\" --json number\n",
+    "expected_ai019_review": false,
+    "reason": "Exponent-form typed number may be normalized or rejected; numeric-text provenance only, not positive-ID proof."
+  },
+  {
+    "name": "string_input",
+    "source_yaml": "name: typed-read-control\non:\n  workflow_dispatch:\n    inputs:\n      pr_number:\n        type: string\n        required: true\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ inputs.pr_number }}\" --json number\n",
+    "expected_ai019_review": true,
+    "reason": "String input is not provider-typed numeric-or-empty; preserve review although selector says number."
+  },
+  {
+    "name": "undeclared_input",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ inputs.pr_number }}\" --json number\n",
+    "expected_ai019_review": true,
+    "reason": "No declaration establishes numeric provenance; arbitrary string may alter operand or option interpretation."
+  },
+  {
+    "name": "free_content_operand",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ github.event.pull_request.body }}\" --json number\n",
+    "expected_ai019_review": true,
+    "reason": "Free-form body is not a typed numeric-or-empty operand."
+  },
+  {
+    "name": "duplicate_step_ids",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - id: pr\n        run: echo \"number=${{ github.event.pull_request.number }}\" >> \"$GITHUB_OUTPUT\"\n      - id: pr\n        run: echo \"number=freeform\" >> \"$GITHUB_OUTPUT\"\n      - run: gh pr view \"${{ steps.pr.outputs.number }}\" --json number\n",
+    "expected_ai019_review": true,
+    "reason": "Duplicate producer IDs make output ownership ambiguous."
+  },
+  {
+    "name": "later_producer",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ steps.pr.outputs.number }}\" --json number\n      - id: pr\n        run: echo \"number=${{ github.event.pull_request.number }}\" >> \"$GITHUB_OUTPUT\"\n",
+    "expected_ai019_review": true,
+    "reason": "A later step cannot establish an earlier producer for the consumer."
+  },
+  {
+    "name": "sibling_job_producer",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  produce:\n    runs-on: ubuntu-latest\n    steps:\n      - id: pr\n        run: echo \"number=${{ github.event.pull_request.number }}\" >> \"$GITHUB_OUTPUT\"\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ steps.pr.outputs.number }}\" --json number\n",
+    "expected_ai019_review": true,
+    "reason": "A producer in a sibling job is not the consumer job's step output."
+  },
+  {
+    "name": "producer_with_extra_write",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - id: pr\n        run: |\n          echo \"number=${{ github.event.pull_request.number }}\" >> \"$GITHUB_OUTPUT\"\n          echo \"number=$UNTRUSTED\" >> \"$GITHUB_OUTPUT\"\n      - run: gh pr view \"${{ steps.pr.outputs.number }}\" --json number\n",
+    "expected_ai019_review": true,
+    "reason": "Extra write to the same output means value is not uniquely proven typed."
+  },
+  {
+    "name": "nested_control_flow",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - id: pr\n        run: |\n          if [ \"$FLAG\" = yes ]; then\n            if [ \"$OTHER\" = yes ]; then\n              echo \"number=${{ github.event.pull_request.number }}\" >> \"$GITHUB_OUTPUT\"\n            fi\n          else\n            echo \"number=${{ github.event.pull_request.number }}\" >> \"$GITHUB_OUTPUT\"\n          fi\n      - run: gh pr view \"${{ steps.pr.outputs.number }}\" --json number\n",
+    "expected_ai019_review": true,
+    "reason": "Nested branches are outside the bounded accepted producer grammar."
+  },
+  {
+    "name": "elif_branch",
+    "source_yaml": "name: typed-read-control\non:\n  pull_request:\n  issues:\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - id: pr\n        run: |\n          if [ \"${{ github.event_name }}\" = pull_request ]; then\n            echo \"number=${{ github.event.pull_request.number }}\" >> \"$GITHUB_OUTPUT\"\n          elif [ \"${{ github.event_name }}\" = issues ]; then\n            echo \"number=${{ github.event.issue.number }}\" >> \"$GITHUB_OUTPUT\"\n          else\n            echo \"number=freeform\" >> \"$GITHUB_OUTPUT\"\n          fi\n      - run: gh pr view \"${{ steps.pr.outputs.number }}\" --json number\n",
+    "expected_ai019_review": true,
+    "reason": "Elif/custom branch structure is outside bounded if/else grammar and includes a freeform fallback."
+  },
+  {
+    "name": "custom_shell",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - id: pr\n        shell: bash {0}\n        run: echo \"number=${{ github.event.pull_request.number }}\" >> \"$GITHUB_OUTPUT\"\n      - run: gh pr view \"${{ steps.pr.outputs.number }}\" --json number\n",
+    "expected_ai019_review": true,
+    "reason": "Custom shell invocation is outside proven producer semantics."
+  },
+  {
+    "name": "windows_powershell",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: windows-latest\n    steps:\n      - id: pr\n        shell: pwsh\n        run: echo \"number=${{ github.event.pull_request.number }}\" >> $env:GITHUB_OUTPUT\n      - shell: pwsh\n        run: gh pr view \"${{ steps.pr.outputs.number }}\" --json number\n",
+    "expected_ai019_review": true,
+    "reason": "Windows/PowerShell output semantics are outside accepted shell proof."
+  },
+  {
+    "name": "commented_selector_is_not_selector",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ github.event.pull_request.number }}\" # --json number\n",
+    "expected_ai019_review": true,
+    "reason": "Apparent selector is only a shell comment; actual command lacks a proved metadata-only selector."
+  },
+  {
+    "name": "dynamic_selector_flag",
+    "source_yaml": "name: typed-read-control\non:\n  workflow_dispatch:\n    inputs:\n      fields:\n        type: string\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ github.event.pull_request.number }}\" --json \"${{ inputs.fields }}\"\n",
+    "expected_ai019_review": true,
+    "reason": "Dynamic selector flag can choose mutable content fields; review remains despite typed operand."
+  },
+  {
+    "name": "jq_overrides_metadata_projection",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ github.event.pull_request.number }}\" --json number,title --jq .title\n",
+    "expected_ai019_review": true,
+    "reason": "Selector includes title and jq projects it; numeric source cannot make fetched mutable content safe."
+  },
+  {
+    "name": "body_field_with_numeric_operand",
+    "source_yaml": "name: typed-read-control\non: pull_request\njobs:\n  read:\n    runs-on: ubuntu-latest\n    steps:\n      - run: gh pr view \"${{ github.event.pull_request.number }}\" --json body\n",
+    "expected_ai019_review": true,
+    "reason": "Body is mutable free-form content; numeric operand provenance does not neutralize a body-field read."
+  }
+]

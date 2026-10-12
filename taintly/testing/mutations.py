@@ -17,7 +17,11 @@ def mutate_whitespace_pad(sample: str) -> list[str]:
     mutations.append(sample.replace(": ", ":  "))
     mutations.append(sample.replace(": ", ":"))
     mutations.append(sample.replace("= ", "=  "))
-    return [m for m in mutations if m != sample]
+    return [
+        m
+        for m in mutations
+        if m != sample and not _invalidates_actions_guard(sample, m, allow_guard_loss=True)
+    ]
 
 
 def mutate_indent_shift(sample: str) -> list[str]:
@@ -98,8 +102,70 @@ def mutate_quote_swap(sample: str) -> list[str]:
         # not be scored as a false negative.
         if mutated.count('"') % 2 != 0 or mutated.count("'") % 2 != 0:
             continue
+        if _invalidates_actions_guard(sample, mutated):
+            continue
         mutations.append(mutated)
     return mutations
+
+
+def _invalidates_actions_guard(
+    original: str, mutated: str, *, allow_guard_loss: bool = False
+) -> bool:
+    """Reject only a proved valid-to-invalid Actions guard transformation."""
+    from taintly.parsers.gha_expr import ExprSyntaxError, parse
+    from taintly.parsers.structural import EventKind, walk_workflow
+
+    def guards(source: str) -> dict[tuple[object, ...], str] | None:
+        result: dict[tuple[object, ...], str] = {}
+        keys: set[tuple[object, ...]] = set()
+        for leaf in walk_workflow(
+            "workflow.yml", content=source, include_keys=True, include_merge_origins=True
+        ):
+            if leaf.kind in {EventKind.ERROR, EventKind.CUTOFF} or leaf.merge_origins:
+                return None
+            if leaf.kind is EventKind.MAP_KEY:
+                if leaf.path in keys:
+                    return None
+                keys.add(leaf.path)
+            path = leaf.path
+            if (
+                leaf.kind is EventKind.LEAF_SCALAR
+                and leaf.value is not None
+                and path[:1] == ("jobs",)
+                and path[-1:] == ("if",)
+                and len(path) in {3, 5}
+                and isinstance(path[1], str)
+                and (len(path) == 3 or (path[2] == "steps" and isinstance(path[3], int)))
+            ):
+                value = leaf.value.strip()
+                if value.startswith("${{") and value.endswith("}}"):
+                    value = value[3:-2].strip()
+                result[path] = value
+        return result
+
+    before, after = guards(original), guards(mutated)
+    if before is None or after is None:
+        return False
+    if before.keys() != after.keys():
+        if not allow_guard_loss or not after.keys() < before.keys():
+            return False
+        for path in before.keys() - after.keys():
+            try:
+                parse(before[path])
+            except (ExprSyntaxError, RecursionError):
+                continue
+            return True
+        return False
+    for path, value in before.items():
+        try:
+            parse(value)
+        except (ExprSyntaxError, RecursionError):
+            continue
+        try:
+            parse(after[path])
+        except (ExprSyntaxError, RecursionError):
+            return True
+    return False
 
 
 def mutate_comment_inject(sample: str) -> list[str]:

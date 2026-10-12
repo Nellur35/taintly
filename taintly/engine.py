@@ -427,7 +427,7 @@ def scan_file(
                         ),
                         wf_ctx,
                     )
-                    exploitability = compute_exploitability(family, finding_ctx)
+                    exploitability = compute_exploitability(family, finding_ctx, rule_id=rule.id)
                     ctx_notes: list[str] = []
                     ctx_tags: list[str] = []
                     if rule.id == "TAINT-GH-012" and exploitability == "high":
