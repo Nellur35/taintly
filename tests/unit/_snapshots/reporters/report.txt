@@ -48,9 +48,12 @@ Quick win
   [CRITICAL] SEC3-GH-001: Action referenced by mutable tag [exploitability:high]
     File: .github/workflows/ci.yml:12
     Code:       - uses: actions/checkout@v4
-    An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action's repo can move the tag to a malicious commit; every consumer
+    An external action is referenced by a mutable tag (e.g. @v4) instead of a 40-character commit SHA.  An attacker who compromises the action's repo can move the tag to a malicious commit; every consumer pinned by tag picks up the new code on the next workflow run.
     Threat: Tag-based pinning lets the upstream maintainer (or anyone who compromises their account) hot-swap the action contents without changing the workflow file.
     Fix:  Pin the action to a full 40-character commit SHA.
+        Use `gh action pin` or `taintly --fix`.
+    Reference: https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+    Family: supply_chain_immutability
     OWASP:CICD-SEC-3 | STRIDE:T
     Incidents: tj-actions/changed-files (CVE-2025-30066)
 
@@ -60,9 +63,15 @@ Quick win
     Permission Slip Effect: a fork-reachable trigger, an AI agent action, and a cloud-credential grant co-exist.  An attacker who steers the agent via prompt injection holds a valid OIDC token.
     Threat: Attacker mints OIDC token via prompt injection.
     Context: Exploitability may differ because external pull requests are blocked.
+    Context tags: external_prs:blocked
     Suppression: Dead-path siblings were removed before reporting.
     Calibration: Maintainer-only trigger path lowers exploitability.
     Fix:  Break at least one leg of the triangle:
+        1. Gate the agent job by same-repo identity.
+        2. Drop the id-token: write grant from the agent job.
+        3. Narrow the agent's allowedTools to forbid shell.
+    Reference: https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/
+    Family: agent_credential_chain
     OWASP:CICD-SEC-4 | STRIDE:E+T+I
 
   [MEDIUM] SEC2-GH-002: Missing top-level permissions block
@@ -71,6 +80,8 @@ Quick win
     Workflow does not declare a top-level permissions block.
     Threat: A compromised step inherits the default token's full scope.
     Fix:  Add `permissions: contents: read` at the top level.
+    Reference: https://docs.github.com/en/actions/security-guides/automatic-token-authentication
+    Family: excessive_permissions
     OWASP:CICD-SEC-2 | STRIDE:E+T
 
   [LOW] ENGINE-ERR: File size 60000 bytes exceeds scanner cap (50000)
@@ -82,4 +93,5 @@ Quick win
     Code:         run: echo "$PR_TITLE"
     Untrusted context flows into a run: block via env.
     Fix:  Quote the variable in the run: block.
+    Family: taint_to_run_block
     OWASP:CICD-SEC-1 | STRIDE:T
