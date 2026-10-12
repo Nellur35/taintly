@@ -88,8 +88,13 @@ def load_all_rules() -> list[Rule]:
     """
     _IMPORT_FAILURES.clear()
     rules: list[Rule] = []
+    failures: list[str] = []
     for plat in Platform:
         rules.extend(load_rules_for_platform(plat))
+        failures.extend(_IMPORT_FAILURES)
+    # Each platform load resets its own state; retain the complete result for
+    # callers that must reject an incomplete all-platform registry.
+    _IMPORT_FAILURES[:] = failures
     return rules
 
 

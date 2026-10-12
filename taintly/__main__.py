@@ -42,6 +42,7 @@ from .reporters._encoding import ensure_utf8_stdout
 from .reporters.json_report import format_json
 from .reporters.sarif import format_sarif, format_sarif_reports
 from .reporters.text import format_text
+from .rules import registry as _rule_registry
 from .rules.registry import load_all_rules, load_rules_for_platform
 
 # Map AuditReport.platform string to the Platform enum the scorer
@@ -674,6 +675,16 @@ def main():
                     # Mixed (.github + .gitlab-ci.yml in one repo) or undetectable
                     # — load everything; engine will scope per platform.
                     all_rules = load_all_rules()
+
+    # A partial registry cannot establish a clean scan or a passing self-test.
+    # This must run before exclusions, testing modes and report generation.
+    if _rule_registry._IMPORT_FAILURES:
+        print(
+            "taintly: rule loading failed; cannot continue with incomplete coverage: "
+            + ", ".join(_rule_registry._IMPORT_FAILURES),
+            file=sys.stderr,
+        )
+        sys.exit(3)
 
     # Apply rule exclusions (CLI + config, merged)
     cli_excluded = set(args.exclude_rule or [])

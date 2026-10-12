@@ -260,7 +260,7 @@ findings. Three patterns, each with a recipe.
 
 | `2` | CLI argument error OR scan completed with CRITICAL-severity findings — distinguish via stderr (argparse usage on argument error vs. severity summary on findings) |
 
-| `3` | Configuration error (missing config file, invalid YAML, unknown rule ID) |
+| `3` | Initialization or configuration error (rule module failed to load, missing config file, invalid YAML, unknown rule ID) |
 
 | `10` | `--self-test` failed: a positive sample didn't fire, or a negative sample did, or `--integration-test` reported a non-bypass failure |
 
