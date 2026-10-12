@@ -588,6 +588,7 @@ def scan_file(
         gitlabctx=gitlabctx,
         jenkinsctx=jenkinsctx,
     )
+    _bind_input_script_sinks(findings, content)
     return findings
 
 
@@ -1511,6 +1512,107 @@ def _discovery_confidence(repo_path: str, platform: Platform, files: list[str]) 
     }
 
 
+def coalesce_input_script_findings(findings: list[Finding]) -> list[Finding]:
+    """Keep the JavaScript-specific claim for one shared input splice.
+
+    SEC4-GH-008 also visits known action-owned executable inputs. A same-scan
+    structural witness establishes the github-script sink. Same location is
+    insufficient: a second expression may be a distinct source that only
+    one rule understands. Require identical complete source snippets with
+    exactly one bare input expression and equivalent evidence metadata.
+    Anything uncertain, including more complex input expressions, survives.
+
+    Apply after operator configuration filters, but before baseline creation
+    or diffing, so a suppressed canonical rule leaves its fallback available
+    and an accepted canonical baseline does not resurrect the duplicate.
+    """
+    canonical: dict[tuple[str, int, str], list[Finding]] = {}
+    for finding in findings:
+        if finding.rule_id == "SEC4-GH-025" and finding._input_script_sink is not None:
+            canonical.setdefault((finding.file, finding.line, finding.snippet), []).append(finding)
+    if not canonical:
+        return findings
+
+    evidence_fields = (
+        "severity",
+        "confidence",
+        "discovery_confidence",
+        "review_needed",
+        "exploitability",
+        "context_notes",
+        "context_tags",
+        "triage_needed",
+        "suppression_reason",
+        "calibration_reason",
+        "origin",
+        "finding_family",
+        "composition_tags",
+    )
+    kept: list[Finding] = []
+    for finding in findings:
+        candidates = canonical.get((finding.file, finding.line, finding.snippet), [])
+        if finding.rule_id == "SEC4-GH-008" and candidates:
+            snippet = finding.snippet
+            if snippet.count("${{") == 1 and snippet.count("}}") == 1:
+                body = snippet.split("${{", 1)[1].split("}}", 1)[0].strip()
+                if re.fullmatch(r"(?:inputs|github\.event\.inputs)\.[A-Za-z0-9_-]+", body):
+                    if any(
+                        all(
+                            getattr(finding, name) == getattr(other, name)
+                            for name in evidence_fields
+                        )
+                        and finding._input_script_sink == other._input_script_sink
+                        for other in candidates
+                    ):
+                        continue
+        kept.append(finding)
+    return kept
+
+
+def _bind_input_script_sinks(findings: list[Finding], content: str) -> None:
+    """Bind narrow overlap witnesses to actual leaves of the scanned content.
+
+    The legacy github-script walker can also match action-shaped text inside
+    a run heredoc. Never treat its rule ID as proof of JavaScript ownership.
+    Unsupported structural input keeps both findings rather than guessing.
+    """
+    pair = {"SEC4-GH-008", "SEC4-GH-025"}
+    if not pair <= {finding.rule_id for finding in findings}:
+        return
+    from .parsers.structural import EventKind, walk_workflow
+    from .workflow_aware_pattern import PredicateContext
+
+    try:
+        events = list(walk_workflow("anonymous.yml", content=content, recover=True))
+        if any(event.kind is EventKind.CUTOFF for event in events):
+            return
+        leaves = tuple(event for event in events if event.kind is EventKind.LEAF_SCALAR)
+        context = PredicateContext(leaves)
+        owners: dict[int, tuple[str, int]] = {}
+        for leaf in leaves:
+            path = leaf.path
+            if not (
+                len(path) == 6
+                and path[0] == "jobs"
+                and isinstance(path[1], str)
+                and path[2] == "steps"
+                and isinstance(path[3], int)
+                and path[4:] == ("with", "script")
+            ):
+                continue
+            uses = context.step_uses(path) or ""
+            if uses.split("@", 1)[0].strip().lower() != "actions/github-script":
+                continue
+            for line in [leaf.line, *(number for number, _ in leaf.block_lines or ())]:
+                owners[line] = (path[1], path[3])
+        for finding in findings:
+            if finding.rule_id in pair:
+                finding._input_script_sink = owners.get(finding.line)
+    except Exception:
+        # A failed optional proof must retain findings, never remove them.
+        return
+
+
 def _apply_discovery_confidence(findings: list[Finding], conf_map: dict[str, str]) -> None:
     """Tag each finding with the discovery confidence of its file and cap
     low-confidence findings at review-needed.
@@ -1717,6 +1819,7 @@ def scan_repo(
     *,
     explicit_github_repoctx: StaticGuardContext | None = None,
     max_scan_seconds: float | None = None,
+    coalesce_overlaps: bool = True,
 ) -> list[AuditReport]:
     """Scan an entire repository. Returns one report per platform detected.
 
@@ -1725,6 +1828,10 @@ def scan_repo(
     static-guard ``WorkflowContext`` on the GitHub scan path.  Useful
     when the directory is not a git checkout or its remote is not named
     ``origin``.  When omitted, auto-detection is used as before.
+
+    Callers applying their own finding filters may set ``coalesce_overlaps``
+    false, then call ``coalesce_input_script_findings`` after those filters
+    and before baseline creation, diffing, scoring or serialization.
     """
     import sys as _sys
 
@@ -1960,6 +2067,8 @@ def scan_repo(
         # first-seen slot and silently mask the canonical finding).
         _apply_discovery_confidence(all_findings, discovery_conf)
         all_findings = _dedupe_supersedes(all_findings, platform_rules)
+        if coalesce_overlaps:
+            all_findings = coalesce_input_script_findings(all_findings)
         for f in _dedupe_project_scope(all_findings):
             report.add(f)
 

@@ -1790,6 +1790,13 @@ class Finding:
     """Reason a related finding was suppressed or neutralized, when reported."""
     calibration_reason: str = ""
     """Reason severity or exploitability presentation was calibrated."""
+    _input_script_sink: tuple[str, int] | None = field(default=None, repr=False, compare=False)
+    """Internal same-scan structural witness: github-script owning job and step.
+
+    None means unknown. Populated only from the scanned content's actual
+    with.script leaf; never reconstructed from display snippets or file reads.
+    This bookkeeping is not serialized as finding metadata.
+    """
 
     def to_dict(self) -> dict[str, Any]:
         return {

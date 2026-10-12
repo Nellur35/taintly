@@ -43,6 +43,20 @@ the call, not in a new process-global registry. Calls are sequential and retain
 all reports in memory; split very large input lists into bounded batches.
 `max_scan_seconds` forwards the existing scanner time-budget option.
 
+Repository reports consolidate SEC4-GH-008 with SEC4-GH-025 only when both
+describe the same simple input splice in a structurally verified
+`actions/github-script` JavaScript body. The JavaScript warning and its
+`process.env` remediation remain. Different sources, locations, evidence
+metadata or unknown sink ownership retain their separate findings.
+
+Integrations that apply custom finding suppressions should use
+`taintly.engine.scan_repo(..., coalesce_overlaps=False)`, apply those filters,
+then call `taintly.engine.coalesce_input_script_findings(report.findings)`
+and `report.summarize()`. Consolidate before saving or comparing a baseline,
+scoring, or rendering. This preserves the input warning when the JavaScript
+rule is disabled or ignored. The CLI follows this order automatically.
+`scan_file` remains the per-file candidate API; it does not consolidate reports.
+
 The main expected benefit is avoiding repeated process startup and rule loading
 when an integration previously invoked one CLI process per repository. It is not
 a claim that individual rules have become faster. Scans on large repositories
