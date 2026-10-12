@@ -11,6 +11,8 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 ## [Unreleased]
 
 ### Added
+- Runtime package data explicitly includes the grandfather baseline and existing data/fixture assets,
+  keeping checkout and installed-package confidence fallback inputs aligned.
 - Local workflow/action input tracing now follows declared job outputs through
   direct `needs` dependencies. Evidence quotes the output declaration and retains
   review status when its writer, execution, or propagation is unresolved.
