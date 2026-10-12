@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from taintly.staticguard import (
     Verdict,
     WorkflowContext,
@@ -30,29 +32,17 @@ def test_evaluate_if_repo_identity_comparison():
     assert evaluate_if("github.repository_owner != 'other'", ctx) is Verdict.STATIC_TRUE
 
 
-def test_comparison_is_case_sensitive():
-    """GitHub Actions' ``==`` on strings is case-sensitive.
-
-    A pre-existing ``.lower()`` coercion in the comparison evaluator
-    would treat ``MyOrg`` and ``myorg`` as equal, causing false
-    negatives on suppression when ctx and literal differ only in
-    case.  The fix matches GHA's actual semantics.
-    """
+def test_comparison_ignores_ascii_case():
+    """Actions string equality ignores case, including repository guards."""
     ctx = WorkflowContext(repository="MyOrg/MyRepo", repository_owner="MyOrg")
     # Exact match → STATIC_TRUE
     assert evaluate_if("github.repository_owner == 'MyOrg'", ctx) is Verdict.STATIC_TRUE
-    # Case mismatch → STATIC_FALSE (GHA would evaluate false at runtime)
-    assert evaluate_if("github.repository_owner == 'myorg'", ctx) is Verdict.STATIC_FALSE
-    assert evaluate_if("github.repository_owner == 'MYORG'", ctx) is Verdict.STATIC_FALSE
+    assert evaluate_if("github.repository_owner == 'myorg'", ctx) is Verdict.STATIC_TRUE
+    assert evaluate_if("github.repository_owner == 'MYORG'", ctx) is Verdict.STATIC_TRUE
 
 
-def test_comparison_case_sensitive_drives_whole_dead():
-    """Whole-workflow suppression fires on a case-mismatched literal.
-
-    ctx owner is ``MyOrg``; the workflow gates on ``'myorg'``.  Real
-    GHA would evaluate the comparison false (case-mismatch), so the
-    sole job is dead and the whole workflow is suppressible.
-    """
+def test_comparison_case_variant_keeps_workflow_live():
+    """A differently cased spelling of the same owner cannot hide a live job."""
     ctx = WorkflowContext(repository="MyOrg/MyRepo", repository_owner="MyOrg")
     content = (
         "on: pull_request_target\n"
@@ -63,14 +53,99 @@ def test_comparison_case_sensitive_drives_whole_dead():
         "    steps:\n"
         "      - run: echo hi\n"
     )
-    assert is_workflow_whole_dead(content, ctx) is True
+    assert is_workflow_whole_dead(content, ctx) is False
+    assert find_dead_line_ranges(content, ctx) == []
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("github.repository == 'myorg/myrepo'", Verdict.STATIC_TRUE),
+        ("'MYORG/MYREPO' == github.repository", Verdict.STATIC_TRUE),
+        ("github.repository != 'myorg/myrepo'", Verdict.STATIC_FALSE),
+        ("'MYORG' != github.repository_owner", Verdict.STATIC_FALSE),
+        ("github.repository_owner != 'OtherOrg'", Verdict.STATIC_TRUE),
+        ("github.repository_owner == 'OtherOrg'", Verdict.STATIC_FALSE),
+        ("'Release' == 'release'", Verdict.STATIC_TRUE),
+        ("'Release' != 'release'", Verdict.STATIC_FALSE),
+        ("'01' == '1'", Verdict.STATIC_FALSE),
+        ("' MyOrg' == 'myorg'", Verdict.STATIC_FALSE),
+        ("${{ github.repository_owner == 'MYORG' }}", Verdict.STATIC_TRUE),
+    ],
+)
+def test_case_comparison_direction_operator_and_literal(expression, expected):
+    ctx = WorkflowContext(repository="MyOrg/MyRepo", repository_owner="MyOrg")
+    assert evaluate_if(expression, ctx) is expected
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "'straße' == 'STRASSE'",
+        "'straße' != 'STRASSE'",
+        "'İ' == 'i'",
+        "'é' != 'É'",
+        "github.repository_owner == 'MýOrg'",
+        "github.repository_owner != 'MýOrg'",
+    ],
+)
+def test_unicode_comparison_cannot_prove_suppression(expression):
+    ctx = WorkflowContext(repository="MyOrg/MyRepo", repository_owner="MyOrg")
+    assert evaluate_if(expression, ctx) is Verdict.RUNTIME
+
+
+def test_non_ascii_context_and_missing_context_stay_unknown():
+    for operator in ("==", "!="):
+        expression = f"github.repository_owner {operator} 'myorg'"
+        assert evaluate_if(expression, WorkflowContext(repository_owner="MýOrg")) is Verdict.RUNTIME
+        assert evaluate_if(expression, WorkflowContext()) is Verdict.RUNTIME
+        assert evaluate_if(expression) is Verdict.RUNTIME
+
+
+@pytest.mark.parametrize(
+    ("operator", "expected"), [("==", Verdict.STATIC_TRUE), ("!=", Verdict.STATIC_FALSE)]
+)
+def test_identical_unicode_strings_preserve_known_truth(operator, expected):
+    # Identity needs no Unicode case mapping and must not introduce dead-job FPs.
+    assert evaluate_if(f"'é' {operator} 'é'") is expected
+    assert (
+        evaluate_if(
+            f"github.repository_owner {operator} 'MýOrg'",
+            WorkflowContext(repository_owner="MýOrg"),
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(("operator", "dead"), [("==", False), ("!=", True)])
+def test_step_case_comparison_controls_only_owning_step(operator, dead):
+    ctx = WorkflowContext(repository="MyOrg/MyRepo", repository_owner="MyOrg")
+    content = (
+        "on: pull_request_target\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f"      - if: github.repository_owner {operator} 'myorg'\n"
+        "        run: echo conditional\n"
+        "      - run: echo unconditional\n"
+    )
+    assert find_dead_line_ranges(content, ctx) == ([(6, 7)] if dead else [])
+    assert is_workflow_whole_dead(content, ctx) is False
+
+
+def test_literal_case_equality_needs_no_repository_context():
+    assert evaluate_if("'Release' == 'release'") is Verdict.STATIC_TRUE
+    assert evaluate_if("'Release' != 'release'") is Verdict.STATIC_FALSE
 
 
 def test_evaluate_if_runtime_fallback():
     ctx = WorkflowContext(repository="Nellur35/taintly", repository_owner="Nellur35")
 
     assert evaluate_if("github.event_name == 'pull_request'", ctx) is Verdict.RUNTIME
-    assert evaluate_if("success() && github.repository == 'Nellur35/taintly'", ctx) is Verdict.RUNTIME
+    assert (
+        evaluate_if("success() && github.repository == 'Nellur35/taintly'", ctx) is Verdict.RUNTIME
+    )
     assert evaluate_if("${{ inputs.deploy == 'prod' }}", ctx) is Verdict.RUNTIME
 
 
@@ -142,17 +217,10 @@ def test_yaml_quoted_repo_comparison():
     """YAML-quoted repo comparison must evaluate against ctx."""
     ctx = WorkflowContext(repository="me/myrepo", repository_owner="me")
     assert (
-        evaluate_if(
-            "\"${{ github.repository_owner == 'someone-else' }}\"", ctx
-        )
+        evaluate_if("\"${{ github.repository_owner == 'someone-else' }}\"", ctx)
         is Verdict.STATIC_FALSE
     )
-    assert (
-        evaluate_if(
-            "\"${{ github.repository_owner == 'me' }}\"", ctx
-        )
-        is Verdict.STATIC_TRUE
-    )
+    assert evaluate_if("\"${{ github.repository_owner == 'me' }}\"", ctx) is Verdict.STATIC_TRUE
 
 
 def test_empty_yaml_string_stays_runtime():
