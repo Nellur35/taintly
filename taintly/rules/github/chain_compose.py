@@ -20,9 +20,9 @@ Initial three rules (all conjunctive; the join is what the engine
 layer can't do):
 
 * CHAIN-GH-101 — SEC4-GH-005 + fork-reachable + an externally-triggered
-  event that retains write-token scope + write-token = CRITICAL. The
-  actions/checkout step persists a write-capable GITHUB_TOKEN onto a
-  runner that can execute attacker-influenced code.
+  event that can retain write-token scope + write-token candidate.
+  Potential CRITICAL impact, review needed: the join does not prove
+  attacker-controlled code execution or the persisted token's authority.
 * CHAIN-GH-102 — SEC3-GH-001 + fork-reachable = HIGH. An unpinned
   third-party action in a workflow attackers can fire; a single
   upstream compromise → arbitrary code in the fork-reachable job.
@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 from taintly.composer import CompositeFact, context_for, findings_by_rule
 from taintly.models import Platform, Rule, Severity
 from taintly.workflow_corpus import (
+    CorpusEvidence,
     CorpusFindings,
     CorpusPattern,
     WorkflowCorpus,
@@ -59,33 +60,53 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
-    """SEC4-GH-005 + fork-reachable + retained external write scope → CRITICAL.
+_CHAIN_101_TITLE = "Review: persisted checkout credential with external-trigger/write-scope context"
 
-    The pwn-request shape, derived from existing finding output rather
-    than re-detected from YAML. Anchors at the SEC4-GH-005 finding's
+_CHAIN_101_REASON = (
+    "The composition matches credential-consumer, trigger and permission candidates; "
+    "it does not prove attacker-controlled checkout/execution or effective credential authority."
+)
+
+_CHAIN_101_REMEDIATION = (
+    "First verify the checkout repository/ref, the later command or action that executes "
+    "attacker-controlled bytes, and the persisted credential's identity and effective scopes. "
+    "A default checkout followed by a fixed git command is not proof of fork-code execution.\n"
+    "  1. Keep untrusted code execution in a separate unprivileged job;\n"
+    "  2. Set `persist-credentials: false` when later steps do not need checkout authentication;\n"
+    "  3. Declare minimum GITHUB_TOKEN permissions and separately restrict any custom token.\n"
+    "Review repository defaults, workflow_run parent provenance and event/job/step guards. "
+    "Requested write scopes and a trigger name alone do not establish an exploitable chain."
+)
+
+
+def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
+    """SEC4-GH-005 + fork-reachable + write context → review candidate.
+
+    A possible pwn-request prerequisite join, not execution/authority proof.
+    Derived from existing finding output rather than re-detected from YAML.
+    Anchors at the SEC4-GH-005 finding's
     line — that's the actions/checkout that should have set
     ``persist-credentials: false``.
 
     Note: SEC4-GH-005B (INFO posture sibling, added 2026-05-19 by
     github-tanstack-posture-design-v1) does NOT feed this composer.
     SEC4-GH-005B fires only when no downstream credential consumer
-    is detected — the "consumer present" gate is exactly what makes
-    SEC4-GH-005 a confident pwn-request building block.  Composing
+    is detected. A credential consumer alone does not prove that the
+    attacker controls the command or checked-out code. Composing
     SEC4-GH-005B into CHAIN-GH-101 would re-introduce the FP-density
     noise the May-17 SEC4-GH-005 precision tune eliminated.  The
-    composer's input set is intentionally limited to confirmed-
-    consumer findings (SEC4-GH-005 only).
+    composer's input set is intentionally limited to consumer candidates
+    (SEC4-GH-005 only).
 
-    Trigger eligibility follows GitHub's default public-repository
-    GITHUB_TOKEN model: a fork-originated ``pull_request`` run is downgraded
-    to read-only, even when the workflow also has a trusted ``push`` trigger
-    or declares write permissions. ``pull_request_target``, ``issue_comment``,
-    and ``workflow_run`` with an external parent retain write scope. Unresolved
+    Trigger eligibility follows the default public-repository GITHUB_TOKEN
+    model: a fork-originated ``pull_request`` run is downgraded to read-only,
+    even when the workflow also has a trusted ``push`` trigger or declares
+    write permissions. ``pull_request_target``, ``issue_comment``, and a
+    ``workflow_run`` with an external parent retain write scope. Unresolved
     workflow_run parents remain conservatively eligible. Static YAML cannot
-    determine private-repository settings that grant fork PR write tokens, nor
-    whether checkout uses a custom PAT; this chain specifically describes the
-    GITHUB_TOKEN and does not infer those repository-level overrides.
+    determine a private-repository setting that grants fork PR write tokens,
+    nor whether checkout uses a custom PAT; this chain is specifically about
+    the GITHUB_TOKEN and does not infer those repository-level overrides.
     """
     for f in findings_by_rule(db, "SEC4-GH-005"):
         if not f.job:
@@ -102,11 +123,11 @@ def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
         if ctx.trusted_bot_gate:
             continue
         snippet = (
-            "CHAIN: actions/checkout without `persist-credentials: false` "
-            "in a fork-reachable, write-token-holding job. A PR from a "
-            "fork executes code with the persisted GITHUB_TOKEN — the "
-            "classic pwn-request shape, composed from "
-            "SEC4-GH-005 + fork trigger + write-scope permissions."
+            f"CHAIN candidate in job '{f.job}', checkout anchor line {f.line}: "
+            "SEC4-GH-005 credential-consumer candidate + external-privileged "
+            "trigger + declared or default-unknown write-token context. "
+            "Attacker-controlled code execution and effective persisted-token "
+            "authority are not proven by this join."
         )
         yield (
             "composite",
@@ -673,7 +694,26 @@ def _make_chain_callback(chain_id: str):
         from taintly.composer import run_composer
 
         composites = run_composer(corpus, prior, COMPOSER_RULES)
-        return [(c.file, c.anchor_line, c.snippet) for c in composites if c.chain_id == chain_id]
+        results: CorpusFindings = []
+        for c in composites:
+            if c.chain_id != chain_id:
+                continue
+            if chain_id == "CHAIN-GH-101":
+                results.append(
+                    CorpusEvidence(
+                        file=c.file,
+                        line=c.anchor_line,
+                        snippet=c.snippet,
+                        title=_CHAIN_101_TITLE,
+                        remediation=_CHAIN_101_REMEDIATION,
+                        context_notes=(_CHAIN_101_REASON,),
+                        context_tags=("execution-unproven", "credential-authority-unproven"),
+                        calibration_reason=_CHAIN_101_REASON,
+                    )
+                )
+            else:
+                results.append((c.file, c.anchor_line, c.snippet))
+        return results
 
     return callback
 
@@ -681,10 +721,7 @@ def _make_chain_callback(chain_id: str):
 RULES: list[Rule] = [
     Rule(
         id="CHAIN-GH-101",
-        title=(
-            "Composite: persisted checkout credential in a fork-reachable, "
-            "write-token job (SEC4-GH-005 + fork trigger + write-scope)"
-        ),
+        title=_CHAIN_101_TITLE,
         severity=Severity.CRITICAL,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-1",
@@ -695,31 +732,25 @@ RULES: list[Rule] = [
             "(2) an external trigger can start the job with retained "
             "write scope (`pull_request_target`, `issue_comment`, or "
             "`workflow_run` whose named parent is externally reachable); "
-            "and (3) the job holds a write-capable GITHUB_TOKEN. A plain "
+            "and (3) the job requests write permissions, or permissions "
+            "are omitted and the repository default is unknown. A plain "
             "`pull_request` run is downgraded to read-only by default, and "
             "adding a trusted `push` trigger does not upgrade that PR run.\n\n"
-            "This uses GitHub's default public-repository token policy. "
+            "This uses GitHub's default public-repository fork-token policy. "
             "Static workflow YAML cannot identify private-repository settings "
             "that grant fork PRs write tokens or prove that checkout receives "
             "a custom PAT; custom credentials are outside this GITHUB_TOKEN "
-            "chain. An unresolved workflow_run parent remains conservatively "
+            "authority proof. An unresolved workflow_run parent remains conservatively "
             "eligible.\n\n"
-            "Individually each is MEDIUM/HIGH at most; combined, an "
-            "external PR can execute code with the persisted "
-            "write-token — the canonical pwn-request RCE shape."
+            "This is a review candidate with potentially CRITICAL consequences, "
+            "not a confirmed pwn request. The join does not establish an "
+            "attacker-controlled repository/ref, execution of those bytes, "
+            "compatible runtime guards, or the persisted token's identity and "
+            "effective authority. A default pull_request_target checkout uses "
+            "trusted base code; even an untrusted checkout alone is not execution."
         ),
         pattern=CorpusPattern(callback=_make_chain_callback("CHAIN-GH-101")),
-        remediation=(
-            "Break any one of the three legs:\n"
-            "  1. Set `persist-credentials: false` on the checkout step "
-            "(addresses SEC4-GH-005);\n"
-            "  2. Move the workflow off fork-reachable triggers (or "
-            "use `pull_request` instead of `pull_request_target` if you "
-            "don't need write-scope secrets);\n"
-            "  3. Drop the job's permissions to the minimum needed "
-            "(`permissions: contents: read`).\n"
-            "Run `taintly --guide CHAIN-GH-101` for the full checklist."
-        ),
+        remediation=_CHAIN_101_REMEDIATION,
         reference=(
             "https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/"
         ),
@@ -727,18 +758,18 @@ RULES: list[Rule] = [
         test_negative=[],
         stride=["E", "T", "S"],
         threat_narrative=(
-            "An external contributor opens a PR. The workflow fires "
-            "on `pull_request_target` with the default write-capable "
-            "GITHUB_TOKEN. The fork's code is checked out without "
-            "`persist-credentials: false`, so the checkout step writes "
-            "the workflow's GITHUB_TOKEN into the local git config. "
-            "A later step in the same job runs `git push` (or any "
-            "shell op an attacker landed in the fork) and uses that "
-            "persisted token — now arbitrary writes against the host "
-            "repo from a fork PR."
+            "If an external contributor can cause attacker-controlled code to "
+            "execute in this job while a persisted credential has useful write "
+            "authority, that code could reuse the credential to modify authorized "
+            "repository resources. This composition does not prove those conditions: "
+            "a later git command may be entirely trusted, an omitted permissions "
+            "block leaves repository defaults unknown, and a custom checkout token "
+            "may have different authority from GITHUB_TOKEN. Verify each missing "
+            "source-to-execution and credential-authority edge before treating "
+            "the candidate as exploitable."
         ),
-        confidence="high",
-        review_needed=False,
+        confidence="medium",
+        review_needed=True,
         finding_family="chain-composition",
         composition_tags=frozenset({"chain-composition"}),
     ),
