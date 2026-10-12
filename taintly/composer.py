@@ -27,6 +27,7 @@ machinery actually earn its keep on this layer of the system.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -36,6 +37,7 @@ from taintly.taint_facts.relations import Database
 
 if TYPE_CHECKING:
     from taintly.models import Finding
+    from taintly.parsers.segmentation import JobSegment
     from taintly.workflow_corpus import WorkflowCorpus
 
 # ---------------------------------------------------------------------------
@@ -156,6 +158,23 @@ _TRUSTED_BOT_PATTERNS: tuple[str, ...] = (
 )
 
 
+@dataclass(frozen=True)
+class _JobIndex:
+    """Immutable job ranges, retained only for one composer invocation."""
+
+    segments: tuple[JobSegment, ...]
+    starts: tuple[int, ...]
+
+    def at_line(self, line: int) -> str | None:
+        if line <= 0:
+            return None
+        position = bisect_right(self.starts, line) - 1
+        if position < 0:
+            return None
+        job = self.segments[position]
+        return job.name if job.name and line <= job.end_line else None
+
+
 # ---------------------------------------------------------------------------
 # EDB seeding
 # ---------------------------------------------------------------------------
@@ -163,8 +182,8 @@ _TRUSTED_BOT_PATTERNS: tuple[str, ...] = (
 
 def _seed_findings(
     db: Database,
-    corpus: WorkflowCorpus,
     prior_findings: Iterable[Finding],
+    job_indexes: dict[str, _JobIndex],
 ) -> None:
     """Push each prior finding into the database as a FindingFact.
 
@@ -172,17 +191,14 @@ def _seed_findings(
     when a rule has not set it explicitly. Findings outside a known
     job remain unscoped and cannot satisfy job-sensitive chains.
     """
-    from taintly.parsers.segmentation import job_at_line
-
-    workflow_content = {wf.filepath: wf.content for wf in corpus.all()}
     for f in prior_findings:
         if f.rule_id == "ENGINE-ERR":
             continue  # don't compose error-class findings into chains
         line = f.line or 0
         job = getattr(f, "job", None)
         if not job:
-            content = workflow_content.get(f.file or "")
-            job = job_at_line(content, line) if content else None
+            index = job_indexes.get(f.file or "")
+            job = index.at_line(line) if index is not None else None
         db.add(
             "finding",
             FindingFact(
@@ -196,7 +212,9 @@ def _seed_findings(
         )
 
 
-def _seed_job_contexts(db: Database, corpus: WorkflowCorpus) -> None:
+def _seed_job_contexts(
+    db: Database, corpus: WorkflowCorpus, job_indexes: dict[str, _JobIndex]
+) -> None:
     """Walk the corpus and assert one JobContextFact per (file, job).
 
     Workflow-level permissions and triggers cascade to every job in
@@ -206,7 +224,6 @@ def _seed_job_contexts(db: Database, corpus: WorkflowCorpus) -> None:
     Trusted-bot gates are evaluated per job so a guarded sibling cannot
     suppress a chain in an attacker-reachable job.
     """
-    from taintly.parsers.segmentation import for_each_job
     from taintly.workflow_corpus import TriggerFamily
 
     for wf in corpus.all():
@@ -227,7 +244,7 @@ def _seed_job_contexts(db: Database, corpus: WorkflowCorpus) -> None:
         }
 
         # Every segmented job receives its effective permission context.
-        for job in for_each_job(wf.content):
+        for job in job_indexes[wf.filepath].segments:
             if not job.name:
                 continue
             jb = job_permissions.get(job.name)
@@ -326,9 +343,19 @@ def run_composer(
     ``composer_rules`` is a list of closure-rule callables (each takes
     the :class:`Database` and yields ``(relation, fact)`` tuples).
     """
+    from taintly.parsers.segmentation import for_each_job
+
+    # Job ranges are shared by finding attribution and context seeding.
+    # Keep this index local because a later invocation may see changed content.
+    job_indexes = {}
+    for workflow in corpus.all():
+        segments = tuple(for_each_job(workflow.content))
+        job_indexes[workflow.filepath] = _JobIndex(
+            segments, tuple(job.start_line for job in segments)
+        )
     db = Database()
-    _seed_findings(db, corpus, prior_findings)
-    _seed_job_contexts(db, corpus)
+    _seed_findings(db, prior_findings, job_indexes)
+    _seed_job_contexts(db, corpus, job_indexes)
     solve(db, composer_rules)
     return list(db.all("composite"))  # type: ignore[return-value]
 

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 # Imported from models to keep the segmentation truth in one place.
 # This is a thin wrapper that produces typed records — the heavy
 # lifting still lives next to the dataclass that originally needed it.
-from taintly.models import _split_into_job_segments
+from taintly.models import _split_into_job_segments_for_content
 
 # Step blocks under a GitHub Actions job's ``steps:`` are sequence
 # items: each begins with ``-`` at the steps-indent + 2 spaces, has
@@ -106,8 +106,7 @@ def for_each_job(content: str) -> list[JobSegment]:
     The "preamble" segment (file content before the first job) is
     returned with ``name=""`` so callers can iterate uniformly.
     """
-    lines = content.splitlines()
-    raw_segments = _split_into_job_segments(lines)
+    raw_segments = _split_into_job_segments_for_content(content)
     out: list[JobSegment] = []
     for seg_start, seg_lines in raw_segments:
         name = _extract_job_name(seg_lines)
