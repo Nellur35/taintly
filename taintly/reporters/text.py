@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import TYPE_CHECKING
 
@@ -99,14 +100,33 @@ def _top_issues(findings: list[Finding], n: int = 3) -> list[tuple[str, int, Sev
 
     def _rank(item):
         rule_id, group = item
-        # Use the first finding in the group as the representative for
-        # the surface-priority key — all findings in a group share the
-        # same rule and therefore the same review_needed / confidence.
-        sev_rank, not_review, conf_rank = _surface_priority(group[0])
+        # Context enrichment can change severity and review state within
+        # one rule. Rank and label the group by its worst actual finding.
+        sev_rank, not_review, conf_rank = _surface_priority(max(group, key=_surface_priority))
         return (-sev_rank, -not_review, -conf_rank, -len(group), rule_id)
 
     ranked = sorted(groups.items(), key=_rank)
-    return [(rid, len(grp), grp[0].severity, grp[0].title) for rid, grp in ranked[:n]]
+    out = []
+    for rid, group in ranked[:n]:
+        representative = max(group, key=_surface_priority)
+        out.append((rid, len(group), representative.severity, representative.title))
+    return out
+
+
+def _review_details_key(f: Finding) -> str:
+    """Only share details that are identical before display truncation.
+
+    Location and source text are printed for every occurrence. All other
+    serialized metadata must agree, including evidence notes, remediation,
+    review state and provenance. Matching details do not prove a common
+    root cause or execution path; this is presentation only.
+    """
+    details = f.to_dict()
+    for field in ("file", "line", "snippet", "match_text"):
+        details.pop(field)
+    # Discovery confidence is currently absent from Finding.to_dict().
+    details["discovery_confidence"] = f.discovery_confidence
+    return json.dumps(details, sort_keys=True, separators=(",", ":"))
 
 
 def _top_risk(findings: list[Finding]) -> Finding | None:
@@ -394,9 +414,9 @@ def format_text(
 ) -> str:
     """Render the audit report as text.
 
-    When ``verbose=False`` (the default), any rule that fires more than
-    ``collapse_threshold`` times collapses to a single summary block
-    listing the affected files, with one sample finding shown in full.
+    When ``verbose=False`` (the default), more than ``collapse_threshold``
+    occurrences of one rule with identical review details share one detail
+    block. Every occurrence retains its location and source preview.
     Pass ``verbose=True`` (CLI: ``--verbose``) to expand every finding.
     """
     c = COLORS if use_color else dict.fromkeys(COLORS, "")
@@ -450,19 +470,27 @@ def format_text(
     # Executive summary (score, counts, top issues, top risk, quick win)
     out.extend(_format_executive_summary(report, c, r, b, dim, score_report))
 
-    # Group findings by rule_id so we can collapse repeats. Within each
-    # group, sort by file then line for stable output.
-    by_rule: dict[str, list[Finding]] = {}
+    # Different witnesses or review decisions must never disappear behind
+    # a sample from the same rule. Verbose mode still expands every finding.
+    groups: dict[tuple[str, str], list[Finding]] = {}
     for f in report.findings:
-        by_rule.setdefault(f.rule_id, []).append(f)
-    for group in by_rule.values():
+        details = "" if verbose else _review_details_key(f)
+        groups.setdefault((f.rule_id, details), []).append(f)
+    for group in groups.values():
         group.sort(key=lambda f: (f.file, f.line))
 
     # Order rule groups by worst severity, then by group size (desc),
     # then by rule_id for determinism.
-    rule_order = sorted(
-        by_rule.items(),
-        key=lambda kv: (-kv[1][0].severity.rank, -len(kv[1]), kv[0]),
+    group_order = sorted(
+        groups.items(),
+        key=lambda kv: (
+            -max(f.severity.rank for f in kv[1]),
+            -len(kv[1]),
+            kv[0][0],
+            kv[1][0].file,
+            kv[1][0].line,
+            kv[0][1],
+        ),
     )
 
     total = len(report.findings)
@@ -480,15 +508,19 @@ def format_text(
     out.append(f"{b}{sep * 3} Findings ({header_count}) {sep * 3}{r}")
     out.append("")
 
-    for rule_id, group in rule_order:
+    collapsed = False
+    for (_rule_id, _details), group in group_order:
         if not verbose and len(group) > collapse_threshold:
-            out.extend(_format_collapsed_group(rule_id, group, c, r, b, dim))
+            out.extend(_format_collapsed_group(group, c, r, b, dim))
+            collapsed = True
         else:
             for f in group:
                 out.extend(_format_finding(f, c, r, b, dim))
 
-    if not verbose and any(len(g) > collapse_threshold for g in by_rule.values()):
-        out.append(f"{dim}(some rules fire many times - pass --verbose to expand every finding){r}")
+    if collapsed:
+        out.append(
+            f"{dim}(identical review details shared - pass --verbose to expand every finding){r}"
+        )
 
     # Flatten any rule-authored typography (em-dashes, smart quotes, ellipses
     # in titles / descriptions / remediations) to 7-bit ASCII before we
@@ -500,8 +532,8 @@ def format_text(
     return to_ascii("\n".join(out))
 
 
-def _format_finding(f: Finding, c: dict[Severity, str], r: str, b: str, dim: str) -> list[str]:
-    """Render one finding in full detail."""
+def _finding_heading(f: Finding, c: dict[Severity, str], r: str, b: str, dim: str) -> str:
+    """Use the same review markers for individual and shared detail blocks."""
     markers = []
     if f.review_needed:
         markers.append("review-needed")
@@ -511,91 +543,80 @@ def _format_finding(f: Finding, c: dict[Severity, str], r: str, b: str, dim: str
         markers.append(f"exploitability:{f.exploitability}")
     if f.triage_needed:
         markers.append("triage-needed")
-    suffix = f" {dim}[{', '.join(markers)}]{r}" if markers else ""
-    out = [
-        f"  {c[f.severity]}[{f.severity.value}]{r} {b}{f.rule_id}{r}: {f.title}{suffix}",
-        f"    File: {_safe(f.file)}:{f.line}",
-    ]
-    if f.snippet:
-        out.append(f"    Code: {_safe(f.snippet[:120])}")
-    out.append(f"    {f.description[:200]}")
+    suffix = f" {dim}[{_safe(', '.join(markers))}]{r}" if markers else ""
+    return f"  {c[f.severity]}[{f.severity.value}]{r} {b}{_safe(f.rule_id)}{r}: {_safe(f.title)}{suffix}"
+
+
+def _detail_lines(label: str, value: str) -> list[str]:
+    """Preserve full multi-line advice without accepting forged report lines."""
+    parts = value.splitlines() or [""]
+    return [f"    {label}{_safe(parts[0])}", *(f"        {_safe(part)}" for part in parts[1:])]
+
+
+def _format_review_details(f: Finding) -> list[str]:
+    """Render review evidence and remediation in full, once per detail block."""
+    out = _detail_lines("", f.description)
     if f.threat_narrative:
-        out.append(f"    Threat: {f.threat_narrative}")
+        out.extend(_detail_lines("Threat: ", f.threat_narrative))
     for note in f.context_notes:
-        out.append(f"    Context: {note}")
+        out.extend(_detail_lines("Context: ", note))
+    if f.context_tags:
+        out.append(f"    Context tags: {_safe(', '.join(f.context_tags))}")
     if f.suppression_reason:
-        out.append(f"    Suppression: {f.suppression_reason}")
+        out.extend(_detail_lines("Suppression: ", f.suppression_reason))
     if f.calibration_reason:
-        out.append(f"    Calibration: {f.calibration_reason}")
+        out.extend(_detail_lines("Calibration: ", f.calibration_reason))
     if f.remediation:
-        out.append(f"    Fix:  {f.remediation.split(chr(10))[0]}")
+        out.extend(_detail_lines("Fix:  ", f.remediation))
+    if f.reference:
+        out.extend(_detail_lines("Reference: ", f.reference))
+    if f.origin != "file":
+        out.append(f"    Origin: {_safe(f.origin)}")
+    if f.discovery_confidence != "high":
+        out.append(f"    Discovery confidence: {_safe(f.discovery_confidence)}")
+    if f.finding_family:
+        out.append(f"    Family: {_safe(f.finding_family)}")
+    if f.composition_tags:
+        out.append(f"    Composition tags: {_safe(', '.join(sorted(f.composition_tags)))}")
     tags = []
     if f.owasp_cicd:
         tags.append(f"OWASP:{f.owasp_cicd}")
     if f.stride:
         tags.append(f"STRIDE:{'+'.join(f.stride)}")
     if tags:
-        out.append(f"    {' | '.join(tags)}")
+        out.append(f"    {_safe(' | '.join(tags))}")
     if f.incidents:
-        out.append(f"    Incidents: {', '.join(f.incidents)}")
+        out.append(f"    Incidents: {_safe(', '.join(f.incidents))}")
     out.append("")
     return out
 
 
-def _format_collapsed_group(
-    rule_id: str, group: list[Finding], c: dict[Severity, str], r: str, b: str, dim: str
-) -> list[str]:
-    """Render a collapsed summary for a rule that fires many times.
-
-    Shows one summary line, the affected files (capped), and one
-    representative sample finding in full. The full per-instance list
-    is reachable via --verbose.
-    """
-    sample = group[0]
-    files = sorted({f.file for f in group})
-    n_files = len(files)
-    files_preview = files[:5]
-    files_str = ", ".join(files_preview)
-    if n_files > len(files_preview):
-        files_str += f", +{n_files - len(files_preview)} more"
-
-    markers = []
-    if sample.review_needed:
-        markers.append("review-needed")
-    if sample.confidence and sample.confidence != "high":
-        markers.append(f"confidence:{sample.confidence}")
-    if sample.exploitability and sample.exploitability != "medium":
-        markers.append(f"exploitability:{sample.exploitability}")
-    if sample.triage_needed:
-        markers.append("triage-needed")
-    suffix = f" {dim}[{', '.join(markers)}]{r}" if markers else ""
-
+def _format_finding(f: Finding, c: dict[Severity, str], r: str, b: str, dim: str) -> list[str]:
+    """Render one finding in full detail with a bounded source preview."""
     out = [
-        f"  {c[sample.severity]}[{sample.severity.value}]{r} {b}{rule_id}{r}: "
-        f"{sample.title}{suffix}",
-        f"    {b}{len(group)} instances across {n_files} file(s){r}",
-        f"    Files: {files_str}",
-        f"    Sample: {sample.file}:{sample.line}",
+        _finding_heading(f, c, r, b, dim),
+        f"    File: {_safe(f.file)}:{f.line}",
     ]
-    if sample.snippet:
-        out.append(f"    Code:   {sample.snippet[:120]}")
-    out.append(f"    {sample.description[:200]}")
-    if sample.threat_narrative:
-        out.append(f"    Threat: {sample.threat_narrative}")
-    for note in sample.context_notes:
-        out.append(f"    Context: {note}")
-    if sample.suppression_reason:
-        out.append(f"    Suppression: {sample.suppression_reason}")
-    if sample.calibration_reason:
-        out.append(f"    Calibration: {sample.calibration_reason}")
-    if sample.remediation:
-        out.append(f"    Fix:    {sample.remediation.split(chr(10))[0]}")
-    tags = []
-    if sample.owasp_cicd:
-        tags.append(f"OWASP:{sample.owasp_cicd}")
-    if sample.stride:
-        tags.append(f"STRIDE:{'+'.join(sample.stride)}")
-    if tags:
-        out.append(f"    {' | '.join(tags)}")
-    out.append("")
+    if f.snippet:
+        out.append(f"    Code: {_safe(f.snippet[:120])}")
+    out.extend(_format_review_details(f))
+    return out
+
+
+def _format_collapsed_group(
+    group: list[Finding], c: dict[Severity, str], r: str, b: str, dim: str
+) -> list[str]:
+    """Share identical review details while retaining every occurrence."""
+    sample = group[0]
+    n_files = len({f.file for f in group})
+    out = [
+        _finding_heading(sample, c, r, b, dim),
+        f"    {b}{len(group)} instances across {n_files} file(s){r}",
+        "    Occurrences:",
+    ]
+    for f in group:
+        out.append(f"      {_safe(f.file)}:{f.line}")
+        if f.snippet:
+            out.append(f"        Code: {_safe(f.snippet[:120])}")
+    out.extend(_format_review_details(sample))
     return out

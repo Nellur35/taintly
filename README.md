@@ -598,6 +598,13 @@ and `calibration_reason`. Reporters render these engine decisions; they
 
 do not recompute risk.
 
+The text report shares review details when more than five occurrences of one
+rule have identical evidence, remediation and decision metadata. Every occurrence
+keeps its file, line and source preview; differing details stay separate. Full
+descriptions, multi-line fixes and references remain visible. Use `--verbose` to
+repeat the details for every occurrence. This grouping does not change findings,
+scores or machine-readable output, and does not prove a shared attack path.
+
 
 
 `--score` prints a 0–100 grade and a debt profile labelling each family Strong, Moderate, Weak, Needs review, or Not applicable. "Not applicable" is reserved for families whose rules had no candidate location to evaluate in this scan — distinct from "Strong" (rules ran, nothing was wrong).
