@@ -56,16 +56,23 @@ class _OwningAgentForkPattern(ContextPattern):
     def _excluded(self, index: AgentGuardIndex, owner: tuple[object, ...]) -> bool:
         return index.excludes(owner)
 
-    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+    def _check_with_index(
+        self, content: str, lines: list[str]
+    ) -> tuple[AgentGuardIndex | None, list[tuple[int, str]]]:
         candidates = super().check(content, lines)
         if not candidates:
-            return candidates
+            return None, candidates
         index = AgentGuardIndex(content)
-        return [
-            candidate
-            for candidate in candidates
-            if (owner := index.owner(candidate[0])) is None or not self._excluded(index, owner)
-        ]
+        result = []
+        for candidate in candidates:
+            owner = index.owner(candidate[0])
+            if owner is None or not self._excluded(index, owner):
+                result.append(candidate)
+        return index, result
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        _, candidates = self._check_with_index(content, lines)
+        return candidates
 
 
 class _WriteAgentForkPattern(_OwningAgentForkPattern):
@@ -78,10 +85,11 @@ class _MutableAgentReadPattern(_OwningAgentForkPattern):
         return index.excludes(owner, outside_actor=False)
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        candidates = super().check(content, lines)
+        index, candidates = self._check_with_index(content, lines)
         if not candidates:
             return candidates
-        index = AgentGuardIndex(content)
+        if index is None:  # Defensive: every retained candidate was indexed above.
+            raise RuntimeError("owning pattern retained candidates without an index")
         return [
             candidate
             for candidate in candidates
