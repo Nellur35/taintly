@@ -3667,18 +3667,7 @@ RULES: list[Rule] = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "An AI coding agent action deployed on a fork-triggerable "
-            "event runs with the ability to execute whatever the model "
-            "decides is useful — by default that includes Bash, file "
-            "writes, and ``gh`` / ``git`` invocations.  A single "
-            "prompt-injection payload in the PR title, description, or "
-            "a review comment (which Aonan Guan's 'Comment and Control' "
-            "demonstrated in April 2026 against three vendors "
-            "simultaneously) steers the agent into exfiltrating "
-            "secrets, rewriting files, or force-pushing a backdoor.  "
-            "Adding an ``allowed_tools:`` allowlist narrows the surface "
-            "from 'every tool the model knows about' to 'exactly the "
-            "tools the workflow author authorized'."
+            "If attacker-controlled text reaches an agent with executable tools and sensitive credentials, prompt injection may become a command or credential-leak path. A policy marker elsewhere in the file cannot constrain this invocation. This rule checks declared ownership and bounded tool restrictions; it does not establish model behavior, a complete attacker-input flow, all effective runtime settings or successful execution."
         ),
         confidence="medium",
         incidents=[

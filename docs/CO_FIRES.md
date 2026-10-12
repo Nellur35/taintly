@@ -35,7 +35,7 @@ configuration risky:
 | `AI-GH-006` | "agent runs on a fork-triggerable event" |
 | `AI-GH-008` | "agent runs in a job that checks out PR code" |
 | `AI-GH-015` | "agent has repo-write permission on a fork-reachable trigger" |
-| `AI-GH-020` | "agent has no tool allowlist" |
+| `AI-GH-020` | "agent lacks verified tool restrictions" |
 | `AI-GH-021` | "agent runs in a job that checks out PR head code (settings-file poisoning vector)" |
 | `PSE-GH-001` | "agent has cloud credential grant on a fork-reachable event" |
 
@@ -93,7 +93,7 @@ rule:
    (see the retired-duplicates list above).
 2. **Name the layer in the title.** A user reading two findings on one line
    should be able to distinguish "agent has PR checkout" from "agent has
-   write permissions" from "agent has no tool allowlist" without reading the
+   write permissions" from "agent lacks verified tool restrictions" without reading the
    full description.
 3. **Add the new rule to the relevant `FindingFamily.members` set in
    `taintly/families.py`** so the reporter clusters them.

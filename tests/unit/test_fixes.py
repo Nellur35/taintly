@@ -9,6 +9,7 @@ import pytest
 from taintly.fixes import (
     ALL_FIXERS,
     OPT_IN_FIXERS,
+    FixResult,
     apply_fixes,
     fix_disable_setup_cache_in_release,
     fix_github_ai_allowed_tools_scaffold,
@@ -22,6 +23,7 @@ from taintly.fixes import (
     fix_remove_debug_logging,
     fix_remove_insecure_commands,
     fix_unquote_groovy_gstring_with_params,
+    format_fix_results,
 )
 
 # ---------------------------------------------------------------------------
@@ -927,80 +929,208 @@ def test_cap_add_hint_skips_jenkinsfile_doc_extensions(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# fix_github_ai_allowed_tools_scaffold (opt-in)
+# fix_github_ai_allowed_tools_scaffold (opt-in review hint)
 # ---------------------------------------------------------------------------
 
 
-def test_allowed_tools_scaffold_injects_with_block(tmp_path):
-    """Agent action with no ``with:`` block at all — scaffold creates
-    one and nests the ``allowed_tools:`` line inside it."""
-    path = _write(
-        tmp_path,
-        "on: pull_request\n"
-        "jobs:\n"
-        "  review:\n"
-        "    runs-on: ubuntu-latest\n"
-        "    steps:\n"
-        "      - uses: anthropics/claude-code-action@v1\n",
+def _workflow_structure(path, content):
+    from taintly.parsers.structural import walk_workflow
+
+    events = walk_workflow(
+        str(path),
+        content=content,
+        schema="github_actions",
+        include_keys=True,
+        include_merge_origins=True,
     )
-    results = fix_github_ai_allowed_tools_scaffold(path, dry_run=False)
-    assert len(results) == 1
-    new_content = pathlib.Path(path).read_text()
-    assert "with:" in new_content
-    assert "allowed_tools:" in new_content
-    assert "mcp__github_inline_comment__create_inline_comment" in new_content
+    return [
+        (event.kind.value, event.path, event.value, event.value_kind, event.merge_origins)
+        for event in events
+    ]
 
 
-def test_allowed_tools_scaffold_nests_under_existing_with(tmp_path):
-    """Existing ``with:`` block — scaffold becomes the first key
-    under it without disrupting other inputs."""
-    path = _write(
-        tmp_path,
+def test_agent_review_hint_claude_v1_preserves_active_workflow_values(tmp_path):
+    source = (
         "on: pull_request\n"
         "jobs:\n"
         "  review:\n"
-        "    runs-on: ubuntu-latest\n"
         "    steps:\n"
         "      - uses: anthropics/claude-code-action@v1\n"
         "        with:\n"
-        "          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}\n",
+        "          claude_args: '--model sonnet'\n"
+        "          allowedTools: 'Read'\n"
+        "          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}\n"
     )
-    results = fix_github_ai_allowed_tools_scaffold(path, dry_run=False)
+    path = _write(tmp_path, source)
+    before = _workflow_structure(path, source)
+    results = fix_github_ai_allowed_tools_scaffold(path)
+    changed = pathlib.Path(path).read_text(encoding="utf-8")
+
     assert len(results) == 1
-    new_content = pathlib.Path(path).read_text()
-    # anthropic_api_key must survive, allowed_tools must be present.
-    assert "anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}" in new_content
-    assert "allowed_tools:" in new_content
+    assert results[0].fix_type == "github_ai_allowed_tools_scaffold"
+    assert "--tools Read,Grep --disallowedTools mcp__*" in changed
+    assert "allowedTools is approval-only" in changed
+    assert "deprecated allowed_tools is not a verified hard boundary" in changed
+    assert "mcp__github_inline_comment__create_inline_comment" not in changed
+    assert "allowed_tools:" not in "\n".join(
+        line for line in changed.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert _workflow_structure(path, changed) == before
 
 
-def test_allowed_tools_scaffold_skips_already_scoped(tmp_path):
-    """File that already declares a tool allowlist (anywhere) is
-    left alone to avoid conflicting scaffolds."""
-    path = _write(
-        tmp_path,
+def test_agent_review_hint_gemini_handles_quoted_uses_long_with_and_siblings(tmp_path):
+    source = (
+        "on: pull_request\n"
+        "jobs:\n"
+        "  first:\n"
+        "    steps:\n"
+        "      - name: analyze\n"
+        "        with:\n"
+        "          one: 1\n"
+        "          two: 2\n"
+        "          three: 3\n"
+        "          four: 4\n"
+        "          five: 5\n"
+        "          six: 6\n"
+        "          seven: 7\n"
+        "          eight: 8\n"
+        '          settings: \'{"coreTools": ["run_shell_command(echo)"]}\'\n'
+        "        'uses': \"google-github-actions/run-gemini-cli@v0\"\n"
+        "      - name: decoy\n"
+        "        run: |\n"
+        "          uses: anthropics/claude-code-action@v1\n"
+        "  second:\n"
+        "    steps:\n"
+        "      - uses: github/copilot-review-action@v2\n"
+    )
+    path = _write(tmp_path, source)
+    before = _workflow_structure(path, source)
+    results = fix_github_ai_allowed_tools_scaffold(path)
+    changed = pathlib.Path(path).read_text(encoding="utf-8")
+
+    assert len(results) == 2
+    assert "pin the Gemini CLI version" in changed
+    assert "settings.tools.core concerns built-in tools" in changed
+    assert "MCP servers and extensions are separate surfaces" in changed
+    assert "review the deployed github/copilot-review-action@v2" in changed
+    assert "allowed_tools:" not in "\n".join(
+        line for line in changed.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert _workflow_structure(path, changed) == before
+
+
+def test_agent_review_hints_are_per_step_idempotent_and_not_suppressed_by_other_policy(tmp_path):
+    source = (
         "on: pull_request\n"
         "jobs:\n"
         "  review:\n"
-        "    runs-on: ubuntu-latest\n"
         "    steps:\n"
         "      - uses: anthropics/claude-code-action@v1\n"
+        "      - uses: anthropics/claude-code-action@v1\n"
         "        with:\n"
-        "          allowed_tools: 'Read,Grep'\n",
+        "          allowed_tools: 'Read,Grep'\n"
     )
-    results = fix_github_ai_allowed_tools_scaffold(path, dry_run=False)
-    assert results == []
+    path = _write(tmp_path, source)
+    first = fix_github_ai_allowed_tools_scaffold(path)
+    changed = pathlib.Path(path).read_text(encoding="utf-8")
+    assert len(first) == 2
+    assert "allowed_tools: 'Read,Grep'" in changed
+    assert fix_github_ai_allowed_tools_scaffold(path) == []
+
+    # A marker in earlier steps cannot suppress a separate step's hint.
+    pathlib.Path(path).write_text(
+        changed + "      - uses: google-github-actions/run-gemini-cli@v0\n",
+        encoding="utf-8",
+    )
+    results = fix_github_ai_allowed_tools_scaffold(path)
+    assert len(results) == 1
+    assert "pin the Gemini CLI version" in pathlib.Path(path).read_text(encoding="utf-8")
 
 
-def test_allowed_tools_scaffold_idempotent(tmp_path):
-    path = _write(
-        tmp_path,
-        "on: pull_request\n"
-        "jobs:\n  review:\n    runs-on: ubuntu-latest\n    steps:\n"
-        "      - uses: anthropics/claude-code-action@v1\n",
+@pytest.mark.parametrize(
+    "source",
+    [
+        "jobs: {review: {steps: [{uses: anthropics/claude-code-action@v1}]}}\n",
+        "jobs:\n  review:\n    steps:\n      - uses: a.yaml-alias\n",
+        "jobs:\n  review:\n    steps:\n      - uses: anthropics/claude-code-action@${{ inputs.ref }}\n",
+        "jobs:\n  review:\n    steps:\n      - uses: anthropics/claude-code-action@v1\n        uses: google-github-actions/run-gemini-cli@v0\n",
+        "defaults: &base\n  runs-on: ubuntu-latest\njobs:\n  review:\n    <<: *base\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+        "%YAML 1.2\njobs:\n  review:\n    steps:\n      - uses: anthropics/claude-code-action@v1\n",
+    ],
+)
+def test_agent_review_hint_rejects_ambiguous_merged_cutoff_or_flow_workflows(tmp_path, source):
+    path = _write(tmp_path, source)
+    before = pathlib.Path(path).read_bytes()
+    assert fix_github_ai_allowed_tools_scaffold(path) == []
+    assert pathlib.Path(path).read_bytes() == before
+
+
+def test_agent_review_hint_preserves_crlf_and_dry_run(tmp_path):
+    source = (
+        "jobs:\r\n  review:\r\n    steps:\r\n      - uses: anthropics/claude-code-action@v1\r\n"
     )
-    fix_github_ai_allowed_tools_scaffold(path, dry_run=False)
-    results = fix_github_ai_allowed_tools_scaffold(path, dry_run=False)
-    assert results == []
+    path = _write(tmp_path, source)
+    before = pathlib.Path(path).read_bytes()
+    dry = fix_github_ai_allowed_tools_scaffold(path, dry_run=True)
+    assert len(dry) == 1
+    assert dry[0].applied is False
+    assert pathlib.Path(path).read_bytes() == before
+    applied = fix_github_ai_allowed_tools_scaffold(path)
+    assert len(applied) == 1
+    assert applied[0].applied is True
+    after = pathlib.Path(path).read_bytes()
+    assert b"\r\n" in after
+    assert b"\n" not in after.replace(b"\r\n", b"")
+    assert fix_github_ai_allowed_tools_scaffold(path) == []
+
+
+def test_agent_review_hint_does_not_modify_final_non_newline_key(tmp_path):
+    source = "jobs:\n  review:\n    steps:\n      - uses: anthropics/claude-code-action@v1"
+    path = _write(tmp_path, source)
+    before = pathlib.Path(path).read_bytes()
+    assert fix_github_ai_allowed_tools_scaffold(path) == []
+    assert pathlib.Path(path).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "|\n          anthropics/claude-code-action@v1\n",
+        ">\n          anthropics/claude-code-action@v1\n",
+        "|-\n          anthropics/claude-code-action@v1\n",
+        ">+\n          anthropics/claude-code-action@v1\n",
+        '"anthropics/claude-code-action@v1\\n  continued"\n',
+        '"anthropics/claude-code-action@v1\n          continued"\n',
+        "'anthropics/claude-code-action@v1\n          continued'\n",
+    ],
+)
+def test_agent_review_hint_skips_block_or_multiline_uses_values(tmp_path, value):
+    source = "jobs:\n  review:\n    steps:\n      - uses: " + value
+    path = _write(tmp_path, source)
+    before = pathlib.Path(path).read_bytes()
+
+    assert fix_github_ai_allowed_tools_scaffold(path) == []
+    assert pathlib.Path(path).read_bytes() == before
+
+
+def test_fix_formatter_labels_review_guidance_separately_from_policy_fixes():
+    review = FixResult(
+        "workflow.yml",
+        4,
+        "uses: vendor/action@v1",
+        "# review hint",
+        "github_ai_allowed_tools_scaffold",
+        True,
+    )
+    ordinary = FixResult("workflow.yml", 8, "old", "new", "ordinary_fix", True)
+    rendered = format_fix_results([review, ordinary])
+    assert "Fixed: 1" in rendered
+    assert "Guidance added: 1" in rendered
+    assert "workflow policy values unchanged" in rendered
+    assert "Fixed: 2" not in rendered
+    dry = format_fix_results([review, ordinary], dry_run=True)
+    assert "Would fix: 1" in dry
+    assert "Would add guidance: 1" in dry
 
 
 # ---------------------------------------------------------------------------

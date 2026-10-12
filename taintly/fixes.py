@@ -21,6 +21,7 @@ import subprocess
 from dataclasses import dataclass
 
 from .models import _quoted_heredoc_body_lines
+from .parsers.structural import Event, EventKind, walk_workflow
 from .reporters._encoding import em_dash_char, sep_char
 
 
@@ -1103,135 +1104,170 @@ def fix_jenkins_cap_add_hint(filepath: str, dry_run: bool = False) -> list[FixRe
 
 
 # =============================================================================
-# Opt-in fix: scaffold ``allowed_tools`` for AI agent actions (AI-GH-020)
+# Opt-in review hint for AI-agent actions (AI-GH-020)
 # =============================================================================
-#
-# When a step uses ``anthropics/claude-code-action`` / similar agent
-# action without an ``allowed_tools`` (or ``claude_args: --allowed-
-# tools=...``) input, inject a minimal allow-list scaffold so the
-# agent's tool surface is narrow by default.  The scaffold is
-# intentionally restrictive — a single named inline-comment tool —
-# because the correct allow-list is workflow-specific and a
-# too-permissive default would defeat the point.  The user is
-# expected to widen the list after reviewing the PR.
-_GH_AGENT_ACTION = re.compile(
-    r"(?P<indent>\s*)(?:-\s*)?uses:\s+"
-    r"(?:"
-    r"anthropics/claude-code-action"
-    r"|google-github-actions/run-gemini-cli"
-    r"|github/copilot-[a-zA-Z0-9-]+-action"
-    r"|paul-gauthier/aider-action"
-    r"|openhands/[a-zA-Z0-9-]*action"
-    r"|coderabbit(?:ai)?/[a-zA-Z0-9-]*action"
-    r")"
-    r"[^@\s]*@[^\s]+"
+# This legacy fix name remains public for CLI/API compatibility. It adds only
+# comments; it never invents vendor inputs or claims to enforce tool policy.
+_GH_AGENT_USES_KEY = re.compile(
+    r"^(?P<indent> *)(?P<sequence>-\s+)?(?P<key>'uses'|\"uses\"|uses)\s*:(?P<tail>.*?)(?:\r?\n)?$"
 )
+_GH_AGENT_ACTIONS = re.compile(
+    r"^(?P<repo>anthropics/claude-code-action|google-github-actions/run-gemini-cli|"
+    r"github/copilot-[A-Za-z0-9-]+-action|paul-gauthier/aider-action|"
+    r"openhands/[A-Za-z0-9-]*action|coderabbit(?:ai)?/[A-Za-z0-9-]*action)@(?P<ref>[A-Za-z0-9._/-]+)$",
+    re.IGNORECASE,
+)
+_GH_AGENT_HINT_MARKER = "taintly review hint (AI-GH-020)"
 
-_GH_ALLOWED_TOOLS_PRESENT = re.compile(
-    r"(?:"
-    r"\ballowed[_-]tools\s*:"
-    r"|\ballowedTools\s*:"
-    r"|--allowed-tools\b"
-    r"|--allowedTools\b"
-    r"|--disallowed-tools\b"
-    r"|\bdisallowed_tools\s*:"
-    r")"
-)
 
-_GH_AGENT_ALLOWED_TOOLS_SCAFFOLD = (
-    'allowed_tools: "mcp__github_inline_comment__create_inline_comment"  '
-    "# taintly scaffold (AI-GH-020): narrow list; widen to the "
-    "tools your workflow actually needs."
-)
+def _github_agent_review_hint(repo: str, ref: str, indent: str, newline: str) -> str:
+    prefix = f"{indent}# "
+    lines: tuple[str, ...]
+    if repo == "anthropics/claude-code-action" and ref == "v1":
+        lines = (
+            f"{_GH_AGENT_HINT_MARKER}: Claude Code Action v1 example; verify against the pinned action/version.",
+            'Example: claude_args: "--tools Read,Grep --disallowedTools mcp__*"',
+            "allowedTools is approval-only; deprecated allowed_tools is not a verified hard boundary.",
+        )
+    elif repo == "google-github-actions/run-gemini-cli":
+        lines = (
+            f"{_GH_AGENT_HINT_MARKER}: pin the Gemini CLI version and verify its deployed settings schema.",
+            "settings.tools.core concerns built-in tools; configured MCP servers and extensions are separate surfaces.",
+        )
+    else:
+        lines = (
+            f"{_GH_AGENT_HINT_MARKER}: review the deployed {repo}@{ref} tool controls and version-specific documentation.",
+            "No vendor input is inferred here; this comment does not enforce a tool boundary.",
+        )
+    return "".join(prefix + text + newline for text in lines)
 
 
 def fix_github_ai_allowed_tools_scaffold(filepath: str, dry_run: bool = False) -> list[FixResult]:
-    """Inject an ``allowed_tools:`` scaffold under any agent action
-    step that doesn't already declare a tool allowlist.  OPT-IN
-    because it restricts the agent's tool surface to a single narrow
-    tool — which WILL break workflows that relied on wildcard access;
-    the user is expected to widen the list after review."""
-    results: list[FixResult] = []
-    with open(filepath, encoding="utf-8") as f:
+    """Add step-scoped AI tool-boundary review comments, without changing YAML values.
+
+    The legacy function name and ``fix_type`` stay available. Insertion is
+    limited to unambiguous standalone ``uses`` keys in a complete structural
+    GitHub workflow walk. Unsupported, merged, malformed, duplicate, or
+    flow-style candidate steps are left unchanged.
+    """
+    with open(filepath, encoding="utf-8", newline="") as f:
         content = f.read()
-
-    # File-level check: if the workflow already constrains tools
-    # anywhere, treat the file as already-mitigated to avoid layering
-    # conflicting scaffolds into a single workflow.
-    if _GH_ALLOWED_TOOLS_PRESENT.search(content):
-        return results
-
+    newline = "\r\n" if "\r\n" in content else "\r" if "\r" in content else "\n"
     lines = content.splitlines(keepends=True)
-    new_lines: list[str] = []
-    modified = False
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        m = _GH_AGENT_ACTION.search(line)
-        if not m:
-            new_lines.append(line)
-            i += 1
+    try:
+        events = tuple(
+            walk_workflow(
+                filepath,
+                content=content,
+                schema="github_actions",
+                include_keys=True,
+                include_merge_origins=True,
+            )
+        )
+    except (OSError, UnicodeError, ValueError):
+        return []
+    if any(event.kind in (EventKind.ERROR, EventKind.CUTOFF) for event in events):
+        return []
+    if any(
+        event.merge_origins or (event.kind is EventKind.MAP_KEY and event.value == "<<")
+        for event in events
+    ):
+        return []
+
+    key_paths: set[tuple[object, ...]] = set()
+    for event in events:
+        if event.kind is EventKind.MAP_KEY:
+            if event.path in key_paths:
+                return []
+            key_paths.add(event.path)
+
+    by_step: dict[tuple[object, ...], dict[str, list[Event]]] = {}
+    for event in events:
+        path = event.path
+        if (
+            len(path) == 5
+            and path[0] == "jobs"
+            and isinstance(path[1], str)
+            and path[2] == "steps"
+            and isinstance(path[3], int)
+            and path[4] == "uses"
+        ):
+            slot = by_step.setdefault(path[:4], {"keys": [], "values": []})
+            if event.kind is EventKind.MAP_KEY and event.value == "uses":
+                slot["keys"].append(event)
+            elif event.kind is EventKind.LEAF_SCALAR:
+                slot["values"].append(event)
+
+    insertions: dict[int, str] = {}
+    results: list[FixResult] = []
+    for found in by_step.values():
+        if len(found["keys"]) != 1 or len(found["values"]) != 1:
             continue
-
-        new_lines.append(line)
-        # Look for a ``with:`` sibling in the next few lines; if found,
-        # inject the scaffold as the first key under it.  If not, emit
-        # a fresh ``with:`` block right after the ``uses:`` line.
-        step_indent = len(m.group("indent"))
-        child_indent = " " * (step_indent + 2)
-        grandchild_indent = " " * (step_indent + 4)
-
-        # Peek ahead to find `with:` at step_indent + 2 within ~8 lines.
-        peek = i + 1
-        found_with_at: int | None = None
-        while peek < min(i + 9, len(lines)):
-            nxt = lines[peek]
-            stripped = nxt.strip()
-            if not stripped:
-                peek += 1
-                continue
-            nxt_indent = len(nxt) - len(nxt.lstrip())
-            if nxt_indent <= step_indent:
-                # Exited this step's block.
-                break
-            if nxt_indent == step_indent + 2 and stripped.startswith("with:"):
-                found_with_at = peek
-                break
-            peek += 1
-
-        scaffold_line = f"{grandchild_indent}{_GH_AGENT_ALLOWED_TOOLS_SCAFFOLD}\n"
-        if found_with_at is not None:
-            # Copy lines up to and including the `with:` line.
-            for j in range(i + 1, found_with_at + 1):
-                new_lines.append(lines[j])
-            new_lines.append(scaffold_line)
-            i = found_with_at + 1
-        else:
-            # No `with:` — create one right after `uses:`.
-            new_lines.append(f"{child_indent}with:\n")
-            new_lines.append(scaffold_line)
-            i += 1
-
+        key_event = found["keys"][0]
+        value_event = found["values"][0]
+        line_index = key_event.line - 1
+        if line_index < 0 or line_index >= len(lines) or value_event.line != key_event.line:
+            continue
+        key_line = lines[line_index]
+        match = _GH_AGENT_USES_KEY.fullmatch(key_line)
+        if match is None:
+            continue
+        if value_event.value_kind not in {"plain", "quoted"}:
+            continue
+        # The structural walker also emits block scalars at their header
+        # line. Only edit when the parsed value is represented by one
+        # literal scalar on this exact physical line.
+        rhs = re.fullmatch(
+            r"\s*(?P<scalar>'[^'\r\n]*'|\"[^\"\r\n]*\"|[^\s#]+)"
+            r"\s*(?:\#.*)?\s*",
+            match.group("tail").rstrip("\r\n"),
+        )
+        if rhs is None:
+            continue
+        action_value = rhs.group("scalar")
+        if (
+            len(action_value) >= 2
+            and action_value[0] == action_value[-1]
+            and action_value[0] in "\"'"
+        ):
+            action_value = action_value[1:-1]
+        if action_value != value_event.value:
+            continue
+        action_match = _GH_AGENT_ACTIONS.fullmatch(action_value)
+        if action_match is None or not key_line.endswith(("\n", "\r")):
+            continue
+        repo = action_match.group("repo").lower()
+        ref = action_match.group("ref")
+        comment_indent = match.group("indent") + ("  " if match.group("sequence") else "")
+        hint = _github_agent_review_hint(repo, ref, comment_indent, newline)
+        if "${{" in action_value or "$" in action_value or "`" in action_value:
+            continue
+        if (
+            "".join(lines[line_index + 1 : line_index + 1 + len(hint.splitlines(keepends=True))])
+            == hint
+        ):
+            continue
+        insertions[line_index] = insertions.get(line_index, "") + hint
         results.append(
             FixResult(
                 file=filepath,
-                line=i,
-                original=line.rstrip(),
-                fixed=(
-                    line.rstrip()
-                    + "\n"
-                    + (f"{child_indent}with:\n" if found_with_at is None else "")
-                    + scaffold_line.rstrip()
-                ),
+                line=key_event.line,
+                original=key_line.rstrip("\r\n"),
+                fixed=hint.rstrip("\r\n"),
                 fix_type="github_ai_allowed_tools_scaffold",
                 applied=not dry_run,
             )
         )
-        modified = True
 
-    if modified and not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+    if not results or dry_run:
+        return results
+    output: list[str] = []
+    for index, line in enumerate(lines):
+        output.append(line)
+        if index in insertions:
+            output.append(insertions[index])
+    with open(filepath, "w", encoding="utf-8", newline="") as f:
+        f.write("".join(output))
     return results
 
 
@@ -1478,7 +1514,7 @@ def apply_fixes(
 
 
 def format_fix_results(results: list[FixResult], dry_run: bool = False) -> str:
-    """Format fix results as human-readable text."""
+    """Format fixes and comment-only review guidance without conflating them."""
     out = []
     mode = "DRY RUN" if dry_run else "APPLIED"
     sep = sep_char() * 3
@@ -1488,17 +1524,32 @@ def format_fix_results(results: list[FixResult], dry_run: bool = False) -> str:
         out.append("  No fixable issues found.")
         return "\n".join(out)
 
-    applied = [r for r in results if r.applied]
+    guidance_type = "github_ai_allowed_tools_scaffold"
+    ordinary = [r for r in results if r.fix_type != guidance_type]
+    guidance = [r for r in results if r.fix_type == guidance_type]
+    applied = [r for r in ordinary if r.applied]
     failed = [r for r in results if not r.applied and r.error]
-    # skipped = [r for r in results if not r.applied and not r.error]  # reserved
 
-    if applied or dry_run:
-        fixes = applied if not dry_run else [r for r in results if not r.error]
+    if applied or (dry_run and ordinary):
+        fixes = applied if not dry_run else [r for r in ordinary if not r.error]
         out.append(f"  {'Would fix' if dry_run else 'Fixed'}: {len(fixes)}")
         for r in fixes:
             out.append(f"\n  \033[32m[{r.fix_type}]\033[0m {r.file}:{r.line}")
             out.append(f"    - {r.original}")
             out.append(f"    + {r.fixed}")
+
+    visible_guidance = (
+        [r for r in guidance if not r.error] if dry_run else [r for r in guidance if r.applied]
+    )
+    if visible_guidance:
+        out.append(
+            f"  {'Would add guidance' if dry_run else 'Guidance added'}: {len(visible_guidance)}"
+        )
+        for r in visible_guidance:
+            out.append(f"\n  \033[36m[{r.fix_type}]\033[0m {r.file}:{r.line}")
+            out.append("    Review hint (workflow policy values unchanged):")
+            for line in r.fixed.splitlines():
+                out.append(f"      {line}")
 
     if failed:
         out.append(f"\n  Failed: {len(failed)}")
