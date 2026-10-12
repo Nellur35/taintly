@@ -39,15 +39,10 @@ from .deployment_context import (
 from .engine import detect_platform, scan_file, scan_repo
 from .models import Platform, Severity, _defer_context_regex_compilation
 from .reporters._encoding import ensure_utf8_stdout
-from .reporters.csv_report import format_csv, format_csv_reports
-from .reporters.html_report import format_html
 from .reporters.json_report import format_json
 from .reporters.sarif import format_sarif, format_sarif_reports
-from .reporters.score_text import format_score
 from .reporters.text import format_text
 from .rules.registry import load_all_rules, load_rules_for_platform
-from .scorer import compute_score
-from .testing.self_test import format_test_results, run_mutation_tests, run_self_test
 
 # Map AuditReport.platform string to the Platform enum the scorer
 # uses for bonus gating. Keeps the call sites readable.
@@ -544,6 +539,12 @@ def main():
 
     args = parser.parse_args()
 
+    if args.score or args.format == "html":
+        from .scorer import compute_score
+
+        if args.format == "text":
+            from .reporters.score_text import format_score
+
     if args.check_imposter_commits:
         from taintly.platform import github_sha_verify
 
@@ -713,6 +714,8 @@ def main():
 
     # Self-test mode
     if args.self_test:
+        from .testing.self_test import format_test_results, run_mutation_tests, run_self_test
+
         rules_to_test = all_rules
         if args.rule:
             rules_to_test = [r for r in all_rules if r.id == args.rule]
@@ -1386,6 +1389,8 @@ def main():
         }
         print(json.dumps(wrapped, indent=2))
     elif args.format == "csv" and len(reports) > 1:
+        from .reporters.csv_report import format_csv_reports
+
         for report in reports:
             _print_engine_errors_to_stderr(report)
         print(format_csv_reports(reports))
@@ -1464,10 +1469,14 @@ def _output_report(report, args, score_report=None):
     elif args.format == "json":
         print(format_json(report, score_report=score_report))
     elif args.format == "csv":
+        from .reporters.csv_report import format_csv
+
         print(format_csv(report))
     elif args.format == "sarif":
         print(format_sarif(report))
     elif args.format == "html":
+        from .reporters.html_report import format_html
+
         print(format_html(report, score_report=score_report))
 
 
