@@ -30,13 +30,14 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from taintly.taint_facts.closure import solve
 from taintly.taint_facts.relations import Database
 
 if TYPE_CHECKING:
-    from taintly.models import Finding
+    from taintly.models import CheckoutBuildWitness, Finding
     from taintly.parsers.segmentation import JobSegment
     from taintly.workflow_corpus import WorkflowCorpus
 
@@ -73,6 +74,20 @@ class FindingFact:
 
     def fact_rank(self):
         return (0,)  # findings are first-class; never displaced
+
+
+@dataclass(frozen=True)
+class CheckoutBuildFact:
+    """A source-bound configured build path, separate from warning categories."""
+
+    witness: CheckoutBuildWitness
+
+    def fact_key(self):
+        w = self.witness
+        return (w.file, w.job, w.checkout_step, w.build_step, w.build_line)
+
+    def fact_rank(self):
+        return (0,)
 
 
 @dataclass(frozen=True)
@@ -127,6 +142,7 @@ class CompositeFact:
     job: str | None
     anchor_line: int
     snippet: str
+    checkout_build: CheckoutBuildWitness | None = field(default=None, compare=False)
 
     def fact_key(self):
         return (self.chain_id, self.file, self.job, self.anchor_line)
@@ -164,6 +180,7 @@ class _JobIndex:
 
     segments: tuple[JobSegment, ...]
     starts: tuple[int, ...]
+    source_sha256: str = ""
 
     def at_line(self, line: int) -> str | None:
         if line <= 0:
@@ -210,6 +227,23 @@ def _seed_findings(
                 snippet=getattr(f, "snippet", "") or "",
             ),
         )
+        witness = getattr(f, "_checkout_build", None)
+        index = job_indexes.get(f.file or "")
+        if (
+            witness is not None
+            and f.rule_id in {"LOTP-GH-001", "LOTP-GH-003"}
+            and f.origin == "file"
+            and index is not None
+            and witness.file == f.file
+            and witness.job == job
+            and witness.source_sha256 == index.source_sha256
+            and witness.build_line == line
+            and index.at_line(line) == job
+            and index.at_line(witness.checkout_line) == job
+            and witness.checkout_line < line
+            and witness.build_step == witness.checkout_step + 1
+        ):
+            db.add("checkout_build", CheckoutBuildFact(witness))
 
 
 def _seed_job_contexts(
@@ -345,13 +379,21 @@ def run_composer(
     """
     from taintly.parsers.segmentation import for_each_job
 
-    # Job ranges are shared by finding attribution and context seeding.
-    # Keep this index local because a later invocation may see changed content.
+    # Job ranges are identical for finding attribution and context seeding.
+    # Keep this index local: a later invocation may see changed source content.
+    prior_findings = tuple(prior_findings)
+    witnessed_files = {
+        f.file for f in prior_findings if getattr(f, "_checkout_build", None) is not None
+    }
     job_indexes = {}
     for workflow in corpus.all():
         segments = tuple(for_each_job(workflow.content))
         job_indexes[workflow.filepath] = _JobIndex(
-            segments, tuple(job.start_line for job in segments)
+            segments,
+            tuple(job.start_line for job in segments),
+            sha256(workflow.content.encode("utf-8")).hexdigest()
+            if workflow.filepath in witnessed_files
+            else "",
         )
     db = Database()
     _seed_findings(db, prior_findings, job_indexes)

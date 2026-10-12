@@ -10,9 +10,10 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from hashlib import sha256
 
 from .eventguard import event_guard_verdict
-from .models import Finding, Severity
+from .models import CheckoutBuildWitness, Finding, Severity
 from .parsers.gha_expr import (
     Binary,
     ExprSyntaxError,
@@ -55,6 +56,13 @@ _CHECKOUT = re.compile(r"actions/checkout@v([2-7])\Z", re.I)
 _TOKEN_PATHS = frozenset({"github.token", "secrets.github_token"})
 _PR_REPOSITORY = "github.event.pull_request.head.repo.full_name"
 _PR_REFS = frozenset({"github.event.pull_request.head.sha", "github.event.pull_request.head.ref"})
+# Deliberately literal commands whose ordinary contract consumes the checkout's
+# build definitions/hooks. Flags, alternate paths, shell wrappers and expansion
+# need richer evidence; the underlying LOTP observation remains visible.
+_DIRECT_LOCAL_BUILD = re.compile(
+    r"(?:npm (?:ci|install|run [A-Za-z0-9_][A-Za-z0-9_:.-]*)|"
+    r"make(?: [A-Za-z0-9_][A-Za-z0-9_.:-]*)?|cargo (?:build|test))\Z"
+)
 
 
 def _expression_path(value: str) -> str | None:
@@ -456,6 +464,100 @@ def _classify(index: _Index, finding: Finding) -> tuple[str, list[str]]:
     ]
 
 
+def _configured_build_path(index: _Index, finding: Finding) -> CheckoutBuildWitness | None:
+    """Refine an evidenced authority profile into a bounded persisted path.
+
+    Called only after _classify validates source/ref, compatible guards,
+    credentials, directory, shell and explicit grants. Environment-only token
+    access is not a persisted-checkout witness. A build observation alone is
+    not enough: require a literal local command without alternate-path options.
+    """
+    sink = index.sink(finding.line)
+    if sink is None or not isinstance(sink[3], int):
+        return None
+    base = ("jobs", sink[1])
+    checkout = base + ("steps", sink[3] - 1)
+    uses = index.leaves.get(checkout + ("uses",))
+    if uses is None:
+        return None
+    run = index.leaves[sink + ("run",)]
+    statements = [
+        text.strip()
+        for text in (run.value or "").splitlines()
+        if text.strip() and not text.lstrip().startswith("#")
+    ]
+    if len(statements) != 1:
+        return None
+    command = statements[0]
+    if _DIRECT_LOCAL_BUILD.fullmatch(command) is None:
+        return None
+    shell = next(
+        (
+            index.value(p)
+            for p in (
+                sink + ("shell",),
+                base + ("defaults", "run", "shell"),
+                ("defaults", "run", "shell"),
+            )
+            if index.has(p)
+        ),
+        "",
+    )
+    if shell not in {"bash", "sh"} and not (
+        not shell
+        and re.fullmatch(
+            r"ubuntu-(?:latest|20\.04|22\.04|24\.04)", index.value(base + ("runs-on",))
+        )
+    ):
+        return None
+    if index.value(checkout + ("with", "persist-credentials"), "true").lower() != "true":
+        return None
+    # Explicit configuration can disable npm lifecycle hooks. Unknown values
+    # and executable/search-path overrides also need separate investigation.
+    environment = index.environment(sink)
+    if any(
+        name.upper()
+        in {
+            "PATH",
+            "BASH_ENV",
+            "ENV",
+            "NODE_OPTIONS",
+            "MAKEFLAGS",
+            "MFLAGS",
+            "MAKEFILES",
+            "CARGO_HOME",
+            "CARGO_TARGET_DIR",
+            "RUSTC",
+            "RUSTC_WRAPPER",
+        }
+        or (command.startswith("npm ") and name.upper().startswith("NPM_CONFIG_"))
+        for name in environment
+    ):
+        return None
+    grant = index.grants(str(sink[1]))
+    return CheckoutBuildWitness(
+        source_sha256=sha256(index.content.encode("utf-8")).hexdigest(),
+        file=finding.file,
+        job=str(sink[1]),
+        checkout_step=int(checkout[3]),
+        build_step=sink[3],
+        checkout_line=uses.line,
+        repository_line=index.leaves[checkout + ("with", "repository")].line,
+        ref_line=index.leaves[checkout + ("with", "ref")].line,
+        build_line=finding.line,
+        command=command,
+        permission_line=grant.line,
+        write_scopes=tuple(
+            (scope, line)
+            for scope, line in zip(grant.writes, grant.write_lines, strict=True)
+            if scope != "id-token"
+        ),
+        persistence_line=(
+            index.leaves.get(checkout + ("with", "persist-credentials")) or uses
+        ).line,
+    )
+
+
 def calibrate_lotp_authority(findings: list[Finding], content: str) -> None:
     """Annotate only LOTP001/003; preserve matches, IDs, spans and rule confidence."""
     targets = [f for f in findings if f.rule_id in _RULES and f.origin == "file"]
@@ -463,7 +565,11 @@ def calibrate_lotp_authority(findings: list[Finding], content: str) -> None:
         return
     index = _Index(content)
     for finding in targets:
+        # A reused Finding must not retain a witness from different source.
+        finding._checkout_build = None
         state, notes = _classify(index, finding)
+        if state == "evidenced":
+            finding._checkout_build = _configured_build_path(index, finding)
         finding.context_tags.append("authority-" + state)
         finding.context_notes.extend(notes)
         if state == "limited":

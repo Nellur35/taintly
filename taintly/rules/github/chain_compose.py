@@ -21,8 +21,9 @@ layer can't do):
 
 * CHAIN-GH-101 — SEC4-GH-005 + fork-reachable + an externally-triggered
   event that can retain write-token scope + write-token candidate.
-  Potential CRITICAL impact, review needed: the join does not prove
-  attacker-controlled code execution or the persisted token's authority.
+  Also accepts a source-bound configured PR-head checkout/build/persisted-token
+  path without a later Git command. Potential CRITICAL impact, review needed:
+  neither branch proves runtime execution or effective provider authority.
 * CHAIN-GH-102 — SEC3-GH-001 + fork-reachable = HIGH. An unpinned
   third-party action in a workflow attackers can fire; a single
   upstream compromise → arbitrary code in the fork-reachable job.
@@ -43,7 +44,7 @@ import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from taintly.composer import CompositeFact, context_for, findings_by_rule
+from taintly.composer import CheckoutBuildFact, CompositeFact, context_for, findings_by_rule
 from taintly.models import Platform, Rule, Severity
 from taintly.workflow_corpus import (
     CorpusEvidence,
@@ -80,9 +81,9 @@ _CHAIN_101_REMEDIATION = (
 
 
 def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
-    """SEC4-GH-005 + fork-reachable + write context → review candidate.
+    """Compose a configured checkout/build path or a consumer review candidate.
 
-    A possible pwn-request prerequisite join, not execution/authority proof.
+    Both are possible pwn-request paths, not runtime/authority proof.
     Derived from existing finding output rather than re-detected from YAML.
     Anchors at the SEC4-GH-005 finding's
     line — that's the actions/checkout that should have set
@@ -108,6 +109,35 @@ def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
     nor whether checkout uses a custom PAT; this chain is specifically about
     the GITHUB_TOKEN and does not infer those repository-level overrides.
     """
+    witnessed: set[tuple[str, str, int]] = set()
+    for fact in db.all("checkout_build"):
+        if not isinstance(fact, CheckoutBuildFact):
+            continue
+        w = fact.witness
+        # This witness already validates the owning event/guards/grants. The
+        # broader job heuristics below can be affected by unrelated later steps
+        # and must not discard this stronger, source-bound configuration path.
+        witnessed.add((w.file, w.job, w.checkout_line))
+        scopes = ", ".join(f"{scope}:write (line {line})" for scope, line in w.write_scopes)
+        yield (
+            "composite",
+            CompositeFact(
+                chain_id="CHAIN-GH-101",
+                file=w.file,
+                job=w.job,
+                anchor_line=w.checkout_line,
+                snippet=(
+                    f"Configured pull_request_target path in job '{w.job}': "
+                    f"PR-head repository/ref at lines {w.repository_line}/{w.ref_line} "
+                    f"-> checkout at line {w.checkout_line} -> local build `{w.command}` "
+                    f"at line {w.build_line}. The build can execute checkout-provided hooks "
+                    f"with a persisted GITHUB_TOKEN candidate (line {w.persistence_line}); "
+                    f"requested scopes: {scopes}. Runtime execution and effective provider "
+                    "authority remain unverified."
+                ),
+                checkout_build=w,
+            ),
+        )
     for f in findings_by_rule(db, "SEC4-GH-005"):
         if not f.job:
             continue
@@ -121,6 +151,8 @@ def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
         if not ctx.has_write_token:
             continue
         if ctx.trusted_bot_gate:
+            continue
+        if (f.file, f.job, f.line) in witnessed:
             continue
         snippet = (
             f"CHAIN candidate in job '{f.job}', checkout anchor line {f.line}: "
@@ -699,6 +731,41 @@ def _make_chain_callback(chain_id: str):
             if c.chain_id != chain_id:
                 continue
             if chain_id == "CHAIN-GH-101":
+                if c.checkout_build is not None:
+                    w = c.checkout_build
+                    reason = (
+                        "The same-source structural witness links PR-head checkout, a "
+                        "supported local build command and configured persisted GITHUB_TOKEN "
+                        "write scopes. Hook existence, tool/configuration behavior, successful "
+                        "execution, approvals and effective provider authority need review."
+                    )
+                    results.append(
+                        CorpusEvidence(
+                            file=c.file,
+                            line=c.anchor_line,
+                            snippet=c.snippet,
+                            title="Review: PR-head build can access a persisted write-token candidate",
+                            remediation=(
+                                f"In job '{w.job}', set `persist-credentials: false` on the "
+                                f"checkout at line {w.checkout_line} (persistence input/default "
+                                f"at line {w.persistence_line}), and run the untrusted build at "
+                                f"line {w.build_line} in a separate unprivileged job. Minimize "
+                                f"the requested permissions at line {w.permission_line}. Verify "
+                                "the checked-out build definitions, tool configuration, guards, "
+                                "approvals and provider-granted token scopes before concluding "
+                                "that this path is exploitable."
+                            ),
+                            context_notes=(reason,),
+                            context_tags=(
+                                "checkout-build-path-evidenced",
+                                "persisted-github-token-configured",
+                                "runtime-execution-unverified",
+                                "effective-token-policy-unresolved",
+                            ),
+                            calibration_reason=reason,
+                        )
+                    )
+                    continue
                 results.append(
                     CorpusEvidence(
                         file=c.file,
@@ -726,7 +793,10 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-1",
         description=(
-            "CHAIN-GH-101 composes three findings/contexts: "
+            "CHAIN-GH-101 accepts either a source-bound configured path from "
+            "PR-head repository/ref through a supported local build command to "
+            "a persisted GITHUB_TOKEN with explicit requested write scopes, or "
+            "a broader join of three findings/contexts: "
             "(1) SEC4-GH-005 fires on an actions/checkout step that "
             "doesn't set `persist-credentials: false`; "
             "(2) an external trigger can start the job with retained "
@@ -743,11 +813,15 @@ RULES: list[Rule] = [
             "authority proof. An unresolved workflow_run parent remains conservatively "
             "eligible.\n\n"
             "This is a review candidate with potentially CRITICAL consequences, "
-            "not a confirmed pwn request. The join does not establish an "
+            "not a confirmed pwn request. The broader join does not establish an "
             "attacker-controlled repository/ref, execution of those bytes, "
             "compatible runtime guards, or the persisted token's identity and "
             "effective authority. A default pull_request_target checkout uses "
-            "trusted base code; even an untrusted checkout alone is not execution."
+            "trusted base code; even an untrusted checkout alone is not execution. "
+            "The configured-path branch cites exact source, build, persistence "
+            "and permission lines without requiring a later fixed Git command. "
+            "Build-hook existence, configuration, runtime success, approvals "
+            "and effective provider permissions remain unverified."
         ),
         pattern=CorpusPattern(callback=_make_chain_callback("CHAIN-GH-101")),
         remediation=_CHAIN_101_REMEDIATION,
