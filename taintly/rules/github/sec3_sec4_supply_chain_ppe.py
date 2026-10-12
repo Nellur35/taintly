@@ -968,6 +968,7 @@ RULES: list[Rule] = [
             "PR the very actor who opened the PR can download it — a clean "
             "exfiltration path that leaves the workflow looking green."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-3: Dependency Chain Abuse
@@ -1024,6 +1025,7 @@ RULES: list[Rule] = [
             "tj-actions/changed-files (Mar 2025)",
             "Checkmarx (Mar 2025)",
         ],
+        confidence="high",
     ),
     Rule(
         id="SEC3-GH-002",
@@ -1059,6 +1061,7 @@ RULES: list[Rule] = [
             "An attacker who gains temporary write access — via a compromised maintainer account — "
             "can substitute malicious code that runs with your workflow's full permissions and secrets."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC3-GH-003",
@@ -1109,6 +1112,7 @@ RULES: list[Rule] = [
             "tj-actions/changed-files (Mar 2025)",
             "Checkmarx (Mar 2025)",
         ],
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-GH-004 — known-vulnerable version of action in use (precise match)
@@ -1218,6 +1222,7 @@ RULES: list[Rule] = [
             "Trivy supply chain (Mar 2026) — GHSA-69fq-xp46-6x23",
             "Trivy script-injection — GHSA-9p44-j4g5-cfx5",
         ],
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-GH-006 — third-party action inventory (review-needed)
@@ -1340,6 +1345,7 @@ RULES: list[Rule] = [
             "A compromised container image executes with full access to all runner secrets, "
             "source code, and build artifacts."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-4: Poisoned Pipeline Execution
@@ -1378,6 +1384,7 @@ RULES: list[Rule] = [
             "exfiltrate repository secrets at scale from thousands of repositories."
         ),
         incidents=["Trivy supply chain (Mar 2026)", "Ultralytics (Dec 2024)"],
+        confidence="high",
     ),
     Rule(
         id="SEC4-GH-002",
@@ -1445,6 +1452,7 @@ RULES: list[Rule] = [
             "workflow — such as adding actions/checkout — becomes a critical PPE vulnerability."
         ),
         incidents=["Trivy supply chain (Mar 2026)"],
+        confidence="high",
     ),
     Rule(
         id="SEC4-GH-003",
@@ -1528,6 +1536,7 @@ RULES: list[Rule] = [
             "An attacker who can trigger the upstream workflow to fail after partially completing "
             "can produce tainted artifacts that the privileged downstream workflow then ships."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC4-GH-004",
@@ -1588,6 +1597,7 @@ RULES: list[Rule] = [
             "and all bound secrets."
         ),
         incidents=["Ultralytics (Dec 2024)", "Langflow (2024)"],
+        confidence="high",
     ),
     Rule(
         id="SEC4-GH-005",
@@ -1677,6 +1687,7 @@ RULES: list[Rule] = [
             "downstream step actually uses the credential; this rule scopes to that "
             "case to keep the signal-to-noise ratio actionable."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-005B: posture sibling of SEC4-GH-005.
@@ -1784,6 +1795,7 @@ RULES: list[Rule] = [
             "whether to harden the checkout before that future risk."
         ),
         review_needed=True,
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-GH-007: Docker image reference (services.<name>.image: or
@@ -1868,6 +1880,7 @@ RULES: list[Rule] = [
             # ``actions/*@v4`` tag mutability (SEC3-GH-001) and the
             # general Docker-image-tag attack class.
         ],
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-GH-009: Imposter commit (SHA pinned to an orphan commit)

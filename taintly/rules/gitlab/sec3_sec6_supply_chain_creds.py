@@ -237,6 +237,7 @@ RULES: list[Rule] = [
             "repository. The injected configuration runs with your project's runner token "
             "and protected variable access."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-GL-006 — third-party include inventory (review-needed)
@@ -385,6 +386,7 @@ RULES: list[Rule] = [
             "what your pipeline executes on the next run. Pin includes to specific commit "
             "SHAs to ensure the included configuration is immutable."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-GL-007 — CI Component included at a mutable ref.
@@ -461,6 +463,7 @@ RULES: list[Rule] = [
             "runner token and protected-variable scope, and no diff in the "
             "consumer's repository to review."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC3-GL-005",
@@ -494,6 +497,7 @@ RULES: list[Rule] = [
             "arbitrary code execution with access to all CI/CD variables and runner-mounted "
             "secrets. Pinning to a SHA256 digest makes the image reference immutable."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-GL-004: pip --extra-index-url without --index-url — dependency
@@ -561,6 +565,7 @@ RULES: list[Rule] = [
             "variables visible to the job."
         ),
         incidents=["PyTorch dependency confusion (Dec 2022, GH analog)"],
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-6: Insufficient Credential Hygiene (GitLab)
@@ -593,6 +598,7 @@ RULES: list[Rule] = [
             "contributors and, in public projects, the entire internet. Every fork, mirror, "
             "and backup of the repository permanently contains the leaked credential."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC6-GL-002",
@@ -632,6 +638,7 @@ RULES: list[Rule] = [
             "variables. Supply chain attacks frequently target popular install scripts "
             "precisely because this pattern is so common."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC6-GL-003",
@@ -664,6 +671,7 @@ RULES: list[Rule] = [
             "malicious responses. This is especially dangerous when credentials are sent as "
             "part of the same request."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC6-GL-004",
@@ -703,6 +711,7 @@ RULES: list[Rule] = [
             "through environment injection, compromised scripts, or attacker-controlled CI "
             "variables — gain arbitrary code execution."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC6-GL-005",
@@ -729,6 +738,7 @@ RULES: list[Rule] = [
             "mechanism used after initial code execution — modified scripts survive across "
             "jobs."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-10: Insufficient Logging and Visibility (GitLab)
@@ -807,6 +817,7 @@ RULES: list[Rule] = [
             "to, for the remainder of its (often multi-minute) validity window, before it "
             "expires."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-GL-008: Archived include:project (opt-in, network-dependent)
@@ -916,5 +927,6 @@ RULES: list[Rule] = [
             "run. A per-commit/job uniqueness component, or a content-hash key, "
             "removes the shared-key window."
         ),
+        confidence="high",
     ),
 ]

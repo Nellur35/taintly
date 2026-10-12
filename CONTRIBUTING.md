@@ -41,6 +41,12 @@ CI enforces all four on every PR.
 
 ## Conventions for new rules
 
+An omitted or empty `Rule.confidence` uses the family/grandfather fallback.
+A new, unmapped rule therefore emits MEDIUM-confidence findings until its
+precision is validated. An explicit `high`, `medium`, or `low` choice takes
+precedence. Existing rules retain their accepted values explicitly; those
+compatibility declarations do not constitute new precision validation.
+
 When adding or modifying a rule, the PR review checks:
 
 1. **`test_positive` covers the documented attack shape.**  Each

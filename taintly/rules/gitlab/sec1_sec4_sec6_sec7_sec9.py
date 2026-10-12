@@ -378,6 +378,7 @@ RULES: list[Rule] = [
             "review. Manual approval gates are the last barrier between automated CI/CD and "
             "production scope."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-4: Poisoned Pipeline Execution
@@ -495,6 +496,7 @@ RULES: list[Rule] = [
             "unquoted in a script. The injected commands run with the full permissions of "
             "the GitLab runner token."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC4-GL-002",
@@ -535,6 +537,7 @@ RULES: list[Rule] = [
             "forwarded token to read protected variables, push to the upstream repository, "
             "or trigger further pipelines."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-6: Insufficient Credential Hygiene — extended
@@ -581,6 +584,7 @@ RULES: list[Rule] = [
             "compromise, or a supply chain attack on the hosting domain is sufficient to "
             "substitute a malicious payload."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC6-GL-007",
@@ -621,6 +625,7 @@ RULES: list[Rule] = [
             "trace, or a compromised runner gains persistent cloud access independent of "
             "the CI/CD system."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC6-GL-009: Exfil-shaped primitive in GitLab CI script: block.
@@ -845,6 +850,7 @@ RULES: list[Rule] = [
             "protection. Attackers with access to job logs can read all secrets while the "
             "debug trace is active, including tokens, API keys, and deployment credentials."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-9: Improper Artifact Integrity Validation
@@ -1026,6 +1032,7 @@ RULES: list[Rule] = [
             "with the job's permissions and may access variables or credentials made "
             "available to that job."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-4: Poisoned Pipeline Execution — extended variable coverage
@@ -1118,6 +1125,7 @@ RULES: list[Rule] = [
             "merge request. The injected commands execute with the GitLab runner's "
             "permissions and environment."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-4 continued — eval on tainted input (closes FINDINGS §F-2)
@@ -1178,6 +1186,7 @@ RULES: list[Rule] = [
             "semicolons are not parsed again."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-5: Insufficient PBAC (Pipeline-Based Access Controls)
@@ -1228,6 +1237,7 @@ RULES: list[Rule] = [
             "inconsistent state. This is the GitLab equivalent of missing "
             "disableConcurrentBuilds in Jenkins."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-1: Security gate silenced by allow_failure / manual gating — GAP-4
@@ -1300,6 +1310,7 @@ RULES: list[Rule] = [
             "introduce malicious code that would normally be caught, confident it will not "
             "block the pipeline."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-1: Security scanner disabled by protected CI variable.
@@ -1352,6 +1363,7 @@ RULES: list[Rule] = [
             "detection, dependency scanning, container scanning, or DAST without removing "
             "the template include that reviewers expect to enforce the gate."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GL-007: Security gate keyed on a spoofable GitLab identity field.
@@ -1442,6 +1454,7 @@ RULES: list[Rule] = [
         incidents=[
             "Dependabot auto-merge bypass class (GH analog)",
         ],
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GL-011 — CI_MERGE_REQUEST_LABELS used as a security gate.
@@ -1540,6 +1553,7 @@ RULES: list[Rule] = [
             "project's CI scope — the same bypass shape as label-gated "
             "``pull_request_target`` workflows on GitHub."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GL-010 — trigger:forward:pipeline_variables: true.
@@ -1758,6 +1772,7 @@ RULES: list[Rule] = [
             "``--ignore-scripts`` are structurally identical."
         ),
         incidents=["Ultralytics (Dec 2024, GH analog)"],
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GL-008: ``base64 -d | shell`` obfuscation in script block

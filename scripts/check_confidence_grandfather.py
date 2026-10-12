@@ -16,8 +16,9 @@ have validated precision:
     ``--update``) to validate-at-HIGH, OR
   * set an explicit ``confidence=`` on the Rule definition.
 
-A rule that already carries an explicit ``confidence=`` is NOT reported — the
-author has already made a deliberate confidence call.
+A rule that carries explicit HIGH, MEDIUM or LOW confidence is not reported —
+the author has made a deliberate confidence call. An explicit empty string
+still relies on the fallback and is reported for an unknown rule id.
 
 Usage:
 
@@ -61,22 +62,18 @@ def _unvalidated_new_rules() -> list[str]:
     A rule is reported only when ALL of the following hold:
       * it is not in ``_CONFIDENCE_OVERRIDES`` (no explicit default), and
       * it is not in the grandfather baseline (not validated-at-HIGH), and
-      * its Rule definition carries no explicit ``confidence=`` (i.e. it
-        relies on the default), so the new-rule MEDIUM default actually bites.
+      * its Rule confidence is unset/empty (i.e. it relies on the fallback),
+        so the new-rule MEDIUM default actually applies.
     """
     from taintly.families import _CONFIDENCE_OVERRIDES
-    from taintly.models import Rule
     from taintly.rules.registry import load_all_rules
 
     baseline = set(_load_baseline())
-    # The Rule dataclass default for ``confidence`` — a rule still carrying it
-    # is relying on the engine default, not making an explicit call.
-    default_conf = Rule.__dataclass_fields__["confidence"].default
     out: list[str] = []
     for r in load_all_rules():
         if r.id in _CONFIDENCE_OVERRIDES or r.id in baseline:
             continue
-        if r.confidence != default_conf:
+        if r.confidence:
             continue  # author set an explicit confidence — deliberate
         out.append(r.id)
     return sorted(set(out))
@@ -103,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     if new_rules:
         print(
             "NOTICE (advisory): these rule(s) are NEW (not in the confidence "
-            "grandfather baseline) and carry no explicit confidence=, so they "
+            "grandfather baseline) and have unset/empty confidence, so they "
             "default to MEDIUM confidence until validated:\n"
             + "\n".join(f"  {rid}" for rid in new_rules)
             + "\n\nThis is intentional (P3.6): an un-validated detector should "

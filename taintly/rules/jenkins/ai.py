@@ -129,6 +129,7 @@ RULES: list[Rule] = [
             "no model inference ever has to run for the compromise "
             "to succeed."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # AI-JK-002: torch.load without weights_only=True inside a Jenkins step.
@@ -190,6 +191,7 @@ RULES: list[Rule] = [
             "single mitigation for this entire class of CVE."
         ),
         incidents=["CVE-2022-45907"],
+        confidence="high",
     ),
     # =========================================================================
     # AI-JK-003: LLM output piped to sh or eval inside a Jenkins step.
@@ -270,6 +272,7 @@ RULES: list[Rule] = [
             "agent with the Jenkins credentials bound to the "
             "step."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # AI-JK-004: Non-torch pickle-backed loaders in a Jenkins sh step.
@@ -342,6 +345,7 @@ RULES: list[Rule] = [
             "execution on the Jenkins agent, with the "
             "credentials ``withCredentials`` bound in scope."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # AI-JK-005: Jenkins port of AI-GH-015 — agent + PR-context variable +
@@ -1196,6 +1200,7 @@ RULES: list[Rule] = [
         incidents=[
             "Phoenix Security — claude-code CLI command-injection (2025)",
         ],
+        confidence="high",
     ),
     # =========================================================================
     # AI-JK-011 — port of AI-GH-024.  MCP config sourced from
@@ -1363,6 +1368,7 @@ RULES: list[Rule] = [
         incidents=[
             "Embrace The Red — MCP Untrusted Servers (2025)",
         ],
+        confidence="high",
     ),
     # =========================================================================
     # AI-JK-012 — port of AI-GH-025.  HuggingFace resolver
@@ -1504,5 +1510,6 @@ RULES: list[Rule] = [
         incidents=[
             "JFrog x Hugging Face - auto_factory remote-code redirection (2024-2025)",
         ],
+        confidence="high",
     ),
 ]

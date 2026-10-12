@@ -1673,12 +1673,14 @@ class Rule:
     ``"chain-composition"`` so a reporting-family rename can never silently
     re-route (or de-route) the composer.  Empty for every non-composer rule
     (the overwhelming majority)."""
-    confidence: str = "high"
-    """Rule precision hint: "high" (default), "medium", or "low". Rules with
-    a known false-positive profile — shallow taint analysis, secret-string
-    heuristics, trigger-level rules that require design review — should set
-    a lower confidence so the reporter can surface them as review-needed
-    rather than as confirmed risk."""
+    confidence: str = ""
+    """Rule precision hint: explicit "high", "medium", or "low". Empty means
+    use the family/grandfather default: new, unmapped rules resolve to MEDIUM.
+    Existing rules declare their accepted confidence explicitly. Rules with a
+    known false-positive profile — shallow taint analysis, secret-string
+    heuristics, trigger-level rules that require design review — should set a
+    lower confidence to communicate that uncertainty. The separate
+    ``review_needed`` field marks findings that require analyst review."""
     review_needed: bool = False
     """When True, the reporter treats this rule as an analyst-review item
     rather than a confirmed risk. Useful for patterns that can be safe or

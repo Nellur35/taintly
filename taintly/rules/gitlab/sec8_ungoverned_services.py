@@ -97,6 +97,7 @@ RULES: list[Rule] = [
             "executes with full access to all CI/CD variables, source code, and build "
             "artifacts in the job."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC8-GL-002 was a near-perfect duplicate of SEC3-GL-002 (same
@@ -174,5 +175,6 @@ RULES: list[Rule] = [
             "protected-tag pipelines, with additional conditions for merge-request "
             "pipelines."
         ),
+        confidence="high",
     ),
 ]
