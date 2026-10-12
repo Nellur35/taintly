@@ -13,7 +13,7 @@ for the TanStack-style cache + checkout + publish chain:
 
 This is intentionally pinned to public-repo semantics.  Public currently
 does not flag SEC2-GH-002 when job-level permissions are present, and it
-does not ship the lab-only CHAIN-GH-101 composition as a required fire.
+keeps CHAIN-GH-101 as a review candidate rather than execution proof.
 """
 
 from __future__ import annotations
@@ -90,6 +90,14 @@ def test_kill_chain_fires_xf_gh_001a_not_001(kill_chain_findings):
     assert any("release.yml" in finding.file for finding in fires_a)
     assert any(finding.severity == Severity.HIGH for finding in fires_a)
     assert _fires_of(kill_chain_findings, "XF-GH-001") == []
+
+
+def test_checkout_chain_is_visible_but_execution_is_unproven(kill_chain_findings):
+    fires = _fires_of(kill_chain_findings, "CHAIN-GH-101")
+    assert len(fires) == 1
+    assert fires[0].severity == Severity.CRITICAL
+    assert fires[0].review_needed is True
+    assert fires[0].confidence == "medium"
 
 
 def test_kill_chain_public_inventory_stable(kill_chain_findings):
