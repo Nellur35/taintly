@@ -1135,6 +1135,7 @@ RULES: list[Rule] = [
             "run as trusted code in the Jenkins Groovy sandbox with full access to the "
             "pipeline's credentials and workspace."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-JK-007 — shared library loaded via the library() STEP without a
@@ -1208,6 +1209,7 @@ RULES: list[Rule] = [
             "trigger) chooses the library revision — arbitrary trusted-code "
             "execution on the Jenkins controller."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-JK-009 — checkout/git step clones a remote URL built from a build
@@ -1271,6 +1273,7 @@ RULES: list[Rule] = [
             "job's credentials, and the build looks legitimate because the "
             "Jenkinsfile itself was never changed."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-JK-010 — load step executes Groovy from an attacker-influenced
@@ -1336,6 +1339,7 @@ RULES: list[Rule] = [
             "attacker's Groovy executes on the controller with the "
             "pipeline's full privilege."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-JK-011 — @Grab + process-execution class = Groovy sandbox escape.
@@ -1411,6 +1415,7 @@ RULES: list[Rule] = [
             "achieves arbitrary command execution on the Jenkins controller "
             "with the pipeline's full trust."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-JK-012 — direct OS process execution from Groovy.  SEC4-JK-011 only
@@ -1711,6 +1716,7 @@ RULES: list[Rule] = [
             "stage that is green on every run, while critical findings sail "
             "through to production — the worst kind of false assurance."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC5-JK-002 — unattended trigger (cron / pollSCM) on a deploy/publish
@@ -1867,6 +1873,7 @@ RULES: list[Rule] = [
             "hardcoded values cannot be rotated without a code change and are permanently "
             "visible in git history."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC6-JK-002: Credential variable echoed inside withCredentials block
@@ -1963,6 +1970,7 @@ RULES: list[Rule] = [
             "readable by anyone with build log access and typically forwarded to "
             "long-lived log aggregation systems."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC7-JK-001: Unconstrained agent (agent any)
@@ -2016,6 +2024,7 @@ RULES: list[Rule] = [
             "any compromise beyond what the pipeline actually requires. Pinning to a labelled "
             "agent restricts execution to nodes with the appropriate permission scope."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC8-JK-001: Docker agent image uses :latest or no tag
@@ -2084,6 +2093,7 @@ RULES: list[Rule] = [
             "A compromised image executes all pipeline steps with access to the workspace, "
             "credentials, and environment variables."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC9-JK-001: curl or wget piped directly to shell
@@ -2139,6 +2149,7 @@ RULES: list[Rule] = [
             "attacker-controlled code with full access to the Jenkins agent environment and "
             "all bound credentials."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-JK-001: User-controlled params interpolated in shell command
@@ -2287,6 +2298,7 @@ RULES: list[Rule] = [
             "interpolated via Groovy GString syntax into shell commands, a contributor who "
             "can push a crafted branch name achieves command injection."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-JK-003: Dynamic Groovy evaluation
@@ -2341,6 +2353,7 @@ RULES: list[Rule] = [
             "library, a malicious parameter, or an injected environment variable — gains "
             "unconstrained code execution on the Jenkins controller."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC6-JK-003: println leaks credential inside withCredentials block
@@ -2396,6 +2409,7 @@ RULES: list[Rule] = [
             "derived representations or concatenated strings containing the credential may "
             "appear unmasked."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC8-JK-002: Remote Groovy script loaded and executed via URL
@@ -2450,6 +2464,7 @@ RULES: list[Rule] = [
             "DNS hijacking or server compromise is sufficient to substitute a malicious "
             "payload that runs with full Jenkins controller privileges."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-JK-002: @Grab annotation without explicit version
@@ -2505,6 +2520,7 @@ RULES: list[Rule] = [
             "be substituted transparently. Grabbed dependencies run as trusted Groovy code "
             "with access to the full Jenkins pipeline context including credentials."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC1-JK-001: Production deployment without manual approval gate
@@ -2583,6 +2599,7 @@ RULES: list[Rule] = [
             "commit reaching the deploy stage has full access to production infrastructure "
             "via the Jenkins agent's credentials."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC9-JK-002: archiveArtifacts without fingerprinting
@@ -2646,6 +2663,7 @@ RULES: list[Rule] = [
             "but they are the minimum evidence chain Jenkins itself can provide "
             "for supply chain forensics."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC2-JK-001: Credentials stored in build parameters
@@ -2701,6 +2719,7 @@ RULES: list[Rule] = [
             "read access to the job. Unlike Jenkins credentials, build parameters are not "
             "masked in logs and are exposed in the parameter list for every build run."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC2-JK-002: credentialsId bound from user-controlled build parameter
@@ -2754,6 +2773,7 @@ RULES: list[Rule] = [
             "credential IDs and extract secrets they are not authorized to use by "
             "triggering builds with crafted parameter values."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC2-JK-003: hardcoded credentials in a ``docker login`` or
@@ -2879,6 +2899,7 @@ RULES: list[Rule] = [
             "access extracts the credential and reuses it against "
             "whatever service it authenticates to."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-JK-004: input step without submitter restriction
@@ -2923,6 +2944,7 @@ RULES: list[Rule] = [
             "to enforce that only designated release managers or change approvers can "
             "authorize deployments."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-JK-005: Additional PR author/URL env vars used in shell
@@ -2980,6 +3002,7 @@ RULES: list[Rule] = [
             "controls the PR title or description can inject shell commands that run with "
             "the pipeline's agent permissions."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC5-JK-001: Deploy stage without disableConcurrentBuilds
@@ -3032,6 +3055,7 @@ RULES: list[Rule] = [
             "or leaves infrastructure in an inconsistent state. This is especially "
             "dangerous for database migrations or infrastructure provisioning."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-JK-003: docker.image().inside() with mutable tag
@@ -3089,6 +3113,7 @@ RULES: list[Rule] = [
             "credentials, and environment variables — a compromised image has full build "
             "access."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC6-JK-004: TLS certificate verification disabled in shell step
@@ -3138,6 +3163,7 @@ RULES: list[Rule] = [
             "malicious responses. Credentials sent over an unverified connection are "
             "effectively public."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC6-JK-009 — HTTP Request plugin step disables TLS verification.
@@ -3195,6 +3221,7 @@ RULES: list[Rule] = [
             "content the pipeline then executes or deploys — credentials in "
             "transit are effectively public."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC6-JK-005: Long-lived cloud credentials in environment block
@@ -3264,6 +3291,7 @@ RULES: list[Rule] = [
             "AWS_ACCESS_KEY_ID remains valid indefinitely — unlike OIDC tokens which expire "
             "within minutes of the build."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC6-JK-006: writeFile writing private key or credential material
@@ -3318,6 +3346,7 @@ RULES: list[Rule] = [
             "agent can read workspace files from prior jobs, exposing the key material to "
             "any build that runs on that node."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC6-JK-007: bat step with Groovy string interpolation of params/env
@@ -3366,6 +3395,7 @@ RULES: list[Rule] = [
             "controls the interpolated parameter can inject CMD metacharacters that execute "
             "arbitrary commands on the Windows build agent."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC7-JK-002: Scripted pipeline node block without label
@@ -3414,6 +3444,7 @@ RULES: list[Rule] = [
             "scope and matching pipeline labels to that scope enforces least-privilege for "
             "build execution."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC7-JK-003: docker.withRegistry with null credentials
@@ -3459,6 +3490,7 @@ RULES: list[Rule] = [
             "registries, anonymous pushes also make it impossible to audit which build "
             "published which image, breaking the provenance chain."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC8-JK-003: Git checkout from HTTP (non-HTTPS) URL
@@ -3503,6 +3535,7 @@ RULES: list[Rule] = [
             "transmitted over an unencrypted channel are also exposed to any observer on "
             "the network path."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC9-JK-003: wget download without checksum verification
@@ -3557,6 +3590,7 @@ RULES: list[Rule] = [
             "malicious payload. The pipeline then executes attacker-controlled code with "
             "access to the Jenkins agent's credentials and build environment."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC1-JK-002: No timeout in declarative pipeline
@@ -3606,6 +3640,7 @@ RULES: list[Rule] = [
             "bounds the impact and makes anomalous build durations immediately "
             "visible in the Jenkins dashboard."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC10-JK-001: No post { always } block in declarative pipeline
@@ -3657,6 +3692,7 @@ RULES: list[Rule] = [
             "audit logging hooks, notification steps, and forensic artifact uploads should "
             "live; omitting it silently removes the audit trail."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC7-JK-004 — Docker registry accessed over cleartext HTTP.
@@ -3720,6 +3756,7 @@ RULES: list[Rule] = [
             "downstream pipelines that pull from the same registry then execute "
             "the attacker's image with the build's privileges."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC6-JK-008: Exfil-shaped primitive in Jenkinsfile sh step.
@@ -3963,6 +4000,7 @@ RULES: list[Rule] = [
             "at install time and the Jenkins agent's SCM credentials."
         ),
         incidents=["PyTorch dependency confusion (Dec 2022, GH analog)"],
+        confidence="high",
     ),
     # =========================================================================
     # SEC8-JK-004: Docker agent with `args '--privileged'` — container
@@ -4065,6 +4103,7 @@ RULES: list[Rule] = [
             "persisted a hook (e.g., a modified shell profile, a "
             "backdoored binary in the agent's PATH)."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC8-JK-005 — Docker container escape flags beyond --privileged.
@@ -4157,6 +4196,7 @@ RULES: list[Rule] = [
             "Jenkins agent the escape persists across later builds and exposes "
             "every future pipeline's credentials on that node."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-JK-007: Security gate keyed on a spoofable PR-author / actor
@@ -4267,6 +4307,7 @@ RULES: list[Rule] = [
         incidents=[
             "Dependabot auto-merge bypass class (GH analog)",
         ],
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-JK-005 — shared-library inventory (review-needed)
@@ -4495,6 +4536,7 @@ RULES: list[Rule] = [
             "access to bound credentials and shared-library state."
         ),
         incidents=["Ultralytics (Dec 2024, GH analog)", "Trivy supply chain (Mar 2026, GH analog)"],
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-JK-008: ``env.<USER_VAR>`` interpolated into sh — taint
@@ -4786,6 +4828,7 @@ RULES: list[Rule] = [
             "``sh|bat|powershell`` bodies so unrelated Groovy literals "
             "do not produce false positives."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC6-JK-010: world-writable permissions (chmod 777) in a sh step
@@ -4826,6 +4869,7 @@ RULES: list[Rule] = [
             "attacker — a classic post-exploitation persistence mechanism where "
             "a modified build script survives to the next pipeline run."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC6-JK-011: bound credential run through an encode/obfuscate transform

@@ -704,6 +704,7 @@ RULES: list[Rule] = [
                 "          password: ${{ secrets.DOCKER_TOKEN }}\n"
             ),
         ],
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-1: Insufficient Flow Control Mechanisms
@@ -830,6 +831,7 @@ RULES: list[Rule] = [
             "An attacker with these credentials can push a backdoored image to the private registry "
             "that your pipelines then pull and execute."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC2-GH-003: Hardcoded container credentials in services / job container
@@ -928,6 +930,7 @@ RULES: list[Rule] = [
             "redaction layer), workflow-text leaks are immediate and "
             "permanent."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-5: Insufficient PBAC
@@ -993,6 +996,7 @@ RULES: list[Rule] = [
             "Attackers who compromise a single step in a workflow with this permission can silently "
             "obtain persistent cloud access beyond the workflow run."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC5-GH-001B: id-token: write + an unseeable consumer (composite/reusable)
@@ -1184,6 +1188,7 @@ RULES: list[Rule] = [
             "leakage becomes likely, and in every case a single compromised action "
             "walks away with every secret the caller holds."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC6-GH-005",
@@ -1236,6 +1241,7 @@ RULES: list[Rule] = [
             "Using env: variables passes the secret through a protected channel that keeps it out of "
             "the command string itself."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC6-GH-006",
@@ -1280,6 +1286,7 @@ RULES: list[Rule] = [
             "runner with access to all secrets and write permissions."
         ),
         incidents=["Ultralytics (Dec 2024)", "Trivy supply chain (Mar 2026)"],
+        confidence="high",
     ),
     Rule(
         id="SEC6-GH-007",
@@ -1339,6 +1346,7 @@ RULES: list[Rule] = [
             "A hijacked installer runs with the runner's full permissions and secret access before "
             "any audit mechanism can detect it."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-7: Insecure System Configuration — extended
@@ -1385,6 +1393,7 @@ RULES: list[Rule] = [
             "Supply chain attackers have been observed enabling debug mode in victim environments "
             "specifically to capture credentials from log output."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC7-GH-003",
@@ -1442,6 +1451,7 @@ RULES: list[Rule] = [
             "Unlike GitHub-hosted runners, self-hosted runners retain their filesystem state between "
             "jobs, allowing attackers to plant backdoors that affect subsequent runs."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-9: Improper Artifact Integrity Validation
@@ -1495,6 +1505,7 @@ RULES: list[Rule] = [
             "The pipeline executes attacker code with full runner access before any integrity check "
             "can detect the substitution."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC9-GH-002",
@@ -1579,6 +1590,7 @@ RULES: list[Rule] = [
             "the package registry, with no integrity check between cache write "
             "and cache restore."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC9-GH-003: Opt-in setup-<lang> cache in release/tag workflow
@@ -1761,6 +1773,7 @@ RULES: list[Rule] = [
             "via setup-node, pip wheels via setup-python), making this the "
             "highest-traffic cache-poisoning surface in practice."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC7-GH-004: Unconstrained workflow_dispatch string input
@@ -1821,6 +1834,7 @@ RULES: list[Rule] = [
             "When the input value reaches a shell command, an authorized user or attacker with a "
             "compromised token can inject arbitrary commands that run with the workflow's full permissions."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC8-GH-004: Service container with --privileged flag
@@ -1890,6 +1904,7 @@ RULES: list[Rule] = [
             "self-hosted runners, subsequent jobs from other workflows that land on "
             "the same host."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC9-GH-005: Cache key derived from attacker-controlled context
@@ -1965,6 +1980,7 @@ RULES: list[Rule] = [
             "cache restore happens before any verification step observes the inputs."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # SEC3-GH-008: pip --extra-index-url dependency-confusion shape
@@ -2024,6 +2040,7 @@ RULES: list[Rule] = [
             "execute as the build user with access to all workflow secrets."
         ),
         incidents=["PyTorch dependency confusion (Dec 2022)"],
+        confidence="high",
     ),
     # =========================================================================
     # SEC9-GH-006: pipe-bash / iex(Invoke-WebRequest) — runtime supply chain
@@ -2142,6 +2159,7 @@ RULES: list[Rule] = [
             # `install-fetch-execute` patterns the supply-chain
             # research community has documented.
         ],
+        confidence="high",
     ),
     # =========================================================================
     # SEC10-GH-003: Actions debug logging enabled — unmasks secrets in logs
@@ -2203,6 +2221,7 @@ RULES: list[Rule] = [
             "third-party log archivers, and cached by the CDN."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # SEC6-GH-008: Exfil-shaped primitives in a CI run: block.  Wiz's
@@ -3124,5 +3143,6 @@ RULES: list[Rule] = [
             "execution — a common persistence mechanism where a modified script "
             "survives across jobs."
         ),
+        confidence="high",
     ),
 ]

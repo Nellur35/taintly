@@ -1040,6 +1040,7 @@ RULES: list[Rule] = [
             "ever has to run for the compromise to succeed."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # AI-GH-002: HuggingFace model / dataset fetch without a pinned revision.
@@ -1217,6 +1218,7 @@ RULES: list[Rule] = [
             "entire class of CVE."
         ),
         incidents=["CVE-2022-45907"],
+        confidence="high",
     ),
     # =========================================================================
     # AI-GH-004: Model fetch in a job that doesn't invoke a pickle / model
@@ -1766,6 +1768,7 @@ RULES: list[Rule] = [
             "next command the runner executes, with whatever token "
             "and secrets the job holds."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # AI-GH-008: Agent runs in the same job as a PR-head checkout.
@@ -1893,6 +1896,7 @@ RULES: list[Rule] = [
             "No prompt-injection payload in the PR body is required "
             "because the agent's entire behaviour came from the PR."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # AI-GH-009: AI agent run with sandbox / permission controls disabled
@@ -2006,6 +2010,7 @@ RULES: list[Rule] = [
             "injected prompt asks for, all on the workflow's "
             "GITHUB_TOKEN."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # AI-GH-010: Non-torch pickle-backed model loaders without a safety flag.
@@ -2089,6 +2094,7 @@ RULES: list[Rule] = [
             "``torch.load`` path — no model inference ever has to "
             "run, and no framework-specific exploit is needed."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # AI-GH-011: MCP server loaded from a registry runner (npx/uvx/pipx)
@@ -2587,6 +2593,7 @@ RULES: list[Rule] = [
             "exact same class as TAINT-GH-003 / TAINT-GH-004, with "
             "the agent sitting in the middle of the flow."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # AI-GH-015: AI agent step on fork-reachable trigger WITH repository-write
@@ -4074,6 +4081,7 @@ RULES: list[Rule] = [
             "Embrace The Red — AWS Kiro indirect prompt injection RCE (2025)",
             "Embrace The Red — Amp Code self-modify-config (2025)",
         ],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-023 — Agent step in a workflow that grants ``actions: write``
@@ -4265,6 +4273,7 @@ RULES: list[Rule] = [
             "Adnan Khan — Cacheract (Dec 2024)",
             "Adnan Khan — Angular dev-infra cache-poisoning (Dec 2025)",
         ],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-024 — MCP config sourced from PR-head checkout
@@ -4479,6 +4488,7 @@ RULES: list[Rule] = [
             "Embrace The Red — MCP Untrusted Servers (2025)",
             "Kilo Code — AI agent supply-chain advisory (Oct 2025)",
         ],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-025 — HuggingFace resolver rebound from PR-reachable input
@@ -4683,6 +4693,7 @@ RULES: list[Rule] = [
         incidents=[
             "JFrog x Hugging Face - auto_factory remote-code redirection research (2024-2025)",
         ],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-026 — Training run on fork-reachable trigger consumes unpinned dataset
@@ -4816,6 +4827,7 @@ RULES: list[Rule] = [
             "LoRATK: LoRA Once Backdoor Everywhere (EMNLP 2025)",
             "LoBAM: LoRA-Based Backdoor on Model Merging (ICLR 2025)",
         ],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-027 — Checkpoint upload to mutable tag / Production stage
@@ -4915,6 +4927,7 @@ RULES: list[Rule] = [
         incidents=[
             "NIST AI RMF GOVERN-1.6 / MAP-4.1 (artefact integrity)",
         ],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-028 — ML experiment-tracking URI rebound from PR-reachable input
@@ -5046,6 +5059,7 @@ RULES: list[Rule] = [
             "CVE-2025-14279 — MLflow DNS rebinding",
             "CVE-2025-52967 — MLflow SSRF",
         ],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-029 — LoRA / PEFT adapter merged from unpinned Hub repo
@@ -5166,6 +5180,7 @@ RULES: list[Rule] = [
             "LoBAM: LoRA-Based Backdoor on Model Merging (ICLR 2025)",
             "LoRATK: LoRA Once Backdoor Everywhere (EMNLP 2025)",
         ],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-030 — RLHF reward function / preference data from PR-controlled config
@@ -5308,6 +5323,7 @@ RULES: list[Rule] = [
         incidents=[
             "MITRE ATLAS AML.T0020 — Poison Training Data",
         ],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-031 — Auto-approved agent delegation (config grep)
@@ -5433,6 +5449,7 @@ RULES: list[Rule] = [
             "controlled context from a PR body or fetched URL."
         ),
         incidents=[],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-032 — LangGraph / AutoGen LLM-routed conditional edge
@@ -5549,6 +5566,7 @@ RULES: list[Rule] = [
             "node never validated."
         ),
         incidents=[],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-033 — Multi-agent shared state used as a taint bridge (CASP)
@@ -5674,6 +5692,7 @@ RULES: list[Rule] = [
         incidents=[
             "Greshake et al. — Not what you've signed up for (ACM AISec '23, arXiv:2302.12173)",
         ],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-034 — Agent-as-tool privilege inflation
@@ -5791,6 +5810,7 @@ RULES: list[Rule] = [
             "is the union; reviewers who check tools=[...] miss it."
         ),
         incidents=[],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # AI-GH-035 — Artifact-laundered agent output across jobs
@@ -5973,6 +5993,7 @@ RULES: list[Rule] = [
         incidents=[
             "GitHub Security Lab — research/github-actions-untrusted-input",
         ],
+        confidence="high",
     ),
     # =========================================================================
     # AI-GH-036: Repository contains agent-instruction file

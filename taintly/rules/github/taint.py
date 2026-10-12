@@ -592,6 +592,7 @@ RULES = [
             "command-substitution with the runner's full privileges."
         ),
         incidents=["Ultralytics (Dec 2024)"],
+        confidence="high",
     ),
     Rule(
         id="TAINT-GH-002",
@@ -716,6 +717,7 @@ RULES = [
             "the injected command with the runner's GITHUB_TOKEN."
         ),
         incidents=[],
+        confidence="high",
     ),
     Rule(
         id="TAINT-GH-003",
@@ -857,6 +859,7 @@ RULES = [
             "the runner's state."
         ),
         incidents=[],
+        confidence="high",
     ),
     Rule(
         id="TAINT-GH-004",
@@ -1001,6 +1004,7 @@ RULES = [
             "runner's GITHUB_TOKEN."
         ),
         incidents=[],
+        confidence="high",
     ),
     # ---------------------------------------------------------------------------
     # TAINT-GH-005 — AI coding-agent step output flowing into a shell sink
@@ -1128,6 +1132,7 @@ RULES = [
             "``$GITHUB_OUTPUT`` writes."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GH-006 — cross-workflow input reference in a reusable workflow
@@ -1448,6 +1453,7 @@ RULES = [
             "workflow boundary so SEC4-GH-004 alone cannot catch it."
         ),
         incidents=["Ultralytics December 2024"],
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GH-008 — workflow_run event taint
@@ -1597,6 +1603,7 @@ RULES = [
             "name executes as a shell command."
         ),
         incidents=["Trivy March 2026"],
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GH-009 — cross-job needs.<j>.outputs.<n> taint propagation
@@ -1817,6 +1824,7 @@ RULES = [
             "the taint crosses the job boundary."
         ),
         incidents=["Ultralytics April 2025"],
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GH-010 — workflow_run consumer without head-SHA pin
@@ -1993,6 +2001,7 @@ RULES = [
             "Adnan Khan — Dependabot-core dispatch TOCTOU writeup",
             "Trivy supply-chain compromise breakdown (March 2026)",
         ],
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GH-011 — Multi-trigger idempotency hole on a state-mutating step
@@ -2176,6 +2185,7 @@ RULES = [
         incidents=[
             "Adnan Khan — Dependabot-core dispatch TOCTOU writeup",
         ],
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GH-012 — Tainted env safely double-quoted in shell sink (lint)
@@ -2596,6 +2606,7 @@ RULES = [
             "dispatched to a runner the attacker registered, handing "
             "them the job's token and secrets on their own machine."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GH-015 — attacker-controlled value reaches a container /
@@ -2743,6 +2754,7 @@ RULES = [
             "image, with the job's token and secrets — full remote "
             "code execution with no shell command in the workflow."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GH-016 — attacker-controlled cross-job output gates a job's if:
@@ -3129,6 +3141,7 @@ RULES = [
             "the dangerous step's ``run:`` only contains "
             "``bash setup.sh``."
         ),
+        confidence="high",
     ),
     Rule(
         id="TAINT-GH-019",
@@ -3205,5 +3218,6 @@ RULES = [
             "executes it before the main step even begins, with the "
             "caller workflow's full token and secrets."
         ),
+        confidence="high",
     ),
 ]

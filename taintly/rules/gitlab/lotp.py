@@ -125,6 +125,7 @@ RULES: list[Rule] = [
             "state."
         ),
         incidents=["Ultralytics (Dec 2024)"],
+        confidence="high",
     ),
     # =========================================================================
     # LOTP-GL-005: npm/yarn/pnpm install in a GitLab job holding an

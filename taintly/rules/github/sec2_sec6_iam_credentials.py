@@ -360,6 +360,7 @@ RULES: list[Rule] = [
             "Any step that is compromised, including a single malicious third-party action, inherits "
             "the ability to modify branches, create releases, or read and exfiltrate the token."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC2-GH-002",
@@ -552,6 +553,7 @@ RULES: list[Rule] = [
             "removal they remain accessible in prior revisions to anyone who clones the repository. "
             "Every contributor, fork, and automated bot inherits the leaked credential."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC6-GH-003",
@@ -587,6 +589,7 @@ RULES: list[Rule] = [
             "An attacker who reads an AWS access key from a build log or environment dump has "
             "persistent cloud access until the key is manually rotated."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC7-GH-001",
@@ -628,5 +631,6 @@ RULES: list[Rule] = [
             "that affect every subsequent job on that machine. "
             "Unlike GitHub-hosted runners, self-hosted runners are not wiped between workflow runs."
         ),
+        confidence="high",
     ),
 ]

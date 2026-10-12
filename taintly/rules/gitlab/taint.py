@@ -401,6 +401,7 @@ RULES = [
             "GitLab token, protected CI/CD variables, and SSH keys."
         ),
         incidents=[],
+        confidence="high",
     ),
     Rule(
         id="TAINT-GL-002",
@@ -559,6 +560,7 @@ RULES = [
             "runner's GitLab token and every protected variable."
         ),
         incidents=[],
+        confidence="high",
     ),
     Rule(
         id="TAINT-GL-003",
@@ -786,6 +788,7 @@ RULES = [
             "GitLab token, protected CI/CD variables, and SSH keys."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GL-004 — cross-component input reference (GitLab CI Components,
@@ -942,6 +945,7 @@ RULES = [
             "so no single-file rule catches it."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GL-005 — attacker-controlled value reaches a job / service image
@@ -1042,6 +1046,7 @@ RULES = [
             "the pipeline file."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GL-006 — attacker-controlled value reaches a runner tags: selector
@@ -1121,6 +1126,7 @@ RULES = [
             "job's masked CI/CD variables and runner credentials."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GL-007 — Vault secret PATH built from an attacker-controlled CI
@@ -1206,6 +1212,7 @@ RULES = [
             "leaks, all without changing a line of the committed pipeline."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # TAINT-GL-008 — cross-file / inheritance-laundered taint (corpus rule)

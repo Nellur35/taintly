@@ -83,6 +83,7 @@ RULES: list[Rule] = [
             "``CI_JOB_TOKEN`` — no model inference ever has to run "
             "for the compromise to succeed."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # AI-GL-002: LLM output piped into a shell interpreter in a GitLab script.
@@ -164,6 +165,7 @@ RULES: list[Rule] = [
             "'suggestion' becomes shell with the job's full "
             "secrets and ``CI_JOB_TOKEN``."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # AI-GL-003: Non-torch pickle-backed loaders in a GitLab script.
@@ -238,6 +240,7 @@ RULES: list[Rule] = [
             "source gets arbitrary code execution in the GitLab "
             "runner with full CI/CD variable access."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # AI-GL-004: HuggingFace model / dataset fetch without a pinned revision.
@@ -359,6 +362,7 @@ RULES: list[Rule] = [
             "instant ``torch.load`` parses the file."
         ),
         incidents=["CVE-2022-45907"],
+        confidence="high",
     ),
     # =========================================================================
     # AI-GL-006: Model fetch without a scanner invocation in the same job.
@@ -1407,6 +1411,7 @@ RULES: list[Rule] = [
             "Phoenix Security — claude-code CLI command-injection (2025)",
             "Embrace The Red — AWS Kiro indirect prompt injection RCE (2025)",
         ],
+        confidence="high",
     ),
     # =========================================================================
     # AI-GL-015 — port of AI-GH-024.  MCP config sourced from MR-head
@@ -1544,6 +1549,7 @@ RULES: list[Rule] = [
             "Embrace The Red — MCP Untrusted Servers (2025)",
             "Kilo Code — AI agent supply-chain advisory (Oct 2025)",
         ],
+        confidence="high",
     ),
     # =========================================================================
     # AI-GL-016 — port of AI-GH-025.  HuggingFace resolver
@@ -1666,5 +1672,6 @@ RULES: list[Rule] = [
         incidents=[
             "JFrog x Hugging Face - auto_factory remote-code redirection (2024-2025)",
         ],
+        confidence="high",
     ),
 ]

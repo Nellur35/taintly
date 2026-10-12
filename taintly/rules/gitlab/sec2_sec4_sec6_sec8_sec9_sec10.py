@@ -118,6 +118,7 @@ RULES: list[Rule] = [
             "An attacker with these credentials can push backdoored images to your private "
             "registry that your pipelines then pull and execute."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC2-GL-002",
@@ -174,6 +175,7 @@ RULES: list[Rule] = [
             "script step can connect to the unprotected daemon, spawn privileged containers, "
             "and escape to the runner host."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC2-GL-004 — Docker daemon TLS *explicitly* disabled / host socket targeted.
@@ -257,6 +259,7 @@ RULES: list[Rule] = [
             "container, bind-mount the host root filesystem, and escape onto the runner "
             "host, persisting across every later build on that shared agent."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC2-GL-003: hardcoded service-instance password in variables/services.
@@ -369,6 +372,7 @@ RULES: list[Rule] = [
             "``*_PASSWORD`` through the CI/CD variables store with "
             "Masked + Protected flags."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-4: Poisoned Pipeline Execution (extended)
@@ -426,6 +430,7 @@ RULES: list[Rule] = [
             "Access controls must be layered with branch protection and project membership "
             "checks."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC4-GL-005",
@@ -483,6 +488,7 @@ RULES: list[Rule] = [
             "project's runner token. Deployment steps should only run on protected branches "
             "after merge, not on MR pipelines."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-6: Insufficient Credential Hygiene (extended)
@@ -546,6 +552,7 @@ RULES: list[Rule] = [
             "names on public registries."
         ),
         incidents=["Dependency confusion attacks (2021, widespread)"],
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-8: Ungoverned Usage of 3rd Party Services (extended)
@@ -595,6 +602,7 @@ RULES: list[Rule] = [
             "image can intercept requests from the main job, inject malicious responses, or "
             "exfiltrate data passed through shared volumes."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-9: Improper Artifact Integrity Validation (extended)
@@ -774,6 +782,7 @@ RULES: list[Rule] = [
             "the duration of the job and can be used to read protected variables, trigger "
             "pipelines, or access the package registry."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC10-GL-003: Job missing timeout
@@ -862,5 +871,6 @@ RULES: list[Rule] = [
             "durations immediately visible in the pipeline UI."
         ),
         review_needed=True,
+        confidence="high",
     ),
 ]

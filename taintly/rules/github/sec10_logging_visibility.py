@@ -61,6 +61,7 @@ RULES: list[Rule] = [
             "subject to runner execution limits. A shorter per-job limit can bound "
             "how long a hung or compromised step continues running."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC10-GH-002: Workflow uploads no artifacts — no evidence trail
@@ -130,6 +131,7 @@ RULES: list[Rule] = [
             "Artifact deletion or tampering that occurred inside the build cannot be detected "
             "through logs alone."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC10-GH-004: Workflow uploads a debug log / step summary / runner

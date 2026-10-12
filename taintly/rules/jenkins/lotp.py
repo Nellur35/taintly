@@ -382,6 +382,7 @@ RULES: list[Rule] = [
             "SSH agent keys for SCM) are all reachable."
         ),
         incidents=["Ultralytics (Dec 2024)"],
+        confidence="high",
     ),
     # =========================================================================
     # LOTP-JK-005: npm/yarn/pnpm install in a Jenkins pipeline that binds an
@@ -734,5 +735,6 @@ RULES: list[Rule] = [
             "that land on the same host."
         ),
         incidents=["Ultralytics (Dec 2024, GH analog)"],
+        confidence="high",
     ),
 ]

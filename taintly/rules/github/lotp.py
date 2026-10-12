@@ -2166,6 +2166,7 @@ RULES: list[Rule] = [
             "evidence; untrusted execution alone does not establish them."
         ),
         incidents=["Ultralytics (Dec 2024)"],
+        confidence="high",
     ),
     # =========================================================================
     # LOTP-GH-002 is intentionally NOT defined.
@@ -2259,6 +2260,7 @@ RULES: list[Rule] = [
             "credentials and privileges are evaluated separately."
         ),
         incidents=["Ultralytics (Dec 2024)"],
+        confidence="high",
     ),
     # =========================================================================
     # LOTP-GH-004: Build tool after actions/download-artifact
@@ -2343,6 +2345,7 @@ RULES: list[Rule] = [
             "artefact content flows into a privileged build step and the "
             "lifecycle-script / build-hook problem is back."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # LOTP-GH-005: npm/yarn/pnpm install runs lifecycle scripts in a job

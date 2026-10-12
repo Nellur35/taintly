@@ -125,6 +125,7 @@ RULES: list[Rule] = [
             "The substituted image executes with full access to all runner secrets, mounted volumes, "
             "and source code."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC8-GH-002: Container / service image with no version tag (implicit latest)
@@ -183,6 +184,7 @@ RULES: list[Rule] = [
             "An attacker who can push to the image repository can substitute any payload as the "
             "job's execution environment on the next run."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC8-GH-003: External reusable workflow called without commit-SHA pinning
@@ -249,6 +251,7 @@ RULES: list[Rule] = [
             "The risk exceeds unpinned actions because called workflows can themselves call "
             "further nested workflows, multiplying the scope."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC8-GH-005: dependabot.yml update spec missing ``cooldown:``
@@ -387,5 +390,6 @@ RULES: list[Rule] = [
             "history; a single repo-read compromise hands the attacker "
             "standing access to the private package registry."
         ),
+        confidence="high",
     ),
 ]

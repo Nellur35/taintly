@@ -1255,6 +1255,7 @@ RULES: list[Rule] = [
             "execution — without ever needing a shell metacharacter, so a "
             "``run:``-focused injection check never sees it."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-006: GITHUB_ENV injection — CRITICAL
@@ -1313,6 +1314,7 @@ RULES: list[Rule] = [
             "hijack every command that runs after the injection point."
         ),
         incidents=["Ultralytics (Dec 2024)"],
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-007: GITHUB_OUTPUT injection — HIGH
@@ -1365,6 +1367,7 @@ RULES: list[Rule] = [
             "metacharacters, enabling the same injection as writing the context value directly "
             "into a run: block."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-008: workflow_dispatch inputs used directly in run block — HIGH
@@ -1450,6 +1453,7 @@ RULES: list[Rule] = [
             "exploitable by any authorized triggerer — not only external attackers."
         ),
         incidents=["Langflow (2024)", "Ultralytics (Dec 2024)"],
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-009: ACTIONS_ALLOW_UNSECURE_COMMANDS re-enabled — HIGH
@@ -1494,6 +1498,7 @@ RULES: list[Rule] = [
             "Re-enabling this turns every tool's standard output into a potential privilege "
             "escalation side channel."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-010: Spoofable bot actor condition — HIGH
@@ -1538,6 +1543,7 @@ RULES: list[Rule] = [
             "This confused-deputy pattern has been used in Dependabot auto-merge bypasses where "
             "attackers gained repository write access without direct approval."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-011: LOTP tools after pull_request_target — CRITICAL
@@ -1698,6 +1704,7 @@ RULES: list[Rule] = [
             "A single compromised action in the called workflow — or any of its transitive "
             "dependencies — can exfiltrate your entire secret store in one extraction."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-013: if: | always evaluates true — HIGH
@@ -1767,6 +1774,7 @@ RULES: list[Rule] = [
             "The security gate appears present in code review but provides no actual access control "
             "at runtime — an attacker benefits from the gate's removal without any code change."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-014: Two-step output injection — attacker context → GITHUB_OUTPUT → run
@@ -1843,6 +1851,7 @@ RULES: list[Rule] = [
             "The output write appears benign in isolation; the injection only manifests when the "
             "output is consumed in a run: block, making it harder to detect in code review."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-015: Matrix injection from github.event context
@@ -1910,6 +1919,7 @@ RULES: list[Rule] = [
             "The fromJSON() pattern is the most dangerous form, letting an attacker craft a matrix "
             "that spawns jobs with arbitrary configurations including attacker-controlled runner labels."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-016: Reusable workflow caller passes event context to with: params
@@ -1994,6 +2004,7 @@ RULES: list[Rule] = [
             "event payload can inject commands that run with the caller's secrets in a different "
             "repository's workflow context."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # CICD-SEC-4 continued — GitHub auto-populated env vars used unquoted in
@@ -2076,6 +2087,7 @@ RULES: list[Rule] = [
             "GITHUB_TOKEN and any mounted secrets."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-020 — Maintainer-controlled GitHub env vars unquoted in shell
@@ -2237,6 +2249,7 @@ RULES: list[Rule] = [
             "variable owns execution with the runner's secrets and token."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-019: GITHUB_PATH injection — CRITICAL
@@ -2300,6 +2313,7 @@ RULES: list[Rule] = [
             "before /usr/bin owns execution of every later tool invocation in the job."
         ),
         incidents=[],
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-021: ``github.actor`` (or bot-login) used as a trust gate
@@ -2571,6 +2585,7 @@ RULES: list[Rule] = [
             "by a trusted push or release run. That run restores and "
             "executes the poisoned files with its stronger credentials."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC4-GH-026B",
@@ -2669,6 +2684,7 @@ RULES: list[Rule] = [
             "metadata in a privileged `pull_request_target` run. Treat this as a reduced but "
             "still meaningful poisoned-pipeline surface."
         ),
+        confidence="high",
     ),
     Rule(
         id="SEC4-GH-012A",
@@ -2706,6 +2722,7 @@ RULES: list[Rule] = [
             "sides, so the risk is lower than a third-party callee, but compromise of the callee's "
             "transitive dependencies still exposes the caller's complete secret set."
         ),
+        confidence="high",
     ),
     # =========================================================================
     # SEC4-GH-024: actions/github-script script: interpolates opaque step output
@@ -2859,5 +2876,6 @@ RULES: list[Rule] = [
             "in-depth principle applied to a different sink."
         ),
         incidents=[],
+        confidence="high",
     ),
 ]
