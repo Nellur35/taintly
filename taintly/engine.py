@@ -1905,11 +1905,10 @@ def scan_repo(
                         ):
                             report.families_with_surface.add(family)
                             break
-        # IAM blast-radius escalation: enrich PSE-GH-001 findings by classifying
-        # any local IAM policy that matches the workflow's role-to-assume
-        # ARN.  Mutates findings in-place — escalation only happens on
-        # a CRITICAL classifier verdict; absence of evidence keeps the
-        # finding at HIGH.  GitHub-only (the rule is GH-platform).
+        # IAM context: only an exact local snapshot inline attachment and
+        # owning credential configuration can raise the configured severity.
+        # Lexical policy matches and effective AWS access remain review-needed.
+        # GitHub-only (the rule is GH-platform).
         if plat == Platform.GITHUB:
             all_findings = enrich_pse_findings(all_findings, repo_path)
             # B2 cross-file pass: build the WorkflowCorpus once per
