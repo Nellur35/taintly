@@ -7,9 +7,9 @@ import json
 import os
 import re
 import sys
+from gettext import gettext
 from typing import Any
 
-from . import __version__
 from .baseline import (
     BASELINE_FILENAME,
     BaselineError,
@@ -37,7 +37,7 @@ from .deployment_context import (
     load_deployment_context,
 )
 from .engine import detect_platform, scan_file, scan_repo
-from .models import Platform, Severity
+from .models import Platform, Severity, _defer_context_regex_compilation
 from .reporters._encoding import ensure_utf8_stdout
 from .reporters.csv_report import format_csv, format_csv_reports
 from .reporters.html_report import format_html
@@ -52,6 +52,25 @@ from .testing.self_test import format_test_results, run_mutation_tests, run_self
 # Map AuditReport.platform string to the Platform enum the scorer
 # uses for bonus gating. Keeps the call sites readable.
 _PLATFORM_LOOKUP: dict[str, Platform] = {platform.value: platform for platform in Platform}
+
+
+class _VersionAction(argparse.Action):
+    """Keep version discovery out of ordinary scans and help output."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, **kwargs):
+        if kwargs.get("help") is None:
+            kwargs["help"] = gettext("show program's version number and exit")
+        super().__init__(
+            option_strings=option_strings, dest=dest, nargs=0, default=default, **kwargs
+        )
+
+    def __call__(self, parser, _namespace, _values, _option_string=None):
+        from . import __version__
+
+        formatter = parser._get_formatter()
+        formatter.add_text(f"%(prog)s {__version__}")
+        parser._print_message(formatter.format_help(), sys.stdout)
+        parser.exit()
 
 
 def _platforms_for_reports(*reports) -> set[Platform]:
@@ -142,7 +161,7 @@ def main():
         description="Zero-dependency CI/CD pipeline security auditor",
         epilog="Because trusting a third-party tool to audit your third-party tools is the problem.",
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--version", action=_VersionAction)
     parser.add_argument("path", nargs="?", default=".", help="Path to repository")
     parser.add_argument(
         "--format", "-f", choices=["text", "json", "csv", "sarif", "html"], default="text"
@@ -638,20 +657,22 @@ def main():
     # through to the all-platforms loader.
     if args.self_test or args.integration_test or args.mutate:
         all_rules = load_all_rules()
-    elif effective_platform:
-        all_rules = load_rules_for_platform(Platform(effective_platform))
     else:
-        detected = (
-            detect_platform(args.path)
-            if os.path.isdir(args.path) or os.path.isfile(args.path)
-            else None
-        )
-        if detected is not None:
-            all_rules = load_rules_for_platform(detected)
-        else:
-            # Mixed (.github + .gitlab-ci.yml in one repo) or undetectable
-            # — load everything; engine will scope per platform.
-            all_rules = load_all_rules()
+        with _defer_context_regex_compilation():
+            if effective_platform:
+                all_rules = load_rules_for_platform(Platform(effective_platform))
+            else:
+                detected = (
+                    detect_platform(args.path)
+                    if os.path.isdir(args.path) or os.path.isfile(args.path)
+                    else None
+                )
+                if detected is not None:
+                    all_rules = load_rules_for_platform(detected)
+                else:
+                    # Mixed (.github + .gitlab-ci.yml in one repo) or undetectable
+                    # — load everything; engine will scope per platform.
+                    all_rules = load_all_rules()
 
     # Apply rule exclusions (CLI + config, merged)
     cli_excluded = set(args.exclude_rule or [])

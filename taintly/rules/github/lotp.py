@@ -2072,7 +2072,7 @@ RULES: list[Rule] = [
     Rule(
         id="LOTP-GH-001",
         finding_family="pipeline_tool_execution",
-        title="Build tool executed in job that checks out pull-request code (LOTP)",
+        title="Build tool may run in job that checks out pull-request code (LOTP)",
         severity=Severity.CRITICAL,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",

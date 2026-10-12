@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _pkg_version
+from threading import RLock
+
+_VERSION_LOCK = RLock()
+# Reloading the package should refresh the same public version attribute.
+globals().pop("__version__", None)
 
 
 def _resolve_version() -> str:
@@ -20,6 +23,9 @@ def _resolve_version() -> str:
     3. ``"0.0.0+unknown"`` — last-resort sentinel for source trees
        with no git history (e.g. a Docker COPY of just the package).
     """
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
     try:
         return _pkg_version("taintly")
     except PackageNotFoundError:
@@ -36,6 +42,19 @@ def _resolve_version() -> str:
         return "0.0.0+unknown"
 
 
-__version__ = _resolve_version()
+def __getattr__(name: str) -> str:
+    """Resolve the public version only when a caller actually requests it."""
+    if name != "__version__":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    with _VERSION_LOCK:
+        if name not in globals():
+            globals()[name] = _resolve_version()
+        version: str = globals()[name]
+        return version
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
+
 
 __all__ = ["__version__"]
