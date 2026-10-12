@@ -218,12 +218,9 @@ def main():
         "--fix-github-ai-allowed-tools-scaffold",
         action="store_true",
         help=(
-            "Opt-in: inject an `allowed_tools:` scaffold under any AI-agent "
-            "action step (claude-code-action, run-gemini-cli, copilot-*-action, "
-            "aider-action, openhands-action, coderabbit-action) that doesn't "
-            "declare one.  Scaffold is deliberately restrictive (one inline-"
-            "comment tool) to surface the review gate — widen the list manually "
-            "to match the workflow's actual needs.  Pairs with AI-GH-020."
+            "Opt-in: add step-scoped vendor-specific AI tool-boundary review "
+            "comments for recognized agent action steps. Does not change "
+            "workflow policy values or enforce a restriction. Pairs with AI-GH-020."
         ),
     )
     parser.add_argument(
