@@ -115,6 +115,14 @@ build-backend = "setuptools.build_meta"
 # dirs (benchmark/, docs/, scripts/, tests/, templates/).
 include = ["taintly*"]
 
+[tool.setuptools.package-data]
+taintly = [
+    "data/compromised_actions.json",
+    "data/confidence_grandfather_baseline.json",
+    "testing/fixtures/README.md",
+    "testing/fixtures/*.yml",
+]
+
 [tool.setuptools_scm]
 # fallback_version keeps `python -m build` working in a detached
 # checkout (e.g. a Docker layer that copies the source without .git).

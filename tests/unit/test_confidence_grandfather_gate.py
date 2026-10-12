@@ -26,6 +26,27 @@ def _load_gate():
     return mod
 
 
+def test_maintenance_targets_the_runtime_asset():
+    from taintly import families
+
+    assert _load_gate().BASELINE == families._GRANDFATHER_BASELINE_PATH
+
+
+def test_update_writes_only_the_authoritative_asset(tmp_path, monkeypatch):
+    gate = _load_gate()
+    asset = tmp_path / "taintly" / "data" / "confidence_grandfather_baseline.json"
+    legacy = tmp_path / "tests" / "_confidence_grandfather_baseline.json"
+    legacy.parent.mkdir()
+    legacy.write_text('["LEGACY-SENTINEL"]', encoding="utf-8")
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    monkeypatch.setattr(gate, "BASELINE", asset)
+    monkeypatch.setattr(gate, "_registered_ids_without_override", lambda: ["VALIDATED-001"])
+
+    assert gate.main(["--update"]) == 0
+    assert gate._load_baseline() == ["VALIDATED-001"]
+    assert legacy.read_text(encoding="utf-8") == '["LEGACY-SENTINEL"]'
+
+
 def test_gate_is_advisory_and_clean_on_current_pack(capsys):
     """On the shipped pack the gate reports clean and exits 0 (advisory)."""
     gate = _load_gate()

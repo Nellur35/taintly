@@ -2,7 +2,7 @@
 """Confidence grandfather gate — advisory notice for un-validated new rules (P3.6).
 
 ``taintly/families.default_confidence`` grandfathers every rule id in
-``tests/_confidence_grandfather_baseline.json`` at HIGH confidence and defaults
+``taintly/data/confidence_grandfather_baseline.json`` at HIGH confidence and defaults
 any OTHER un-overridden rule id to MEDIUM. That means a brand-new rule, added
 without an explicit ``confidence=`` and without being added to the baseline,
 will surface at MEDIUM until someone validates its precision.
@@ -12,7 +12,7 @@ non-zero in ``--check`` mode — so an author who adds a new rule sees a clear
 notice telling them the rule defaults to MEDIUM and how to promote it once they
 have validated precision:
 
-  * add the rule id to ``tests/_confidence_grandfather_baseline.json`` (via
+  * add the rule id to ``taintly/data/confidence_grandfather_baseline.json`` (via
     ``--update``) to validate-at-HIGH, OR
   * set an explicit ``confidence=`` on the Rule definition.
 
@@ -37,7 +37,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-BASELINE = ROOT / "tests" / "_confidence_grandfather_baseline.json"
+BASELINE = ROOT / "taintly" / "data" / "confidence_grandfather_baseline.json"
 
 
 def _load_baseline() -> list[str]:

@@ -507,14 +507,14 @@ _CONFIDENCE_OVERRIDES: dict[str, str] = {
 #     by adding its id to this baseline (or sets an explicit ``confidence=``
 #     on the Rule definition).
 #
-# The committed list lives beside the tests so a rule author edits it in the
+# The committed list ships with runtime data so a rule author edits it in the
 # same review that adds the rule — making "I validated this at HIGH" an
 # explicit, diff-visible decision rather than a silent default. The file is
 # the sorted set of every registered rule id NOT in ``_CONFIDENCE_OVERRIDES``
 # at freeze time; regenerate it with ``scripts/check_confidence_grandfather.py
 # --update`` when a rule is validated.
 _GRANDFATHER_BASELINE_PATH = (
-    Path(__file__).resolve().parent.parent / "tests" / "_confidence_grandfather_baseline.json"
+    Path(__file__).resolve().parent / "data" / "confidence_grandfather_baseline.json"
 )
 
 
