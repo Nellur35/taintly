@@ -10,7 +10,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .families import classify_rule, default_confidence, default_review_needed
-from .gitlab_workflow_corpus import GitLabCorpusPattern, build_gitlab_corpus
 from .gitlabguard import (
     GitLabContext,
     detect_gitlab_context,
@@ -2077,6 +2076,8 @@ def _run_gitlab_corpus_rules(repo_path: str, rules: list[Rule]) -> list[Finding]
     corpus build is then skipped entirely so non-cross-file GL scans
     don't pay the walk cost.
     """
+    from .gitlab_workflow_corpus import GitLabCorpusPattern, build_gitlab_corpus
+
     corpus_rules = [r for r in rules if isinstance(r.pattern, GitLabCorpusPattern)]
     if not corpus_rules:
         return []

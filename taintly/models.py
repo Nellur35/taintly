@@ -5,9 +5,12 @@ from __future__ import annotations
 import os
 import re
 import signal
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import cached_property
 from typing import Any, Protocol, runtime_checkable
 
 # Structural ``${{ }}`` expression parser — used to OPTIONALLY normalise an
@@ -40,6 +43,21 @@ _CHUNKED_SEARCH_INCOMPLETE: ContextVar[bool] = ContextVar(
 _JOB_SEGMENT_CACHE: ContextVar[dict[int, tuple[list[str], list[tuple[int, list[str]]]]] | None] = (
     ContextVar("taintly_job_segment_cache", default=None)
 )
+_DEFER_CONTEXT_REGEX: ContextVar[bool] = ContextVar("taintly_defer_context_regex", default=False)
+
+
+@contextmanager
+def _defer_context_regex_compilation() -> Iterator[None]:
+    """Defer secondary ContextPattern regexes while loading CLI scan rules.
+
+    Ordinary constructors and validation modes remain eager. This affects only
+    compilation time; matching, surface accounting and safety checks are shared.
+    """
+    token = _DEFER_CONTEXT_REGEX.set(True)
+    try:
+        yield
+    finally:
+        _DEFER_CONTEXT_REGEX.reset(token)
 
 
 def _reset_chunked_search_coverage() -> None:
@@ -1016,6 +1034,16 @@ def _split_into_step_segments(content: str) -> list[tuple[int, list[str]]]:
     return segments
 
 
+@dataclass(frozen=True, slots=True)
+class _ContextRegexSources:
+    anchor: str
+    requires_absent: str
+    exclude: tuple[str, ...]
+    anchor_job_exclude: str
+    anchor_step_exclude: str
+    anchor_step_require: str
+
+
 @dataclass
 class ContextPattern:
     """Trigger when BOTH anchor AND requires patterns exist in the same file.
@@ -1083,6 +1111,20 @@ class ContextPattern:
     first_match_only: bool = False
 
     def __post_init__(self):
+        # Snapshot construction-time values, as eager compiled attributes did.
+        # Later mutation of public source fields must not alter their meaning.
+        self._regex_sources = _ContextRegexSources(
+            self.anchor,
+            self.requires_absent,
+            tuple(self.exclude),
+            self.anchor_job_exclude,
+            self.anchor_step_exclude,
+            self.anchor_step_require,
+        )
+        if _DEFER_CONTEXT_REGEX.get():
+            self._requires_re = re.compile(self.requires)
+            self._platform: Platform | None = None
+            return
         self._anchor_re = re.compile(self.anchor)
         self._requires_re = re.compile(self.requires)
         self._requires_absent_re = (
@@ -1103,7 +1145,35 @@ class ContextPattern:
         # :meth:`_check_file_scoped`) doesn't apply to GitHub / GitLab
         # rules — their YAML can carry inline ``//`` JavaScript comments
         # (``actions/github-script@v7`` blocks) that must not be blanked.
-        self._platform: Platform | None = None
+        self._platform = None
+
+    @cached_property
+    def _anchor_re(self) -> re.Pattern[str]:
+        return re.compile(self._regex_sources.anchor)
+
+    @cached_property
+    def _requires_absent_re(self) -> re.Pattern[str] | None:
+        source = self._regex_sources.requires_absent
+        return re.compile(source) if source else None
+
+    @cached_property
+    def _excludes(self) -> list[re.Pattern[str]]:
+        return [re.compile(source) for source in self._regex_sources.exclude]
+
+    @cached_property
+    def _anchor_job_exclude_re(self) -> re.Pattern[str] | None:
+        source = self._regex_sources.anchor_job_exclude
+        return re.compile(source) if source else None
+
+    @cached_property
+    def _anchor_step_exclude_re(self) -> re.Pattern[str] | None:
+        source = self._regex_sources.anchor_step_exclude
+        return re.compile(source) if source else None
+
+    @cached_property
+    def _anchor_step_require_re(self) -> re.Pattern[str] | None:
+        source = self._regex_sources.anchor_step_require
+        return re.compile(source) if source else None
 
     # CONTRACT: returns (line_num, snippet) where snippet is the
     # ``.strip()``'d anchor line — the line whose contents matched

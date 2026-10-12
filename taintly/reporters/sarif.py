@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from taintly import __version__
 from taintly.baseline import fingerprint
 from taintly.models import AuditReport, Severity
 from taintly.reporters.text import INVENTORY_RULE_IDS, _security_findings
@@ -28,7 +27,17 @@ _LEVEL_MAP = {
 
 _TOOL_NAME = "taintly"
 _TOOL_URI = "https://github.com/Nellur35/taintly"
-_TOOL_VERSION = __version__
+_TOOL_VERSION: str | None = None
+
+
+def _tool_version() -> str:
+    """Resolve the version on SARIF rendering, retaining reporter overrides."""
+    global _TOOL_VERSION
+    if _TOOL_VERSION is None:
+        from taintly import __version__
+
+        _TOOL_VERSION = __version__
+    return _TOOL_VERSION
 
 
 def _build_rules(findings: list[Any]) -> list[dict[str, Any]]:
@@ -192,7 +201,7 @@ def format_sarif(report: AuditReport) -> str:
                 "tool": {
                     "driver": {
                         "name": _TOOL_NAME,
-                        "version": _TOOL_VERSION,
+                        "version": _tool_version(),
                         "informationUri": _TOOL_URI,
                         "rules": rules,
                     }

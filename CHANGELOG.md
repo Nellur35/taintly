@@ -34,6 +34,11 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- Ordinary CLI scans defer secondary regex compilation, package version
+  discovery and the GitLab corpus builder until needed. Direct constructors
+  and validation modes remain eager; `--version` and SARIF retain the version.
+- The checkout/build warning describes a build tool that may run, avoiding a
+  claim of observed execution when the configured path still needs review.
 - Cross-workflow cache warnings now check the owning job, event, access mode,
   ref isolation, and lookup-only behavior. Primary-key prefix matches are included.
   Package/build cache names indicate potential impact and require review; they
