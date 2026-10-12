@@ -983,10 +983,7 @@ RULES: list[Rule] = [
             "Third-party action referenced by mutable tag instead of commit SHA. Tags "
             "can be force-pushed to point at malicious code — a technique used in "
             "documented supply chain attacks against popular GitHub Actions "
-            "(Trivy, Checkmarx, tj-actions).  Sibling rule SEC3-GH-001A covers "
-            "unpinned actions from documented first-party publishers (``actions/*``, "
-            "``aws-actions/*``, ``azure/*``, etc.) at LOW severity with "
-            "``review_needed=True``."
+            "(Trivy, Checkmarx, tj-actions)."
         ),
         pattern=StructuralPattern(
             path="**.uses",
