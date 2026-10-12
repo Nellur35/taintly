@@ -14,9 +14,10 @@ context reference to a canonical lowercased dotted path, so all of the above
 collapse to ``github.event.pull_request.title`` — which the existing taint
 list then matches unchanged.
 
-Modelled on actionlint's ``expr_{lexer,parser,ast,sema}.go``. Deliberately NOT
-a type-checker or evaluator: it extracts *provenance reachability* (which
-context paths appear in an expression), which is all taint analysis needs.
+Modelled on actionlint's ``expr_{lexer,parser,ast,sema}.go``. This is not a full
+type-checker or evaluator. Syntactic context extraction is separate from value
+provenance, which uses bounded truthiness analysis to exclude unreachable
+short-circuit branches.
 
 Grammar facts (GitHub docs + actionlint):
   * ``a.b`` ≡ ``a['b']`` ≡ ``a["b"]`` for string-literal members; index
@@ -438,6 +439,53 @@ _BOOLEAN_RESULT_FUNCTIONS = frozenset(
 _COMPARISON_OPERATORS = frozenset({"==", "!=", "<", "<=", ">", ">="})
 
 
+def _truthiness(node: object, budget: int = 64) -> bool | None:
+    """Prove truthiness using at most ``budget`` AST visits; otherwise unknown.
+
+    GitHub treats null, false and empty strings as falsy, and nonempty strings
+    as truthy (including ``'false'``). Numeric literals remain unknown: their
+    tokens are stored as strings, and Python coercion is not GitHub coercion.
+    Runtime values, calls and comparisons also remain unknown. No ASTs or
+    results are cached across expressions.
+    """
+    remaining = budget
+
+    def visit(current: object) -> bool | None:
+        nonlocal remaining
+        if remaining <= 0:
+            return None
+        remaining -= 1
+        if isinstance(current, Lit):
+            if current.kind == "null":
+                return False
+            if current.kind == "bool" and isinstance(current.value, bool):
+                return current.value
+            if current.kind == "string" and isinstance(current.value, str):
+                return bool(current.value)
+            return None
+        if isinstance(current, Unary) and current.op == "!":
+            value = visit(current.operand)
+            return None if value is None else not value
+        if isinstance(current, Binary) and current.op in {"&&", "||"}:
+            left = visit(current.left)
+            if current.op == "&&":
+                if left is False:
+                    return False
+                right = visit(current.right)
+                if right is False:
+                    return False
+                return True if left is True and right is True else None
+            if left is True:
+                return True
+            right = visit(current.right)
+            if right is True:
+                return True
+            return False if left is False and right is False else None
+        return None
+
+    return visit(node)
+
+
 def _iter_result_provenance(node: object) -> Iterator[str]:
     """Yield paths whose bytes can contribute to ``node``'s result value.
 
@@ -470,12 +518,14 @@ def _iter_result_provenance(node: object) -> Iterator[str]:
             return
         if node.op == "&&":
             # The left side controls selection. Only the right side can become
-            # the value returned by GitHub's short-circuit expression.
-            yield from _iter_result_provenance(node.right)
+            # arbitrary bytes in the result; a proven falsy left skips it.
+            if _truthiness(node.left) is not False:
+                yield from _iter_result_provenance(node.right)
             return
         if node.op == "||":
             yield from _iter_result_provenance(node.left)
-            yield from _iter_result_provenance(node.right)
+            if _truthiness(node.left) is not True:
+                yield from _iter_result_provenance(node.right)
 
 
 def result_provenance_paths(body: str) -> list[str]:
@@ -484,6 +534,8 @@ def result_provenance_paths(body: str) -> list[str]:
     Comparisons, negation, and boolean-returning functions are control-only.
     Fallbacks and value transforms such as ``format()``, ``join()``,
     ``toJSON()``, and ``fromJSON()`` preserve argument provenance.
+    Short-circuit branches proven unreachable by bounded literal truthiness
+    analysis are excluded; unknown conditions retain possible provenance.
     """
     seen: dict[str, None] = {}
     for path in _iter_result_provenance(parse(body)):

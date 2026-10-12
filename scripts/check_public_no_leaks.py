@@ -50,6 +50,7 @@ ALLOWED_FILES: dict[str, str] = {
     "docs/BATCH_SCANNING.md": "user-facing core batch API usage and error contract",
     "docs/CO_FIRES.md": "user-facing co-fire matrix",
     "docs/CONTEXT.md": "user-facing context-file format reference",
+    "docs/EXPRESSION_ANALYSIS.md": "user-facing GitHub Actions expression provenance scope and uncertainty limits",
     "docs/IAM_POLICY_EVIDENCE.md": "user-facing IAM snapshot evidence format and authority limits",
     "docs/JENKINSFILE_READER_SCOPE.md": "user-facing parser-scope contract for the optional [jenkins-structural] extra",
     "docs/JENKINS_POSTURE_TESTING.md": "user-facing Jenkins runbook",
