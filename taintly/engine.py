@@ -49,7 +49,13 @@ from .workflow_context import (
     compute_exploitability,
 )
 from .workflow_context import analyze as analyze_workflow
-from .workflow_corpus import CorpusEvidence, CorpusPattern, build_corpus, is_fork_reachable
+from .workflow_corpus import (
+    CorpusEvidence,
+    CorpusPattern,
+    WorkflowSummary,
+    build_corpus,
+    is_fork_reachable,
+)
 
 # Hygiene families that ``classify_rule`` falls back to from broad OWASP
 # categories (CICD-SEC-1 → resource_controls, CICD-SEC-10 → logging_visibility).
@@ -1911,7 +1917,19 @@ def scan_repo(
             # CorpusPattern.  Per-file rules (RegexPattern /
             # ContextPattern / …) are unaffected because their
             # CorpusPattern siblings stub `check()` to return [].
-            all_findings.extend(_run_corpus_rules(repo_path, platform_rules))
+            # The ordinary and composer passes retain separate corpus walks,
+            # while exact filepath/content summaries are reused only inside
+            # this scan invocation. Each fresh corpus gets a pristine copy so
+            # mutable callbacks cannot change the cached summary for the next
+            # pass.
+            summary_cache: dict[str, tuple[str, WorkflowSummary]] = {}
+            all_findings.extend(
+                _run_corpus_rules(
+                    repo_path,
+                    platform_rules,
+                    _summary_cache=summary_cache,
+                )
+            )
             # B3 composer pass: re-invoke corpus rules whose
             # finding_family is "chain-composition", this time with
             # the full per-file + corpus findings list seeded as EDB.
@@ -1923,6 +1941,7 @@ def scan_repo(
                     platform_rules,
                     prior_findings=list(all_findings),
                     composer_only=True,
+                    _summary_cache=summary_cache,
                 )
             )
             # A0: a composite must not silently outrank the per-file guard
@@ -1957,6 +1976,7 @@ def _run_corpus_rules(
     *,
     prior_findings: list[Finding] | None = None,
     composer_only: bool = False,
+    _summary_cache: dict[str, tuple[str, WorkflowSummary]] | None = None,
 ) -> list[Finding]:
     """Build a WorkflowCorpus and run every CorpusPattern rule against it.
 
@@ -1986,7 +2006,10 @@ def _run_corpus_rules(
     if not corpus_rules:
         return []
 
-    corpus = build_corpus(repo_path)
+    if _summary_cache is None:
+        corpus = build_corpus(repo_path)
+    else:
+        corpus = build_corpus(repo_path, _summary_cache=_summary_cache)
     if prior_findings is not None:
         # Smuggled onto the corpus object for composer rules to read.
         corpus._prior_findings = prior_findings  # type: ignore[attr-defined]

@@ -34,6 +34,10 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- Composer job attribution reuses an immutable interval index per invocation.
+  Scan sessions reuse exact-content job segmentation, and corpus passes reuse
+  unchanged workflow summaries while retaining separate filesystem reads and
+  isolated mutable callback inputs.
 - Ordinary CLI scans defer secondary regex compilation, package version
   discovery and the GitLab corpus builder until needed. Direct constructors
   and validation modes remain eager; `--version` and SARIF retain the version.

@@ -37,6 +37,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -388,7 +389,11 @@ class WorkflowCorpus:
 _WORKFLOW_GLOB_DIRS = (os.path.join(".github", "workflows"),)
 
 
-def build_corpus(repo_path: str) -> WorkflowCorpus:
+def build_corpus(
+    repo_path: str,
+    *,
+    _summary_cache: dict[str, tuple[str, WorkflowSummary]] | None = None,
+) -> WorkflowCorpus:
     """Walk ``repo_path/.github/workflows/`` and build a
     :class:`WorkflowCorpus`.
 
@@ -401,8 +406,10 @@ def build_corpus(repo_path: str) -> WorkflowCorpus:
     corpus = WorkflowCorpus(repo_path=repo_path)
     wf_dir = os.path.join(repo_path, ".github", "workflows")
     if not os.path.isdir(wf_dir):
+        _prune_summary_cache(_summary_cache, wf_dir, set())
         return corpus
 
+    summarized_paths: set[str] = set()
     for fname in sorted(os.listdir(wf_dir)):
         if not (fname.endswith(".yml") or fname.endswith(".yaml")):
             continue
@@ -411,10 +418,41 @@ def build_corpus(repo_path: str) -> WorkflowCorpus:
             with open(fpath, encoding="utf-8", errors="replace") as f:
                 content = f.read()
         except OSError:
+            if _summary_cache is not None:
+                _summary_cache.pop(fpath, None)
             continue
-        corpus.workflows[fpath] = _summarize_workflow(fpath, content)
+        summarized_paths.add(fpath)
+        cached = _summary_cache.get(fpath) if _summary_cache is not None else None
+        if cached is not None and cached[0] == content:
+            summary = deepcopy(cached[1])
+        else:
+            summary = _summarize_workflow(fpath, content)
+            if _summary_cache is not None:
+                # Keep a pristine copy: callbacks can mutate summaries through
+                # the public WorkflowCorpus API before the next pass.
+                _summary_cache[fpath] = (content, deepcopy(summary))
+        corpus.workflows[fpath] = summary
+
+    _prune_summary_cache(_summary_cache, wf_dir, summarized_paths)
 
     return corpus
+
+
+def _prune_summary_cache(
+    summary_cache: dict[str, tuple[str, WorkflowSummary]] | None,
+    wf_dir: str,
+    summarized_paths: set[str],
+) -> None:
+    """Drop entries no longer readable from this corpus directory."""
+    if summary_cache is None:
+        return
+    normalized_dir = os.path.normcase(os.path.normpath(wf_dir))
+    for filepath in list(summary_cache):
+        if (
+            os.path.normcase(os.path.normpath(os.path.dirname(filepath))) == normalized_dir
+            and filepath not in summarized_paths
+        ):
+            del summary_cache[filepath]
 
 
 def _summarize_workflow(filepath: str, content: str) -> WorkflowSummary:

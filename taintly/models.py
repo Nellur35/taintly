@@ -43,6 +43,9 @@ _CHUNKED_SEARCH_INCOMPLETE: ContextVar[bool] = ContextVar(
 _JOB_SEGMENT_CACHE: ContextVar[dict[int, tuple[list[str], list[tuple[int, list[str]]]]] | None] = (
     ContextVar("taintly_job_segment_cache", default=None)
 )
+_JOB_SEGMENT_CONTENT_CACHE: ContextVar[dict[str, list[tuple[int, list[str]]]] | None] = ContextVar(
+    "taintly_job_segment_content_cache", default=None
+)
 _DEFER_CONTEXT_REGEX: ContextVar[bool] = ContextVar("taintly_defer_context_regex", default=False)
 
 
@@ -107,6 +110,7 @@ class scan_session:
     def __enter__(self):
         self._installed = False
         self._job_segment_cache_token = _JOB_SEGMENT_CACHE.set({})
+        self._job_segment_content_cache_token = _JOB_SEGMENT_CONTENT_CACHE.set({})
         if os.name != "posix":
             return self
         try:
@@ -122,6 +126,7 @@ class scan_session:
                 signal.alarm(0)  # type: ignore[attr-defined,unused-ignore]
                 signal.signal(signal.SIGALRM, self._old_handler)  # type: ignore[attr-defined,unused-ignore]
         finally:
+            _JOB_SEGMENT_CONTENT_CACHE.reset(self._job_segment_content_cache_token)
             _JOB_SEGMENT_CACHE.reset(self._job_segment_cache_token)
 
 
@@ -952,6 +957,31 @@ def _split_into_job_segments(lines: list[str]) -> list[tuple[int, list[str]]]:
     if len(cache) >= 2:
         del cache[next(iter(cache))]
     cache[key] = (lines, segments)
+    return segments
+
+
+def _split_into_job_segments_for_content(content: str) -> list[tuple[int, list[str]]]:
+    """Reuse job segmentation for equal content only during a scan session.
+
+    ``for_each_job`` is content-oriented and creates fresh line lists on every
+    call, so the identity-keyed cache above cannot help it. This bounded cache
+    shares raw segmentation only within the current context. Direct callers
+    outside a scan session retain the uncached behavior.
+    """
+    cache = _JOB_SEGMENT_CONTENT_CACHE.get()
+    if cache is None:
+        return _compute_job_segments(content.splitlines())
+
+    cached = cache.get(content)
+    if cached is not None:
+        del cache[content]
+        cache[content] = cached
+        return cached
+
+    segments = _compute_job_segments(content.splitlines())
+    if len(cache) >= 2:
+        del cache[next(iter(cache))]
+    cache[content] = segments
     return segments
 
 
