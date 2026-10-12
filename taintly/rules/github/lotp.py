@@ -20,9 +20,22 @@ from functools import lru_cache
 from textwrap import dedent
 
 from taintly.models import ContextPattern, Platform, Rule, Severity
-from taintly.parsers.gha_expr import ExprSyntaxError, context_paths, iter_expression_bodies
-from taintly.parsers.segmentation import JobSegment, StepSegment, for_each_job, for_each_step
+from taintly.parsers.gha_expr import (
+    Binary,
+    ExprSyntaxError,
+    canonical_path,
+    context_paths,
+    iter_expression_bodies,
+    parse,
+)
+from taintly.parsers.segmentation import (
+    JobSegment,
+    StepSegment,
+    for_each_job,
+    for_each_step,
+)
 from taintly.parsers.structural import EventKind, walk_workflow
+from taintly.parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
 
@@ -166,6 +179,9 @@ _BASE_REPO_FETCH_URL_RE = re.compile(
 _PR_FETCH_SOURCE_RE = re.compile(
     r"(?:refs/)?pull/(?:\d+|__PR_NUMBER__)/(?:head|merge)\Z", re.IGNORECASE
 )
+
+
+_LITERAL_PR_REF_RE = re.compile(r"(?:refs/)?pull/\d+/(?:head|merge)\Z")
 _GH_PR_URL_RE = re.compile(
     r"https://github\.com/(?:__GITHUB_REPOSITORY__|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/"
     r"pull/(?:\d+|__PR_NUMBER__)\Z",
@@ -195,6 +211,189 @@ _EVENT_EQ_RE = re.compile(
 _TRUSTED = "trusted"
 _UNTRUSTED = "untrusted"
 _UNKNOWN = "unknown"
+
+
+def _head_ref_unavailable(content: str) -> bool:
+    """Certify the narrow push/manual-only case; incomplete syntax stays unknown.
+
+    ``github.head_ref`` exists only for pull_request/pull_request_target.
+    Reusable workflows inherit caller context, so workflow_call cannot certify
+    absence. This is deliberately not a general trigger or YAML validator.
+    """
+    if re.search(r"(?m)^(?:---|\.\.\.)(?:\s|$)", content):
+        return False  # The structural reader skips document boundaries.
+    events = list(
+        walk_workflow("lotp-events.yml", content=content, include_keys=True, recover=True)
+    )
+    if any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
+        return False
+    declarations = [
+        event for event in events if event.kind is EventKind.MAP_KEY and event.path == ("on",)
+    ]
+    if len(declarations) != 1:
+        return False
+    try:
+        tokens = list(tokenize(content))
+    except TokenizerError:
+        return False
+    brackets: list[TokenKind] = []
+    for token in tokens:
+        if token.kind in {TokenKind.ANCHOR, TokenKind.ALIAS, TokenKind.MERGE_KEY}:
+            return False
+        if token.kind in {TokenKind.FLOW_OPEN_SEQ, TokenKind.FLOW_OPEN_MAP}:
+            brackets.append(token.kind)
+        elif token.kind in {TokenKind.FLOW_CLOSE_SEQ, TokenKind.FLOW_CLOSE_MAP}:
+            expected = (
+                TokenKind.FLOW_OPEN_SEQ
+                if token.kind is TokenKind.FLOW_CLOSE_SEQ
+                else TokenKind.FLOW_OPEN_MAP
+            )
+            if not brackets or brackets.pop() is not expected:
+                return False
+    if brackets:
+        return False
+
+    # Empty collection members disappear from the leaf stream. Certifying a
+    # trigger list therefore needs its complete token shape, not just leaves.
+    declaration = declarations[0]
+    starts = [
+        index
+        for index, token in enumerate(tokens)
+        if token.kind is TokenKind.KEY
+        and token.value == "on"
+        and token.line == declaration.line
+        and token.column == declaration.column
+    ]
+    if len(starts) != 1 or declaration.column != 1:
+        return False
+    start = starts[0] + 1
+    end = next(
+        (
+            index
+            for index in range(start, len(tokens))
+            if tokens[index].kind is TokenKind.KEY
+            and tokens[index].column == 1
+            and tokens[index].line > declaration.line
+        ),
+        len(tokens),
+    )
+    value_tokens = [
+        token
+        for token in tokens[start:end]
+        if token.kind not in {TokenKind.INDENT, TokenKind.COMMENT, TokenKind.EOF}
+    ]
+    scalar_kinds = {TokenKind.SCALAR_PLAIN, TokenKind.SCALAR_QUOTED}
+    if not value_tokens:
+        return False
+    if value_tokens[0].kind is TokenKind.FLOW_OPEN_SEQ:
+        if value_tokens[-1].kind is not TokenKind.FLOW_CLOSE_SEQ:
+            return False
+        expect_scalar = True
+        for token in value_tokens[1:-1]:
+            if expect_scalar:
+                if token.kind not in scalar_kinds:
+                    return False
+            elif token.kind is not TokenKind.FLOW_COMMA:
+                return False
+            expect_scalar = not expect_scalar
+    elif value_tokens[0].kind is TokenKind.SEQUENCE_DASH:
+        if len(value_tokens) % 2:
+            return False
+        for dash, scalar in zip(value_tokens[::2], value_tokens[1::2], strict=True):
+            if (
+                dash.kind is not TokenKind.SEQUENCE_DASH
+                or scalar.kind not in scalar_kinds
+                or dash.line != scalar.line
+            ):
+                return False
+
+    on_events = [event for event in events if event.path and event.path[0] == "on"]
+    keys = [event.path for event in on_events if event.kind is EventKind.MAP_KEY]
+    if len(keys) != len(set(keys)):
+        return False
+    bare = [
+        event
+        for event in on_events
+        if event.kind is EventKind.LEAF_SCALAR and event.path == ("on",)
+    ]
+    items = [event for event in on_events if len(event.path) > 1 and isinstance(event.path[1], int)]
+    mapping = [
+        event for event in on_events if len(event.path) > 1 and isinstance(event.path[1], str)
+    ]
+    if sum(bool(shape) for shape in (bare, items, mapping)) != 1:
+        return False
+    if bare:
+        if len(bare) != 1 or bare[0].value_kind not in {"plain", "quoted"}:
+            return False
+        names = {bare[0].value}
+    elif items:
+        if any(
+            len(event.path) != 2
+            or event.kind is not EventKind.LEAF_SCALAR
+            or event.value_kind not in {"plain", "quoted"}
+            for event in items
+        ):
+            return False
+        names = {event.value for event in items}
+    else:
+        if any(
+            len(event.path) == 2
+            and event.kind is EventKind.LEAF_SCALAR
+            and (event.value_kind != "plain" or event.value not in {"null", "~", ""})
+            for event in mapping
+        ):
+            return False
+        for event in mapping:
+            if len(event.path) != 2 or event.kind is not EventKind.MAP_KEY:
+                continue
+            position = next(
+                (
+                    index
+                    for index, token in enumerate(tokens)
+                    if token.kind is TokenKind.KEY
+                    and token.line == event.line
+                    and token.column == event.column
+                ),
+                None,
+            )
+            if position is None:
+                return False
+            following = next(
+                (
+                    token
+                    for token in tokens[position + 1 :]
+                    if token.kind not in {TokenKind.INDENT, TokenKind.COMMENT}
+                ),
+                None,
+            )
+            if following is not None and following.kind in {
+                TokenKind.FLOW_OPEN_SEQ,
+                TokenKind.SEQUENCE_DASH,
+                TokenKind.SCALAR_BLOCK_HEADER,
+            }:
+                return False
+        names = {
+            str(event.path[1])
+            for event in mapping
+            if len(event.path) == 2 and event.kind is EventKind.MAP_KEY
+        }
+    return bool(names) and names <= {"push", "workflow_dispatch"}
+
+
+def _exact_context(value: str) -> str | None:
+    """Return an entire context access, never a compound's component paths."""
+    value = value.strip()
+    if not (value.startswith("${{") and value.endswith("}}")):
+        return None
+    try:
+        return canonical_path(parse(value[3:-2]))
+    except ExprSyntaxError:
+        return None
+
+
+def _unavailable_head_ref(value: str, unavailable: bool) -> bool:
+    """Only an entire exact context access can lose its source evidence."""
+    return unavailable and _exact_context(value) == "github.head_ref"
 
 
 def _contains_pr_head_reference(text: str) -> bool:
@@ -367,7 +566,10 @@ def _checkout_input_fields(step: StepSegment) -> tuple[str, dict[str, str]] | No
 
 
 def _checkout_action_state(
-    step: StepSegment, *, default_trusted: bool = False
+    step: StepSegment,
+    *,
+    default_trusted: bool = False,
+    head_ref_unavailable: bool = False,
 ) -> tuple[str, bool, str | None] | None:
     """Return source state, repository provenance, and checkout path.
 
@@ -389,6 +591,8 @@ def _checkout_action_state(
     repository = fields.get("repository")
     foreign_repository = False
     if repository is not None:
+        if _unavailable_head_ref(repository, head_ref_unavailable):
+            return _UNKNOWN, True, path
         if _contains_pr_head_reference(repository):
             return _UNTRUSTED, True, path
         if repository != "${{ github.repository }}":
@@ -397,7 +601,13 @@ def _checkout_action_state(
 
     ref = fields.get("ref")
     if ref is not None:
-        if _contains_pr_head_reference(ref) or _WORKFLOW_RUN_HEAD_BRANCH_RE.search(ref):
+        if _unavailable_head_ref(ref, head_ref_unavailable):
+            return _UNKNOWN, foreign_repository, path
+        if (
+            _contains_pr_head_reference(ref)
+            or _WORKFLOW_RUN_HEAD_BRANCH_RE.search(ref)
+            or _LITERAL_PR_REF_RE.fullmatch(ref)
+        ):
             return _UNTRUSTED, foreign_repository, path
         if _STATIC_REF_RE.fullmatch(ref):
             return _TRUSTED, foreign_repository, path
@@ -409,7 +619,7 @@ def _checkout_action_state(
     return _UNKNOWN, False, path
 
 
-def _checkout_may_use_pr_source(step: StepSegment) -> bool:
+def _checkout_may_use_pr_source(step: StepSegment, *, head_ref_unavailable: bool = False) -> bool:
     """Require PR source evidence in checkout fields, not adjacent metadata."""
 
     if not _CHECKOUT_ACTION_RE.search(step.text):
@@ -420,11 +630,20 @@ def _checkout_may_use_pr_source(step: StepSegment) -> bool:
     uses, fields = structural
     if not re.match(r"^actions/checkout@", uses, re.IGNORECASE):
         return False
-    values = [fields[name] for name in ("ref", "repository") if name in fields]
+    values = [
+        fields[name]
+        for name in ("ref", "repository")
+        if name in fields
+        and not (name == "repository" and _exact_context(fields[name]) == "github.repository")
+    ]
     return any(
-        _contains_pr_head_reference(value)
-        or _WORKFLOW_RUN_HEAD_BRANCH_RE.search(value)
-        or "${{" in value
+        not _unavailable_head_ref(value, head_ref_unavailable)
+        and (
+            _contains_pr_head_reference(value)
+            or _WORKFLOW_RUN_HEAD_BRANCH_RE.search(value)
+            or _LITERAL_PR_REF_RE.fullmatch(value)
+            or "${{" in value
+        )
         for value in values
     )
 
@@ -779,7 +998,16 @@ def _git_fetch_events(
                 state = remote_state
             if write_fetch_head or target_ref:
                 events.append(
-                    (column, state, target_ref, paths, write_fetch_head, remote, source, integrates)
+                    (
+                        column,
+                        state,
+                        target_ref,
+                        paths,
+                        write_fetch_head,
+                        remote,
+                        source,
+                        integrates,
+                    )
                 )
     return events
 
@@ -947,7 +1175,10 @@ def _git_worktree_add_events(
         if invocation is None:
             continue
         index, paths = invocation
-        if [token.lower() for token in tokens[index : index + 2]] != ["worktree", "add"]:
+        if [token.lower() for token in tokens[index : index + 2]] != [
+            "worktree",
+            "add",
+        ]:
             continue
         args = tokens[index + 2 :]
         while args and args[0].startswith("-"):
@@ -1091,7 +1322,12 @@ def _git_clone_events(
         if not args:
             continue
         events.append(
-            (column, _git_fetch_remote_state(args[0]), args[1] if len(args) > 1 else None, paths)
+            (
+                column,
+                _git_fetch_remote_state(args[0]),
+                args[1] if len(args) > 1 else None,
+                paths,
+            )
         )
     return events
 
@@ -1150,7 +1386,10 @@ def _build_source_path(
         index for index, char in enumerate(shell_line) if char in ";&|" and not mask[index]
     ]
     start = max((index + 1 for index in separators if index < anchor_column), default=0)
-    end = min((index for index in separators if index > anchor_column), default=len(shell_line))
+    end = min(
+        (index for index in separators if index > anchor_column),
+        default=len(shell_line),
+    )
     segment = shell_line[start:end]
     if _PIP_COMMAND_RE.match(shell_line[anchor_column:]):
         command = shell_line[anchor_column:end]
@@ -1277,7 +1516,7 @@ def _git_source_changes(
         if ref == "--":
             # ``git checkout -- path`` restores a path; it does not select a ref.
             continue
-        if _contains_pr_head_reference(ref):
+        if _contains_pr_head_reference(ref) or _LITERAL_PR_REF_RE.fullmatch(ref):
             state = _UNTRUSTED
         elif ref.upper() in _GIT_TRANSIENT_REFS:
             state = _UNKNOWN
@@ -1330,7 +1569,7 @@ def _git_source_changes(
         if not args or args[0] == "--":
             continue
         ref = args[0]
-        if _contains_pr_head_reference(ref):
+        if _contains_pr_head_reference(ref) or _LITERAL_PR_REF_RE.fullmatch(ref):
             state = _UNTRUSTED
         elif ref.upper() in _GIT_TRANSIENT_REFS:
             state = _UNKNOWN
@@ -1380,6 +1619,82 @@ def _job_for_line(jobs: list[JobSegment], line: int) -> JobSegment | None:
     return next((job for job in jobs if job.start_line <= line <= job.end_line), None)
 
 
+def _pr_event_source(value: str) -> bool:
+    """Prove an exact PR source or the supported PR-or-base-SHA fallback.
+
+    A context inventory cannot prove this: a literal fallback or a function can
+    select independent bytes without introducing another context reference.
+    """
+    value = value.strip()
+    if not (value.startswith("${{") and value.endswith("}}")):
+        return False
+    try:
+        node = parse(value[3:-2])
+    except ExprSyntaxError:
+        return False
+    path = canonical_path(node)
+    if path is not None:
+        return bool(_PR_HEAD_PATH_RE.fullmatch(path))
+    if isinstance(node, Binary) and node.op == "||":
+        left = canonical_path(node.left)
+        return (
+            left is not None
+            and bool(_PR_HEAD_PATH_RE.fullmatch(left))
+            and canonical_path(node.right) == "github.sha"
+        )
+    return False
+
+
+def _run_sources_require_pr_event(step: StepSegment) -> bool:
+    """Qualify actual command source operands, never adjacent PR text."""
+    quote: str | None = None
+    for _, line in sorted(_run_shell_lines(step).items()):
+        mask, quote, _ = _shell_quote_mask(line, quote)
+        for column, state, ref, _, _ in _git_source_changes(line, mask):
+            if not mask[column] and state != _TRUSTED:
+                if state == _UNKNOWN or not _pr_event_source(ref):
+                    return False
+        for _, state, _, _, _, remote, source, _ in _git_fetch_events(line, mask):
+            if state != _TRUSTED:
+                if state == _UNKNOWN or not (
+                    "__PR_HEAD_REPOSITORY__" in remote
+                    or (source is not None and "__PR_NUMBER__" in source)
+                ):
+                    return False
+        if any(state == _UNKNOWN for _, _, state, _, _ in _git_remote_events(line, mask)):
+            return False
+        if any(state == _UNKNOWN for _, state, _, _ in _git_clone_events(line, mask)):
+            return False
+    return True
+
+
+def _job_sources_require_pr_event(steps: list[StepSegment], unavailable: bool) -> bool:
+    """A PR-only step guard cannot exclude independently selected PR bytes.
+
+    Use a conservative job-wide join: any workflow-run, literal PR selection,
+    or unknown independent source disables PR-only guard pruning for the job.
+    This does not prove that any particular invocation actually ran.
+    """
+    for step in steps:
+        if _checkout_may_use_pr_source(step, head_ref_unavailable=unavailable):
+            structural = _checkout_input_fields(step)
+            if structural is None:
+                return False
+            for name in ("ref", "repository"):
+                value = structural[1].get(name)
+                if value is None or (
+                    name == "repository" and _exact_context(value) == "github.repository"
+                ):
+                    continue
+                if _unavailable_head_ref(value, unavailable):
+                    continue
+                if _LITERAL_PR_REF_RE.fullmatch(value) or not _pr_event_source(value):
+                    return False
+        if not _run_sources_require_pr_event(step):
+            return False
+    return True
+
+
 class _OrderedPrBuildPattern(ContextPattern):
     """Keep build matches only on a feasible PR-head execution path.
 
@@ -1422,15 +1737,17 @@ class _OrderedPrBuildPattern(ContextPattern):
         kept: set[int] = set()
         resolved: set[int] = set()
         workflow_default = _default_working_path(lines, 0, ".")
+        head_ref_unavailable = _head_ref_unavailable(content)
 
         for job in jobs:
             job_lines = {line for line in raw_by_line if job.start_line <= line <= job.end_line}
             if not job_lines:
                 continue
             job_steps = [step for step in steps if step.job_name == job.name]
+            pr_event_only = _job_sources_require_pr_event(job_steps, head_ref_unavailable)
             if not any(
                 (
-                    _checkout_may_use_pr_source(step)
+                    _checkout_may_use_pr_source(step, head_ref_unavailable=head_ref_unavailable)
                     or _run_may_select_pr_source(
                         step, include_unknown=self._default_trusted_checkout
                     )
@@ -1439,7 +1756,7 @@ class _OrderedPrBuildPattern(ContextPattern):
                         and _checkout_action_state(step, default_trusted=True) is not None
                     )
                 )
-                and not _excludes_pr_path(_direct_if(step))
+                and not (pr_event_only and _excludes_pr_path(_direct_if(step)))
                 for step in job_steps
             ):
                 resolved.update(job_lines)
@@ -1469,9 +1786,11 @@ class _OrderedPrBuildPattern(ContextPattern):
                 step_candidates = {
                     line for line in job_lines if step.start_line <= line <= step.end_line
                 }
-                pr_excluded = _excludes_pr_path(_direct_if(step))
+                pr_excluded = pr_event_only and _excludes_pr_path(_direct_if(step))
                 checkout_state = _checkout_action_state(
-                    step, default_trusted=self._default_trusted_checkout
+                    step,
+                    default_trusted=self._default_trusted_checkout,
+                    head_ref_unavailable=head_ref_unavailable,
                 )
                 cwd = _step_working_path(step, default_path)
                 child_scopes: dict[int, list[tuple[int, int]]] = {}
@@ -1558,7 +1877,11 @@ class _OrderedPrBuildPattern(ContextPattern):
                         for cd_match in _SHELL_CD_RE.finditer(shell_line):
                             if not shell_mask[cd_match.start()]:
                                 events.append(
-                                    (cd_match.start("command"), "cd", cd_match.group("path"))
+                                    (
+                                        cd_match.start("command"),
+                                        "cd",
+                                        cd_match.group("path"),
+                                    )
                                 )
                         for (
                             column,
@@ -1741,6 +2064,7 @@ class _OrderedPrBuildPattern(ContextPattern):
                                         local_branches.get(source_key, {}),
                                         _UNTRUSTED
                                         if _contains_pr_head_reference(start_ref)
+                                        or _LITERAL_PR_REF_RE.fullmatch(start_ref)
                                         else _UNKNOWN
                                         if source_key in ref_state_uncertain
                                         else _TRUSTED
@@ -1854,7 +2178,10 @@ class _OrderedPrBuildPattern(ContextPattern):
                             if clone_path is not None and destination is None:
                                 uncertain_layout = True
                             elif destination is not None:
-                                sources[destination] = clone_state, clone_state != _TRUSTED
+                                sources[destination] = (
+                                    clone_state,
+                                    clone_state != _TRUSTED,
+                                )
                             elif clone_cwd is None:
                                 uncertain_layout = True
                             else:
@@ -1897,7 +2224,8 @@ class _OrderedPrBuildPattern(ContextPattern):
                                 if fetch_writes.get(column, True):
                                     refs["FETCH_HEAD"] = (
                                         _join_source_states(
-                                            refs.get("FETCH_HEAD", _UNKNOWN), target_state
+                                            refs.get("FETCH_HEAD", _UNKNOWN),
+                                            target_state,
                                         )
                                         if conditional
                                         else target_state
