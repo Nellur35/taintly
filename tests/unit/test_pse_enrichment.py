@@ -1,8 +1,8 @@
-"""Tests for PSE-GH-002 — IAM-policy escalation of PSE-GH-001 findings.
+"""Tests for IAM candidate discovery and PSE-GH-001 enrichment.
 
 The escalation pass must:
-  * Promote a HIGH PSE-GH-001 finding to CRITICAL when the matched
-    local IAM policy classifies as :attr:`BlastRadius.CRITICAL`.
+  * Keep lexical local-policy matches HIGH and review-needed.
+    Positive snapshot attachment controls live in test_pse_authority.py.
   * Leave the finding at HIGH when no matching policy is found
     (absence of evidence is not evidence of absence).
   * Leave the finding at HIGH when the matched policy classifies
@@ -188,7 +188,7 @@ def _make_pse_finding(workflow_path: str) -> Finding:
     )
 
 
-def test_enrich_escalates_to_critical_on_iam_star_policy(tmp_path: Path) -> None:
+def test_enrich_keeps_raw_iam_star_policy_as_review_candidate(tmp_path: Path) -> None:
     wf_path = _write_workflow(
         tmp_path,
         "on: pull_request\n"
@@ -205,10 +205,10 @@ def test_enrich_escalates_to_critical_on_iam_star_policy(tmp_path: Path) -> None
     findings = [_make_pse_finding(wf_path)]
     enriched = enrich_pse_findings(findings, str(tmp_path))
 
-    assert enriched[0].severity == Severity.CRITICAL
-    assert "[CRITICAL IAM blast radius]" in enriched[0].title
-    assert "iam:*" in enriched[0].description
-    assert "IAM-policy blast-radius escalation" in enriched[0].description
+    assert enriched[0].severity == Severity.HIGH
+    assert enriched[0].review_needed
+    assert any("candidate" in note for note in enriched[0].context_notes)
+    assert "arbitrary AWS-account impact" not in enriched[0].description
 
 
 def test_enrich_does_not_escalate_when_policy_is_high_only(tmp_path: Path) -> None:
@@ -286,13 +286,13 @@ def test_enrich_handles_terraform_heredoc_critical_policy(tmp_path: Path) -> Non
     findings = [_make_pse_finding(wf_path)]
     enriched = enrich_pse_findings(findings, str(tmp_path))
 
-    assert enriched[0].severity == Severity.CRITICAL
-    assert "sts:*" in enriched[0].description
+    assert enriched[0].severity == Severity.HIGH
+    assert enriched[0].review_needed
+    assert any("candidate" in note for note in enriched[0].context_notes)
 
 
-def test_enrich_takes_worst_when_workflow_assumes_multiple_roles(tmp_path: Path) -> None:
-    # Workflow that assumes two roles in the same job — the worst
-    # blast-radius wins.  Auditors care about the upper bound.
+def test_enrich_keeps_multiple_unresolved_roles_at_high(tmp_path: Path) -> None:
+    # Multiple role configurations do not identify the active authority.
     wf_path = _write_workflow(
         tmp_path,
         "on: pull_request\n"
@@ -316,8 +316,9 @@ def test_enrich_takes_worst_when_workflow_assumes_multiple_roles(tmp_path: Path)
     findings = [_make_pse_finding(wf_path)]
     enriched = enrich_pse_findings(findings, str(tmp_path))
 
-    assert enriched[0].severity == Severity.CRITICAL
-    assert "CriticalRole" in enriched[0].description
+    assert enriched[0].severity == Severity.HIGH
+    assert enriched[0].review_needed
+    assert any("CriticalRole" in note for note in enriched[0].context_notes)
 
 
 def test_enrich_handles_missing_workflow_file(tmp_path: Path) -> None:
@@ -395,11 +396,8 @@ def test_enrich_caches_repeated_policy_classifications(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_scan_repo_escalates_pse_finding_via_iam_policy(tmp_path: Path) -> None:
-    """End-to-end: a workflow that fires PSE-GH-001 and ships a
-    CRITICAL local IAM policy should be reported at CRITICAL after
-    scan_repo runs.  This is the user-visible PSE-GH-002 contract.
-    """
+def test_scan_repo_preserves_raw_iam_policy_as_review_candidate(tmp_path: Path) -> None:
+    """A raw policy file cannot certify attachment or effective access."""
     from taintly.engine import scan_repo
     from taintly.models import Platform
     from taintly.rules.registry import load_all_rules
@@ -428,8 +426,9 @@ def test_scan_repo_escalates_pse_finding_via_iam_policy(tmp_path: Path) -> None:
 
     pse_findings = [f for r in reports for f in r.findings if f.rule_id == "PSE-GH-001"]
     assert len(pse_findings) == 1
-    assert pse_findings[0].severity == Severity.CRITICAL
-    assert "IAM-policy blast-radius escalation" in pse_findings[0].description
+    assert pse_findings[0].severity == Severity.HIGH
+    assert pse_findings[0].review_needed
+    assert any("candidate" in note for note in pse_findings[0].context_notes)
 
 
 def test_scan_repo_leaves_pse_at_high_without_iam_policy(tmp_path: Path) -> None:
