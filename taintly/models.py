@@ -1722,6 +1722,30 @@ class Rule:
 # =============================================================================
 
 
+@dataclass(frozen=True)
+class CheckoutBuildWitness:
+    """Same-content configured PR checkout/build/persisted-token path.
+
+    This is static configuration evidence, not observed execution or effective
+    provider authority. Only the bounded authority profile constructs it.
+    Source identity and structural owners must be checked again at composition.
+    """
+
+    source_sha256: str
+    file: str
+    job: str
+    checkout_step: int
+    build_step: int
+    checkout_line: int
+    repository_line: int
+    ref_line: int
+    build_line: int
+    command: str
+    permission_line: int
+    write_scopes: tuple[tuple[str, int], ...]
+    persistence_line: int
+
+
 @dataclass
 class Finding:
     """A single finding from scanning a file or platform setting."""
@@ -1797,6 +1821,9 @@ class Finding:
     with.script leaf; never reconstructed from display snippets or file reads.
     This bookkeeping is not serialized as finding metadata.
     """
+
+    _checkout_build: CheckoutBuildWitness | None = field(default=None, repr=False, compare=False)
+    """Internal static path from this scan; never reconstructed from prose/tags."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
