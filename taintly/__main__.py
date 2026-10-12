@@ -36,7 +36,7 @@ from .deployment_context import (
     apply_context_notes_to_findings,
     load_deployment_context,
 )
-from .engine import detect_platform, scan_file, scan_repo
+from .engine import coalesce_input_script_findings, detect_platform, scan_file, scan_repo
 from .models import Platform, Severity, _defer_context_regex_compilation
 from .reporters._encoding import ensure_utf8_stdout
 from .reporters.json_report import format_json
@@ -1029,6 +1029,7 @@ def main():
 
         report.findings = apply_config_ignores(report.findings, audit_config.ignores, args.path)
         report.filter_severity(effective_min_sev)
+        report.findings = coalesce_input_script_findings(report.findings)
         report.summarize()
         score_report = (
             compute_score(
@@ -1110,6 +1111,7 @@ def main():
 
         report.findings = apply_config_ignores(report.findings, audit_config.ignores, args.path)
         report.filter_severity(effective_min_sev)
+        report.findings = coalesce_input_script_findings(report.findings)
         report.summarize()
         score_report = (
             compute_score(
@@ -1153,6 +1155,7 @@ def main():
 
         report.findings = apply_config_ignores(report.findings, audit_config.ignores, args.path)
         report.filter_severity(effective_min_sev)
+        report.findings = coalesce_input_script_findings(report.findings)
         report.summarize()
         score_report = (
             compute_score(
@@ -1239,6 +1242,7 @@ def main():
         platform,
         explicit_github_repoctx=explicit_repoctx,
         max_scan_seconds=args.max_scan_seconds,
+        coalesce_overlaps=False,
     )
 
     # Surface config-driven exclusions on every report so the summary
@@ -1259,6 +1263,8 @@ def main():
         apply_context_notes_to_findings(report.findings, deployment_context)
         report.findings = apply_config_ignores(report.findings, audit_config.ignores, args.path)
         report.filter_severity(effective_min_sev)
+        report.findings = coalesce_input_script_findings(report.findings)
+        report.summarize()
         all_findings.extend(report.findings)
 
     # --baseline: write fingerprints and exit
