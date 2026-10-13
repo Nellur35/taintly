@@ -129,12 +129,20 @@ jobs:
     assert "inherit" in call_notes
     assert "sibling_only" not in action_notes
     assert "build_token" in action_notes
+    permission_note = next(
+        note.lower()
+        for note in action.context_notes
+        if note.startswith("Declared local permission ceiling:")
+    )
+    assert "contents=read" in permission_note
+    assert "contents=write" not in permission_note
+    assert "effective provider token permissions remain unknown" in permission_note
     assert "effective" in action_notes
     assert "unknown" in action_notes
     assert action.context_notes[0] in action.to_dict()["context_notes"]
 
 
-def test_malformed_and_cutoff_uses_keep_inventory_with_unknown_context():
+def test_malformed_and_incomplete_uses_keep_inventory_with_unknown_context():
     mixed = """jobs:
   odd:
     uses: example/reusable@v1
@@ -145,14 +153,19 @@ def test_malformed_and_cutoff_uses_keep_inventory_with_unknown_context():
     assert len(findings) == 2
     assert all("unknown" in " ".join(f.context_notes).lower() for f in findings)
 
-    cutoff = """jobs:
+    incomplete = """jobs:
   before:
     steps:
       - uses: example/before@v1
 %YAML 1.2
 """
-    assert inventory_findings(cutoff) == []
-    assert any(f.rule_id == "ENGINE-ERR" for f in scan(cutoff))
+    assert inventory_findings(incomplete) == []
+    assert any(
+        f.rule_id == "ENGINE-ERR"
+        and "SEC3-GH-006" in f.title
+        and "incomplete pattern results" in f.title
+        for f in scan(incomplete)
+    )
 
 
 def test_duplicate_owner_keys_keep_occurrence_but_withhold_borrowed_context():
