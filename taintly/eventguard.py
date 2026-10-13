@@ -149,8 +149,10 @@ def intersect_constraints(left: GuardConstraints, right: GuardConstraints) -> Gu
 def guard_constraints(guards: Iterable[str | None], event: str) -> GuardConstraints:
     """Possible joint guards on one invocation's ref and event name.
 
-    Only ASCII string comparisons on ``github.ref`` are correlated. Other
-    runtime paths remain unknown, including step/job-varying env and outputs.
+    Only ASCII string comparisons on ``github.ref`` and the PR-only
+    ``github.base_ref``/``github.head_ref`` fields are correlated. Other
+    invocation fields remain unknown, including step/job-varying env and
+    outputs.
     Negation is pushed into the expression, never applied to a widened set.
     """
     result = UNCONSTRAINED
@@ -204,8 +206,12 @@ def _possible_constraints(
             if path == "github.event_name":
                 matches = event.casefold() == literal.value.casefold()
                 return UNCONSTRAINED if matches is equal else ()
-            if path == "github.ref" and literal.value.isascii():
-                return (frozenset({(path, literal.value.lower(), equal)}),)
+            pr_ref_context = path in {"github.base_ref", "github.head_ref"} and (
+                event.casefold() in {"pull_request", "pull_request_target"}
+            )
+            if path is not None and (path == "github.ref" or pr_ref_context):
+                if literal.value.isascii():
+                    return (frozenset({(path, literal.value.lower(), equal)}),)
     return UNCONSTRAINED
 
 

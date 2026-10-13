@@ -208,3 +208,22 @@ Exhaustion returns unconstrained/unknown, so very long duplicate streams may
 now conservatively widen. Unsupported conditions and opaque owners stay
 possible. Bounded results may retain different precision under different
 input orders; a later broad alternative need not be reached after exhaustion.
+
+## Pull-request branch conditions
+
+On known `pull_request` and `pull_request_target` events, the same bounded
+condition model also understands direct `github.base_ref` and `github.head_ref`
+comparisons with ASCII string literals. The base field names the PR target
+branch; the head field names its source branch. Contradictory conditions on the
+same field cannot hold in one invocation. Equality is case-insensitive, matching
+GitHub's expression rules.
+
+Each field stays independent of the other and of `github.ref`. A head branch
+name does not establish trust. Unsupported events, inherited reusable-workflow
+context, dynamic values, transformed fields and uncertain ownership remain
+unknown. The analysis does not relate separate runs or callers, infer branch
+filter constraints, or establish runtime execution or credential authority.
+
+These conditions apply to composed paths and secret-bearing cache execution
+states. An incompatible cleanup step cannot erase evidence from a compatible
+path. Existing state and condition budgets still report or retain uncertainty.
