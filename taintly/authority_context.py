@@ -7,11 +7,13 @@ Unknown links remain review-needed; an execution observation is never removed.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from hashlib import sha256
 
+from ._local_invocation import LocalFileInvocation, recognize_local_file_invocation
 from .eventguard import event_guard_verdict
 from .models import CheckoutBuildWitness, Finding, Severity
 from .parsers.gha_expr import (
@@ -25,7 +27,7 @@ from .parsers.gha_expr import (
 )
 from .parsers.structural import Event, EventKind, triggers, walk_workflow
 
-_RULES = frozenset({"LOTP-GH-001", "LOTP-GH-003"})
+_RULES = frozenset({"LOTP-GH-001", "LOTP-GH-003", "LOTP-GH-006"})
 _MAX_PROFILE_EVENTS = 20_000
 _MAX_PROFILE_STEPS = 256
 _SCOPES = frozenset(
@@ -263,10 +265,36 @@ def _guard(index: _Index, path: tuple[object, ...]) -> str | None:
     return index.value(path) if index.has(path) else None
 
 
+def _local_invocation_for_finding(index: _Index, finding: Finding) -> LocalFileInvocation | None:
+    """Re-read a direct run scalar and bind the invocation to its source line."""
+
+    sink = index.sink(finding.line)
+    if sink is None:
+        return None
+    run = index.leaves.get(sink + ("run",))
+    if run is None or not isinstance(run.value, str):
+        return None
+    if run.value_kind == "block_literal":
+        body_line = next(
+            (text for line, text in run.block_lines or () if line == finding.line),
+            None,
+        )
+        return recognize_local_file_invocation(body_line) if body_line is not None else None
+    if run.line != finding.line:
+        return None
+    return recognize_local_file_invocation(run.value)
+
+
 def _classify(index: _Index, finding: Finding) -> tuple[str, list[str]]:
     unresolved = "unresolved"
     sink = index.sink(finding.line)
-    notes = [f"Build observation at line {finding.line}; authority is evaluated separately."]
+    notes = [
+        (
+            f"Local-file execution candidate at line {finding.line}; runtime success and file availability are unverified."
+            if finding.rule_id == "LOTP-GH-006"
+            else f"Build observation at line {finding.line}; authority is evaluated separately."
+        )
+    ]
     if index.ambiguous or sink is None or not isinstance(sink[3], int):
         return unresolved, notes + ["Structural ownership is incomplete or ambiguous."]
     job = str(sink[1])
@@ -280,7 +308,11 @@ def _classify(index: _Index, finding: Finding) -> tuple[str, list[str]]:
     if not grant.known:
         return unresolved, notes + ["Effective token permissions are unknown or unsupported."]
     notes.append(
-        f"Effective permissions at line {grant.line}: "
+        (
+            f"Declared token permission ceiling at line {grant.line}: "
+            if finding.rule_id == "LOTP-GH-006"
+            else f"Effective permissions at line {grant.line}: "
+        )
         + (
             ", ".join(
                 f"{scope}:write (line {line})"
@@ -319,7 +351,10 @@ def _classify(index: _Index, finding: Finding) -> tuple[str, list[str]]:
             "Indirect source, workspace changes or intervening steps need review."
         ]
     notes.append(
-        f"PR-head source at lines {index.leaves[repo].line}/{index.leaves[ref].line}; checkout at line {uses.line} precedes this build."
+        f"PR-head source at lines {index.leaves[repo].line}/{index.leaves[ref].line}; "
+        f"checkout at line {uses.line} precedes this local-file invocation."
+        if finding.rule_id == "LOTP-GH-006"
+        else f"PR-head source at lines {index.leaves[repo].line}/{index.leaves[ref].line}; checkout at line {uses.line} precedes this build."
     )
     version = _CHECKOUT.fullmatch(uses.value or "")
     if version is None:
@@ -349,13 +384,36 @@ def _classify(index: _Index, finding: Finding) -> tuple[str, list[str]]:
         )
     ):
         return unresolved, notes + ["Custom shell execution or isolation needs review."]
+    shell = next(
+        (
+            index.value(path)
+            for path in (
+                sink + ("shell",),
+                base + ("defaults", "run", "shell"),
+                ("defaults", "run", "shell"),
+            )
+            if index.has(path)
+        ),
+        "",
+    )
+    if finding.rule_id == "LOTP-GH-006" and shell not in {"", "bash", "sh"}:
+        return unresolved, notes + ["The outer run shell is not a supported POSIX shell."]
     run = index.leaves[sink + ("run",)]
     before = [
         text
         for n, text in run.block_lines or ()
         if n < finding.line and text.strip() and not text.lstrip().startswith("#")
     ]
-    command = index.lines[finding.line - 1].strip()
+    invocation = (
+        _local_invocation_for_finding(index, finding) if finding.rule_id == "LOTP-GH-006" else None
+    )
+    command = (
+        invocation.command if invocation is not None else index.lines[finding.line - 1].strip()
+    )
+    if finding.rule_id == "LOTP-GH-006" and invocation is None:
+        return unresolved, notes + [
+            "The source-owned run scalar no longer matches a supported local-file invocation."
+        ]
     if before or any(marker in command for marker in ("${", "$", "`", ";", "&&", "||")):
         return unresolved, notes + [
             "Script statements or dynamic command state before the build need review."
@@ -429,15 +487,26 @@ def _classify(index: _Index, finding: Finding) -> tuple[str, list[str]]:
     )
     if reachable_target and token_writes and access_event is not None:
         access_line = access_event.line
-        notes.append(
-            f"On the pull_request_target path, configured GITHUB_TOKEN write authority is accessible at line {access_line} through "
-            + (
-                "checkout credential persistence (same runner user; removed after the job)."
-                if persistence == "true"
-                else "the effective build environment."
+        if finding.rule_id == "LOTP-GH-006":
+            notes.append(
+                f"On the pull_request_target path, a configured GITHUB_TOKEN access candidate is declared at line {access_line} through "
+                + (
+                    "checkout credential persistence (same runner user; removed after the job)."
+                    if persistence == "true"
+                    else "the effective step environment."
+                )
+                + " Provider permission policy and effective authority remain unverified."
             )
-            + " Provider permission policy still applies; no cloud role or external secret value is inferred."
-        )
+        else:
+            notes.append(
+                f"On the pull_request_target path, configured GITHUB_TOKEN write authority is accessible at line {access_line} through "
+                + (
+                    "checkout credential persistence (same runner user; removed after the job)."
+                    if persistence == "true"
+                    else "the effective build environment."
+                )
+                + " Provider permission policy still applies; no cloud role or external secret value is inferred."
+            )
         return "evidenced", notes
     opaque = any(
         p == "unknown" or p.startswith(("steps.", "needs.", "inputs.", "vars.", "env.", "matrix."))
@@ -445,6 +514,13 @@ def _classify(index: _Index, finding: Finding) -> tuple[str, list[str]]:
         if "env" in path or ("with" in path and path[-1] in {"token", "ssh-key"})
         for p in _paths(ev.value or "")
     )
+    local_script_has_declared_env = False
+    if finding.rule_id == "LOTP-GH-006":
+        local_script_has_declared_env = any(
+            (event.value or "").strip()
+            for step in steps
+            for event in index.environment(step).values()
+        )
     runner = [ev.value or "" for p, ev in index.leaves.items() if p[:3] == base + ("runs-on",)]
     if (
         events == {"pull_request"}
@@ -452,6 +528,7 @@ def _classify(index: _Index, finding: Finding) -> tuple[str, list[str]]:
         and persistence == "false"
         and not secret_lines
         and not opaque
+        and not local_script_has_declared_env
         and runner
         and all(_HOSTED.fullmatch(v) for v in runner)
     ):
@@ -481,16 +558,37 @@ def _configured_build_path(index: _Index, finding: Finding) -> CheckoutBuildWitn
     if uses is None:
         return None
     run = index.leaves[sink + ("run",)]
-    statements = [
-        text.strip()
-        for text in (run.value or "").splitlines()
-        if text.strip() and not text.lstrip().startswith("#")
-    ]
-    if len(statements) != 1:
+    if not isinstance(run.value, str):
         return None
-    command = statements[0]
-    if _DIRECT_LOCAL_BUILD.fullmatch(command) is None:
-        return None
+    invocation: LocalFileInvocation | None = None
+    if finding.rule_id == "LOTP-GH-006":
+        invocation = _local_invocation_for_finding(index, finding)
+        command = invocation.command if invocation is not None else ""
+        if invocation is None:
+            return None
+        if invocation.normalized_operand.startswith("../"):
+            return None
+        if run.value_kind == "block_literal":
+            meaningful = [
+                text.strip()
+                for _, text in run.block_lines or ()
+                if text.strip() and not text.lstrip().startswith("#")
+            ]
+            if len(meaningful) != 1:
+                return None
+        elif "\n" in run.value.strip():
+            return None
+    else:
+        statements = [
+            text.strip()
+            for text in (run.value or "").splitlines()
+            if text.strip() and not text.lstrip().startswith("#")
+        ]
+        if len(statements) != 1:
+            return None
+        command = statements[0]
+        if _DIRECT_LOCAL_BUILD.fullmatch(command) is None:
+            return None
     shell = next(
         (
             index.value(p)
@@ -555,21 +653,57 @@ def _configured_build_path(index: _Index, finding: Finding) -> CheckoutBuildWitn
         persistence_line=(
             index.leaves.get(checkout + ("with", "persist-credentials")) or uses
         ).line,
+        execution_kind="script" if invocation is not None else "build",
+        script_path=(
+            posixpath.normpath(invocation.normalized_operand) if invocation is not None else None
+        ),
+        interpreter=invocation.interpreter if invocation is not None else None,
     )
 
 
 def calibrate_lotp_authority(findings: list[Finding], content: str) -> None:
-    """Annotate only LOTP001/003; preserve matches, IDs, spans and rule confidence."""
+    """Annotate bounded LOTP candidates and suppress only supported low-risk script leaves."""
     targets = [f for f in findings if f.rule_id in _RULES and f.origin == "file"]
     if not targets:
         return
     index = _Index(content)
+    suppressed_script_ids: set[int] = set()
     for finding in targets:
         # A reused Finding must not retain a witness from different source.
         finding._checkout_build = None
+        if finding.rule_id == "LOTP-GH-006":
+            invocation = _local_invocation_for_finding(index, finding)
+            sink = index.sink(finding.line)
+            run = index.leaves.get(sink + ("run",)) if sink is not None else None
+            if invocation is not None and run is not None:
+                origin = (
+                    f"Folded YAML run scalar at line {finding.line} decoded as one local-file invocation; the cited line is the scalar header, not a physical command-body line."
+                    if run.value_kind == "block_folded"
+                    else "Literal YAML run body contains one local-file invocation at the cited physical body line."
+                    if run.value_kind == "block_literal"
+                    else "Inline YAML run scalar contains one local-file invocation at the cited line."
+                )
+                program = (
+                    f"{invocation.interpreter} {posixpath.normpath(invocation.normalized_operand)}"
+                    if invocation.interpreter
+                    else posixpath.normpath(invocation.normalized_operand)
+                )
+                finding.context_notes.append(
+                    f"{origin} Configured local-file invocation candidate: {program}; runtime and file availability remain unverified."
+                )
+                finding.context_tags.append("local-file-invocation-candidate")
+                if run.value_kind == "block_folded":
+                    finding.context_tags.append("folded-run-scalar-header")
         state, notes = _classify(index, finding)
         if state == "evidenced":
             finding._checkout_build = _configured_build_path(index, finding)
+        if finding.rule_id == "LOTP-GH-006":
+            if state == "evidenced":
+                finding.severity = Severity.HIGH
+            else:
+                finding.severity = Severity.MEDIUM
+            if state == "limited":
+                suppressed_script_ids.add(id(finding))
         finding.context_tags.append("authority-" + state)
         finding.context_notes.extend(notes)
         if state == "limited":
@@ -584,3 +718,5 @@ def calibrate_lotp_authority(findings: list[Finding], content: str) -> None:
         finding.calibration_reason = " ".join(
             filter(None, (finding.calibration_reason, f"Authority {state}: " + notes[-1]))
         )
+    if suppressed_script_ids:
+        findings[:] = [finding for finding in findings if id(finding) not in suppressed_script_ids]

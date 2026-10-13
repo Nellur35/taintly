@@ -176,6 +176,7 @@ class _JobIndex:
     segments: tuple[JobSegment, ...]
     starts: tuple[int, ...]
     source_sha256: str = ""
+    content: str = ""
 
     def at_line(self, line: int) -> str | None:
         if line <= 0:
@@ -185,6 +186,36 @@ class _JobIndex:
             return None
         job = self.segments[position]
         return job.name if job.name and line <= job.end_line else None
+
+
+def _script_witness_matches(content: str, witness: CheckoutBuildWitness) -> bool:
+    """Reconstruct a typed script witness with the authority source parser."""
+
+    if (
+        witness.execution_kind != "script"
+        or witness.script_path is None
+        or witness.source_sha256 != sha256(content.encode("utf-8")).hexdigest()
+    ):
+        return False
+    # Share the source parser and authority predicates with the producer. This
+    # avoids a second expression/format parser drifting from the admitted path.
+    from taintly.authority_context import _classify, _configured_build_path, _Index
+    from taintly.models import Finding, Severity
+
+    candidate = Finding(
+        rule_id="LOTP-GH-006",
+        severity=Severity.HIGH,
+        title="",
+        description="",
+        file=witness.file,
+        line=witness.build_line,
+    )
+    index = _Index(content)
+    state, _ = _classify(index, candidate)
+    if state != "evidenced":
+        return False
+    expected = _configured_build_path(index, candidate)
+    return expected is not None and expected == witness
 
 
 def _seed_findings(
@@ -221,7 +252,7 @@ def _seed_findings(
         index = job_indexes.get(f.file or "")
         if (
             witness is not None
-            and f.rule_id in {"LOTP-GH-001", "LOTP-GH-003"}
+            and f.rule_id in {"LOTP-GH-001", "LOTP-GH-003", "LOTP-GH-006"}
             and f.origin == "file"
             and index is not None
             and witness.file == f.file
@@ -232,6 +263,13 @@ def _seed_findings(
             and index.at_line(witness.checkout_line) == job
             and witness.checkout_line < line
             and witness.build_step == witness.checkout_step + 1
+            and (
+                _script_witness_matches(index.content, witness)
+                if f.rule_id == "LOTP-GH-006"
+                else witness.execution_kind == "build"
+                and witness.script_path is None
+                and witness.interpreter is None
+            )
         ):
             db.add("checkout_build", CheckoutBuildFact(witness))
 
@@ -900,6 +938,7 @@ def run_composer(
             sha256(workflow.content.encode("utf-8")).hexdigest()
             if workflow.filepath in witnessed_files
             else "",
+            workflow.content if workflow.filepath in witnessed_files else "",
         )
     db = Database()
     _seed_execution_contexts(db, corpus)

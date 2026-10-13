@@ -399,6 +399,7 @@ _FAMILIES: tuple[FindingFamily, ...] = (
                 "LOTP-GH-003",
                 "LOTP-GH-004",
                 "LOTP-GH-005",
+                "LOTP-GH-006",
                 "LOTP-GL-001",
                 "LOTP-GL-003",
                 "LOTP-GL-005",

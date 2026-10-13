@@ -1770,6 +1770,9 @@ class CheckoutBuildWitness:
     permission_line: int
     write_scopes: tuple[tuple[str, int], ...]
     persistence_line: int
+    execution_kind: str = "build"
+    script_path: str | None = None
+    interpreter: str | None = None
 
 
 @dataclass
