@@ -52,6 +52,11 @@ from taintly.composer import (
     findings_by_rule,
 )
 from taintly.models import Platform, Rule, Severity
+from taintly.rules.github._crossjob_authority import (
+    AuthorityEvidence,
+    AuthorityView,
+    build_authority_view,
+)
 from taintly.rules.github._crossjob_declarations import (
     DeclarationVerdict,
     build_crossjob_declaration_view,
@@ -651,13 +656,12 @@ def _crossjob_edges_in_content(content: str) -> list[_CrossJobEdge]:
     return edges
 
 
-def _scope_exercises_write_authority(text: str) -> bool:
-    """Whether a step/job contains a recognized authority-operation indicator.
+def _scope_has_write_operation(text: str) -> bool:
+    """Whether executable-looking text has a recognized write operation.
 
     A declared write permission by itself is latent capability. CHAIN-GH-105
     needs an operation indicator in the consumer scope. Direct API, CLI, push,
-    or publish call text qualifies. An action step qualifies when it is
-    explicitly handed a GitHub/PAT token. This textual indicator does not prove
+    or publish call text qualifies. This textual indicator does not prove
     runtime execution, effective authority, or argument-level propagation.
     """
     if _GITHUB_REST_WRITE_RE.search(text) or _GH_CLI_WRITE_RE.search(text):
@@ -671,9 +675,14 @@ def _scope_exercises_write_authority(text: str) -> bool:
             return True
         if not _GH_API_READ_METHOD_RE.search(text) and _GH_API_IMPLICIT_POST_RE.search(text):
             return True
-    if _OTHER_AUTHORITY_OPERATION_RE.search(text):
-        return True
-    return bool(_ACTION_USES_RE.search(text) and _AUTHORITY_TOKEN_INPUT_RE.search(text))
+    return bool(_OTHER_AUTHORITY_OPERATION_RE.search(text))
+
+
+def _scope_exercises_write_authority(text: str) -> bool:
+    """Legacy conservative candidate check for incomplete owner shapes."""
+    return _scope_has_write_operation(text) or bool(
+        _ACTION_USES_RE.search(text) and _AUTHORITY_TOKEN_INPUT_RE.search(text)
+    )
 
 
 def _edge_has_authority_sink(
@@ -681,7 +690,8 @@ def _edge_has_authority_sink(
     steps: list[StepSegment],
     jobs: list[JobSegment],
     authority_cache: dict[tuple[str, int, int], bool],
-) -> bool:
+    authority: AuthorityView,
+) -> tuple[bool, tuple[AuthorityEvidence, ...]]:
     """Require a recognized authority-operation indicator in the edge scope.
 
     Step-local references (the common ``env:`` / ``with:`` shape) cannot borrow
@@ -691,18 +701,24 @@ def _edge_has_authority_sink(
     """
     for step in steps:
         if step.job_name == edge.consumer and step.start_line <= edge.line <= step.end_line:
+            if authority.complete:
+                evidence = authority.step_evidence(edge.consumer, step.index)
+                return bool(evidence), evidence
             key = ("step", step.start_line, step.end_line)
             if key not in authority_cache:
                 authority_cache[key] = _scope_exercises_write_authority(step.text)
-            return authority_cache[key]
+            return authority_cache[key], ()
 
     for job in jobs:
         if job.name == edge.consumer and job.start_line <= edge.line <= job.end_line:
+            if authority.complete:
+                evidence = authority.job_evidence(edge.consumer)
+                return bool(evidence), evidence
             key = ("job", job.start_line, job.end_line)
             if key not in authority_cache:
                 authority_cache[key] = _scope_exercises_write_authority(job.text)
-            return authority_cache[key]
-    return False
+            return authority_cache[key], ()
+    return False, ()
 
 
 def _files_with_contexts(db: Database) -> set[str]:
@@ -722,11 +738,13 @@ def _files_with_contexts(db: Database) -> set[str]:
     return files
 
 
-def _edge_events_compatible(db: Database, file: str, edge: _CrossJobEdge, steps) -> bool:
+def _edge_events_compatible(
+    db: Database, file: str, edge: _CrossJobEdge, steps, authority: AuthorityView
+) -> tuple[bool, tuple[AuthorityEvidence, ...]]:
     """Join producer/reader with alternative authority scopes before projection."""
     from taintly.eventguard import UNCONSTRAINED, intersect_constraints, union_constraints
 
-    possibilities = [
+    base_possibilities = [
         execution_constraints_for(db, file, edge.producer, privileged=True),
         execution_constraints_for(db, file, edge.consumer, privileged=True),
         execution_constraints_for(db, file, edge.consumer, edge.line, privileged=True),
@@ -735,20 +753,30 @@ def _edge_events_compatible(db: Database, file: str, edge: _CrossJobEdge, steps)
         step.job_name == edge.consumer and step.start_line <= edge.line <= step.end_line
         for step in steps
     )
+    authority_steps = []
     if not same_step:
         # Job-level env references can be read in a different step. Include
         # every statically recognized authority scope; opaque ownership stays
         # unknown. Job conditions above still apply independently.
+        authority_steps = [
+            step
+            for step in steps
+            if step.job_name == edge.consumer
+            and (
+                bool(authority.step_evidence(edge.consumer, step.index))
+                if authority.complete
+                else _scope_exercises_write_authority(step.text)
+            )
+        ]
         authorities = [
             execution_constraints_for(db, file, edge.consumer, step.start_line, privileged=True)
-            for step in steps
-            if step.job_name == edge.consumer and _scope_exercises_write_authority(step.text)
+            for step in authority_steps
         ]
         if authorities and all(events is not None for events in authorities):
             authority_events = {
                 event for scope in authorities if scope is not None for event in scope
             }
-            possibilities.append(
+            base_possibilities.append(
                 {
                     event: union_constraints(
                         scope[event]
@@ -758,17 +786,43 @@ def _edge_events_compatible(db: Database, file: str, edge: _CrossJobEdge, steps)
                     for event in authority_events
                 }
             )
-    known = [scope for scope in possibilities if scope is not None]
+    known = [scope for scope in base_possibilities if scope is not None]
     if not known:
-        return True
+        return True, ()
     events = set.intersection(*(set(scope) for scope in known))
     for event in events:
         domain = UNCONSTRAINED
         for scope in known:
             domain = intersect_constraints(domain, scope[event])
         if domain:
-            return True
-    return False
+            if same_step:
+                step = next(
+                    step
+                    for step in steps
+                    if step.job_name == edge.consumer
+                    and step.start_line <= edge.line <= step.end_line
+                )
+                return True, authority.step_evidence(edge.consumer, step.index)
+            if authority.complete and authority_steps:
+                owner_scopes = [
+                    execution_constraints_for(
+                        db, file, edge.consumer, step.start_line, privileged=True
+                    )
+                    for step in authority_steps
+                ]
+                viable: list[AuthorityEvidence] = []
+                for step, scope in zip(authority_steps, owner_scopes, strict=True):
+                    # Preserve an opaque owner as an unresolved alternative,
+                    # while filtering each known guard that conflicts with the
+                    # producer/reader domain. Do not let one opaque sibling
+                    # justify citing a known-incompatible earlier step.
+                    if scope is None or (
+                        event in scope and intersect_constraints(domain, scope[event])
+                    ):
+                        viable.extend(authority.step_evidence(edge.consumer, step.index))
+                return True, tuple(viable)
+            return True, ()
+    return False, ()
 
 
 def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
@@ -823,6 +877,7 @@ def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
         steps = for_each_step(content)
         jobs = for_each_job(content)
         authority_cache: dict[tuple[str, int, int], bool] = {}
+        authority = build_authority_view(content, _scope_has_write_operation)
         for edge in edges:
             producer_ctx = context_for(db, file, edge.producer)
             consumer_ctx = context_for(db, file, edge.consumer)
@@ -843,16 +898,29 @@ def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
             # operation. Require a recognized textual operation indicator in
             # the relevant step (or job for job-level references); runtime
             # execution and value-to-operation propagation remain unproven.
-            if not _edge_has_authority_sink(edge, steps, jobs, authority_cache):
+            has_sink, sink_evidence = _edge_has_authority_sink(
+                edge, steps, jobs, authority_cache, authority
+            )
+            if not has_sink:
                 continue
-            if not _edge_events_compatible(db, file, edge, steps):
+            events_compatible, compatible_evidence = _edge_events_compatible(
+                db, file, edge, steps, authority
+            )
+            if not events_compatible:
                 continue
+            if compatible_evidence:
+                sink_evidence = compatible_evidence
+            evidence_summary = (
+                AuthorityView.describe(sink_evidence)
+                if sink_evidence
+                else "an unresolved authority indicator in an opaque owner"
+            )
             snippet = (
                 f"Review: producer job `{edge.producer}` declares output `{edge.output}` "
                 f"read by consumer `{edge.consumer}` via "
                 f"`${{{{ needs.{edge.producer}.outputs.{edge.output} }}}}`. "
                 "Configured token permissions show a read-to-write candidate gradient, "
-                "and the relevant consumer scope contains an authority-operation "
+                f"and the relevant consumer scope contains {evidence_summary}. "
                 "indicator. Verify producer input control, argument-level propagation, "
                 "compatible guards, token identity and effective provider authority; "
                 "this composition does not establish a successful privilege escalation."
