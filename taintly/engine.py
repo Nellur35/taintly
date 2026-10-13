@@ -27,6 +27,7 @@ from .models import (
     _MAX_SAFE_TEXT_LEN,
     AuditReport,
     Finding,
+    IncompletePatternMatches,
     Platform,
     Rule,
     Severity,
@@ -192,6 +193,26 @@ def _is_suppressed(line: str, rule_id: str) -> bool:
         if zizmor_compat.is_zizmor_suppressed(line, rule_id):
             return True
     return False
+
+
+def _append_incomplete_pattern_diagnostic(
+    findings: list[Finding], rule_id: str, filepath: str, reasons: list[str]
+) -> None:
+    if not reasons:
+        return
+    joined_reasons = "; ".join(dict.fromkeys(reasons))
+    findings.append(
+        Finding(
+            rule_id="ENGINE-ERR",
+            severity=Severity.LOW,
+            title=f"Rule {rule_id} returned incomplete pattern results for {filepath}",
+            description=(
+                "Pattern analysis stopped before full coverage; already-found matches "
+                f"are retained. Reasons: {joined_reasons}"
+            ),
+            file=filepath,
+        )
+    )
 
 
 # Anchor-aware suppression: how many lines may a SEC-NN-NNN finding's
@@ -388,8 +409,12 @@ def scan_file(
             if time.monotonic() >= deadline:
                 unevaluated = len(rules) - idx
                 break
+            incomplete_reasons: list[str] = []
+
             try:
                 matches = rule.pattern.check(content, lines)
+                if isinstance(matches, IncompletePatternMatches):
+                    incomplete_reasons.append(matches.reason)
                 # Anchor-aware suppression: if the rule opts in and an
                 # anchor expansion would NOT produce the match, treat
                 # it as an anchor-mediated false positive.  We never
@@ -400,15 +425,21 @@ def scan_file(
                     expanded_content, expanded_lines = _get_expanded()
                     if expanded_content != content:
                         expanded_matches = rule.pattern.check(expanded_content, expanded_lines)
-                        expanded_lineset = {ln for ln, _ in expanded_matches}
-                        matches = [
-                            (ln, snip)
-                            for ln, snip in matches
-                            if any(
-                                abs(ln - eln) <= _ANCHOR_EXPANSION_LINE_TOLERANCE
-                                for eln in expanded_lineset
-                            )
-                        ]
+                        if isinstance(expanded_matches, IncompletePatternMatches):
+                            incomplete_reasons.append(expanded_matches.reason)
+                        else:
+                            expanded_lineset = {ln for ln, _ in expanded_matches}
+                            matches = [
+                                (ln, snip)
+                                for ln, snip in matches
+                                if any(
+                                    abs(ln - eln) <= _ANCHOR_EXPANSION_LINE_TOLERANCE
+                                    for eln in expanded_lineset
+                                )
+                            ]
+                _append_incomplete_pattern_diagnostic(
+                    findings, rule.id, filepath, incomplete_reasons
+                )
                 for line_num, snippet in matches:
                     # Honour inline suppression comments on the matched line.
                     source_line = lines[line_num - 1] if 0 < line_num <= len(lines) else ""
@@ -532,6 +563,9 @@ def scan_file(
                         )
                     )
             except Exception as e:
+                _append_incomplete_pattern_diagnostic(
+                    findings, rule.id, filepath, incomplete_reasons
+                )
                 findings.append(
                     Finding(
                         rule_id="ENGINE-ERR",

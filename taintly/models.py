@@ -1553,6 +1553,32 @@ class PathPattern:
 # returning ``list[tuple[int, str]]``. Structural typing (Protocol) so
 # TaintPattern instances from the per-platform taint modules qualify
 # without circular imports.
+class IncompletePatternMatches(list[tuple[int, str]]):
+    """Matches found before a bounded pattern check stopped early.
+
+    The instance remains list-compatible so callers keep all accumulated
+    evidence. Its immutable reason distinguishes an incomplete miss from a
+    complete empty result without relying on mutable singleton state.
+    """
+
+    __slots__ = ("_reason",)
+
+    def __init__(self, matches: list[tuple[int, str]], *, reason: str) -> None:
+        if not isinstance(reason, str):
+            raise TypeError("reason must be a string")
+        super().__init__(matches)
+        self._reason = reason
+
+    @property
+    def reason(self) -> str:
+        return self._reason
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_reason" and hasattr(self, "_reason"):
+            raise AttributeError("incomplete match reason is immutable")
+        super().__setattr__(name, value)
+
+
 @runtime_checkable
 class PatternProtocol(Protocol):
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]: ...

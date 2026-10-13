@@ -18,15 +18,24 @@ import re
 import shlex
 from collections.abc import Iterator
 from dataclasses import dataclass
-from itertools import product
+from types import SimpleNamespace
 
-from taintly.models import Platform, Rule, Severity
+from taintly.eventguard import (
+    UNCONSTRAINED,
+    GuardConstraints,
+    event_guard_verdict,
+    guard_constraints,
+    intersect_constraints,
+    union_constraints,
+)
+from taintly.models import IncompletePatternMatches, Platform, Rule, Severity
 from taintly.parsers.gha_expr import (
     ExprSyntaxError,
     iter_expression_bodies,
     result_provenance_paths,
 )
 from taintly.parsers.structural import Event, EventKind, triggers, walk_workflow
+from taintly.parsers.structural.tokenizer import Token, TokenizerError, TokenKind, tokenize
 
 _ROOT = "/__workspace__"
 _HOME = "/__home__"
@@ -103,15 +112,6 @@ def _false(value: str) -> bool:
     return value.strip().removeprefix("${{").removesuffix("}}").strip().lower() == "false"
 
 
-def _runs_on_event(guard: str, event: str) -> bool:
-    """Narrow literal event comparisons; arbitrary guards remain review candidates."""
-    if _false(guard):
-        return False
-    guard = guard.strip().removeprefix("${{").removesuffix("}}").strip()
-    match = re.fullmatch(r"github\.event_name\s*(==|!=)\s*(['\"])(\w+)\2", guard, re.IGNORECASE)
-    return (event == match[3]) == (match[1] == "==") if match else True
-
-
 @dataclass(frozen=True)
 class _Output:
     path: str
@@ -125,6 +125,8 @@ class _Cache:
     line: int
     post_job: bool
     filtered_targets: tuple[str, ...] = ()
+    supports_save_if: bool = False
+    save_if_present: bool = False
 
     def contains(self, output: _Output) -> bool:
         if not output.directory and any(
@@ -162,6 +164,346 @@ class _Cache:
         return included and not excluded
 
 
+@dataclass(frozen=True)
+class _AnalysisState:
+    """One possible whole-job execution, with its correlated guard domain."""
+
+    domain: GuardConstraints
+    persisted: tuple[tuple[str, str], ...] = ()
+    outputs: tuple[_Output, ...] = ()
+    post_caches: tuple[_Cache, ...] = ()
+
+
+def _state_payload(state: _AnalysisState) -> tuple[object, ...]:
+    return state.persisted, state.outputs, state.post_caches
+
+
+def _merge_states(states: list[_AnalysisState]) -> list[_AnalysisState]:
+    """Union domains only when the complete execution payload is identical."""
+    merged: dict[tuple[object, ...], _AnalysisState] = {}
+    for state in states:
+        if not state.domain:
+            continue
+        payload = _state_payload(state)
+        previous = merged.get(payload)
+        if previous is None:
+            merged[payload] = state
+        else:
+            merged[payload] = _AnalysisState(
+                union_constraints((previous.domain, state.domain)),
+                state.persisted,
+                state.outputs,
+                state.post_caches,
+            )
+    return list(merged.values())
+
+
+def _token_span(tokens: list[Token], line: int, key_name: str) -> list[Token] | None:
+    starts = [
+        position
+        for position, token in enumerate(tokens)
+        if token.kind is TokenKind.KEY and token.value == key_name and token.line == line
+    ]
+    if len(starts) != 1:
+        return None
+    start = starts[0]
+    key = tokens[start]
+    flow_end = next(
+        (
+            position
+            for position in range(start + 1, len(tokens))
+            if tokens[position].line == key.line
+            and tokens[position].kind
+            in {TokenKind.FLOW_COMMA, TokenKind.FLOW_CLOSE_MAP, TokenKind.FLOW_CLOSE_SEQ}
+        ),
+        None,
+    )
+    if flow_end is not None:
+        return tokens[start + 1 : flow_end]
+    end = next(
+        (
+            position
+            for position in range(start + 1, len(tokens))
+            if tokens[position].line > key.line
+            and (
+                (
+                    tokens[position].kind is TokenKind.KEY
+                    and tokens[position].indent <= key.column - 1
+                )
+                or (
+                    tokens[position].kind is TokenKind.SEQUENCE_DASH
+                    and tokens[position].indent <= key.indent
+                )
+            )
+        ),
+        len(tokens),
+    )
+    return tokens[start + 1 : end]
+
+
+def _scalar_span(span: list[Token] | None) -> bool:
+    if not span or any(
+        token.kind in {TokenKind.ANCHOR, TokenKind.ALIAS, TokenKind.MERGE_KEY} for token in span
+    ):
+        return False
+    if span[0].kind in {
+        TokenKind.SCALAR_PLAIN,
+        TokenKind.SCALAR_QUOTED,
+    } and all(
+        token.kind in {TokenKind.FLOW_CLOSE_MAP, TokenKind.FLOW_CLOSE_SEQ, TokenKind.FLOW_COMMA}
+        for token in span[1:]
+    ):
+        return True
+    return bool(
+        span[0].kind is TokenKind.SCALAR_BLOCK_HEADER
+        and all(token.kind is TokenKind.SCALAR_BLOCK_LINE for token in span[1:])
+    )
+
+
+def _owning_value_span(tokens: list[Token], line: int, key_name: str) -> list[Token] | None:
+    """Return a key's complete value through its next structural sibling."""
+    starts = [
+        position
+        for position, token in enumerate(tokens)
+        if token.kind is TokenKind.KEY and token.value == key_name and token.line == line
+    ]
+    if len(starts) != 1:
+        return None
+    start = starts[0]
+    key = tokens[start]
+    end = next(
+        (
+            position
+            for position in range(start + 1, len(tokens))
+            if tokens[position].line > key.line
+            and (
+                (
+                    tokens[position].kind is TokenKind.KEY
+                    and tokens[position].indent <= key.column - 1
+                )
+                or (
+                    tokens[position].kind is TokenKind.SEQUENCE_DASH
+                    and tokens[position].indent <= key.indent
+                )
+            )
+        ),
+        len(tokens),
+    )
+    return tokens[start + 1 : end]
+
+
+def _certified_flat_flow_map(tokens: list[Token], line: int) -> bool:
+    """Accept only a complete, flat flow map around a same-line ``with`` value."""
+    with_keys = [
+        position
+        for position, token in enumerate(tokens)
+        if token.kind is TokenKind.KEY and token.value == "with" and token.line == line
+    ]
+    if len(with_keys) != 1:
+        return False
+    value_span = _owning_value_span(tokens, line, "with")
+    if not value_span or value_span[0].kind is not TokenKind.FLOW_OPEN_MAP:
+        return False
+    entries: list[Token] = []
+    depth = 1
+    end = 1
+    while end < len(value_span) and depth:
+        token = value_span[end]
+        if token.kind in {TokenKind.FLOW_OPEN_MAP, TokenKind.FLOW_OPEN_SEQ}:
+            depth += 1
+        elif token.kind in {TokenKind.FLOW_CLOSE_MAP, TokenKind.FLOW_CLOSE_SEQ}:
+            depth -= 1
+            if depth == 0:
+                if token.kind is not TokenKind.FLOW_CLOSE_MAP:
+                    return False
+                break
+        if depth == 1:
+            entries.append(token)
+        end += 1
+    if depth or not entries or end != len(value_span) - 1:
+        return False
+
+    # A flat mapping alternates key/value pairs with one comma between pairs.
+    # Restrict values to scalar tokens so nested or malformed flow syntax stays
+    # unknown rather than supplying a negative proof.
+    index = 0
+    seen_save_if = 0
+    while index < len(entries):
+        key = entries[index]
+        if key.kind is not TokenKind.KEY or index + 1 >= len(entries):
+            return False
+        value = entries[index + 1]
+        if value.kind not in {TokenKind.SCALAR_PLAIN, TokenKind.SCALAR_QUOTED}:
+            return False
+        seen_save_if += key.value == "save-if"
+        index += 2
+        if index == len(entries):
+            break
+        if entries[index].kind is not TokenKind.FLOW_COMMA:
+            return False
+        index += 1
+        if index == len(entries):
+            return False
+    return seen_save_if == 1
+
+
+def _with_value_is_flow_map(tokens: list[Token], line: int) -> bool:
+    positions = [
+        position
+        for position, token in enumerate(tokens)
+        if token.kind is TokenKind.KEY and token.value == "with" and token.line == line
+    ]
+    return (
+        len(positions) == 1
+        and positions[0] + 1 < len(tokens)
+        and tokens[positions[0] + 1].kind is TokenKind.FLOW_OPEN_MAP
+    )
+
+
+def _certified_guard_values(
+    content: str, events: tuple[Event, ...]
+) -> tuple[dict[tuple[object, ...], str], set[tuple[object, ...]], bool]:
+    """Return only unique, fully represented scalar if/save-if guards."""
+    invalid_structure = any(event.kind in {EventKind.CUTOFF, EventKind.ERROR} for event in events)
+    key_events: dict[tuple[object, ...], list[Event]] = {}
+    leaf_events: dict[tuple[object, ...], list[Event]] = {}
+    for event in events:
+        if event.kind is EventKind.MAP_KEY:
+            key_events.setdefault(event.path, []).append(event)
+        elif event.kind is EventKind.LEAF_SCALAR:
+            leaf_events.setdefault(event.path, []).append(event)
+    key_paths = set(key_events)
+    if invalid_structure:
+        return {}, key_paths, False
+    try:
+        tokens = [
+            token
+            for token in tokenize(content)
+            if token.kind not in {TokenKind.INDENT, TokenKind.COMMENT, TokenKind.EOF}
+        ]
+    except TokenizerError:
+        return {}, key_paths, False
+    values = {
+        path: leaves[-1].value
+        for path, leaves in leaf_events.items()
+        if len(leaves) == 1 and leaves[0].value is not None
+    }
+    duplicate_key_paths = {
+        path for path, occurrences in key_events.items() if len(occurrences) != 1
+    }
+
+    def has_ambiguous_ancestor(path: tuple[object, ...]) -> bool:
+        return any(
+            path[:prefix_length] in duplicate_key_paths for prefix_length in range(1, len(path) + 1)
+        )
+
+    keys = {path: key_events[path][0].line for path in key_paths if len(key_events[path]) == 1}
+    from taintly.composer import _certified_guards
+
+    certified = dict(_certified_guards(content, SimpleNamespace(values=values, keys=keys)))
+    result: dict[tuple[object, ...], str] = {}
+    for path, name in ((path, "if") for path in key_paths if path[-1:] == ("if",)):
+        key_events_for_path = key_events[path]
+        leaves = leaf_events.get(path, [])
+        if (
+            len(key_events_for_path) != 1
+            or len(leaves) != 1
+            or leaves[0].value is None
+            or leaves[0].merge_origins
+            or path not in certified
+            or has_ambiguous_ancestor(path)
+        ):
+            continue
+        span = _token_span(tokens, key_events_for_path[0].line, name)
+        if _scalar_span(span):
+            result[path] = leaves[0].value
+    for path in key_paths:
+        if path[-2:] != ("with", "save-if"):
+            continue
+        key_events_for_path = key_events[path]
+        leaves = leaf_events.get(path, [])
+        if (
+            len(key_events_for_path) != 1
+            or len(leaves) != 1
+            or leaves[0].value is None
+            or leaves[0].merge_origins
+            or has_ambiguous_ancestor(path)
+        ):
+            continue
+        span = _token_span(tokens, key_events_for_path[0].line, "save-if")
+        with_path = path[:-1]
+        with_keys = key_events.get(with_path, [])
+        in_flow_map = len(with_keys) == 1 and _with_value_is_flow_map(tokens, with_keys[0].line)
+        if (
+            _scalar_span(span)
+            and not has_ambiguous_ancestor(path)
+            and (not in_flow_map or _certified_flat_flow_map(tokens, with_keys[0].line))
+        ):
+            result[path] = leaves[0].value
+    return result, key_paths, True
+
+
+def _negated_guard(guard: str) -> str:
+    source = guard.strip()
+    if source.startswith("${{") and source.endswith("}}"):
+        source = source[3:-2].strip()
+    return f"!({source})"
+
+
+def _guard_alternatives(
+    state: _AnalysisState,
+    path: tuple[object, ...],
+    *,
+    key_paths: set[tuple[object, ...]],
+    guards: dict[tuple[object, ...], str],
+    structure_valid: bool,
+    event: str,
+) -> tuple[_AnalysisState | None, _AnalysisState | None]:
+    """Split one state into execute/skip domains without complementing a widened DNF."""
+    if not structure_valid:
+        return state, state
+    if path not in key_paths:
+        return state, None
+    guard = guards.get(path)
+    if guard is None:
+        return state, state
+    verdict = event_guard_verdict(guard, event)
+    if verdict is True:
+        return state, None
+    if verdict is False:
+        return None, state
+    execute_domain = intersect_constraints(state.domain, guard_constraints((guard,), event))
+    skip_domain = intersect_constraints(
+        state.domain, guard_constraints((_negated_guard(guard),), event)
+    )
+    execute = (
+        _AnalysisState(execute_domain, state.persisted, state.outputs, state.post_caches)
+        if execute_domain
+        else None
+    )
+    skip = (
+        _AnalysisState(skip_domain, state.persisted, state.outputs, state.post_caches)
+        if skip_domain
+        else None
+    )
+    return execute, skip
+
+
+def _state_with(
+    state: _AnalysisState,
+    *,
+    persisted: dict[str, str] | None = None,
+    outputs: list[_Output] | None = None,
+    post_caches: list[_Cache] | None = None,
+) -> _AnalysisState:
+    return _AnalysisState(
+        state.domain,
+        tuple((persisted if persisted is not None else dict(state.persisted)).items()),
+        tuple(outputs if outputs is not None else state.outputs),
+        tuple(post_caches if post_caches is not None else state.post_caches),
+    )
+
+
 def _overlaps(left: str, right: str) -> bool:
     return left == right or left.startswith(right + "/") or right.startswith(left + "/")
 
@@ -188,7 +530,6 @@ def _cache(
     leaves: dict[tuple[object, ...], Event],
     scope: tuple[object, ...],
     env: dict[str, str],
-    event_name: str,
 ) -> _Cache | None:
     uses = leaves.get(scope + ("uses",))
     if uses is None:
@@ -203,10 +544,7 @@ def _cache(
     if action in {"actions/cache", "actions/cache/save"}:
         paths = get("path").splitlines()
     elif action == "swatinem/rust-cache":
-        if (
-            not _runs_on_event(get("save-if"), event_name)
-            or get("cache-provider", "github").lower() != "github"
-        ):
+        if get("cache-provider", "github").lower() != "github":
             return None
         cargo_home = env.get("CARGO_HOME", "~/.cargo")
         paths = [posixpath.join(cargo_home, part) for part in ("registry", "git")]
@@ -232,7 +570,12 @@ def _cache(
         if resolved is not None:
             normalized.append(("!" if excluded else "") + resolved)
     return _Cache(
-        tuple(normalized), uses.line, action != "actions/cache/save", tuple(filtered_targets)
+        tuple(normalized),
+        uses.line,
+        action != "actions/cache/save",
+        tuple(filtered_targets),
+        action == "swatinem/rust-cache",
+        action == "swatinem/rust-cache" and scope + ("with", "save-if") in leaves,
     )
 
 
@@ -518,6 +861,7 @@ class SecretCachePattern:
         events = tuple(
             walk_workflow("workflow.yml", content=content, include_keys=True, recover=True)
         )
+        guards, key_paths, structure_valid = _certified_guard_values(content, events)
         leaves = {event.path: event for event in events if event.kind == EventKind.LEAF_SCALAR}
         env_fields: dict[tuple[object, ...], dict[str, str]] = {}
         job_steps: dict[str, set[int]] = {}
@@ -535,160 +879,273 @@ class SecretCachePattern:
         workflow_env = _scoped_env(env_fields, (), base)
         workflow_mode = _value(leaves, ("cache-mode",)).lower()
         event_names = set(triggers(content)) - {"pull_request"}
+        if not structure_valid and not event_names:
+            # A cutoff may hide an otherwise valid trigger from the query view.
+            # Keep the incomplete source under every known default write event.
+            event_names = set(_WRITE_EVENTS)
         jobs = sorted(job_steps)
         hits: dict[int, str] = {}
-        for job, event_name in product(jobs, sorted(event_names)):
-            job_scope = ("jobs", job)
-            if not _runs_on_event(_value(leaves, job_scope + ("if",)), event_name):
-                continue
-            mode = _value(leaves, job_scope + ("cache-mode",), workflow_mode).lower()
-            if mode in {"read", "none"} or (
-                event_name not in _WRITE_EVENTS and mode not in {"write", "write-only"}
-            ):
-                continue
-            job_env = _scoped_env(env_fields, job_scope, workflow_env)
-            persisted: dict[str, str] = {}
-            outputs: list[_Output] = []
-            post_caches: list[_Cache] = []
-            steps = sorted(job_steps[job])
-
-            def capture(cache: _Cache, current_outputs: list[_Output]) -> None:
-                for output in current_outputs:
-                    if cache.contains(output) and 0 < output.line <= len(lines):
-                        hits.setdefault(
-                            output.line,
-                            lines[output.line - 1].strip()
-                            + f" [cache save at line {cache.line}; output {output.path.replace(_ROOT, '.').replace(_HOME, '~')}]",
-                        )
-
-            for step in steps:
-                scope = job_scope + ("steps", step)
-                if not _runs_on_event(_value(leaves, scope + ("if",)), event_name):
+        incomplete: list[str] = []
+        for job in jobs:
+            for event_name in sorted(event_names):
+                job_scope = ("jobs", job)
+                mode = _value(leaves, job_scope + ("cache-mode",), workflow_mode).lower()
+                if mode in {"read", "none"} or (
+                    event_name not in _WRITE_EVENTS and mode not in {"write", "write-only"}
+                ):
                     continue
-                env = _scoped_env(env_fields, scope, {**job_env, **persisted})
-                cache = _cache(leaves, scope, env, event_name)
-                if cache is not None:
-                    if cache.post_job:
-                        post_caches.append(cache)
-                    else:
-                        capture(cache, outputs)
-                run = leaves.get(scope + ("run",))
-                runner = _value(leaves, job_scope + ("runs-on",)).lower()
-                default_shell = "pwsh" if "windows" in runner else "bash"
-                shell = _value(
-                    leaves,
-                    scope + ("shell",),
-                    _value(
-                        leaves,
-                        job_scope + ("defaults", "run", "shell"),
-                        _value(leaves, ("defaults", "run", "shell"), default_shell),
-                    ),
+                job_env = _scoped_env(env_fields, job_scope, workflow_env)
+                initial = _AnalysisState(UNCONSTRAINED)
+                job_state, _job_skip = _guard_alternatives(
+                    initial,
+                    ("jobs", job, "if"),
+                    key_paths=key_paths,
+                    guards=guards,
+                    structure_valid=structure_valid,
+                    event=event_name,
                 )
-                if run is None or shell.split(" ", 1)[0] not in {"bash", "sh"}:
+                if job_state is None:
                     continue
-                directory = _value(
-                    leaves,
-                    scope + ("working-directory",),
-                    _value(
-                        leaves,
-                        job_scope + ("defaults", "run", "working-directory"),
-                        _value(leaves, ("defaults", "run", "working-directory"), "."),
-                    ),
-                )
-                cwd = _path(directory, _ROOT, env)
-                if cwd is None:
-                    continue
-                variables, exported = dict(env), dict(env)
-                pending: dict[str, str] = {}
-                for line, raw_tokens, definite in _commands(run, env):
-                    if raw_tokens[0] in {"export", "unset"} or all(
-                        _ASSIGNMENT.fullmatch(token) for token in raw_tokens
-                    ):
-                        operation = raw_tokens[0]
-                        for token in (
-                            raw_tokens[1:] if operation in {"export", "unset"} else raw_tokens
-                        ):
-                            if operation == "unset" and definite:
-                                variables.pop(token, None)
-                                exported.pop(token, None)
-                            elif match := _ASSIGNMENT.fullmatch(token):
-                                value = _expand(match[2], variables)
-                                if not definite and _SECRET in variables.get(match[1], ""):
-                                    value = _SECRET
-                                variables[match[1]] = value
-                                if operation == "export" or match[1] in exported:
-                                    exported[match[1]] = variables[match[1]]
-                            elif operation == "export" and token in variables:
-                                exported[token] = variables[token]
-                        continue
-                    tokens, process = _process(raw_tokens, variables, exported)
-                    if not tokens:
-                        continue
-                    if tokens[0] == "cd" and len(tokens) == 2:
-                        if not definite:
-                            break  # relative paths after conditional cd are unknown.
-                        cwd = _path(tokens[1], cwd, variables)
-                        if cwd is None:
+                states = [job_state]
+                transitions = 0
+                cutoff: str | None = None
+                steps = sorted(job_steps[job])
+                for step in steps:
+                    scope = ("jobs", job, "steps", step)
+                    next_states: list[_AnalysisState] = []
+                    for state in states:
+                        transitions += 1
+                        if transitions > 4096:
+                            cutoff = (
+                                f"SEC6-GH-015 guard-state transition limit exceeded "
+                                f"for job {job!r} on {event_name!r}"
+                            )
                             break
-                    elif tokens[0] == "rm" and definite:
-                        recursive = any(
-                            token == "--recursive"  # nosec B105 - command option
-                            or (
-                                token.startswith("-")
-                                and not token.startswith("--")
-                                and ("r" in token or "R" in token)
-                            )
-                            for token in tokens[1:]
+                        execute, skip = _guard_alternatives(
+                            state,
+                            scope + ("if",),
+                            key_paths=key_paths,
+                            guards=guards,
+                            structure_valid=structure_valid,
+                            event=event_name,
                         )
-                        removed = [
-                            _path(token, cwd, variables)
-                            for token in tokens[1:]
-                            if not token.startswith("-")
-                        ]
-                        outputs = [
-                            output
-                            for output in outputs
-                            if not any(
-                                path is not None
-                                and (not output.directory or recursive)
-                                and (output.path == path or output.path.startswith(path + "/"))
-                                for path in removed
-                            )
-                        ]
-                    else:
-                        target = _cargo_path(
-                            [_expand(token, variables) for token in tokens], process, cwd
+                        if skip is not None:
+                            next_states.append(skip)
+                        if execute is None:
+                            continue
+                        env = _scoped_env(
+                            env_fields,
+                            scope,
+                            {**job_env, **dict(execute.persisted)},
                         )
-                        if target is not None:
-                            outputs.append(_Output(target, line, directory=True))
-                        serialized = _serialized_path(tokens, process, variables, cwd)
-                        if serialized is not None:
-                            path, payload, truncates = serialized
-                            if path == _GITHUB_ENV:
-                                if truncates and definite:
-                                    pending.clear()
-                                for entry in payload.replace("\\n", "\n").splitlines():
-                                    assignment = _ASSIGNMENT.fullmatch(entry.strip())
-                                    if assignment:
-                                        value = assignment[2]
-                                        if not definite and _SECRET in pending.get(
-                                            assignment[1], ""
+                        cache = _cache(leaves, scope, env)
+                        action_states = [execute]
+                        if (
+                            cache is not None
+                            and cache.supports_save_if
+                            and (cache.save_if_present or not structure_valid)
+                        ):
+                            save_state, no_save_state = _guard_alternatives(
+                                execute,
+                                scope + ("with", "save-if"),
+                                key_paths=key_paths,
+                                guards=guards,
+                                structure_valid=structure_valid,
+                                event=event_name,
+                            )
+                            action_states = []
+                            if no_save_state is not None:
+                                next_states.append(no_save_state)
+                            if save_state is not None:
+                                action_states.append(save_state)
+                        for action_state in action_states:
+                            current = action_state
+                            if cache is not None:
+                                if cache.post_job:
+                                    current = _state_with(
+                                        current,
+                                        post_caches=[*current.post_caches, cache],
+                                    )
+                                else:
+                                    for output in current.outputs:
+                                        if cache.contains(output) and 0 < output.line <= len(lines):
+                                            hits.setdefault(
+                                                output.line,
+                                                lines[output.line - 1].strip()
+                                                + f" [cache save at line {cache.line}; "
+                                                + f"output {output.path.replace(_ROOT, '.').replace(_HOME, '~')}]",
+                                            )
+                            run = leaves.get(scope + ("run",))
+                            runner = _value(leaves, ("jobs", job, "runs-on")).lower()
+                            default_shell = "pwsh" if "windows" in runner else "bash"
+                            shell = _value(
+                                leaves,
+                                scope + ("shell",),
+                                _value(
+                                    leaves,
+                                    ("jobs", job, "defaults", "run", "shell"),
+                                    _value(leaves, ("defaults", "run", "shell"), default_shell),
+                                ),
+                            )
+                            if run is not None and shell.split(" ", 1)[0] in {"bash", "sh"}:
+                                directory = _value(
+                                    leaves,
+                                    scope + ("working-directory",),
+                                    _value(
+                                        leaves,
+                                        ("jobs", job, "defaults", "run", "working-directory"),
+                                        _value(
+                                            leaves, ("defaults", "run", "working-directory"), "."
+                                        ),
+                                    ),
+                                )
+                                cwd = _path(directory, _ROOT, env)
+                                if cwd is not None:
+                                    variables, exported = dict(env), dict(env)
+                                    persisted = dict(current.persisted)
+                                    outputs = list(current.outputs)
+                                    pending: dict[str, str] = {}
+                                    for line, raw_tokens, definite in _commands(run, env):
+                                        if raw_tokens[0] in {"export", "unset"} or all(
+                                            _ASSIGNMENT.fullmatch(token) for token in raw_tokens
                                         ):
-                                            value = _SECRET
-                                        pending[assignment[1]] = value
-                            else:
-                                if truncates and definite:
-                                    outputs = [
-                                        output
-                                        for output in outputs
-                                        if output.directory or output.path != path
-                                    ]
-                                if _SECRET in payload:
-                                    outputs.append(_Output(path, line))
-                persisted.update(pending)
-            for cache in post_caches:
-                capture(cache, outputs)
-        return sorted(hits.items())
+                                            operation = raw_tokens[0]
+                                            for token in (
+                                                raw_tokens[1:]
+                                                if operation in {"export", "unset"}
+                                                else raw_tokens
+                                            ):
+                                                if operation == "unset" and definite:
+                                                    variables.pop(token, None)
+                                                    exported.pop(token, None)
+                                                elif match := _ASSIGNMENT.fullmatch(token):
+                                                    value = _expand(match[2], variables)
+                                                    if not definite and _SECRET in variables.get(
+                                                        match[1], ""
+                                                    ):
+                                                        value = _SECRET
+                                                    variables[match[1]] = value
+                                                    if (
+                                                        operation == "export"
+                                                        or match[1] in exported
+                                                    ):
+                                                        exported[match[1]] = variables[match[1]]
+                                                elif operation == "export" and token in variables:
+                                                    exported[token] = variables[token]
+                                            continue
+                                        tokens, process = _process(raw_tokens, variables, exported)
+                                        if not tokens:
+                                            continue
+                                        if tokens[0] == "cd" and len(tokens) == 2:
+                                            if not definite:
+                                                break
+                                            cwd = _path(tokens[1], cwd, variables)
+                                            if cwd is None:
+                                                break
+                                        elif tokens[0] == "rm" and definite:
+                                            recursive = any(
+                                                token == "--recursive"  # nosec B105 - command option
+                                                or (
+                                                    token.startswith("-")
+                                                    and not token.startswith("--")
+                                                    and ("r" in token or "R" in token)
+                                                )
+                                                for token in tokens[1:]
+                                            )
+                                            removed = [
+                                                _path(token, cwd, variables)
+                                                for token in tokens[1:]
+                                                if not token.startswith("-")
+                                            ]
+                                            outputs = [
+                                                output
+                                                for output in outputs
+                                                if not any(
+                                                    path is not None
+                                                    and (not output.directory or recursive)
+                                                    and (
+                                                        output.path == path
+                                                        or output.path.startswith(path + "/")
+                                                    )
+                                                    for path in removed
+                                                )
+                                            ]
+                                        else:
+                                            target = _cargo_path(
+                                                [_expand(token, variables) for token in tokens],
+                                                process,
+                                                cwd,
+                                            )
+                                            if target is not None:
+                                                outputs.append(
+                                                    _Output(target, line, directory=True)
+                                                )
+                                            serialized = _serialized_path(
+                                                tokens, process, variables, cwd
+                                            )
+                                            if serialized is not None:
+                                                path, payload, truncates = serialized
+                                                if path == _GITHUB_ENV:
+                                                    if truncates and definite:
+                                                        pending.clear()
+                                                    for entry in payload.replace(
+                                                        "\\n", "\n"
+                                                    ).splitlines():
+                                                        assignment = _ASSIGNMENT.fullmatch(
+                                                            entry.strip()
+                                                        )
+                                                        if assignment:
+                                                            value = assignment[2]
+                                                            if (
+                                                                not definite
+                                                                and _SECRET
+                                                                in pending.get(assignment[1], "")
+                                                            ):
+                                                                value = _SECRET
+                                                            pending[assignment[1]] = value
+                                                else:
+                                                    if truncates and definite:
+                                                        outputs = [
+                                                            output
+                                                            for output in outputs
+                                                            if output.directory
+                                                            or output.path != path
+                                                        ]
+                                                    if _SECRET in payload:
+                                                        outputs.append(_Output(path, line))
+                                    persisted.update(pending)
+                                    current = _state_with(
+                                        current,
+                                        persisted=persisted,
+                                        outputs=outputs,
+                                    )
+                            next_states.append(current)
+                    if cutoff is not None:
+                        break
+                    states = _merge_states(next_states)
+                    if len(states) > 64:
+                        cutoff = (
+                            f"SEC6-GH-015 guard-state limit exceeded "
+                            f"for job {job!r} on {event_name!r}"
+                        )
+                        break
+                if cutoff is not None:
+                    incomplete.append(cutoff)
+                    continue
+                for state in states:
+                    for cache in state.post_caches:
+                        for output in state.outputs:
+                            if cache.contains(output) and 0 < output.line <= len(lines):
+                                hits.setdefault(
+                                    output.line,
+                                    lines[output.line - 1].strip()
+                                    + f" [cache save at line {cache.line}; "
+                                    + f"output {output.path.replace(_ROOT, '.').replace(_HOME, '~')}]",
+                                )
+        matches = sorted(hits.items())
+        if incomplete:
+            return IncompletePatternMatches(matches, reason="; ".join(incomplete))
+        return matches
 
 
 # JSON is valid YAML. Quoted flow keys remain valid when the generic whitespace
