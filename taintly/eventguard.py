@@ -1,19 +1,23 @@
 """Conservative event-specific truth proofs over the existing Actions AST.
 
-Only literal booleans, event-name comparisons and supplied path equalities are known. Runtime values,
-unsupported operations and malformed input stay unknown. This is a truth
-abstraction for reachability, not an evaluator for arbitrary Actions values.
+The truth verdict admits literal booleans, event-name comparisons and supplied
+path facts. A separate bounded constraint domain also correlates direct ASCII
+string comparisons on one invocation's ref. Runtime values, unsupported
+operations and malformed input stay unknown. Neither is a general evaluator.
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from taintly.parsers.gha_expr import (
     Binary,
     Call,
+    Deref,
     ExprSyntaxError,
+    Index,
     Lit,
     Unary,
+    Var,
     canonical_path,
     parse,
 )
@@ -43,6 +47,142 @@ def event_guard_verdict(
         return _truth(parse(source), event, 64, path_equalities or {}, path_string_exclusions or {})
     except (ExprSyntaxError, RecursionError):
         return None
+
+
+# A disjunction of conjunctions. Empty outer tuple is impossible; an empty
+# conjunction is unconstrained. These are may-satisfy constraints, not proofs
+# of execution, input integrity or effective authority.
+GuardConstraints = tuple[frozenset[tuple[str, str, bool]], ...]
+UNCONSTRAINED: GuardConstraints = (frozenset(),)
+_MAX_CONSTRAINT_BRANCHES = 64
+_MAX_CONSTRAINT_JOINS = 1024
+
+
+def union_constraints(domains: Iterable[GuardConstraints]) -> GuardConstraints:
+    """Alternative owners are OR, including any unknown alternative."""
+    out: list[frozenset[tuple[str, str, bool]]] = []
+    seen: set[frozenset[tuple[str, str, bool]]] = set()
+    for domain in domains:
+        for branch in domain:
+            if not branch:
+                return UNCONSTRAINED
+            if branch not in seen:
+                seen.add(branch)
+                out.append(branch)
+                if len(out) > _MAX_CONSTRAINT_BRANCHES:
+                    return UNCONSTRAINED
+    return tuple(out)
+
+
+def intersect_constraints(left: GuardConstraints, right: GuardConstraints) -> GuardConstraints:
+    """Conjoin constraints; resource exhaustion widens to unknown."""
+    out: list[frozenset[tuple[str, str, bool]]] = []
+    seen: set[frozenset[tuple[str, str, bool]]] = set()
+    joins = 0
+    for first in left:
+        for second in right:
+            joins += 1
+            if joins > _MAX_CONSTRAINT_JOINS:
+                return UNCONSTRAINED
+            branch = first | second
+            if len(branch) > 64:
+                return UNCONSTRAINED
+            equals: dict[str, str] = {}
+            possible = True
+            for path, value, equal in branch:
+                if equal:
+                    if path in equals and equals[path] != value:
+                        possible = False
+                        break
+                    equals[path] = value
+            if possible and any(
+                not equal and equals.get(path) == value for path, value, equal in branch
+            ):
+                possible = False
+            if possible and branch not in seen:
+                seen.add(branch)
+                out.append(branch)
+                if len(out) > _MAX_CONSTRAINT_BRANCHES:
+                    return UNCONSTRAINED
+    return tuple(out)
+
+
+def guard_constraints(guards: Iterable[str | None], event: str) -> GuardConstraints:
+    """Possible joint guards on one invocation's ref and event name.
+
+    Only ASCII string comparisons on ``github.ref`` are correlated. Other
+    runtime paths remain unknown, including step/job-varying env and outputs.
+    Negation is pushed into the expression, never applied to a widened set.
+    """
+    result = UNCONSTRAINED
+    for count, guard in enumerate(guards):
+        if count >= 16:
+            return UNCONSTRAINED
+        if guard is None:
+            continue
+        source = guard.strip()
+        if source.startswith("${{") and source.endswith("}}"):
+            source = source[3:-2].strip()
+        if not source or len(source) > 8192:
+            domain = UNCONSTRAINED
+        else:
+            try:
+                domain = _possible_constraints(parse(source), event, True, [64])
+            except (ExprSyntaxError, RecursionError):
+                domain = UNCONSTRAINED
+        result = intersect_constraints(result, domain)
+    return result
+
+
+def _possible_constraints(
+    node: object, event: str, positive: bool, budget: list[int]
+) -> GuardConstraints:
+    budget[0] -= 1
+    if budget[0] < 0:
+        return UNCONSTRAINED
+    if isinstance(node, Lit) and node.kind == "bool":
+        return UNCONSTRAINED if bool(node.value) is positive else ()
+    if isinstance(node, Unary) and node.op == "!":
+        return _possible_constraints(node.operand, event, not positive, budget)
+    if not isinstance(node, Binary):
+        return UNCONSTRAINED
+    if node.op in {"&&", "||"}:
+        left = _possible_constraints(node.left, event, positive, budget)
+        right = _possible_constraints(node.right, event, positive, budget)
+        if (node.op == "&&") is positive:
+            return intersect_constraints(left, right)
+        return union_constraints((left, right))
+    if node.op in {"==", "!="}:
+        for subject, literal in ((node.left, node.right), (node.right, node.left)):
+            if not (
+                isinstance(literal, Lit)
+                and literal.kind == "string"
+                and isinstance(literal.value, str)
+            ):
+                continue
+            path = _direct_invocation_path(subject)
+            equal = (node.op == "==") is positive
+            if path == "github.event_name":
+                matches = event.casefold() == literal.value.casefold()
+                return UNCONSTRAINED if matches is equal else ()
+            if path == "github.ref" and literal.value.isascii():
+                return (frozenset({(path, literal.value.lower(), equal)}),)
+    return UNCONSTRAINED
+
+
+def _direct_invocation_path(node: object) -> str | None:
+    """Admit only a direct provider field, never a transformed call spine."""
+    if isinstance(node, Deref) and isinstance(node.recv, Var):
+        return f"{node.recv.name}.{node.prop}".lower()
+    if (
+        isinstance(node, Index)
+        and isinstance(node.recv, Var)
+        and isinstance(node.index, Lit)
+        and node.index.kind == "string"
+        and isinstance(node.index.value, str)
+    ):
+        return f"{node.recv.name}.{node.index.value}".lower()
+    return None
 
 
 def _truth(

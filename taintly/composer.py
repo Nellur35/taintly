@@ -40,6 +40,7 @@ from taintly.taint_facts.closure import solve
 from taintly.taint_facts.relations import Database
 
 if TYPE_CHECKING:
+    from taintly.eventguard import GuardConstraints
     from taintly.models import CheckoutBuildWitness, Finding
     from taintly.parsers.segmentation import JobSegment
     from taintly.workflow_corpus import WorkflowCorpus
@@ -647,7 +648,24 @@ def execution_events_for(
     A named actor does not establish integrity of the bytes used by that actor.
     Only an owning guard proven false for an event can remove that event.
     """
-    from taintly.eventguard import event_guard_verdict
+    constraints = execution_constraints_for(db, file, job, line, privileged=privileged)
+    return None if constraints is None else frozenset(constraints)
+
+
+def execution_constraints_for(
+    db: Database,
+    file: str,
+    job: str | None,
+    line: int | None = None,
+    *,
+    privileged: bool = False,
+) -> dict[str, GuardConstraints] | None:
+    """Retain same-invocation ref correlations until a path has been joined.
+
+    Missing/opaque ownership remains unknown. These constraints are local to
+    this file invocation and must never be joined across callers or runs.
+    """
+    from taintly.eventguard import event_guard_verdict, guard_constraints
 
     fact = db.get("execution_context", (file,))
     if not isinstance(fact, ExecutionContextFact) or not job:
@@ -668,11 +686,12 @@ def execution_events_for(
         if path in fact.keys and path not in guards:
             return None  # A collection-valued if is not a missing guard.
         conditions.append(guards.get(path))
-    return frozenset(
-        event
+    return {
+        event: domain
         for event in events
         if not any(event_guard_verdict(guard, event) is False for guard in conditions)
-    )
+        if (domain := guard_constraints(conditions, event))
+    }
 
 
 def _certified_guards(content: str, index) -> tuple:
@@ -710,11 +729,11 @@ def _certified_guards(content: str, index) -> tuple:
                 and (
                     (
                         tokens[position].kind is TokenKind.KEY
-                        and tokens[position].indent <= key.indent
+                        and tokens[position].indent <= key.column - 1
                     )
                     or (
                         tokens[position].kind is TokenKind.SEQUENCE_DASH
-                        and tokens[position].indent < key.indent
+                        and tokens[position].indent <= key.indent
                     )
                 )
             ),
