@@ -4,8 +4,9 @@ CHAIN-GH-105 fires when a LOW-privilege producer job (read-only token)
 declares an output that a HIGH-privilege consumer job (write-capable
 token) reads via ``${{ needs.<producer>.outputs.<name> }}``. The
 producer is the attacker-influenceable surface; its output crossing
-the job boundary into a write-capable job is a privilege-escalation
-gradient.
+the job boundary into a write-capable job that exercises authority is
+a candidate privilege-escalation path. Argument-level provenance remains
+review-needed.
 
 CorpusPattern composer rules don't fit the single-file self-test
 harness (the join spans jobs and per-job permission context), so they
@@ -22,6 +23,8 @@ pinned by ``test_negative_workflow_default_only``).
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 
 from taintly.engine import scan_repo
 from taintly.models import Platform, Severity
@@ -40,6 +43,35 @@ def _fires(tmp_path: Path) -> list:
     rules = load_all_rules()
     reports = scan_repo(str(tmp_path), rules, Platform.GITHUB)
     return [f for r in reports for f in r.findings if f.rule_id == "CHAIN-GH-105"]
+
+
+def _github_script_workflow(script: str) -> str:
+    indented_script = "".join(f"            {line}\n" for line in script.splitlines())
+    replacement = (
+        "      - uses: actions/github-script@v9\n"
+        "        env:\n"
+        "          VALUE: ${{ needs.produce.outputs.val }}\n"
+        "        with:\n"
+        "          script: |\n"
+        f"{indented_script}"
+    )
+    return _POSITIVE.replace(
+        '      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n',
+        replacement,
+    )
+
+
+def _assert_review_candidate(tmp_path: Path) -> None:
+    reports = scan_repo(str(tmp_path), load_all_rules(), Platform.GITHUB)
+    assert all(not report.engine_errors() for report in reports)
+    findings = [f for report in reports for f in report.findings if f.rule_id == "CHAIN-GH-105"]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.severity == Severity.MEDIUM
+    assert finding.review_needed is True
+    assert "Review:" in finding.snippet
+    assert "Verify producer input control" in finding.snippet
+    assert "does not establish a successful privilege escalation" in finding.snippet
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +97,7 @@ _POSITIVE = (
     "      contents: write\n"
     "      id-token: write\n"
     "    steps:\n"
-    "      - run: echo ${{ needs.produce.outputs.val }}\n"
+    '      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n'
 )
 
 
@@ -83,6 +115,42 @@ def test_positive_read_producer_into_write_consumer(tmp_path: Path) -> None:
     assert "needs.produce.outputs.val" in f.snippet
 
 
+def test_positive_external_issue_event_can_retain_write_token(tmp_path: Path) -> None:
+    content = _POSITIVE.replace("on: pull_request_target", "on: issues")
+    _write_workflow(tmp_path, "w.yml", content)
+    assert len(_fires(tmp_path)) == 1
+
+
+def test_negative_workflow_run_with_push_only_parent(tmp_path: Path) -> None:
+    child = _POSITIVE.replace(
+        "on: pull_request_target\n",
+        "on:\n  workflow_run:\n    workflows: ['Trusted Build']\n    types: [completed]\n",
+    )
+    _write_workflow(tmp_path, "child.yml", child)
+    _write_workflow(
+        tmp_path,
+        "parent.yml",
+        "name: Trusted Build\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: echo ok\n",
+    )
+    assert _fires(tmp_path) == []
+
+
+def test_positive_workflow_run_with_pull_request_parent(tmp_path: Path) -> None:
+    child = _POSITIVE.replace(
+        "on: pull_request_target\n",
+        "on:\n  workflow_run:\n    workflows: ['PR Build']\n    types: [completed]\n",
+    )
+    _write_workflow(tmp_path, "child.yml", child)
+    _write_workflow(
+        tmp_path,
+        "parent.yml",
+        "name: PR Build\non: pull_request\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: echo ok\n",
+    )
+    assert len(_fires(tmp_path)) == 1
+
+
 # ---------------------------------------------------------------------------
 # Negatives
 # ---------------------------------------------------------------------------
@@ -96,6 +164,281 @@ def test_negative_same_privilege(tmp_path: Path) -> None:
     )
     _write_workflow(tmp_path, "w.yml", content)
     assert _fires(tmp_path) == []
+
+
+def test_negative_fork_pull_request_write_scope_is_downgraded(tmp_path: Path) -> None:
+    """Workflow YAML alone cannot prove the private-repo setting that opts a
+    fork pull request out of GitHub's default write-to-read downgrade."""
+    content = _POSITIVE.replace("on: pull_request_target", "on: pull_request")
+    _write_workflow(tmp_path, "w.yml", content)
+    assert _fires(tmp_path) == []
+
+
+def test_negative_maintainer_only_release_trigger(tmp_path: Path) -> None:
+    content = _POSITIVE.replace("on: pull_request_target", "on: release")
+    _write_workflow(tmp_path, "w.yml", content)
+    assert _fires(tmp_path) == []
+
+
+def test_negative_write_permission_without_authority_operation(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        'gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"',
+        'echo "${{ needs.produce.outputs.val }}"',
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert _fires(tmp_path) == []
+
+
+def test_negative_summary_only_github_script(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        '      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n',
+        "      - uses: actions/github-script@v9\n"
+        "        env:\n"
+        "          VALUE: ${{ needs.produce.outputs.val }}\n"
+        "        with:\n"
+        "          script: |\n"
+        "            core.summary.addCodeBlock(process.env.VALUE).write()\n",
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert _fires(tmp_path) == []
+
+
+def test_positive_authority_action_receives_token_and_output(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        '      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n',
+        "      - uses: example/set-status@0123456789012345678901234567890123456789\n"
+        "        with:\n"
+        "          sha: ${{ needs.produce.outputs.val }}\n"
+        "          token: '${{ secrets.STATUS_PAT }}'\n",
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert len(_fires(tmp_path)) == 1
+
+
+def test_negative_read_only_github_api_call_is_not_authority_use(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        '      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n',
+        "      - uses: actions/github-script@v9\n"
+        "        env:\n"
+        "          VALUE: ${{ needs.produce.outputs.val }}\n"
+        "        with:\n"
+        "          script: |\n"
+        "            await github.rest.issues.get({ issue_number: process.env.VALUE })\n",
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert _fires(tmp_path) == []
+
+
+def test_positive_mutating_github_request(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        '      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n',
+        "      - uses: actions/github-script@v9\n"
+        "        env:\n"
+        "          VALUE: ${{ needs.produce.outputs.val }}\n"
+        "        with:\n"
+        "          script: |\n"
+        "            await github.request('POST /repos/{owner}/{repo}/dispatches', {\n"
+        "              event_type: process.env.VALUE\n"
+        "            })\n",
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert len(_fires(tmp_path)) == 1
+
+
+def test_positive_mutating_github_rest_call(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        'gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"',
+        "github.rest.issues.createComment({ body: '${{ needs.produce.outputs.val }}' })",
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert len(_fires(tmp_path)) == 1
+
+
+def test_positive_graphql_mutation(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        'gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"',
+        "github.graphql(`mutation { addComment(input: "
+        "${{ needs.produce.outputs.val }}) { clientMutationId } }`)",
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert len(_fires(tmp_path)) == 1
+
+
+def test_negative_http_verb_elsewhere_does_not_make_request_mutating(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        '      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n',
+        "      - uses: actions/github-script@v9\n"
+        "        env:\n"
+        "          VALUE: ${{ needs.produce.outputs.val }}\n"
+        "        with:\n"
+        "          script: |\n"
+        "            core.info('POST is documented here')\n"
+        "            await github.request('GET /repos/{owner}/{repo}')\n",
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert _fires(tmp_path) == []
+
+
+def test_positive_gh_api_implicit_post_from_field(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        'gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"',
+        'gh api repos/o/r/dispatches -f event_type="${{ needs.produce.outputs.val }}"',
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert len(_fires(tmp_path)) == 1
+
+
+def test_negative_gh_api_explicit_get_with_field(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        'gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"',
+        'gh api --method GET search/issues -f q="${{ needs.produce.outputs.val }}"',
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert _fires(tmp_path) == []
+
+
+def test_positive_push_operation(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        'gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"',
+        'git tag "${{ needs.produce.outputs.val }}" && git push origin --tags',
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert len(_fires(tmp_path)) == 1
+
+
+def test_negative_step_reference_cannot_borrow_authority_from_other_step(
+    tmp_path: Path,
+) -> None:
+    content = _POSITIVE.replace(
+        '      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n',
+        '      - run: echo "${{ needs.produce.outputs.val }}"\n'
+        "      - run: gh issue edit 1 --add-label unrelated\n",
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert _fires(tmp_path) == []
+
+
+def test_positive_job_env_can_feed_later_authority_step(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        '    steps:\n      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n',
+        "    env:\n"
+        "      VALUE: ${{ needs.produce.outputs.val }}\n"
+        "    steps:\n"
+        '      - run: gh issue edit 1 --add-label "$VALUE"\n',
+        1,
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert len(_fires(tmp_path)) == 1
+
+
+def test_positive_env_output_logged_with_authority_indicator_remains_review_candidate(
+    tmp_path: Path,
+) -> None:
+    content = _POSITIVE.replace(
+        '      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n',
+        "      - uses: actions/github-script@v9\n"
+        "        with:\n"
+        "          github-token: ${{ github.token }}\n"
+        "          script: |\n"
+        "            await github.request('POST /repos/o/r/dispatches', {})\n"
+        "            console.info(\n"
+        "              `Completed: ${process.env.VALUE}`\n"
+        "            )\n"
+        "        env:\n"
+        "          VALUE: ${{ needs.produce.outputs.val }}\n",
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    _assert_review_candidate(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "const alias = process.env;\n"
+        "console.log(process.env.VALUE);\n"
+        "github.rest.issues.createComment({ issue_number: 1, body: alias.VALUE });",
+        "console.log(process.env.VALUE);\n"
+        "github.rest.issues.createComment({ issue_number: 1, body: process['env'].VALUE });",
+        "console.log(process.env.VALUE);\n"
+        'github.rest.issues.createComment({ issue_number: 1, body: process.env["VAL\\u0055E"] });',
+        "let alias = process.env;\n"
+        "console.log(process.env.VALUE);\n"
+        "alias = Object.create(process.env);\n"
+        "github.rest.issues.createComment({ issue_number: 1, body: alias.VALUE });",
+        "console.log(process.env.VALUE);\ngithub.rest.issues.createComment({ ...process.env });",
+        "const { VALUE } = process.env;\n"
+        "console.log(process.env.VALUE);\n"
+        "github.rest.issues.createComment({ issue_number: 1, body: VALUE });",
+        "const console = { log: (value) => github.rest.issues.createComment({ issue_number: 1, body: value }) };\n"
+        "console.log(process.env.VALUE);",
+    ],
+    ids=[
+        "process-env-alias",
+        "bracketed-process-env",
+        "escaped-property-name",
+        "reassigned-alias",
+        "spread-process-env",
+        "destructured-value",
+        "shadowed-console-logger",
+    ],
+)
+def test_output_with_direct_log_and_unresolved_authority_dataflow_stays_review_candidate(
+    tmp_path: Path, script: str
+) -> None:
+    _write_workflow(tmp_path, "w.yml", _github_script_workflow(script))
+    _assert_review_candidate(tmp_path)
+
+
+def test_positive_env_output_nested_write_inside_log_is_not_suppressed(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        '      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n',
+        "      - uses: actions/github-script@v9\n"
+        "        with:\n"
+        "          github-token: ${{ github.token }}\n"
+        "          script: |\n"
+        "            console.info(await github.request(\n"
+        "              'POST /repos/o/r/dispatches',\n"
+        "              { value: process.env.VALUE }\n"
+        "            ))\n"
+        "        env:\n"
+        "          VALUE: ${{ needs.produce.outputs.val }}\n",
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert len(_fires(tmp_path)) == 1
+
+
+def test_positive_env_output_assigned_before_privileged_call(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        '      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n',
+        "      - uses: actions/github-script@v9\n"
+        "        with:\n"
+        "          github-token: ${{ github.token }}\n"
+        "          script: |\n"
+        "            const value = process.env.VALUE\n"
+        "            await github.request('POST /repos/o/r/dispatches', { value })\n"
+        "        env:\n"
+        "          VALUE: ${{ needs.produce.outputs.val }}\n",
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert len(_fires(tmp_path)) == 1
+
+
+def test_positive_env_output_logged_and_used_by_privileged_call(tmp_path: Path) -> None:
+    content = _POSITIVE.replace(
+        '      - run: gh issue edit 1 --add-label "${{ needs.produce.outputs.val }}"\n',
+        "      - uses: actions/github-script@v9\n"
+        "        with:\n"
+        "          github-token: ${{ github.token }}\n"
+        "          script: |\n"
+        "            console.info(`Value: ${process.env.VALUE}`)\n"
+        "            await github.request('POST /repos/o/r/dispatches', {\n"
+        "              value: process.env.VALUE\n"
+        "            })\n"
+        "        env:\n"
+        "          VALUE: ${{ needs.produce.outputs.val }}\n",
+    )
+    _write_workflow(tmp_path, "w.yml", content)
+    assert len(_fires(tmp_path)) == 1
 
 
 def test_negative_high_to_low(tmp_path: Path) -> None:

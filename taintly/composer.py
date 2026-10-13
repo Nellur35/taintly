@@ -10,8 +10,7 @@ Architecture:
 2. Their findings are pushed into a fresh :class:`Database` as
    :class:`FindingFact` rows.
 3. Context facts (:class:`JobContextFact`) are seeded from the
-   workflow corpus — job triggers, write-token state, trusted-bot
-   if-gates.
+   workflow corpus — owning event guards and configured write-token state.
 4. Composer rules close over the database; when their preconditions
    hold for some (file, job), they assert :class:`CompositeFact`
    rows.
@@ -31,6 +30,7 @@ from bisect import bisect_right
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from hashlib import sha256
+from itertools import pairwise
 from typing import TYPE_CHECKING
 
 from taintly.taint_facts.closure import solve
@@ -101,17 +101,15 @@ class JobContextFact:
 
     * ``fork_reachable``: any trigger in the workflow is in
       ``TriggerFamily.FORK_REACHABLE``.
-    * ``external_privileged``: an external trigger can retain its declared
-      write-capable GITHUB_TOKEN scope rather than receiving the default
-      fork-``pull_request`` read-only downgrade.
+    * ``external_privileged``: the workflow has an externally-triggerable
+      event whose token is not automatically downgraded to read-only like a
+      fork-originated ``pull_request`` token.
     * ``has_write_token``: the job's effective permissions include
       any write-scope (or the workflow defaults to write because no
       explicit ``permissions:`` block exists at workflow or job
       level).
-    * ``trusted_bot_gate``: the job's ``if:`` restricts execution to
-      a known-trusted bot (dependabot, renovate, github-actions[bot],
-      pre-commit-ci); if present, composer rules that depend on
-      *external* attacker control should suppress.
+    * ``trusted_bot_gate``: compatibility field, always False. Actor identity
+      is not proof that third-party code or event content is trustworthy.
     """
 
     file: str
@@ -163,15 +161,8 @@ ComposerRule = "Callable[[Database], Iterable[tuple[str, Fact]]]"
 
 
 # ---------------------------------------------------------------------------
-# Trusted-bot user.login allowlist (matches PSE-GH-006's gate)
+# EDB seeding
 # ---------------------------------------------------------------------------
-
-_TRUSTED_BOT_PATTERNS: tuple[str, ...] = (
-    "dependabot[bot]",
-    "renovate[bot]",
-    "github-actions[bot]",
-    "pre-commit-ci[bot]",
-)
 
 
 @dataclass(frozen=True)
@@ -190,11 +181,6 @@ class _JobIndex:
             return None
         job = self.segments[position]
         return job.name if job.name and line <= job.end_line else None
-
-
-# ---------------------------------------------------------------------------
-# EDB seeding
-# ---------------------------------------------------------------------------
 
 
 def _seed_findings(
@@ -246,6 +232,449 @@ def _seed_findings(
             db.add("checkout_build", CheckoutBuildFact(witness))
 
 
+def _flow_value_end(tokens, start: int, depth: int = 0) -> int | None:
+    """Consume a complete flow value, rejecting trailing or dropped tokens."""
+    from taintly.parsers.structural.tokenizer import TokenKind
+
+    if start >= len(tokens) or depth > 64:
+        return None
+    kind = tokens[start].kind
+    if kind in {TokenKind.SCALAR_PLAIN, TokenKind.SCALAR_QUOTED}:
+        return start + 1
+    mapping = kind is TokenKind.FLOW_OPEN_MAP
+    if not mapping and kind is not TokenKind.FLOW_OPEN_SEQ:
+        return None
+    close = TokenKind.FLOW_CLOSE_MAP if mapping else TokenKind.FLOW_CLOSE_SEQ
+    position = start + 1
+    while position < len(tokens):
+        if tokens[position].kind is close:
+            return position + 1
+        if mapping:
+            if tokens[position].kind is not TokenKind.KEY:
+                return None
+            position += 1
+            # A mapping key may have an implicit null value.
+            if position < len(tokens) and tokens[position].kind in {close, TokenKind.FLOW_COMMA}:
+                pass
+            else:
+                next_position = _flow_value_end(tokens, position, depth + 1)
+                if next_position is None:
+                    return None
+                position = next_position
+        else:
+            next_position = _flow_value_end(tokens, position, depth + 1)
+            if next_position is None:
+                return None
+            position = next_position
+        if position >= len(tokens):
+            return None
+        if tokens[position].kind is close:
+            return position + 1
+        if tokens[position].kind is not TokenKind.FLOW_COMMA:
+            return None
+        position += 1
+    return None
+
+
+def _certified_composer_events(content: str) -> frozenset[str] | None:
+    """Return complete supported declarations; malformed/opaque YAML is unknown.
+
+    Token-shape checks follow LOTP's conservative trigger certificate, extended
+    to retain event names rather than certify only head_ref unavailability.
+    This does not validate GitHub's complete event-filter configuration.
+    """
+    import re
+
+    from taintly.parsers.structural import EventKind, walk_workflow
+    from taintly.parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
+
+    if re.search(r"(?m)^(?:---|\.\.\.)(?:\s|$)", content):
+        return None  # The structural reader skips document boundaries.
+    events = list(
+        walk_workflow("composer-events.yml", content=content, include_keys=True, recover=True)
+    )
+    if any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
+        return None
+    declarations = [
+        event for event in events if event.kind is EventKind.MAP_KEY and event.path == ("on",)
+    ]
+    if len(declarations) != 1:
+        return None
+    try:
+        tokens = list(tokenize(content))
+    except TokenizerError:
+        return None
+    brackets: list[TokenKind] = []
+    for token in tokens:
+        if token.kind in {TokenKind.ANCHOR, TokenKind.ALIAS, TokenKind.MERGE_KEY}:
+            return None
+        if token.kind in {TokenKind.FLOW_OPEN_SEQ, TokenKind.FLOW_OPEN_MAP}:
+            brackets.append(token.kind)
+        elif token.kind in {TokenKind.FLOW_CLOSE_SEQ, TokenKind.FLOW_CLOSE_MAP}:
+            expected = (
+                TokenKind.FLOW_OPEN_SEQ
+                if token.kind is TokenKind.FLOW_CLOSE_SEQ
+                else TokenKind.FLOW_OPEN_MAP
+            )
+            if not brackets or brackets.pop() is not expected:
+                return None
+    if brackets:
+        return None
+
+    # Empty collection members disappear from the leaf stream. Certifying a
+    # trigger list therefore needs its complete token shape, not just leaves.
+    declaration = declarations[0]
+    starts = [
+        index
+        for index, token in enumerate(tokens)
+        if token.kind is TokenKind.KEY
+        and token.value == "on"
+        and token.line == declaration.line
+        and token.column == declaration.column
+    ]
+    if len(starts) != 1 or declaration.column != 1:
+        return None
+    start = starts[0] + 1
+    end = next(
+        (
+            index
+            for index in range(start, len(tokens))
+            if tokens[index].kind is TokenKind.KEY
+            and tokens[index].column == 1
+            and tokens[index].line > declaration.line
+        ),
+        len(tokens),
+    )
+    value_tokens = [
+        token
+        for token in tokens[start:end]
+        if token.kind not in {TokenKind.INDENT, TokenKind.COMMENT, TokenKind.EOF}
+    ]
+    scalar_kinds = {TokenKind.SCALAR_PLAIN, TokenKind.SCALAR_QUOTED}
+    if not value_tokens:
+        return None
+    if value_tokens[0].kind is TokenKind.FLOW_OPEN_MAP:
+        if _flow_value_end(value_tokens, 0) != len(value_tokens):
+            return None
+    if value_tokens[0].kind is TokenKind.FLOW_OPEN_SEQ:
+        if value_tokens[-1].kind is not TokenKind.FLOW_CLOSE_SEQ:
+            return None
+        expect_scalar = True
+        for token in value_tokens[1:-1]:
+            if expect_scalar:
+                if token.kind not in scalar_kinds:
+                    return None
+            elif token.kind is not TokenKind.FLOW_COMMA:
+                return None
+            expect_scalar = not expect_scalar
+    elif value_tokens[0].kind is TokenKind.SEQUENCE_DASH:
+        if len(value_tokens) % 2:
+            return None
+        for dash, scalar in zip(value_tokens[::2], value_tokens[1::2], strict=True):
+            if (
+                dash.kind is not TokenKind.SEQUENCE_DASH
+                or scalar.kind not in scalar_kinds
+                or dash.line != scalar.line
+            ):
+                return None
+
+    on_events = [event for event in events if event.path and event.path[0] == "on"]
+    keys = [event.path for event in on_events if event.kind is EventKind.MAP_KEY]
+    if len(keys) != len(set(keys)):
+        return None
+    bare = [
+        event
+        for event in on_events
+        if event.kind is EventKind.LEAF_SCALAR and event.path == ("on",)
+    ]
+    items = [event for event in on_events if len(event.path) > 1 and isinstance(event.path[1], int)]
+    mapping = [
+        event for event in on_events if len(event.path) > 1 and isinstance(event.path[1], str)
+    ]
+    if sum(bool(shape) for shape in (bare, items, mapping)) != 1:
+        return None
+    if bare:
+        if len(bare) != 1 or bare[0].value_kind not in {"plain", "quoted"}:
+            return None
+        if len(value_tokens) != 1 or value_tokens[0].kind not in scalar_kinds:
+            return None  # Do not certify a scalar followed by dropped child content.
+        names = {bare[0].value}
+    elif items:
+        if any(
+            len(event.path) != 2
+            or event.kind is not EventKind.LEAF_SCALAR
+            or event.value_kind not in {"plain", "quoted"}
+            for event in items
+        ):
+            return None
+        names = {event.value for event in items}
+    else:
+        if value_tokens[0].kind not in {TokenKind.KEY, TokenKind.FLOW_OPEN_MAP}:
+            return None
+        # Block-map peers begin with keys. Consume flow subvalues completely
+        # so a dropped sibling container cannot certify event completeness.
+        if value_tokens[0].kind is TokenKind.KEY:
+            peer_indent = value_tokens[0].indent
+            # Root peers are block keys at this indent, never keys inside a
+            # flow value. Check each complete value before advancing a peer.
+            peers = [0]
+            depth = 0
+            for position, token in enumerate(value_tokens):
+                if token.kind in {TokenKind.FLOW_OPEN_MAP, TokenKind.FLOW_OPEN_SEQ}:
+                    depth += 1
+                elif token.kind in {TokenKind.FLOW_CLOSE_MAP, TokenKind.FLOW_CLOSE_SEQ}:
+                    depth -= 1
+                elif position and depth == 0 and token.kind is TokenKind.KEY:
+                    if token.indent == peer_indent:
+                        peers.append(position)
+            peers.append(len(value_tokens))
+            for start, end in pairwise(peers):
+                span = value_tokens[start + 1 : end]
+                if not span:
+                    continue  # Empty event configuration is supported.
+                if span[0].line > value_tokens[start].line and span[0].indent <= peer_indent:
+                    return None  # A peer-indented anonymous value is not a child.
+                if span[0].kind in {
+                    TokenKind.FLOW_OPEN_MAP,
+                    TokenKind.FLOW_OPEN_SEQ,
+                    TokenKind.SCALAR_PLAIN,
+                    TokenKind.SCALAR_QUOTED,
+                }:
+                    if _flow_value_end(span, 0) != len(span):
+                        return None
+                elif span[0].kind is not TokenKind.KEY or any(
+                    token.indent <= peer_indent for token in span
+                ):
+                    return None
+        if any(
+            len(event.path) == 2
+            and event.kind is EventKind.LEAF_SCALAR
+            and (event.value_kind != "plain" or event.value not in {"null", "~", ""})
+            for event in mapping
+        ):
+            return None
+        for event in mapping:
+            if len(event.path) != 2 or event.kind is not EventKind.MAP_KEY:
+                continue
+            position = next(
+                (
+                    index
+                    for index, token in enumerate(tokens)
+                    if token.kind is TokenKind.KEY
+                    and token.line == event.line
+                    and token.column == event.column
+                ),
+                None,
+            )
+            if position is None:
+                return None
+            following = next(
+                (
+                    token
+                    for token in tokens[position + 1 :]
+                    if token.kind not in {TokenKind.INDENT, TokenKind.COMMENT}
+                ),
+                None,
+            )
+            if following is not None and following.kind in {
+                TokenKind.FLOW_OPEN_SEQ,
+                TokenKind.SEQUENCE_DASH,
+                TokenKind.SCALAR_BLOCK_HEADER,
+            }:
+                return None
+        names = {
+            str(event.path[1])
+            for event in mapping
+            if len(event.path) == 2 and event.kind is EventKind.MAP_KEY
+        }
+    known = {
+        "branch_protection_rule",
+        "check_run",
+        "check_suite",
+        "create",
+        "delete",
+        "deployment",
+        "deployment_status",
+        "discussion",
+        "discussion_comment",
+        "fork",
+        "gollum",
+        "issue_comment",
+        "issues",
+        "label",
+        "merge_group",
+        "milestone",
+        "page_build",
+        "public",
+        "pull_request",
+        "pull_request_comment",
+        "pull_request_review",
+        "pull_request_review_comment",
+        "pull_request_target",
+        "push",
+        "registry_package",
+        "release",
+        "repository_dispatch",
+        "schedule",
+        "status",
+        "watch",
+        "workflow_dispatch",
+        "workflow_run",
+    }
+    # workflow_call inherits a caller's event; an unknown/new event cannot
+    # establish a complete external-trigger exclusion.
+    return frozenset(names) if names and names <= known else None
+
+
+@dataclass(frozen=True)
+class ExecutionContextFact:
+    """Immutable per-invocation guards and ownership, never actor trust."""
+
+    file: str
+    events: frozenset[str] | None
+    privileged_events: frozenset[str] | None
+    keys: frozenset[tuple[object, ...]]
+    guards: tuple[tuple[tuple[object, ...], str | None], ...]
+    owners: tuple[tuple[int, tuple[object, ...]], ...]
+
+    def fact_key(self):
+        return (self.file,)
+
+    def fact_rank(self):
+        return (0,)
+
+
+def execution_events_for(
+    db: Database,
+    file: str,
+    job: str | None,
+    line: int | None = None,
+    *,
+    privileged: bool = False,
+) -> frozenset[str] | None:
+    """Possible events for an actual owner; None cannot justify pruning.
+
+    A named actor does not establish integrity of the bytes used by that actor.
+    Only an owning guard proven false for an event can remove that event.
+    """
+    from taintly.eventguard import event_guard_verdict
+
+    fact = db.get("execution_context", (file,))
+    if not isinstance(fact, ExecutionContextFact) or not job:
+        return None
+    events = fact.privileged_events if privileged else fact.events
+    if events is None or ("jobs", job) not in fact.keys:
+        return None
+    scopes = [("jobs", job)]
+    if line is not None:
+        owner = dict(fact.owners).get(line)
+        if owner is None or owner[:2] != ("jobs", job):
+            return None
+        scopes.append(owner)
+    guards = dict(fact.guards)
+    conditions = []
+    for scope in scopes:
+        path = scope + ("if",)
+        if path in fact.keys and path not in guards:
+            return None  # A collection-valued if is not a missing guard.
+        conditions.append(guards.get(path))
+    return frozenset(
+        event
+        for event in events
+        if not any(event_guard_verdict(guard, event) is False for guard in conditions)
+    )
+
+
+def _certified_guards(content: str, index) -> tuple:
+    """Keep scalar guards only when the entire value span is represented."""
+    from taintly.parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
+
+    try:
+        tokens = [
+            token
+            for token in tokenize(content)
+            if token.kind not in {TokenKind.INDENT, TokenKind.COMMENT, TokenKind.EOF}
+        ]
+    except TokenizerError:
+        return ()
+    guards = []
+    for path, value in index.values.items():
+        if path[-1:] != ("if",) or value is None:
+            continue
+        starts = [
+            position
+            for position, token in enumerate(tokens)
+            if token.kind is TokenKind.KEY
+            and token.value == "if"
+            and token.line == index.keys.get(path)
+        ]
+        if len(starts) != 1:
+            continue
+        start = starts[0]
+        key = tokens[start]
+        end = next(
+            (
+                position
+                for position in range(start + 1, len(tokens))
+                if tokens[position].line > key.line
+                and (
+                    (
+                        tokens[position].kind is TokenKind.KEY
+                        and tokens[position].indent <= key.indent
+                    )
+                    or (
+                        tokens[position].kind is TokenKind.SEQUENCE_DASH
+                        and tokens[position].indent < key.indent
+                    )
+                )
+            ),
+            len(tokens),
+        )
+        span = tokens[start + 1 : end]
+        scalar = len(span) == 1 and span[0].kind in {
+            TokenKind.SCALAR_PLAIN,
+            TokenKind.SCALAR_QUOTED,
+        }
+        block = (
+            bool(span)
+            and span[0].kind is TokenKind.SCALAR_BLOCK_HEADER
+            and all(token.kind is TokenKind.SCALAR_BLOCK_LINE for token in span[1:])
+        )
+        if scalar or block:
+            guards.append((path, value))
+    return tuple(guards)
+
+
+def _seed_execution_contexts(db: Database, corpus: WorkflowCorpus) -> None:
+    from taintly.agentguards import AgentGuardIndex
+    from taintly.workflow_corpus import _EXTERNAL_PRIVILEGED_EVENTS, _FORK_REACHABLE_EVENTS
+
+    for workflow in corpus.all():
+        index = AgentGuardIndex(workflow.content)
+        names = _certified_composer_events(workflow.content) if index.valid else None
+        events = None if names is None else names & _FORK_REACHABLE_EVENTS
+        privileged = None if names is None else names & _EXTERNAL_PRIVILEGED_EVENTS
+        if events is not None and "workflow_run" in events:
+            if corpus.workflow_run_parent_fork_reachable(workflow) is False:
+                events = events - {"workflow_run"}
+                privileged = privileged - {"workflow_run"}
+        db.add(
+            "execution_context",
+            ExecutionContextFact(
+                workflow.filepath,
+                events,
+                privileged,
+                frozenset(index.keys),
+                _certified_guards(workflow.content, index),
+                tuple(
+                    (line, owner)
+                    for line in index.owners
+                    if (owner := index.owner(line)) is not None
+                ),
+            ),
+        )
+
+
 def _seed_job_contexts(
     db: Database, corpus: WorkflowCorpus, job_indexes: dict[str, _JobIndex]
 ) -> None:
@@ -255,8 +684,8 @@ def _seed_job_contexts(
     the file. Job-level permissions override the workflow default
     when present.
 
-    Trusted-bot gates are evaluated per job so a guarded sibling cannot
-    suppress a chain in an attacker-reachable job.
+    Complete owning-job event proofs narrow trigger candidates. Unknown
+    structure retains the legacy candidate; actor names confer no integrity.
     """
     from taintly.workflow_corpus import TriggerFamily
 
@@ -295,7 +724,7 @@ def _seed_job_contexts(
                         if jb is not None
                         else wf_write or wf_default_write
                     ),
-                    trusted_bot_gate=_content_has_trusted_bot_gate(job.text),
+                    trusted_bot_gate=False,
                 ),
             )
 
@@ -313,33 +742,6 @@ def _seed_job_contexts(
                 trusted_bot_gate=False,
             ),
         )
-
-
-def _content_has_trusted_bot_gate(content: str) -> bool:
-    """Quick content-level scan for `if:` lines that gate on a trusted bot.
-
-    Matches an `if:` line followed (within ~200 chars) by any of:
-      * ``user.login == 'dependabot[bot]'``
-      * ``github.actor == 'renovate[bot]'``
-      * ``triggering_actor == 'github-actions[bot]'``
-      * exact-match on any pattern in :data:`_TRUSTED_BOT_PATTERNS`
-
-    Over-approximates: a workflow with one bot-gated job marks the
-    whole file as gated. That favours fewer composer FPs at the cost
-    of missed multi-job composites; tractable for the precision-
-    focused composer family.
-    """
-    import re
-
-    # Find every `if:` line and check the next ~200 chars for a bot
-    # pattern. ``re.IGNORECASE`` because user.login matches are
-    # case-insensitive in GHA expression evaluation.
-    for m in re.finditer(r"\bif\s*:", content):
-        window = content[m.start() : m.start() + 200]
-        for pat in _TRUSTED_BOT_PATTERNS:
-            if pat.lower() in window.lower():
-                return True
-    return False
 
 
 def _permission_block_has_write(perm) -> bool:
@@ -396,6 +798,7 @@ def run_composer(
             else "",
         )
     db = Database()
+    _seed_execution_contexts(db, corpus)
     _seed_findings(db, prior_findings, job_indexes)
     _seed_job_contexts(db, corpus, job_indexes)
     solve(db, composer_rules)
