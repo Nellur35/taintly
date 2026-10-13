@@ -88,6 +88,53 @@ class Event:
 _GLOB_INDEX_RE = re.compile(r"\[\*\]")
 
 
+def _fold_block_scalar_lines(lines: list[str]) -> str:
+    """Apply YAML folded-style line-break rules to indentation-stripped lines."""
+
+    if not lines:
+        return ""
+
+    def more_indented(value: str) -> bool:
+        return bool(value) and value[0].isspace()
+
+    result = lines[0]
+    index = 0
+    while index < len(lines) - 1:
+        current = lines[index]
+        following = lines[index + 1]
+        if current and following:
+            separator = "\n" if more_indented(current) or more_indented(following) else " "
+            result += separator + following
+            index += 1
+            continue
+
+        if current and not following:
+            end = index + 1
+            while end < len(lines) and not lines[end]:
+                end += 1
+            blank_count = end - index - 1
+            if end == len(lines):
+                result += "\n" * blank_count
+            else:
+                preserve = more_indented(current) or more_indented(lines[end])
+                result += "\n" * (blank_count + int(preserve)) + lines[end]
+            index = end
+            continue
+
+        # A leading run of empty lines folds to the same number of newlines.
+        end = index
+        while end < len(lines) and not lines[end]:
+            end += 1
+        blank_count = end - index
+        if end < len(lines):
+            result += "\n" * blank_count + lines[end]
+        else:
+            result += "\n" * blank_count
+        index = end
+
+    return result
+
+
 def _glob_to_segments(glob: str) -> list[str]:
     normalised = _GLOB_INDEX_RE.sub(".[*]", glob)
     return [s for s in normalised.split(".") if s]
@@ -232,6 +279,8 @@ class _Walker:
         include_merge_origins: bool = False,
     ) -> None:
         self._content = content
+        normalized_source = content.replace("\r\n", "\n").replace("\r", "\n")
+        self._source_lines = normalized_source.split("\n")
         self._recover = recover
         self._include_keys = include_keys
         self._include_merge_origins = include_merge_origins
@@ -245,6 +294,7 @@ class _Walker:
         # can land findings at the specific source line a match
         # comes from rather than at the block-scalar header.
         self._block_buffer: list[tuple[int, str]] | None = None
+        self._block_header: Token | None = None
         self._block_anchor_line = 0
         self._block_path: tuple[object, ...] = ()
         # Anchor capture.
@@ -618,33 +668,83 @@ class _Walker:
             self._block_path = self._current_path()
             self._block_anchor_line = tok.line
         self._block_buffer = []
+        self._block_header = tok
 
     def _flush_block(self) -> Event:
         buffer = self._block_buffer or []
-        body = "\n".join(text for _line, text in buffer)
-        # Trim trailing empty lines that come from the splitlines
-        # artefact at end-of-file.
-        body = body.rstrip("\n")
-        if buffer:
-            # Preserve a single trailing newline for ``|``-style
-            # literal scalars (default chomping clip).
-            if not body.endswith("\n"):
-                body = body + "\n"
+        header = self._block_header
+        header_text = header.value if header is not None else "|"
+        style = header_text[:1]
+        indent_indicator = next((int(char) for char in header_text[1:] if char.isdigit()), 0)
+        chomp = next((char for char in header_text[1:] if char in "+-"), "")
+        nonblank_source_lines = [
+            self._source_lines[line_number - 1]
+            for line_number, _text in buffer
+            if 0 < line_number <= len(self._source_lines)
+            and self._source_lines[line_number - 1].strip()
+        ]
+        scalar_lines: list[str] = []
+        if indent_indicator:
+            content_indent = (header.indent if header is not None else 0) + indent_indicator
+        else:
+            content_indent = next(
+                (
+                    len(raw) - len(raw.lstrip(" "))
+                    for line_number, _text in buffer
+                    if 0 < line_number <= len(self._source_lines)
+                    and self._source_lines[line_number - 1].strip()
+                    for raw in (self._source_lines[line_number - 1],)
+                ),
+                (header.indent + 1 if header is not None else 1),
+            )
+        if nonblank_source_lines or indent_indicator:
+            for line_number, text in buffer:
+                if 0 < line_number <= len(self._source_lines):
+                    raw = self._source_lines[line_number - 1]
+                    indent = len(raw) - len(raw.lstrip(" "))
+                    scalar_lines.append(raw[content_indent:] if indent >= content_indent else "")
+                else:
+                    scalar_lines.append(text)
+            final_break = bool(buffer and buffer[-1][0] < len(self._source_lines))
+            if style == ">":
+                body = _fold_block_scalar_lines(scalar_lines)
+            else:
+                body = "\n".join(scalar_lines)
+            if final_break and buffer:
+                body += "\n"
+            trailing_breaks = len(body) - len(body.rstrip("\n"))
+            if chomp == "-":
+                body = body.rstrip("\n")
+            elif chomp != "+":
+                body = body.rstrip("\n")
+                if trailing_breaks:
+                    body += "\n"
+        else:
+            # With implicit indentation, whitespace-only lines are separation,
+            # not scalar content. An explicit indicator makes indentation
+            # beyond the declared content indent part of the scalar value.
+            body = "\n" * sum(
+                line_number < len(self._source_lines) for line_number, _text in buffer
+            )
+            if chomp != "+":
+                body = ""
         # Per-line breakdown for consumers that need to land
         # findings at the line a match actually came from.
         block_lines: tuple[tuple[int, str], ...] = tuple(buffer)
         path = self._block_path
         line = self._block_anchor_line
         self._block_buffer = None
+        self._block_header = None
         self._block_path = ()
-        self._record_anchor_leaf(path, body, "block_literal", line)
+        value_kind = "block_folded" if style == ">" else "block_literal"
+        self._record_anchor_leaf(path, body, value_kind, line)
         return Event(
             EventKind.LEAF_SCALAR,
             path,
             line,
             1,
             value=body,
-            value_kind="block_literal",
+            value_kind=value_kind,
             block_lines=block_lines,
         )
 

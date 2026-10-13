@@ -117,6 +117,14 @@ class _Output:
     path: str
     line: int
     directory: bool = False
+    folded_origin: bool = False
+
+
+def _output_snippet(output: _Output, lines: list[str]) -> str:
+    source = lines[output.line - 1].strip()
+    if output.folded_origin:
+        source += " [decoded folded run body; line is the YAML scalar header]"
+    return source
 
 
 @dataclass(frozen=True)
@@ -637,7 +645,25 @@ def _redirect_tags(script: str) -> str:
 
 def _commands(event: Event, env: dict[str, str]) -> Iterator[tuple[int, list[str], bool]]:
     """Read linear commands; ignore heredoc bodies and quoted/commented command text."""
-    source = event.block_lines or ((event.line, event.value or ""),)
+    folded = event.value_kind == "block_folded"
+    if folded:
+        # YAML has already folded soft physical breaks into spaces in value.
+        # Only LF characters left in that decoded value are shell line breaks.
+        decoded_lines = (event.value or "").split("\n")
+
+        def trailing_backslashes(value: str) -> int:
+            return len(value) - len(value.rstrip("\\"))
+
+        # Backslash + a retained LF is shell line continuation, whose exact
+        # command text needs source-aware handling. Decline the whole scalar
+        # before yielding anything rather than infer from a partial command.
+        if any(trailing_backslashes(line) % 2 for line in decoded_lines):
+            return
+        source = tuple((event.line, line) for line in decoded_lines)
+    else:
+        # Literal block lines are shell command boundaries and retain exact
+        # physical line provenance.
+        source = event.block_lines or ((event.line, event.value or ""),)
     heredocs: list[str] = []
     continued = ""
     start = event.line
@@ -649,7 +675,9 @@ def _commands(event: Event, env: dict[str, str]) -> Iterator[tuple[int, list[str
         if not continued:
             start = line
         continued += raw
-        if continued.endswith("\\"):
+        if continued.endswith("\\") and (
+            not folded or (len(continued) - len(continued.rstrip("\\"))) % 2 == 1
+        ):
             continued = continued[:-1] + " "
             continue
         current = continued
@@ -971,7 +999,7 @@ class SecretCachePattern:
                                         if cache.contains(output) and 0 < output.line <= len(lines):
                                             hits.setdefault(
                                                 output.line,
-                                                lines[output.line - 1].strip()
+                                                _output_snippet(output, lines)
                                                 + f" [cache save at line {cache.line}; "
                                                 + f"output {output.path.replace(_ROOT, '.').replace(_HOME, '~')}]",
                                             )
@@ -1078,7 +1106,13 @@ class SecretCachePattern:
                                             )
                                             if target is not None:
                                                 outputs.append(
-                                                    _Output(target, line, directory=True)
+                                                    _Output(
+                                                        target,
+                                                        line,
+                                                        directory=True,
+                                                        folded_origin=run.value_kind
+                                                        == "block_folded",
+                                                    )
                                                 )
                                             serialized = _serialized_path(
                                                 tokens, process, variables, cwd
@@ -1112,7 +1146,14 @@ class SecretCachePattern:
                                                             or output.path != path
                                                         ]
                                                     if _SECRET in payload:
-                                                        outputs.append(_Output(path, line))
+                                                        outputs.append(
+                                                            _Output(
+                                                                path,
+                                                                line,
+                                                                folded_origin=run.value_kind
+                                                                == "block_folded",
+                                                            )
+                                                        )
                                     persisted.update(pending)
                                     current = _state_with(
                                         current,
@@ -1138,7 +1179,7 @@ class SecretCachePattern:
                             if cache.contains(output) and 0 < output.line <= len(lines):
                                 hits.setdefault(
                                     output.line,
-                                    lines[output.line - 1].strip()
+                                    _output_snippet(output, lines)
                                     + f" [cache save at line {cache.line}; "
                                     + f"output {output.path.replace(_ROOT, '.').replace(_HOME, '~')}]",
                                 )

@@ -45,12 +45,10 @@ def test_pattern_contract_every_rule(rule):
     snippet contract: snippet text comes from the cited line."""
     for sample in rule.test_positive:
         lines = sample.splitlines()
-        try:
-            matches = rule.pattern.check(sample, lines)
-        except Exception as e:
-            pytest.skip(f"{rule.id} pattern raised on sample: {e}")
-        # Some rule patterns are file-scope and may match nothing on a
-        # one-step positive sample — that's fine, we're only verifying
-        # the contract on samples that DO match.
+        # Positive samples promise a match, as in run_self_test. A crashing
+        # pattern must fail this check; skipping or accepting an empty result
+        # would leave the source-location assertions unexercised.
+        matches = rule.pattern.check(sample, lines)
+        assert matches, f"{rule.id} positive sample produced no snippet to validate"
         for line_num, snippet in matches:
             assert_snippet_matches_line(line_num, snippet, lines)

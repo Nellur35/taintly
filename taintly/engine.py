@@ -592,6 +592,10 @@ def scan_file(
                         finding.__dict__["_sec3_gh_006_line_owner_count"] = getattr(
                             match_context, "line_owner_count", None
                         )
+                    if rule.id == "SEC10-GH-002" and owner_path is not None:
+                        finding.__dict__["_sec10_gh_002_line_owner_count"] = getattr(
+                            match_context, "line_owner_count", None
+                        )
                     findings.append(finding)
             except Exception as e:
                 _append_incomplete_pattern_diagnostic(
@@ -1140,6 +1144,7 @@ def _suppress_dead_findings(
         if finding.rule_id == "SEC3-GH-006":
             inventory_at_site.setdefault((finding.file, finding.line), []).append(finding)
     shared_inventory_sites: set[tuple[str, int]] = set()
+    shared_artifact_sites: set[tuple[str, int]] = set()
     for site, site_findings in inventory_at_site.items():
         if not any(start <= site[1] <= end for start, end in dead_ranges):
             continue
@@ -1148,6 +1153,18 @@ def _suppress_dead_findings(
         ]
         if any(count is None or count > 1 for count in owner_counts):
             shared_inventory_sites.add(site)
+    artifact_at_site: dict[tuple[str, int], list[Finding]] = {}
+    for finding in findings:
+        if finding.rule_id == "SEC10-GH-002":
+            artifact_at_site.setdefault((finding.file, finding.line), []).append(finding)
+    for site, site_findings in artifact_at_site.items():
+        if not any(start <= site[1] <= end for start, end in dead_ranges):
+            continue
+        owner_counts = [
+            getattr(finding, "_sec10_gh_002_line_owner_count", None) for finding in site_findings
+        ]
+        if any(count is None or count > 1 for count in owner_counts):
+            shared_artifact_sites.add(site)
     findings[:] = [
         f
         for f in findings
@@ -1155,6 +1172,7 @@ def _suppress_dead_findings(
             f.line <= 0
             or not any(start <= f.line <= end for start, end in dead_ranges)
             or (f.rule_id == "SEC3-GH-006" and (f.file, f.line) in shared_inventory_sites)
+            or (f.rule_id == "SEC10-GH-002" and (f.file, f.line) in shared_artifact_sites)
         )
     ]
     for site in shared_inventory_sites:
@@ -1162,6 +1180,14 @@ def _suppress_dead_findings(
             note = (
                 "Liveness attribution is unresolved for this shared source line; "
                 "inventory rows were retained because line-based filtering cannot distinguish owners."
+            )
+            if note not in finding.context_notes:
+                finding.context_notes.append(note)
+    for site in shared_artifact_sites:
+        for finding in artifact_at_site[site]:
+            note = (
+                "Liveness attribution is unresolved for this shared source line; "
+                "the finding was retained because line-based filtering cannot distinguish owners."
             )
             if note not in finding.context_notes:
                 finding.context_notes.append(note)
