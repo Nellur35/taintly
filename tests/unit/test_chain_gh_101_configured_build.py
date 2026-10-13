@@ -120,7 +120,7 @@ def test_only_positively_compatible_owning_guards_get_a_path(
     assert all(f.review_needed for f in chain(findings))
 
 
-def test_consumer_only_candidate_keeps_existing_bot_heuristic(tmp_path, rules):
+def test_consumer_only_candidate_keeps_review_under_unrelated_bot_guard(tmp_path, rules):
     content = (
         BASE.replace(
             "          repository: ${{ github.event.pull_request.head.repo.full_name }}\n", ""
@@ -130,7 +130,10 @@ def test_consumer_only_candidate_keeps_existing_bot_heuristic(tmp_path, rules):
     _, findings = scan(tmp_path, rules, content)
     assert [f for f in findings if f.rule_id == "SEC4-GH-005"]
     assert not [f for f in findings if f._checkout_build is not None]
-    assert chain(findings) == []
+    candidates = chain(findings)
+    assert candidates
+    assert all(f.review_needed for f in candidates)
+    assert all("not proven" in f.snippet for f in candidates)
 
 
 @pytest.mark.parametrize(

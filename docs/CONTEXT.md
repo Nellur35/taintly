@@ -77,6 +77,28 @@ Limited authority is not a certificate of harmlessness. These source-derived
 calibrations can affect the score through finding metadata; deployment notes
 from `.taintly-context.yml` retain their annotation-only behavior above.
 
+## Source-derived execution context for composed findings
+
+`CHAIN-GH-101` through `CHAIN-GH-105` also inspect workflow source. This is
+separate from the optional deployment notes above. Complete supported event
+declarations and the actual owning job/step guards can exclude an impossible
+external-event combination. Cross-job candidates require compatible events for
+the producer, reader and recognized consumer authority scope. A push-only step
+does not gain PR reachability merely because another job handles PRs.
+
+Missing, malformed, duplicated, aliased or unsupported context cannot prove a
+path impossible. Unknown conditions retain the review candidate. A trusted bot
+name in a guard does not establish that event content, fetched bytes or a
+third-party action is trustworthy; an unrelated guarded step cannot suppress
+another step's finding.
+
+These composites remain review-needed. Requested permissions, secret references
+and authority-operation indicators describe candidates, rather than proving
+runtime access or exploitation. Review the source, actual guards, approvals,
+credential identity and provider permissions. Passing a secret through `env:`
+does not isolate it from an action that receives it, and quoting a variable
+passed to `eval` does not prevent reevaluation as code.
+
 ## Authority across local workflow and action calls
 
 For `XF-GH-005` and `XF-GH-006`, source-derived context follows each local call

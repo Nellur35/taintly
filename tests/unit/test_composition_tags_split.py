@@ -116,7 +116,7 @@ _CHAIN_105_POSITIVE = (
     "      contents: write\n"
     "      id-token: write\n"
     "    steps:\n"
-    "      - run: echo ${{ needs.produce.outputs.val }}\n"
+    "      - run: gh issue edit 1 --add-label ${{ needs.produce.outputs.val }}\n"
 )
 
 

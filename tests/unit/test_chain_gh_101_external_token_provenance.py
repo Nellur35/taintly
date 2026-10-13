@@ -228,7 +228,7 @@ def test_read_only_job_keeps_chain_clean(tmp_path: Path) -> None:
     assert _findings(tmp_path, "CHAIN-GH-101") == []
 
 
-def test_trusted_bot_gate_keeps_chain_clean(tmp_path: Path) -> None:
+def test_trusted_actor_does_not_prove_checkout_or_credential_integrity(tmp_path: Path) -> None:
     _write_workflow(
         tmp_path,
         "ci.yml",
@@ -237,4 +237,7 @@ def test_trusted_bot_gate_keeps_chain_clean(tmp_path: Path) -> None:
             job_if="github.actor == 'dependabot[bot]'",
         ),
     )
-    assert _findings(tmp_path, "CHAIN-GH-101") == []
+    candidates = _findings(tmp_path, "CHAIN-GH-101")
+    assert candidates
+    assert all(f.review_needed for f in candidates)
+    assert all("not proven" in f.snippet for f in candidates)

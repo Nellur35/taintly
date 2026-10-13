@@ -27,10 +27,9 @@ layer can't do):
 * CHAIN-GH-102 — SEC3-GH-001 + fork-reachable = HIGH. An unpinned
   third-party action in a workflow attackers can fire; a single
   upstream compromise → arbitrary code in the fork-reachable job.
-* CHAIN-GH-103 — TAINT-GH-001 + fork-reachable = HIGH. Attacker-
-  controlled value reaches a shell in a job attackers can trigger;
-  the fork-reachable trigger upgrades the taint finding from
-  "review-needed" to "concrete pwn-request shape."
+* CHAIN-GH-103 — TAINT-GH-001 + possible external context = HIGH,
+  review needed. Owning guards exclude proven impossible events;
+  runtime control, execution and authority still need verification.
 
 The conjuncts intentionally cite *existing* lab-shipped rules rather
 than re-implementing their patterns. Composer rules earn their keep
@@ -44,7 +43,13 @@ import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from taintly.composer import CheckoutBuildFact, CompositeFact, context_for, findings_by_rule
+from taintly.composer import (
+    CheckoutBuildFact,
+    CompositeFact,
+    context_for,
+    execution_events_for,
+    findings_by_rule,
+)
 from taintly.models import Platform, Rule, Severity
 from taintly.workflow_corpus import (
     CorpusEvidence,
@@ -54,20 +59,18 @@ from taintly.workflow_corpus import (
 )
 
 if TYPE_CHECKING:
+    from taintly.parsers.segmentation import JobSegment, StepSegment
     from taintly.taint_facts.relations import Database, Fact
 
 # ---------------------------------------------------------------------------
 # Composer rules (closure-rule callables)
 # ---------------------------------------------------------------------------
 
-
 _CHAIN_101_TITLE = "Review: persisted checkout credential with external-trigger/write-scope context"
-
 _CHAIN_101_REASON = (
     "The composition matches credential-consumer, trigger and permission candidates; "
     "it does not prove attacker-controlled checkout/execution or effective credential authority."
 )
-
 _CHAIN_101_REMEDIATION = (
     "First verify the checkout repository/ref, the later command or action that executes "
     "attacker-controlled bytes, and the persisted credential's identity and effective scopes. "
@@ -146,11 +149,12 @@ def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
             continue
         if not ctx.fork_reachable:
             continue
+        possible = execution_events_for(db, f.file, f.job, f.line, privileged=True)
+        if possible == frozenset():
+            continue
         if not ctx.external_privileged:
             continue
         if not ctx.has_write_token:
-            continue
-        if ctx.trusted_bot_gate:
             continue
         if (f.file, f.job, f.line) in witnessed:
             continue
@@ -200,20 +204,17 @@ def _compose_chain_gh_102(db: Database) -> Iterable[tuple[str, Fact]]:
             continue
         if not ctx.fork_reachable:
             continue
-        if ctx.trusted_bot_gate:
+        possible = execution_events_for(db, f.file, f.job, f.line, privileged=False)
+        if possible == frozenset():
             continue
         if not _is_high_blast_radius_action(db, f.file, f.line):
             continue
         snippet = (
-            "CHAIN: high-blast-radius third-party action used at a "
-            "mutable ref (SEC3-GH-001) inside a fork-reachable "
-            "workflow. The action handles secrets, runs in a "
-            "container, or pushes/publishes/deploys — an upstream tag "
-            "overwrite (by the action's maintainer or by an attacker "
-            "who compromises them) silently lands "
-            "attacker-controlled code in a workflow any external "
-            "contributor can trigger, with the action's full runtime "
-            "authority."
+            "Review: mutable third-party action (SEC3-GH-001) with a secret, "
+            "container or publish/deploy indicator in externally triggered context. "
+            "An upstream compromise could affect this invocation. Verify action "
+            "behavior, actual event/guards, approvals and available credentials; "
+            "the join does not prove compromise or effective runtime authority."
         )
         yield (
             "composite",
@@ -296,15 +297,7 @@ def _is_high_blast_radius_action(db: Database, file: str, line: int) -> bool:  #
 
 
 def _compose_chain_gh_103(db: Database) -> Iterable[tuple[str, Fact]]:
-    """TAINT-GH-001 (tainted run) + fork-reachable → HIGH.
-
-    TAINT-GH-001 normally flags "this `${{ github.event.X }}` reaches a
-    shell"; on a non-fork-reachable trigger, the attack story is weak
-    (only a maintainer can fire the trigger). Composed with a fork-
-    reachable trigger, it becomes a concrete pwn-request shape:
-    external attacker fires the workflow → injects shell → executes
-    in the workflow's context.
-    """
+    """Taint candidate plus compatible external event context, review needed."""
     for f in findings_by_rule(db, "TAINT-GH-001"):
         if not f.job:
             continue
@@ -313,17 +306,18 @@ def _compose_chain_gh_103(db: Database) -> Iterable[tuple[str, Fact]]:
             continue
         if not ctx.fork_reachable:
             continue
-        if ctx.trusted_bot_gate:
+        possible = execution_events_for(db, f.file, f.job, f.line, privileged=False)
+        if possible == frozenset():
             continue
         # Surface the constituent TAINT-GH-001 finding's rendered
         # source→hop→sink path (its snippet) so the upgraded finding shows
         # WHY it chained, not just the conclusion.
         path_note = f" Taint path: {f.snippet}" if f.snippet else ""
         snippet = (
-            "CHAIN: tainted value reaches a shell run: in a fork-"
-            "reachable workflow. TAINT-GH-001 by itself flagged the "
-            "flow; the fork-reachable trigger upgrades that to a "
-            "concrete external-attacker-injectable shell." + path_note
+            "Review: TAINT-GH-001 source-to-shell candidate in externally triggered "
+            "context. Verify attacker control, owning guards and shell interpretation. "
+            "A trusted triggering actor does not establish input integrity; runtime "
+            "execution, secret availability and token authority remain unverified." + path_note
         )
         yield (
             "composite",
@@ -338,48 +332,24 @@ def _compose_chain_gh_103(db: Database) -> Iterable[tuple[str, Fact]]:
 
 
 def _compose_chain_gh_104(db: Database) -> Iterable[tuple[str, Fact]]:
-    """SEC6-GH-010 (secret to action input without masking) +
-    fork-reachable + unpinned action → HIGH.
+    """Secret-input and mutable-action candidates at one compatible step.
 
-    Three legs:
-      (1) SEC6-GH-010: a credential-named action input takes
-          ``${{ secrets.X }}`` directly (no env-block masking).
-      (2) fork_reachable: the workflow fires on a trigger
-          external contributors can reach.
-      (3) SEC3-GH-001: the action at this step is unpinned
-          (mutable ref, not SHA).
-
-    Each leg in isolation is MEDIUM or review-needed.  Combined,
-    the supply-chain + secret-disclosure shape is concrete: a fork
-    PR fires the workflow, the action — published at a mutable
-    ref — receives the secret in plaintext, and an upstream
-    compromise (tag overwrite, maintainer takeover) immediately
-    exfiltrates the secret.
-
-    The unpinned-action leg is what makes this rule pay rent.
-    Without it, ``secrets.GITHUB_TOKEN`` passed to official
-    SHA-pinned actions (the dominant ordinary-corpus shape) fires
-    as a false positive: SHA-pinned actions can't be silently
-    swapped, so the supply-chain leg of the chain doesn't exist.
-    Requiring SEC3-GH-001 narrows fires to the case where the
-    chain is real end-to-end.
+    Upstream compromise, secret availability and authority are unverified.
+    Environment transport and log masking do not isolate a secret from its
+    recipient. The source rule's legacy category is not an access proof.
     """
     # Build (file, line) anchors of every UNPINNED THIRD-PARTY
     # action finding.  SEC3-GH-001 fires on the ``uses:`` line for
     # third-party actions only; SEC3-GH-001A fires on first-party
     # actions (``actions/*``, ``aws-actions/*``, ``github/*``,
     # ``microsoft/*``, ``Azure/*``) and is INTENTIONALLY EXCLUDED:
-    # first-party publishers carry materially lower supply-chain
-    # risk (operationally trusted, audit-attested by the vendor),
-    # so the "upstream compromise" leg of the chain doesn't fire
-    # in the same way.  SEC6-GH-010 itself flags the hardening
-    # miss on first-party actions at its own severity.
+    # This is the existing third-party rule boundary, not proof of a
+    # publisher's integrity or a pinned action's safety.
     #
     # SEC6-GH-010 fires on the ``token: ${{ secrets.X }}`` line a
     # few lines below the ``uses:`` line inside the same step's
-    # ``with:`` block.  A step is typically 2-12 lines tall, so a
-    # SEC3-GH-001 finding within 15 lines BEFORE the SEC6-GH-010
-    # line in the same file is the same step.
+    # ``with:`` block. The helper below requires the actual step's uses
+    # anchor, rather than accepting an arbitrary nearby action finding.
     unpinned_by_job: dict[tuple[str, str], set[int]] = {}
     for f in findings_by_rule(db, "SEC3-GH-001"):
         if f.job:
@@ -393,7 +363,8 @@ def _compose_chain_gh_104(db: Database) -> Iterable[tuple[str, Fact]]:
             continue
         if not ctx.fork_reachable:
             continue
-        if ctx.trusted_bot_gate:
+        possible = execution_events_for(db, f.file, f.job, f.line, privileged=False)
+        if possible == frozenset():
             continue
         # Leg (3): does the SEC6-GH-010-bearing step's ``uses:``
         # line itself have a SEC3-GH-001 finding?  This locks the
@@ -404,14 +375,11 @@ def _compose_chain_gh_104(db: Database) -> Iterable[tuple[str, Fact]]:
         if not _has_unpinned_in_step_window(unpinned_lines, f.line, f.file):
             continue
         snippet = (
-            "CHAIN: secret passed to an action input without env-block "
-            "masking (SEC6-GH-010) in a fork-reachable workflow, and "
-            "the action is pinned to a mutable ref (SEC3-GH-001). "
-            "Any external PR fires the workflow; the action receives "
-            "the secret in plaintext via `with:`; an upstream "
-            "compromise of the action's tag or branch immediately "
-            "exposes the secret to the attacker pool external "
-            "contributors are in."
+            "Review: a secret reference is supplied to a mutable third-party action "
+            "at the same step (SEC6-GH-010 + SEC3-GH-001), in externally triggered "
+            "context. A compromised action could misuse a credential if available. "
+            "Verify secret availability, action behavior and effective authority. "
+            "Changing with: to env: does not isolate a secret from its recipient."
         )
         yield (
             "composite",
@@ -504,6 +472,66 @@ _NEEDS_OUTPUT_REF_RE = re.compile(
     r"\.outputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}"
 )
 
+# Observable uses of GitHub/package authority inside a write-capable job. The
+# list is deliberately structural and conservative: it proves that the job
+# actually exercises authority somewhere in the relevant step/scope, while the
+# rule remains review-needed until value-to-call argument provenance is known.
+_GITHUB_REST_WRITE_RE = re.compile(
+    r"\bgithub\.rest\.[A-Za-z0-9_]+\."
+    r"(?:add|cancel|close|create|delete|disable|dismiss|enable|lock|merge|"
+    r"remove|reopen|replace|request|rerun|set|submit|transfer|unlock|update)"
+    r"[A-Za-z0-9_]*\s*\(",
+    re.IGNORECASE,
+)
+_GITHUB_REQUEST_WRITE_RE = re.compile(
+    r"\bgithub\.request\s*\(\s*(?:"
+    r"[\"'`]\s*(?:POST|PUT|PATCH|DELETE)\b|"
+    r"\{(?:(?!\}\s*\)).){0,1000}?\bmethod\s*:\s*[\"'`]"
+    r"(?:POST|PUT|PATCH|DELETE)\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+_GITHUB_GRAPHQL_MUTATION_RE = re.compile(
+    r"\bgithub\.graphql\s*\(\s*[\"'`]?\s*mutation\b",
+    re.IGNORECASE,
+)
+_GH_CLI_WRITE_RE = re.compile(
+    r"\bgh\s+(?:"
+    r"issue\s+(?:close|comment|create|delete|edit|lock|pin|reopen|transfer|unlock)|"
+    r"pr\s+(?:close|comment|create|edit|lock|merge|ready|reopen|review|unlock)|"
+    r"release\s+(?:create|delete|edit|upload)|"
+    r"repo\s+(?:archive|create|delete|edit|fork|rename|sync)|"
+    r"run\s+(?:cancel|delete|rerun)|"
+    r"workflow\s+(?:disable|enable|run)"
+    r")\b",
+    re.IGNORECASE,
+)
+_GH_API_RE = re.compile(r"\bgh\s+api\b", re.IGNORECASE)
+_GH_API_WRITE_METHOD_RE = re.compile(
+    r"(?:--method(?:=|\s+)|-X\s*)(?:POST|PUT|PATCH|DELETE)\b", re.IGNORECASE
+)
+_GH_API_READ_METHOD_RE = re.compile(r"(?:--method(?:=|\s+)|-X\s*)(?:GET|HEAD)\b", re.IGNORECASE)
+_GH_API_IMPLICIT_POST_RE = re.compile(
+    r"(?:^|\s)(?:-f|-F|--field|--raw-field)(?:=|\s+)", re.IGNORECASE
+)
+_OTHER_AUTHORITY_OPERATION_RE = re.compile(
+    r"\bgit\s+push\b|"
+    r"\b(?:npm|pnpm|yarn)\s+publish\b|"
+    r"\b(?:twine\s+upload|docker\s+push)\b|"
+    r"\b(?:curl|wget)\b[^\n]*(?:"
+    r"\bapi\.github\.com\b[^\n]*(?:-X|--request)\s*"
+    r"(?:POST|PUT|PATCH|DELETE)\b|"
+    r"(?:-X|--request)\s*(?:POST|PUT|PATCH|DELETE)\b[^\n]*"
+    r"\bapi\.github\.com\b)",
+    re.IGNORECASE,
+)
+_ACTION_USES_RE = re.compile(r"^\s*(?:-\s*)?uses\s*:\s*([^\s#]+)", re.MULTILINE)
+_AUTHORITY_TOKEN_INPUT_RE = re.compile(
+    r"^\s*(?:github[_-]?token|token)\s*:\s*['\"]?"
+    r"\$\{\{\s*(?:secrets\.[A-Za-z_][A-Za-z0-9_]*|github\.token)\s*\}\}['\"]?",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 class _CrossJobEdge:
     """One producer→consumer cross-job output edge in a single file.
@@ -523,8 +551,8 @@ class _CrossJobEdge:
         self.output = output
 
 
-def _producer_jobs_in_file(file: str) -> set[str]:
-    """Return the set of job names in ``file`` that declare an
+def _producer_jobs_in_lines(lines: list[str]) -> set[str]:
+    """Return job names in ``lines`` that declare an
     ``outputs:`` block (the producers of cross-job output edges).
 
     A job declares outputs when an ``outputs:`` key appears at the
@@ -534,11 +562,6 @@ def _producer_jobs_in_file(file: str) -> set[str]:
     """
     from taintly.models import _split_into_job_segments
 
-    try:
-        with open(file, encoding="utf-8", errors="replace") as fh:
-            lines = fh.read().splitlines()
-    except OSError:
-        return set()
     producers: set[str] = set()
     for _start_idx, seg in _split_into_job_segments(lines):
         # The first line of a job segment is the ``<jobname>:`` key
@@ -561,9 +584,9 @@ def _producer_jobs_in_file(file: str) -> set[str]:
     return producers
 
 
-def _crossjob_edges_in_file(file: str) -> list[_CrossJobEdge]:
+def _crossjob_edges_in_content(content: str) -> list[_CrossJobEdge]:
     """Extract every ``needs.<producer>.outputs.<name>`` edge in
-    ``file``, attributing each reference to the consumer job whose
+    ``content``, attributing each reference to the consumer job whose
     segment contains it.
 
     Only edges whose producer actually declares an ``outputs:`` block
@@ -572,12 +595,8 @@ def _crossjob_edges_in_file(file: str) -> list[_CrossJobEdge]:
     """
     from taintly.models import _split_into_job_segments
 
-    try:
-        with open(file, encoding="utf-8", errors="replace") as fh:
-            lines = fh.read().splitlines()
-    except OSError:
-        return []
-    producers = _producer_jobs_in_file(file)
+    lines = content.splitlines()
+    producers = _producer_jobs_in_lines(lines)
     if not producers:
         return []
     edges: list[_CrossJobEdge] = []
@@ -608,6 +627,60 @@ def _crossjob_edges_in_file(file: str) -> list[_CrossJobEdge]:
     return edges
 
 
+def _scope_exercises_write_authority(text: str) -> bool:
+    """Whether a step/job contains a recognized authority-operation indicator.
+
+    A declared write permission by itself is latent capability. CHAIN-GH-105
+    needs an operation indicator in the consumer scope. Direct API, CLI, push,
+    or publish call text qualifies. An action step qualifies when it is
+    explicitly handed a GitHub/PAT token. This textual indicator does not prove
+    runtime execution, effective authority, or argument-level propagation.
+    """
+    if _GITHUB_REST_WRITE_RE.search(text) or _GH_CLI_WRITE_RE.search(text):
+        return True
+    if _GITHUB_REQUEST_WRITE_RE.search(text):
+        return True
+    if _GITHUB_GRAPHQL_MUTATION_RE.search(text):
+        return True
+    if _GH_API_RE.search(text):
+        if _GH_API_WRITE_METHOD_RE.search(text):
+            return True
+        if not _GH_API_READ_METHOD_RE.search(text) and _GH_API_IMPLICIT_POST_RE.search(text):
+            return True
+    if _OTHER_AUTHORITY_OPERATION_RE.search(text):
+        return True
+    return bool(_ACTION_USES_RE.search(text) and _AUTHORITY_TOKEN_INPUT_RE.search(text))
+
+
+def _edge_has_authority_sink(
+    edge: _CrossJobEdge,
+    steps: list[StepSegment],
+    jobs: list[JobSegment],
+    authority_cache: dict[tuple[str, int, int], bool],
+) -> bool:
+    """Require a recognized authority-operation indicator in the edge scope.
+
+    Step-local references (the common ``env:`` / ``with:`` shape) cannot borrow
+    an unrelated privileged action from another step. A reference in job-level
+    ``env:`` or ``if:`` can feed later steps, so the whole consumer job is the
+    conservative scope.
+    """
+    for step in steps:
+        if step.job_name == edge.consumer and step.start_line <= edge.line <= step.end_line:
+            key = ("step", step.start_line, step.end_line)
+            if key not in authority_cache:
+                authority_cache[key] = _scope_exercises_write_authority(step.text)
+            return authority_cache[key]
+
+    for job in jobs:
+        if job.name == edge.consumer and job.start_line <= edge.line <= job.end_line:
+            key = ("job", job.start_line, job.end_line)
+            if key not in authority_cache:
+                authority_cache[key] = _scope_exercises_write_authority(job.text)
+            return authority_cache[key]
+    return False
+
+
 def _files_with_contexts(db: Database) -> set[str]:
     """The set of workflow files the composer seeded job contexts for.
 
@@ -625,24 +698,51 @@ def _files_with_contexts(db: Database) -> set[str]:
     return files
 
 
+def _edge_events_compatible(db: Database, file: str, edge: _CrossJobEdge, steps) -> bool:
+    """Reject only proven disjoint producer/reader/authority event sets."""
+    possibilities = [
+        execution_events_for(db, file, edge.producer, privileged=True),
+        execution_events_for(db, file, edge.consumer, privileged=True),
+        execution_events_for(db, file, edge.consumer, edge.line, privileged=True),
+    ]
+    same_step = any(
+        step.job_name == edge.consumer and step.start_line <= edge.line <= step.end_line
+        for step in steps
+    )
+    if not same_step:
+        # Job-level env references can be read in a different step. Include
+        # every statically recognized authority scope; opaque ownership stays
+        # unknown. Job conditions above still apply independently.
+        authorities = [
+            execution_events_for(db, file, edge.consumer, step.start_line, privileged=True)
+            for step in steps
+            if step.job_name == edge.consumer and _scope_exercises_write_authority(step.text)
+        ]
+        if authorities and all(events is not None for events in authorities):
+            possibilities.append(frozenset().union(*authorities))
+    known = [events for events in possibilities if events is not None]
+    return not known or bool(frozenset.intersection(*known))
+
+
 def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
-    """Cross-job privilege escalation (P1.3) → HIGH.
+    """Cross-job privilege escalation (P1.3) → MEDIUM review candidate.
 
     A LOW-privilege producer job (``has_write_token=False``) declares
     an output that a HIGH-privilege consumer job
     (``has_write_token=True``) reads via
     ``${{ needs.<producer>.outputs.<name> }}``. The producer is the
-    exposed / attacker-influenceable surface; its output crossing into
-    a write-capable job is a privilege-escalation vector — the
-    write-capable job acts on data shaped in a context that was never
-    granted that authority.
+    exposed / attacker-influenceable surface. The relevant consumer
+    step or job scope must also contain a recognized textual authority
+    indicator, such as a mutating GitHub API/CLI call, a push/publish
+    command, or an action explicitly handed a token.
 
     Distinct from TAINT-GH-009 (cross-job output → *shell* sink) and
-    from the severity-escalation / id-token co-occurrence rules: the
-    sink here is the *privilege boundary itself*, not a shell or a
-    specific dangerous statement. The composite fires only when the
-    privilege GRADIENT exists (read producer → write consumer); a
-    same-tier or high→low edge is benign data flow and is suppressed.
+    from the severity-escalation / id-token co-occurrence rules: this
+    rule accepts API and action sinks as well as shell operations. It
+    requires a privilege GRADIENT (read producer → write consumer) and
+    a co-scoped operation indicator. It remains review-needed because this
+    layer does not establish runtime execution, effective authority, or
+    argument-level proof that the transferred value controls the operation.
 
     Per-job write-token resolution relies on each job declaring its
     own ``permissions:`` block (the only way the corpus can attribute
@@ -650,38 +750,65 @@ def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
     to the workflow-default wildcard, no gradient is observable and
     the rule conservatively does NOT fire — favouring precision, the
     whole point of the composer family.
+
+    A plain ``pull_request`` from a fork is not sufficient: GitHub normally
+    downgrades every declared write scope to read-only for that event. The
+    rule therefore also requires an externally-triggerable event that can
+    retain write authority (for example ``pull_request_target``, ``issues``,
+    or ``workflow_run`` whose named parent is externally reachable). A
+    push-only ``workflow_run`` parent is excluded; an unresolved parent fails
+    open as review-needed. Repository settings can opt private forks out of the
+    downgrade; without that deployment context, those remain outside the
+    statically confirmed rule contract.
     """
     files = _files_with_contexts(db)
     for file in sorted(files):
-        edges = _crossjob_edges_in_file(file)
+        try:
+            with open(file, encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError:
+            continue
+        edges = _crossjob_edges_in_content(content)
         if not edges:
             continue
+        from taintly.parsers.segmentation import for_each_job, for_each_step
+
+        steps = for_each_step(content)
+        jobs = for_each_job(content)
+        authority_cache: dict[tuple[str, int, int], bool] = {}
         for edge in edges:
             producer_ctx = context_for(db, file, edge.producer)
             consumer_ctx = context_for(db, file, edge.consumer)
             if producer_ctx is None or consumer_ctx is None:
                 continue
-            # Suppress when a trusted-bot gate restricts the workflow:
-            # the producer surface isn't externally attacker-controlled.
-            if consumer_ctx.trusted_bot_gate or producer_ctx.trusted_bot_gate:
+            # A normal fork-originated pull_request token is forced read-only
+            # by GitHub, even when the YAML requests write. Without an event
+            # that can retain write authority, the claimed privilege gradient
+            # does not exist in the default execution model.
+            if not producer_ctx.external_privileged:
                 continue
             # The privilege GRADIENT: read-only producer → write consumer.
             if producer_ctx.has_write_token:
                 continue
             if not consumer_ctx.has_write_token:
                 continue
+            # A write scope is latent capability, not proof of a privileged
+            # operation. Require a recognized textual operation indicator in
+            # the relevant step (or job for job-level references); runtime
+            # execution and value-to-operation propagation remain unproven.
+            if not _edge_has_authority_sink(edge, steps, jobs, authority_cache):
+                continue
+            if not _edge_events_compatible(db, file, edge, steps):
+                continue
             snippet = (
-                "CHAIN: cross-job privilege escalation. Low-privilege "
-                f"producer job `{edge.producer}` (read-only token) "
-                f"declares output `{edge.output}`, which the "
-                f"write-capable consumer job `{edge.consumer}` reads "
-                f"via `${{{{ needs.{edge.producer}.outputs.{edge.output} }}}}`. "
-                "The producer is the exposed, attacker-influenceable "
-                "surface; its output crossing into a job that holds a "
-                "write-capable token (contents/id-token/packages write) "
-                "lets a value shaped under low authority drive an action "
-                "under high authority — a privilege-escalation gradient "
-                f"({edge.producer} → {edge.consumer})."
+                f"Review: producer job `{edge.producer}` declares output `{edge.output}` "
+                f"read by consumer `{edge.consumer}` via "
+                f"`${{{{ needs.{edge.producer}.outputs.{edge.output} }}}}`. "
+                "Configured token permissions show a read-to-write candidate gradient, "
+                "and the relevant consumer scope contains an authority-operation "
+                "indicator. Verify producer input control, argument-level propagation, "
+                "compatible guards, token identity and effective provider authority; "
+                "this composition does not establish a successful privilege escalation."
             )
             yield (
                 "composite",
@@ -850,26 +977,17 @@ RULES: list[Rule] = [
     Rule(
         id="CHAIN-GH-102",
         title=(
-            "Composite: unpinned third-party action in a fork-reachable "
-            "workflow (SEC3-GH-001 + fork trigger)"
+            "Review: mutable third-party action with sensitive-operation indicators in external context"
         ),
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-3",
         description=(
-            "CHAIN-GH-102 composes: (1) SEC3-GH-001 fires on a "
-            "third-party action used at a mutable ref (tag or branch); "
-            "(2) the workflow is fork-reachable. Unpinned-action risk "
-            "in isolation is MEDIUM; combined with a fork-reachable "
-            "trigger, an upstream supply-chain compromise reaches "
-            "the lowest-privilege attacker pool immediately."
+            "Joins a mutable third-party action finding, a sensitive-operation indicator and external-trigger context. Possible upstream compromise and runtime authority require review; this does not prove attacker control of the action or execution."
         ),
         pattern=CorpusPattern(callback=_make_chain_callback("CHAIN-GH-102")),
         remediation=(
-            "Pin the third-party action to a full commit SHA "
-            "(addresses SEC3-GH-001). The fork-reachable trigger is "
-            "a property of the workflow's intent and may be unchangeable; "
-            "pinning removes the upstream-compromise leg of the chain."
+            "Pin the action to a reviewed full commit SHA and minimize credentials and permissions supplied to it. Verify the actual event, owning guards and action behavior. Pinning prevents silent tag/branch replacement; it does not establish that the pinned implementation is safe."
         ),
         reference=(
             "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions"
@@ -878,57 +996,27 @@ RULES: list[Rule] = [
         test_negative=[],
         stride=["T", "E"],
         threat_narrative=(
-            "An attacker who compromises a popular GitHub Action "
-            "(via maintainer takeover or upstream account theft) "
-            "publishes a malicious release under the existing tag. "
-            "Every fork-reachable workflow that uses the action at "
-            "that tag picks up the malicious code on the next PR — "
-            "no maintainer action required by the victim repo."
+            "If an upstream publisher or mutable ref is compromised and the action executes with useful credentials, malicious action code could misuse those credentials. External triggering, action compromise, secret availability and effective authority are separate prerequisites."
         ),
-        confidence="high",
-        review_needed=False,
+        confidence="medium",
+        review_needed=True,
         finding_family="chain-composition",
         composition_tags=frozenset({"chain-composition"}),
     ),
     Rule(
         id="CHAIN-GH-104",
         title=(
-            "Composite: secret passed to unpinned action input "
-            "without env-block masking in a fork-reachable workflow "
-            "(SEC6-GH-010 + SEC3-GH-001 + fork trigger)"
+            "Review: secret reference supplied to a mutable third-party action in external context"
         ),
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-6",
         description=(
-            "CHAIN-GH-104 composes three legs: (1) SEC6-GH-010 fires "
-            "on a credential-named action input that receives a "
-            "`${{ secrets.X }}` value directly (no env-block masking); "
-            "(2) the workflow is fork-reachable; (3) the action is "
-            "pinned to a mutable ref (SEC3-GH-001), not a full SHA.\n\n"
-            "Individually each is MEDIUM or review-needed. Combined: "
-            "any external contributor's PR fires the workflow, the "
-            "action — published at a mutable ref — receives the "
-            "secret in plaintext via `with:`, and an upstream "
-            "compromise (tag overwrite, maintainer takeover) "
-            "exfiltrates the secret without needing any change to the "
-            "host repo.\n\n"
-            "The unpinned-action leg is what distinguishes a real "
-            "supply-chain shape from the common hardening miss of "
-            "passing `secrets.GITHUB_TOKEN` to an official "
-            "SHA-pinned action: SHA-pinned actions can't be silently "
-            "swapped, so the supply-chain leg of the chain doesn't "
-            "exist."
+            "Joins a secret-input finding with a mutable third-party action at the same step and external-trigger context. This identifies a potential sensitive recipient; it does not prove secret availability, malicious behavior or exfiltration. Both with and env can supply secrets to actions."
         ),
         pattern=CorpusPattern(callback=_make_chain_callback("CHAIN-GH-104")),
         remediation=(
-            "Sanitise either leg:\n"
-            "  1. Bind the secret to a step `env:` variable and pass "
-            "`${{ env.NAME }}` (with the leading double-quoted shell "
-            "form for run-blocks); GitHub's runner masks env-bound "
-            "secrets in logs and on injection;\n"
-            "  2. Pin the action to a full commit SHA and audit it "
-            "(removes the upstream-compromise leg)."
+            "Audit and pin the recipient action to a full commit SHA; remove unnecessary secrets and minimize credential permissions. Verify event-specific secret availability and recipient behavior. Moving a secret from with: to env: does not protect it from an action that receives it; log masking is not isolation."
         ),
         reference=(
             "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-secrets"
@@ -937,43 +1025,25 @@ RULES: list[Rule] = [
         test_negative=[],
         stride=["I", "T", "E"],
         threat_narrative=(
-            "An external contributor opens a PR. The workflow fires "
-            "and invokes a third-party action that takes a "
-            "`token:` input; the workflow passes `${{ secrets.PAT }}` "
-            "to it without an env-block. The action's source — "
-            "controlled by its upstream maintainer or anyone who "
-            "compromises them — receives the secret in plaintext. "
-            "The PR doesn't need to do anything except trigger; the "
-            "secret leak is automatic."
+            "A compromised action could misuse a secret supplied to it, whether delivered as an input or environment variable, if the credential is available for that invocation. A mutable ref and a secret reference alone do not prove compromise, access, exfiltration or usable authority."
         ),
-        confidence="high",
-        review_needed=False,
+        confidence="medium",
+        review_needed=True,
         finding_family="chain-composition",
         composition_tags=frozenset({"chain-composition"}),
     ),
     Rule(
         id="CHAIN-GH-103",
-        title=(
-            "Composite: tainted value reaches shell in a fork-reachable "
-            "workflow (TAINT-GH-001 + fork trigger)"
-        ),
+        title=("Review: source-to-shell candidate with external-trigger context"),
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "CHAIN-GH-103 composes: (1) TAINT-GH-001 fires on a "
-            "`${{ github.event.X }}` value reaching a shell `run:` "
-            "block; (2) the workflow is fork-reachable. Taint in "
-            "isolation is review-needed; combined with a fork trigger "
-            "it becomes a concrete external-attacker-injectable shell."
+            "Joins TAINT-GH-001 with possible external execution context. Proven impossible owning event guards are excluded. Input control, shell interpretation, runtime execution and credential authority remain review questions."
         ),
         pattern=CorpusPattern(callback=_make_chain_callback("CHAIN-GH-103")),
         remediation=(
-            "Sanitise the tainted input — bind to an env var, then use "
-            '`"$VAR"` inside the run block; never expand '
-            "`${{ ... }}` directly into shell. The fork-reachable "
-            "trigger is workflow intent; sanitising the taint flow "
-            "removes the injection leg."
+            "Pass untrusted data as structured arguments or through an intermediate environment variable and quote shell expansions. Remove eval, shell -c and other reevaluation of untrusted values: quoting a variable passed to eval does not prevent command injection. Verify the actual source, owning guards and sink."
         ),
         reference=(
             "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable"
@@ -982,51 +1052,23 @@ RULES: list[Rule] = [
         test_negative=[],
         stride=["T", "E"],
         threat_narrative=(
-            "An external contributor opens a PR whose title contains "
-            "shell metacharacters. The workflow's CI job inlines that "
-            "title into a shell run via `${{ github.event.pull_request.title }}`. "
-            "The shell interprets the metacharacters; arbitrary commands "
-            "execute in the job's context with the workflow's secrets "
-            "and token."
+            "If attacker-controlled content reaches a shell interpretation or reevaluation sink in a reachable invocation, it could execute commands with that invocation's available authority. A trusted triggering actor alone does not sanitize that content. Secret availability and effective token scopes need separate verification."
         ),
-        confidence="high",
-        review_needed=False,
+        confidence="medium",
+        review_needed=True,
         finding_family="chain-composition",
         composition_tags=frozenset({"chain-composition"}),
     ),
     Rule(
         id="CHAIN-GH-105",
         title=(
-            "Composite: cross-job privilege escalation — low-privilege "
-            "producer output flows into a write-capable consumer job "
-            "(needs.*.outputs + privilege gradient)"
+            "Review: cross-job output with configured privilege gradient and authority-operation indicator"
         ),
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-2",
         description=(
-            "CHAIN-GH-105 composes workflow structure with per-job "
-            "permission context: (1) a producer job declares an "
-            "`outputs:` value and holds only a read-scope GITHUB_TOKEN; "
-            "(2) a consumer job reads that value via "
-            "`${{ needs.<producer>.outputs.<name> }}`; (3) the consumer "
-            "job holds a write-capable token (e.g. `contents: write`, "
-            "`id-token: write`).\n\n"
-            "The producer is the lower-privilege, attacker-influenceable "
-            "surface; its output crossing the job boundary into a "
-            "write-capable consumer is a privilege-escalation vector — a "
-            "value shaped under low authority drives an action under "
-            "high authority.\n\n"
-            "This is DISTINCT from TAINT-GH-009 (cross-job output "
-            "reaching a *shell* sink): the boundary crossed here is the "
-            "privilege gradient itself, not a specific dangerous "
-            "statement. The composite fires only when the gradient is "
-            "observable (read producer → write consumer); same-tier or "
-            "high→low edges are benign data flow and are suppressed. "
-            "Per-job permission attribution requires each job to declare "
-            "its own `permissions:` block; when both jobs inherit the "
-            "workflow default, no gradient is observable and the rule "
-            "conservatively does not fire."
+            "Joins a declared producer output, consumer needs reference, configured read-to-write permission gradient and consumer authority-operation indicator. Proven disjoint event guards are excluded. Producer attacker control, argument-level propagation, runtime success, token identity and effective provider authority remain unverified."
         ),
         pattern=CorpusPattern(callback=_make_chain_callback("CHAIN-GH-105")),
         remediation=(
