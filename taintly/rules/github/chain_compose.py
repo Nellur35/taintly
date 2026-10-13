@@ -51,6 +51,10 @@ from taintly.composer import (
     findings_by_rule,
 )
 from taintly.models import Platform, Rule, Severity
+from taintly.rules.github._crossjob_declarations import (
+    DeclarationVerdict,
+    build_crossjob_declaration_view,
+)
 from taintly.workflow_corpus import (
     CorpusEvidence,
     CorpusFindings,
@@ -589,15 +593,17 @@ def _crossjob_edges_in_content(content: str) -> list[_CrossJobEdge]:
     ``content``, attributing each reference to the consumer job whose
     segment contains it.
 
-    Only edges whose producer actually declares an ``outputs:`` block
-    are kept: a ``needs.X.outputs.Y`` reference to a job that doesn't
-    declare outputs is a typo / dead reference, not a real data edge.
+    The line-based producer set remains a coarse candidate gate. A single
+    complete structural declaration view then prunes only edges whose output
+    name or consumer direct dependency is proven absent. Ambiguous or
+    incomplete structure keeps the review candidate.
     """
     from taintly.models import _split_into_job_segments
 
     lines = content.splitlines()
     producers = _producer_jobs_in_lines(lines)
-    if not producers:
+    declarations = build_crossjob_declaration_view(content)
+    if not producers and declarations is None:
         return []
     edges: list[_CrossJobEdge] = []
     for start_idx, seg in _split_into_job_segments(lines):
@@ -612,10 +618,27 @@ def _crossjob_edges_in_content(content: str) -> list[_CrossJobEdge]:
         for offset, ln in enumerate(seg):
             for m in _NEEDS_OUTPUT_REF_RE.finditer(ln):
                 producer, output = m.group(1), m.group(2)
-                if producer not in producers:
-                    continue
                 if producer == consumer:
                     continue  # a job can't ``needs`` itself; defensive
+                output_verdict = (
+                    declarations.output_name_verdict(producer, output)
+                    if declarations is not None
+                    else DeclarationVerdict.UNKNOWN
+                )
+                needs_verdict = (
+                    declarations.direct_need_verdict(consumer, producer)
+                    if declarations is not None
+                    else DeclarationVerdict.UNKNOWN
+                )
+                # A structurally declared flow-map output is itself positive
+                # evidence when the old block-only candidate gate misses it.
+                if producer not in producers and output_verdict is not DeclarationVerdict.PRESENT:
+                    continue
+                if (
+                    output_verdict is DeclarationVerdict.ABSENT
+                    or needs_verdict is DeclarationVerdict.ABSENT
+                ):
+                    continue
                 edges.append(
                     _CrossJobEdge(
                         producer=producer,

@@ -7,6 +7,7 @@ import os
 import re
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 
 from .families import classify_rule, default_confidence, default_review_needed
@@ -2122,7 +2123,12 @@ def _run_corpus_rules(
         # Smuggled onto the corpus object for composer rules to read.
         corpus._prior_findings = prior_findings  # type: ignore[attr-defined]
     findings: list[Finding] = []
-    with scan_session():
+    composer_cache: AbstractContextManager[None] = nullcontext()
+    if composer_only:
+        from .composer import composer_execution_structure_cache
+
+        composer_cache = composer_execution_structure_cache()
+    with composer_cache, scan_session():
         for rule in corpus_rules:
             # The isinstance(r.pattern, CorpusPattern) filter above
             # guarantees this method exists; assert the narrow type
