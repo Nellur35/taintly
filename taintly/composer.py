@@ -27,7 +27,10 @@ machinery actually earn its keep on this layer of the system.
 from __future__ import annotations
 
 from bisect import bisect_right
-from collections.abc import Iterable
+from collections import OrderedDict
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from hashlib import sha256
 from itertools import pairwise
@@ -544,6 +547,93 @@ class ExecutionContextFact:
         return (0,)
 
 
+@dataclass(frozen=True)
+class _ExecutionStructure:
+    """Immutable facts extracted from workflow bytes, with no file identity."""
+
+    events: frozenset[str] | None
+    keys: frozenset[tuple[object, ...]]
+    guards: tuple[tuple[tuple[object, ...], str | None], ...]
+    owners: tuple[tuple[int, tuple[object, ...]], ...]
+
+
+@dataclass
+class _ExecutionStructureCache:
+    """Small, composer-pass-local cache for content-only extraction."""
+
+    helper_identity: tuple[object, ...]
+    entries: OrderedDict[str, _ExecutionStructure] = field(default_factory=OrderedDict)
+
+
+_EXECUTION_STRUCTURE_CACHE: ContextVar[_ExecutionStructureCache | None] = ContextVar(
+    "taintly_composer_execution_structure_cache", default=None
+)
+_EXECUTION_STRUCTURE_CACHE_LIMIT = 8
+_EXECUTION_STRUCTURE_MAX_CONTENT_CHARS = 65_536
+
+
+def _execution_structure_helpers() -> tuple[object, ...]:
+    from taintly.agentguards import AgentGuardIndex
+
+    return (AgentGuardIndex, _certified_composer_events, _certified_guards)
+
+
+@contextmanager
+def composer_execution_structure_cache() -> Iterator[None]:
+    """Reuse immutable execution structure only within one composer engine pass.
+
+    Nested passes receive an independent cache; ContextVar tokens restore the
+    outer pass even when a callback raises. Standalone composer calls remain
+    uncached unless the engine explicitly establishes this scope.
+    """
+    cache = _ExecutionStructureCache(_execution_structure_helpers())
+    token: Token[_ExecutionStructureCache | None] = _EXECUTION_STRUCTURE_CACHE.set(cache)
+    try:
+        yield
+    finally:
+        _EXECUTION_STRUCTURE_CACHE.reset(token)
+
+
+def _build_execution_structure(content: str) -> _ExecutionStructure:
+    from taintly.agentguards import AgentGuardIndex
+
+    index = AgentGuardIndex(content)
+    events = _certified_composer_events(content) if index.valid else None
+    return _ExecutionStructure(
+        events=events,
+        keys=frozenset(index.keys),
+        guards=_certified_guards(content, index),
+        owners=tuple(
+            (line, owner) for line in index.owners if (owner := index.owner(line)) is not None
+        ),
+    )
+
+
+def _execution_structure(content: str) -> _ExecutionStructure:
+    if len(content) > _EXECUTION_STRUCTURE_MAX_CONTENT_CHARS:
+        return _build_execution_structure(content)
+    cache = _EXECUTION_STRUCTURE_CACHE.get()
+    if cache is None:
+        return _build_execution_structure(content)
+    helpers = _execution_structure_helpers()
+    if helpers != cache.helper_identity:
+        # A callback may replace extraction helpers while a pass is active.
+        # Use the current implementation without consulting or populating the
+        # cache, so an earlier result cannot cross that boundary.
+        return _build_execution_structure(content)
+    structure = cache.entries.get(content)
+    if structure is not None:
+        cache.entries.move_to_end(content)
+        return structure
+    structure = _build_execution_structure(content)
+    if _execution_structure_helpers() == helpers:
+        cache.entries[content] = structure
+        cache.entries.move_to_end(content)
+        while len(cache.entries) > _EXECUTION_STRUCTURE_CACHE_LIMIT:
+            cache.entries.popitem(last=False)
+    return structure
+
+
 def execution_events_for(
     db: Database,
     file: str,
@@ -646,12 +736,11 @@ def _certified_guards(content: str, index) -> tuple:
 
 
 def _seed_execution_contexts(db: Database, corpus: WorkflowCorpus) -> None:
-    from taintly.agentguards import AgentGuardIndex
     from taintly.workflow_corpus import _EXTERNAL_PRIVILEGED_EVENTS, _FORK_REACHABLE_EVENTS
 
     for workflow in corpus.all():
-        index = AgentGuardIndex(workflow.content)
-        names = _certified_composer_events(workflow.content) if index.valid else None
+        structure = _execution_structure(workflow.content)
+        names = structure.events
         events = None if names is None else names & _FORK_REACHABLE_EVENTS
         privileged = None if names is None else names & _EXTERNAL_PRIVILEGED_EVENTS
         if events is not None and "workflow_run" in events:
@@ -664,13 +753,9 @@ def _seed_execution_contexts(db: Database, corpus: WorkflowCorpus) -> None:
                 workflow.filepath,
                 events,
                 privileged,
-                frozenset(index.keys),
-                _certified_guards(workflow.content, index),
-                tuple(
-                    (line, owner)
-                    for line in index.owners
-                    if (owner := index.owner(line)) is not None
-                ),
+                structure.keys,
+                structure.guards,
+                structure.owners,
             ),
         )
 

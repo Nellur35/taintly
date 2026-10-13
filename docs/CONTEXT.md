@@ -124,3 +124,17 @@ privileges or a cloud role. Invalid invocation contracts retain execution review
 ordinary authority uncertainty does not erase a supported input-to-sink path.
 HIGH severity and MEDIUM confidence are retained. Review the cited permission,
 forwarding and sink lines before deciding impact or remediation.
+
+## Declared outputs and direct dependencies
+
+For `CHAIN-GH-105`, a supported complete declaration can exclude a reference
+to a nonexistent named output or a producer that is not a direct dependency of
+the consumer. A transitive dependency alone does not make its outputs available
+in the consumer's `needs` context. Supported literal block declarations and a
+narrow flat inline-output form are checked.
+
+Incomplete, duplicate, aliased, merged, malformed or unsupported declarations
+remain unknown. A case-only name mismatch also remains unknown. These cases
+keep an existing review candidate; an incomplete parse cannot prove absence.
+A declared output and dependency establish a possible connection, without
+proving attacker control, runtime success or effective credential authority.
