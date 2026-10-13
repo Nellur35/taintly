@@ -154,3 +154,25 @@ analysis limits retain review. It does not equate refs across separate runs,
 infer trust from a named actor, prove argument-level propagation or establish
 effective credential authority. Individual underlying warnings may remain
 after an impossible composed path is excluded.
+
+## Conditions through secret-bearing cache output
+
+`SEC6-GH-015` follows possible executions within each job and event. Supported
+owning conditions keep persisted `GITHUB_ENV` values, recognized output files
+and pending cache saves together. A producer on `refs/heads/main` cannot supply
+output to a cache save restricted to `refs/heads/dev` in that execution. A
+cleanup step removes evidence only on paths where that step runs. Unknown
+conditions retain both possibilities; different concrete environment values
+remain separate.
+
+The analysis supports direct event/ref comparisons and Boolean composition
+under the same bounded condition model described above. It allows at most 64
+distinct execution states and 4,096 state-step transitions per job/event. If
+either limit is exceeded, an `ENGINE-ERR` reports incomplete analysis for that
+job/event. Findings already established remain visible, and other jobs and
+rules continue. An incomplete scan must not be read as a clean result.
+
+This remains a review candidate under the existing linear POSIX shell model.
+It does not prove cache contents, runtime success, cache access from PRs or
+third-party tool behavior. Unsupported or ambiguous guards cannot establish
+that a path is impossible.

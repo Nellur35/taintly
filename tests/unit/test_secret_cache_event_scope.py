@@ -6,11 +6,11 @@ import pytest
 
 from taintly.engine import scan_repo
 from taintly.models import Platform
-from taintly.rules.github.secret_cache import SecretCachePattern
-from taintly.rules.registry import load_rules_for_platform
 from taintly.parsers.structural import api as structural_api
 from taintly.parsers.structural import query as structural_query
 from taintly.parsers.structural.query import triggers
+from taintly.rules.github.secret_cache import SecretCachePattern
+from taintly.rules.registry import load_rules_for_platform
 
 clear_walk_cache = structural_api.clear_walk_cache
 
@@ -91,7 +91,7 @@ def test_low_trust_event_with_explicit_write_mode_is_reported():
 
 
 @pytest.mark.parametrize(
-    "workflow_mode,job_mode,expected",
+    ("workflow_mode", "job_mode", "expected"),
     [
         ("write", "", True),
         ("", "write", True),
@@ -100,7 +100,10 @@ def test_low_trust_event_with_explicit_write_mode_is_reported():
     ],
 )
 def test_explicit_cache_mode_overrides_event_default(workflow_mode, job_mode, expected):
-    assert bool(rule_hits(workflow("release", workflow_mode=workflow_mode, job_mode=job_mode))) == expected
+    assert (
+        bool(rule_hits(workflow("release", workflow_mode=workflow_mode, job_mode=job_mode)))
+        == expected
+    )
 
 
 @pytest.mark.parametrize("trigger", ["pull_request_target", "issue_comment", "workflow_run"])
@@ -131,11 +134,20 @@ def test_mixed_event_workflow_reports_matching_guarded_writer():
     assert rule_hits(content)
 
 
-def test_unknown_guard_remains_conservative_for_mixed_events():
+def test_known_nonmatching_event_literal_is_pruned_for_mixed_events():
     content = workflow(
         "[delete, release]",
         cache_if="github.event_name == 'not-real'",
         build_if="github.event_name == 'not-real'",
+    )
+    assert rule_hits(content) == []
+
+
+def test_unknown_guard_remains_conservative_for_mixed_events():
+    content = workflow(
+        "[delete, release]",
+        cache_if="contains(github.ref, 'refs/heads/main')",
+        build_if="contains(github.ref, 'refs/heads/main')",
     )
     assert rule_hits(content)
 
