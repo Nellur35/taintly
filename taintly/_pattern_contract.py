@@ -21,6 +21,11 @@ not as violations):
   * TaintPattern (per-platform) — emits a rendered provenance chain
     instead of a literal source substring; the chain summarises a
     multi-line dataflow that no single source line conveys.
+  * Decoded folded YAML scalars — when a command has no proved physical
+    start-line mapping, a pattern may cite the scalar header and explicitly
+    label it as the scalar origin. The snippet must still contain that actual
+    cited source line. A decoded-line offset must not pretend to be a physical
+    command location. Literal block scalars retain their body-line locations.
 
 This module's ``assert_snippet_matches_line`` is the executable form
 of that contract; it is enforced by ``tests/unit/test_pattern_contract.py``.

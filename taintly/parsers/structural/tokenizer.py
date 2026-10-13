@@ -666,14 +666,25 @@ class _Tokenizer:
             # walker disambiguates via its key-stack.
             if ch in "|>" and self._is_block_scalar_header(raw, pos):
                 header = self._read_block_scalar_header(raw, pos)
+                header_indent = indent
+                compact_prefix = raw[indent:pos]
+                compact_match = re.match(r"- +.+:\s*$", compact_prefix)
+                if compact_match:
+                    # In ``- key: >2`` the block scalar's parent indentation
+                    # is the mapping-key column after the sequence indicator
+                    # and its actual whitespace, which may exceed one space.
+                    spaces_after_dash = len(compact_prefix[1:]) - len(
+                        compact_prefix[1:].lstrip(" ")
+                    )
+                    header_indent += 1 + spaces_after_dash
                 yield Token(
                     TokenKind.SCALAR_BLOCK_HEADER,
                     line_no,
                     pos + 1,
                     header,
-                    indent,
+                    header_indent,
                 )
-                self._enter_block_scalar(header, indent)
+                self._enter_block_scalar(header, header_indent)
                 # Header consumes the rest of the line.
                 return
 
