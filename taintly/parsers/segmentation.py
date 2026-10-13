@@ -20,7 +20,7 @@ from taintly.models import _split_into_job_segments_for_content
 # items: each begins with ``-`` at the steps-indent + 2 spaces, has
 # its own keys at +4 indent, and ends when the next ``-`` appears at
 # the same indent or the indent decreases below the steps block.
-_STEPS_KEY_RE = re.compile(r"^(\s*)steps:\s*(#.*)?$")
+_STEPS_KEY_RE = re.compile(r"^(\s*)(?:steps:|(?:'steps'|\"steps\")\s*:)\s*(#.*)?$")
 _STEP_ITEM_RE = re.compile(r"^(\s*)-\s*(\S.*)?$")
 # Recognise step-name keys for the optional ``name`` field.
 _STEP_NAME_RE = re.compile(r"^\s*name:\s*(.+?)\s*(#.*)?$")
@@ -150,12 +150,26 @@ def for_each_step(content: str) -> list[StepSegment]:
     before the next ``-`` at the same indent (or the indent dropping
     below the steps block).
     """
+    step_key_lines: set[tuple[str, int]] = set()
+    if "'steps'" in content or '"steps"' in content:
+        from taintly.parsers.structural import EventKind, walk_workflow
+
+        step_key_lines = {
+            (event.path[1], event.line)
+            for event in walk_workflow("workflow.yml", content=content, include_keys=True)
+            if event.kind is EventKind.MAP_KEY
+            and len(event.path) == 3
+            and event.path[0] == "jobs"
+            and isinstance(event.path[1], str)
+            and event.path[2] == "steps"
+            and not event.merge_origins
+        }
     out: list[StepSegment] = []
     for job in for_each_job(content):
         if not job.name:
             # Preamble segment has no job to anchor steps under.
             continue
-        out.extend(_steps_in_job(job))
+        out.extend(_steps_in_job(job, step_key_lines))
     return out
 
 
@@ -216,7 +230,7 @@ _GITLAB_NON_JOB_KEYS = frozenset(
 )
 
 
-def _steps_in_job(job: JobSegment) -> list[StepSegment]:
+def _steps_in_job(job: JobSegment, step_key_lines: set[tuple[str, int]]) -> list[StepSegment]:
     """Walk the steps of a single GitHub Actions job segment."""
     steps: list[StepSegment] = []
     lines = list(job.body_lines)
@@ -225,6 +239,12 @@ def _steps_in_job(job: JobSegment) -> list[StepSegment]:
     for idx, line in enumerate(lines):
         m = _STEPS_KEY_RE.match(line)
         if m:
+            key_text = line[len(m.group(1)) :].split(":", 1)[0].strip()
+            # Keep the historical regex fallback for unquoted headers. The
+            # structural check is needed only for the newly supported quoted
+            # spelling, so scalar text cannot become a new quoted header.
+            if key_text != "steps" and (job.name, job.start_line + idx) not in step_key_lines:
+                continue
             steps_anchor = idx
             steps_indent = len(m.group(1))
             break

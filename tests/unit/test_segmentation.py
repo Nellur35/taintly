@@ -10,13 +10,14 @@ NB: line numbers are 1-based and inclusive on both ends.
 
 from __future__ import annotations
 
+import pytest
+
 from taintly.parsers.segmentation import (
     JobSegment,
     StepSegment,
     for_each_job,
     for_each_step,
 )
-
 
 # =============================================================================
 # for_each_job — GitHub Actions
@@ -157,6 +158,77 @@ def test_for_each_step_basic_two_steps():
     assert steps[1].start_line == 7, steps[1]
 
 
+@pytest.mark.parametrize("key", ["steps", "'steps'", '"steps"'])
+def test_for_each_step_accepts_literal_quoted_steps_key(key):
+    src = (
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        f"    {key}:\n"
+        "      - run: echo one\n"
+        "      - run: echo two\n"
+    )
+
+    steps = for_each_step(src)
+
+    assert len(steps) == 2
+    assert [step.index for step in steps] == [0, 1]
+    assert all(step.job_name == "build" for step in steps)
+
+
+def test_quoted_steps_text_in_job_scalar_does_not_capture_actual_steps():
+    src = (
+        "jobs:\n"
+        "  build:\n"
+        "    env:\n"
+        "      PAYLOAD: |\n"
+        '        "steps":\n'
+        "          - run: echo fake-step\n"
+        '    "steps":\n'
+        "      - run: echo actual-step\n"
+    )
+
+    steps = for_each_step(src)
+
+    assert len(steps) == 1
+    assert "actual-step" in steps[0].text
+    assert "fake-step" not in steps[0].text
+
+
+def test_unquoted_steps_preserve_regex_fallback_without_a_new_structural_pass(monkeypatch):
+    from taintly.parsers import structural
+
+    def unexpected_walk(*_args, **_kwargs):
+        raise AssertionError("unquoted steps do not need another structural pass")
+
+    monkeypatch.setattr(structural, "walk_workflow", unexpected_walk)
+    src = "jobs:\n  build:\n    steps:\n      - run: echo actual-step\n"
+    assert len(for_each_step(src)) == 1
+
+
+def test_space_before_unquoted_steps_colon_keeps_existing_unsupported_behavior():
+    src = "jobs:\n  build:\n    steps :\n      - run: echo unknown-shape\n"
+    assert for_each_step(src) == []
+
+
+def test_for_each_step_same_indent_comments_do_not_end_steps_block():
+    src = (
+        "on: push\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "    - uses: actions/checkout@v4\n"
+        "\n"
+        "    # A comment between same-indent sequence items is valid YAML.\n"
+        "    - uses: actions/cache@v4\n"
+        "    - run: npm test\n"
+    )
+    steps = for_each_step(src)
+    assert len(steps) == 3
+    assert [step.start_line for step in steps] == [6, 9, 10]
+
+
 def test_for_each_step_extracts_id_and_name():
     """Steps that carry ``id:`` and ``name:`` must surface them on the
     record so downstream rules don't need to re-parse the body."""
@@ -184,15 +256,7 @@ def test_for_each_step_extracts_id_and_name():
 def test_for_each_step_returns_empty_for_gitlab():
     """GitLab CI files have no GH-shaped ``steps:`` block — must return
     an empty list rather than mis-parsing ``script:`` entries."""
-    src = (
-        "stages:\n"
-        "  - build\n"
-        "build_job:\n"
-        "  stage: build\n"
-        "  script:\n"
-        "    - echo a\n"
-        "    - echo b\n"
-    )
+    src = "stages:\n  - build\nbuild_job:\n  stage: build\n  script:\n    - echo a\n    - echo b\n"
     assert for_each_step(src) == []
 
 

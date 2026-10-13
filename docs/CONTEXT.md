@@ -138,3 +138,19 @@ remain unknown. A case-only name mismatch also remains unknown. These cases
 keep an existing review candidate; an incomplete parse cannot prove absence.
 A declared output and dependency establish a possible connection, without
 proving attacker control, runtime success or effective credential authority.
+## Compatible conditions along a composed path
+
+The composer checks whether owning job and step conditions can hold together.
+For `CHAIN-GH-105`, the producer, consumer and a relevant authority step must
+have a compatible event and ref within the same workflow invocation. For
+example, a producer restricted to `refs/heads/main` cannot supply a path to an
+authority step restricted to `refs/heads/dev`. Several authority steps are
+alternatives: one compatible step is enough to keep a review candidate.
+
+This bounded analysis understands direct `github.ref` comparisons with ASCII
+string literals, case-insensitive equality/inequality, and Boolean composition.
+Runtime values, unsupported expressions, uncertain ownership and exhausted
+analysis limits retain review. It does not equate refs across separate runs,
+infer trust from a named actor, prove argument-level propagation or establish
+effective credential authority. Individual underlying warnings may remain
+after an impossible composed path is excluded.

@@ -47,6 +47,7 @@ from taintly.composer import (
     CheckoutBuildFact,
     CompositeFact,
     context_for,
+    execution_constraints_for,
     execution_events_for,
     findings_by_rule,
 )
@@ -722,11 +723,13 @@ def _files_with_contexts(db: Database) -> set[str]:
 
 
 def _edge_events_compatible(db: Database, file: str, edge: _CrossJobEdge, steps) -> bool:
-    """Reject only proven disjoint producer/reader/authority event sets."""
+    """Join producer/reader with alternative authority scopes before projection."""
+    from taintly.eventguard import UNCONSTRAINED, intersect_constraints, union_constraints
+
     possibilities = [
-        execution_events_for(db, file, edge.producer, privileged=True),
-        execution_events_for(db, file, edge.consumer, privileged=True),
-        execution_events_for(db, file, edge.consumer, edge.line, privileged=True),
+        execution_constraints_for(db, file, edge.producer, privileged=True),
+        execution_constraints_for(db, file, edge.consumer, privileged=True),
+        execution_constraints_for(db, file, edge.consumer, edge.line, privileged=True),
     ]
     same_step = any(
         step.job_name == edge.consumer and step.start_line <= edge.line <= step.end_line
@@ -737,14 +740,35 @@ def _edge_events_compatible(db: Database, file: str, edge: _CrossJobEdge, steps)
         # every statically recognized authority scope; opaque ownership stays
         # unknown. Job conditions above still apply independently.
         authorities = [
-            execution_events_for(db, file, edge.consumer, step.start_line, privileged=True)
+            execution_constraints_for(db, file, edge.consumer, step.start_line, privileged=True)
             for step in steps
             if step.job_name == edge.consumer and _scope_exercises_write_authority(step.text)
         ]
         if authorities and all(events is not None for events in authorities):
-            possibilities.append(frozenset().union(*authorities))
-    known = [events for events in possibilities if events is not None]
-    return not known or bool(frozenset.intersection(*known))
+            authority_events = {
+                event for scope in authorities if scope is not None for event in scope
+            }
+            possibilities.append(
+                {
+                    event: union_constraints(
+                        scope[event]
+                        for scope in authorities
+                        if scope is not None and event in scope
+                    )
+                    for event in authority_events
+                }
+            )
+    known = [scope for scope in possibilities if scope is not None]
+    if not known:
+        return True
+    events = set.intersection(*(set(scope) for scope in known))
+    for event in events:
+        domain = UNCONSTRAINED
+        for scope in known:
+            domain = intersect_constraints(domain, scope[event])
+        if domain:
+            return True
+    return False
 
 
 def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
