@@ -53,6 +53,7 @@ __all__ = [
     "context_paths",
     "iter_expression_bodies",
     "parse",
+    "reachable_context_paths",
     "result_provenance_paths",
     "structural_expr_enabled",
 ]
@@ -395,7 +396,7 @@ def _json_roundtrip_value(node: object) -> object | None:
     return None
 
 
-def _iter_paths(node: object) -> Iterator[str]:
+def _iter_paths(node: object, *, reachable_only: bool = False) -> Iterator[str]:
     cp = canonical_path(node)
     if cp is not None:
         yield cp
@@ -403,17 +404,22 @@ def _iter_paths(node: object) -> Iterator[str]:
     if isinstance(node, Deref | Filter | Index):
         # spine broken by a dynamic segment — recurse into the receiver and any
         # dynamic index so paths inside survive (e.g. ``a[github.event.x]``).
-        yield from _iter_paths(node.recv)
+        yield from _iter_paths(node.recv, reachable_only=reachable_only)
         if isinstance(node, Index):
-            yield from _iter_paths(node.index)
+            yield from _iter_paths(node.index, reachable_only=reachable_only)
     elif isinstance(node, Call):
         for a in node.args:
-            yield from _iter_paths(a)
+            yield from _iter_paths(a, reachable_only=reachable_only)
     elif isinstance(node, Unary):
-        yield from _iter_paths(node.operand)
+        yield from _iter_paths(node.operand, reachable_only=reachable_only)
     elif isinstance(node, Binary):
-        yield from _iter_paths(node.left)
-        yield from _iter_paths(node.right)
+        yield from _iter_paths(node.left, reachable_only=reachable_only)
+        if reachable_only and (
+            (node.op == "&&" and _truthiness(node.left) is False)
+            or (node.op == "||" and _truthiness(node.left) is True)
+        ):
+            return
+        yield from _iter_paths(node.right, reachable_only=reachable_only)
 
 
 def context_paths(body: str) -> list[str]:
@@ -423,6 +429,17 @@ def context_paths(body: str) -> list[str]:
     for p in _iter_paths(parse(body)):
         seen.setdefault(p, None)
     return list(seen)
+
+
+def reachable_context_paths(body: str) -> list[str]:
+    """Return references that may be evaluated, retaining control influence.
+
+    Unlike result provenance, this includes evaluated comparison, negation,
+    function-argument and logical-left references. Only a logical right branch
+    proven unreachable by bounded literal truthiness is excluded. Unknowns and
+    budget exhaustion retain references; the syntactic inventory is unchanged.
+    """
+    return list(dict.fromkeys(_iter_paths(parse(body), reachable_only=True)))
 
 
 _BOOLEAN_RESULT_FUNCTIONS = frozenset(

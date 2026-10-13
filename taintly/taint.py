@@ -160,8 +160,10 @@ from .parsers.gha_expr import (
     ExprSyntaxError,
     context_paths,
     iter_expression_bodies,
+    reachable_context_paths,
     result_provenance_paths,
     structural_expr_enabled,
+    tokenize,
 )
 from .parsers.structural import EventKind, walk_workflow
 from .taint_facts import Database, solve
@@ -2047,6 +2049,10 @@ def _extract_tainted_source(value: str, include_inputs: bool = False) -> str | N
     enough that the simpler rule beats the cost of missing ``||``
     fallbacks (which dominate real-world taint sinks).
 
+    Structural mode removes only references in provably unreachable logical
+    right branches. Evaluated control references and legacy literal mentions
+    remain conservative; malformed expressions retain lexical evidence.
+
     ``include_inputs`` — when True (the file is a reusable workflow,
     ``on: workflow_call``), ``inputs.<name>`` also counts as a source.
     Attacker-context matches still win over ``inputs`` matches within
@@ -2057,23 +2063,47 @@ def _extract_tainted_source(value: str, include_inputs: bool = False) -> str | N
     structural = structural_expr_enabled()
     for expr in _GHA_EXPR_RE.finditer(value):
         body = expr.group(1)
-        m = _TAINTED_IN_EXPR_RE.search(body)
-        if m:
-            return m.group(0)
+        reachable: list[str] | None = None
+        blocked: set[str] = set()
+        if structural and ("&&" in body or "||" in body):
+            try:
+                reachable = reachable_context_paths(body)
+                inventory = context_paths(body)
+                # Preserve the legacy lexical treatment of literal mentions.
+                # A literal and a dead real reference can spell the same path;
+                # path-set filtering alone must not erase that independent match.
+                literals = [token.value for token in tokenize(body) if token.kind == "STRING"]
+                matchers = (_TAINTED_IN_EXPR_RE, _INPUT_REF_IN_EXPR_RE)
+                blocked = {
+                    match.group(0).lower()
+                    for path in inventory
+                    for matcher in matchers
+                    for match in matcher.finditer(path)
+                } - {
+                    match.group(0).lower()
+                    for path in (*reachable, *literals)
+                    for matcher in matchers
+                    for match in matcher.finditer(path)
+                }
+            except ExprSyntaxError:
+                pass  # Incomplete structure cannot justify removing lexical evidence.
+        for m in _TAINTED_IN_EXPR_RE.finditer(body):
+            if m.group(0).lower() not in blocked:
+                return m.group(0)
         if include_inputs:
-            im = _INPUT_REF_IN_EXPR_RE.search(body)
-            if im:
-                return im.group(0)
-        # Structural augmentation: when the dot-literal regex misses, parse the
-        # body and normalise every context reference to a canonical dotted path,
-        # then re-test the SAME taint regexes on it — so an attacker context
-        # written with index/bracket access or context-case
+            for im in _INPUT_REF_IN_EXPR_RE.finditer(body):
+                if im.group(0).lower() not in blocked:
+                    return im.group(0)
+        # Structural augmentation (Phase 3b): when the dot-literal regex misses,
+        # parse the body and normalise reachable context references to a canonical
+        # dotted path, then re-test the SAME taint regexes on it — so an
+        # attacker context written with index/bracket access or context-case
         # (``github.event.pull_request['title']`` / ``GITHUB.event...``) is still
-        # caught as a cross-step taint source. Purely additive; a parse error
-        # leaves the regex-only result for this body.
+        # caught as a cross-step taint source. Logical bodies share the same
+        # reachable set used above; a parse error retains the lexical fallback.
         if structural:
             try:
-                for path in context_paths(body):
+                for path in reachable if reachable is not None else context_paths(body):
                     cm = _TAINTED_IN_EXPR_RE.search(path)
                     if cm:
                         return cm.group(0)
