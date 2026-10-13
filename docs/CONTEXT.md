@@ -176,3 +176,17 @@ This remains a review candidate under the existing linear POSIX shell model.
 It does not prove cache contents, runtime success, cache access from PRs or
 third-party tool behavior. Unsupported or ambiguous guards cannot establish
 that a path is impossible.
+
+## Source ownership of cross-job authority indicators
+
+CHAIN-GH-105 checks where authority-looking text belongs. A command in a
+step's display name or a YAML comment does not establish its operation
+prerequisite. For supported, unambiguous structure, the rule uses the owning
+step's executable payload and same-action credential handoff. Job-level
+references consider the alternatives across that job's steps.
+
+Authority-looking environment values and opaque action inputs can be consumed
+dynamically. These remain qualified review candidates; missing or ambiguous
+structure cannot prove their absence. A textual operation indicator still does
+not establish successful execution, effective token authority or that the
+transferred output controls an operation. Verify each of those prerequisites.
