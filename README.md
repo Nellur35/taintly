@@ -616,7 +616,7 @@ scores or machine-readable output, and does not prove a shared attack path.
 
 
 <!-- AUTOGEN:summary -->
-320 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+321 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 
@@ -627,7 +627,7 @@ scores or machine-readable output, and does not prove a shared attack path.
 | SEC-1 — Insufficient Flow Control | 6 | 3 | 2 | 0 |
 | SEC-2 — Inadequate IAM | 7 | 4 | 3 | 0 |
 | SEC-3 — Dependency Chain Abuse | 34 | 18 | 14 | 3 |
-| SEC-4 — Poisoned Pipeline Execution | 74 | 30 | 24 | 2 |
+| SEC-4 — Poisoned Pipeline Execution | 75 | 30 | 24 | 2 |
 | SEC-5 — Insufficient PBAC | 3 | 1 | 2 | 0 |
 | SEC-6 — Insufficient Credential Hygiene | 15 | 10 | 12 | 2 |
 | SEC-7 — Insecure System Configuration | 4 | 1 | 4 | 0 |

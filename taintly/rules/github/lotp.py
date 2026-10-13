@@ -19,7 +19,8 @@ from collections.abc import Sequence
 from functools import lru_cache
 from textwrap import dedent
 
-from taintly.models import ContextPattern, Platform, Rule, Severity
+from taintly._local_invocation import LocalFileInvocation, recognize_local_file_invocation
+from taintly.models import ContextPattern, IncompletePatternMatches, Platform, Rule, Severity
 from taintly.parsers.gha_expr import (
     Binary,
     ExprSyntaxError,
@@ -34,7 +35,7 @@ from taintly.parsers.segmentation import (
     for_each_job,
     for_each_step,
 )
-from taintly.parsers.structural import EventKind, walk_workflow
+from taintly.parsers.structural import Event, EventKind, walk_workflow
 from taintly.parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
 
 from .._build_tools import BUILD_TOOL_ANCHOR as _BUILD_TOOL_ANCHOR
@@ -712,6 +713,157 @@ def _source_key(sources: dict[str, tuple[str, bool]], cwd: str) -> str:
     while path not in sources and path != ".":
         path = posixpath.dirname(path) or "."
     return path
+
+
+def _local_script_candidates(
+    content: str,
+) -> tuple[
+    dict[tuple[str, int, int], LocalFileInvocation],
+    dict[tuple[str, int, int], Event],
+    str | None,
+]:
+    """Read only unique, structurally owned run scalars with supported shells."""
+
+    values: dict[tuple[object, ...], list[Event]] = {}
+    folded_runs: dict[tuple[str, int, int], Event] = {}
+    workflow_shells: list[Event] = []
+    incomplete = False
+    for count, event in enumerate(
+        walk_workflow("workflow.yml", content=content, include_merge_origins=True)
+    ):
+        if count >= 20_000:
+            incomplete = True
+            break
+        if event.kind in {EventKind.ERROR, EventKind.CUTOFF}:
+            incomplete = True
+            continue
+        if event.kind is not EventKind.LEAF_SCALAR:
+            continue
+        path = event.path
+        shell_path = (
+            path == ("defaults", "run", "shell")
+            or (len(path) == 5 and path[0] == "jobs" and path[2:] == ("defaults", "run", "shell"))
+            or (len(path) == 5 and path[0] == "jobs" and path[2] == "steps" and path[4] == "shell")
+        )
+        if event.merge_origins and not shell_path:
+            continue
+        if path == ("defaults", "run", "shell"):
+            workflow_shells.append(event)
+        elif len(path) == 5 and path[0] == "jobs" and path[2:] == ("defaults", "run", "shell"):
+            values.setdefault((path[1], "default-shell"), []).append(event)
+        elif not path or path[0] != "jobs":
+            continue
+        # Leaf paths are jobs.<job>.steps[index].{run,shell} or
+        # jobs.<job>.runs-on. Keep only the exact fields used below.
+        if len(path) == 3 and path[2] == "runs-on":
+            values.setdefault((path[1], "runs-on"), []).append(event)
+        elif len(path) == 5 and path[2] == "steps" and path[4] in {"run", "shell", "uses"}:
+            values.setdefault((path[1], path[3], path[4]), []).append(event)
+
+    if incomplete or len(workflow_shells) > 1:
+        return (
+            {},
+            {},
+            "Structural run ownership was incomplete; local-script candidates were not evaluated.",
+        )
+
+    candidates: dict[tuple[str, int, int], LocalFileInvocation] = {}
+    for key, run_events in values.items():
+        if len(key) != 3 or key[2] != "run" or len(run_events) != 1:
+            continue
+        job_name, step_index, _ = key
+        run_event = run_events[0]
+        if not isinstance(job_name, str) or not isinstance(step_index, int):
+            continue
+        if run_event.merge_origins or not isinstance(run_event.value, str):
+            continue
+        if run_event.value_kind == "block_folded":
+            folded_runs[(job_name, step_index, run_event.line)] = run_event
+        invocations: list[tuple[int, LocalFileInvocation]] = []
+        if run_event.value_kind == "block_literal":
+            quote: str | None = None
+            continuation = False
+            heredocs: deque[tuple[str, bool]] = deque()
+            for source_line, text in run_event.block_lines or ():
+                if heredocs:
+                    delimiter, strip_tabs = heredocs[0]
+                    body = text.lstrip("\t") if strip_tabs else text
+                    if body == delimiter:
+                        heredocs.popleft()
+                    continue
+                previous_quote = quote
+                _, quote, _ = _shell_quote_mask(text, quote)
+                if continuation:
+                    continuation = _has_unescaped_trailing_backslash(text)
+                    continue
+                if previous_quote is None:
+                    invocation = recognize_local_file_invocation(text)
+                    if invocation is not None:
+                        invocations.append((source_line, invocation))
+                mask, _, _ = _shell_quote_mask(text, None)
+                openers = [
+                    match for match in _HEREDOC_OPEN_RE.finditer(text) if not mask[match.start()]
+                ]
+                opener_columns = {match.start() for match in openers}
+                if any(
+                    text[index : index + 2] == "<<"
+                    and not mask[index]
+                    and index not in opener_columns
+                    for index in range(len(text) - 1)
+                ):
+                    # Preserve invocations already established before the
+                    # unsupported redirection, but do not interpret its body
+                    # or any later lines as shell commands.
+                    break
+                heredocs.extend(
+                    (match.group("delimiter"), match.group("operator") == "<<-")
+                    for match in openers
+                )
+                continuation = _has_unescaped_trailing_backslash(text)
+        else:
+            invocation = recognize_local_file_invocation(run_event.value)
+            if invocation is not None:
+                invocations.append((run_event.line, invocation))
+        if not invocations:
+            continue
+        shell_events = values.get((job_name, step_index, "shell"), [])
+        if len(shell_events) > 1:
+            continue
+        job_shell_events = values.get((job_name, "default-shell"), [])
+        if len(job_shell_events) > 1:
+            continue
+        if shell_events:
+            if shell_events[0].merge_origins:
+                continue
+            shell = shell_events[0].value
+        elif job_shell_events:
+            if job_shell_events[0].merge_origins:
+                continue
+            shell = job_shell_events[0].value
+        elif workflow_shells:
+            if workflow_shells[0].merge_origins:
+                continue
+            shell = workflow_shells[0].value
+        else:
+            shell = None
+        if shell is None:
+            runner_events = values.get((job_name, "runs-on"), [])
+            if len(runner_events) != 1 or not isinstance(runner_events[0].value, str):
+                continue
+            if not re.fullmatch(r"ubuntu-(?:latest|20\.04|22\.04|24\.04)", runner_events[0].value):
+                continue
+        elif shell not in {"bash", "sh"}:
+            continue
+        if values.get((job_name, step_index, "uses")):
+            continue
+        for source_line, invocation in invocations:
+            candidates[(job_name, step_index, source_line)] = invocation
+    return candidates, folded_runs, None
+
+
+def _has_unescaped_trailing_backslash(line: str) -> bool:
+    count = len(line) - len(line.rstrip("\\"))
+    return count % 2 == 1
 
 
 def _shell_child_spans(line: str) -> list[tuple[int, int, int]]:
@@ -1645,10 +1797,18 @@ def _pr_event_source(value: str) -> bool:
     return False
 
 
-def _run_sources_require_pr_event(step: StepSegment) -> bool:
+def _run_sources_require_pr_event(step: StepSegment, folded_runs: Sequence[Event] = ()) -> bool:
     """Qualify actual command source operands, never adjacent PR text."""
     quote: str | None = None
-    for _, line in sorted(_run_shell_lines(step).items()):
+    lines = _run_shell_lines(step)
+    if folded_runs:
+        for event in folded_runs:
+            for source_line, _ in event.block_lines or ():
+                lines.pop(source_line - step.start_line, None)
+            if event.value is None or "\n" in event.value or "\r" in event.value:
+                return False
+            lines[event.line - step.start_line] = event.value
+    for _, line in sorted(lines.items()):
         mask, quote, _ = _shell_quote_mask(line, quote)
         for column, state, ref, _, _ in _git_source_changes(line, mask):
             if not mask[column] and state != _TRUSTED:
@@ -1668,7 +1828,11 @@ def _run_sources_require_pr_event(step: StepSegment) -> bool:
     return True
 
 
-def _job_sources_require_pr_event(steps: list[StepSegment], unavailable: bool) -> bool:
+def _job_sources_require_pr_event(
+    steps: list[StepSegment],
+    unavailable: bool,
+    folded_runs: dict[tuple[str, int], list[Event]] | None = None,
+) -> bool:
     """A PR-only step guard cannot exclude independently selected PR bytes.
 
     Use a conservative job-wide join: any workflow-run, literal PR selection,
@@ -1690,7 +1854,9 @@ def _job_sources_require_pr_event(steps: list[StepSegment], unavailable: bool) -
                     continue
                 if _LITERAL_PR_REF_RE.fullmatch(value) or not _pr_event_source(value):
                     return False
-        if not _run_sources_require_pr_event(step):
+        if not _run_sources_require_pr_event(
+            step, (folded_runs or {}).get((step.job_name, step.index), [])
+        ):
             return False
     return True
 
@@ -1712,6 +1878,7 @@ class _OrderedPrBuildPattern(ContextPattern):
         exclude: list[str] | None = None,
         *,
         default_trusted_checkout: bool = False,
+        script_candidate_mode: bool = False,
     ) -> None:
         super().__init__(
             anchor=anchor,
@@ -1722,29 +1889,51 @@ class _OrderedPrBuildPattern(ContextPattern):
         )
         self._source_anchor_re = re.compile(anchor)
         self._default_trusted_checkout = default_trusted_checkout
+        self._script_candidate_mode = script_candidate_mode
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        raw = super().check(content, lines)
+        script_candidates: dict[tuple[str, int, int], LocalFileInvocation] = {}
+        folded_runs: dict[tuple[str, int, int], Event] = {}
+        if self._script_candidate_mode:
+            script_candidates, folded_runs, incomplete_reason = _local_script_candidates(content)
+            if incomplete_reason is not None:
+                return IncompletePatternMatches([], reason=incomplete_reason)
+        raw = (
+            [
+                (line, lines[line - 1].strip())
+                for (_, _, line), invocation in script_candidates.items()
+                if 0 < line <= len(lines)
+            ]
+            if self._script_candidate_mode
+            else super().check(content, lines)
+        )
         if not raw:
             return []
 
         jobs = [job for job in for_each_job(content) if job.name]
         steps = for_each_step(content)
         if not jobs or not steps:
-            return raw
+            return [] if self._script_candidate_mode else raw
 
         raw_by_line = dict(raw)
         kept: set[int] = set()
         resolved: set[int] = set()
         workflow_default = _default_working_path(lines, 0, ".")
         head_ref_unavailable = _head_ref_unavailable(content)
+        folded_by_step: dict[tuple[str, int], list[Event]] = {}
+        for (job_name, step_index, _), event in folded_runs.items():
+            folded_by_step.setdefault((job_name, step_index), []).append(event)
 
         for job in jobs:
             job_lines = {line for line in raw_by_line if job.start_line <= line <= job.end_line}
             if not job_lines:
                 continue
             job_steps = [step for step in steps if step.job_name == job.name]
-            pr_event_only = _job_sources_require_pr_event(job_steps, head_ref_unavailable)
+            pr_event_only = _job_sources_require_pr_event(
+                job_steps,
+                head_ref_unavailable,
+                folded_by_step if self._script_candidate_mode else None,
+            )
             if not any(
                 (
                     _checkout_may_use_pr_source(step, head_ref_unavailable=head_ref_unavailable)
@@ -1786,6 +1975,15 @@ class _OrderedPrBuildPattern(ContextPattern):
                 step_candidates = {
                     line for line in job_lines if step.start_line <= line <= step.end_line
                 }
+                step_script_candidates = {
+                    line: invocation
+                    for (
+                        candidate_job,
+                        candidate_step,
+                        line,
+                    ), invocation in script_candidates.items()
+                    if candidate_job == job.name and candidate_step == step.index
+                }
                 pr_excluded = pr_event_only and _excludes_pr_path(_direct_if(step))
                 checkout_state = _checkout_action_state(
                     step,
@@ -1795,6 +1993,19 @@ class _OrderedPrBuildPattern(ContextPattern):
                 cwd = _step_working_path(step, default_path)
                 child_scopes: dict[int, list[tuple[int, int]]] = {}
                 shell_lines = _run_shell_lines(step, child_scopes)
+                if self._script_candidate_mode:
+                    for (folded_job, folded_step, header_line), event in folded_runs.items():
+                        if folded_job != job.name or folded_step != step.index:
+                            continue
+                        for body_line, _ in event.block_lines or ():
+                            body_offset = body_line - step.start_line
+                            shell_lines.pop(body_offset, None)
+                            child_scopes.pop(body_offset, None)
+                        header_offset = header_line - step.start_line
+                        if event.value is None or "\n" in event.value or "\r" in event.value:
+                            uncertain_layout = True
+                        else:
+                            shell_lines[header_offset] = event.value
                 script_indent = min(
                     (
                         len(line) - len(line.lstrip(" "))
@@ -1851,7 +2062,11 @@ class _OrderedPrBuildPattern(ContextPattern):
                         if shell_line is not None
                         else []
                     )
-                    anchors = list(self._source_anchor_re.finditer(source_line))
+                    anchors = (
+                        list(self._source_anchor_re.finditer(source_line))
+                        if not self._script_candidate_mode
+                        else []
+                    )
                     events: list[tuple[int, str, str | None]] = []
                     git_states = {column: state for column, state, _, _, _ in transitions}
                     git_paths = {column: paths for column, _, _, paths, _ in transitions}
@@ -1945,6 +2160,9 @@ class _OrderedPrBuildPattern(ContextPattern):
                         and absolute_line in step_candidates
                     ):
                         resolved.add(absolute_line)
+                    invocation = step_script_candidates.get(absolute_line)
+                    if invocation is not None and absolute_line in step_candidates:
+                        events.append((0, "script", None))
                     for anchor in anchors:
                         if absolute_line not in step_candidates:
                             continue
@@ -1965,7 +2183,7 @@ class _OrderedPrBuildPattern(ContextPattern):
                     line_child_scopes = child_scopes.get(offset, [])
                     for column, kind, value in sorted(events):
                         if pr_excluded:
-                            if kind == "build":
+                            if kind in {"build", "script"}:
                                 resolved.add(absolute_line)
                             continue
                         child_span = next(
@@ -2326,6 +2544,24 @@ class _OrderedPrBuildPattern(ContextPattern):
                                         local_branches.setdefault(source_key, {})[active_branch] = (
                                             target_state
                                         )
+                        elif kind == "script":
+                            invocation = step_script_candidates.get(absolute_line)
+                            if invocation is None:
+                                resolved.add(absolute_line)
+                                continue
+                            resolved.add(absolute_line)
+                            script_path = (
+                                _literal_workspace_path(invocation.operand, cwd)
+                                if cwd is not None
+                                else None
+                            )
+                            if script_path is None:
+                                kept.add(absolute_line)
+                            else:
+                                source_key = _source_key(sources, script_path)
+                                source_state = sources.get(source_key, (_UNKNOWN, False))[0]
+                                if uncertain_layout or source_state != _TRUSTED:
+                                    kept.add(absolute_line)
                         else:
                             resolved.add(absolute_line)
                             build_path, local_build = _build_source_path(
@@ -2387,6 +2623,18 @@ class _OrderedPrBuildPattern(ContextPattern):
         # never become silent suppressions.
         kept.update(set(raw_by_line) - resolved)
         return [(line, snippet) for line, snippet in raw if line in kept]
+
+    def check_with_filepath(
+        self, content: str, lines: list[str], filepath: str
+    ) -> list[tuple[int, str]]:
+        """Scope decoded script parsing to structurally owned YAML workflows."""
+
+        if not self._script_candidate_mode:
+            return self.check(content, lines)
+        normalized = filepath.replace("\\", "/").lower()
+        if not normalized.endswith((".yml", ".yaml")):
+            return []
+        return self.check(content, lines)
 
 
 # ---------------------------------------------------------------------------
@@ -2883,5 +3131,75 @@ RULES: list[Rule] = [
             "Shai-Hulud (Sep 2025)",
             "Shai-Hulud 2.0 (Nov 2025, 25k+ repos)",
         ],
+    ),
+    Rule(
+        id="LOTP-GH-006",
+        title="Local file may execute from pull-request checkout (LOTP)",
+        severity=Severity.HIGH,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "A structurally owned GitHub Actions run command directly invokes a "
+            "relative local file with `bash`, `sh`, `python`, `python3`, `node`, "
+            "or a `./` path after the ordered workspace source map identifies "
+            "that file under pull-request checkout content. This is a source-"
+            "controlled local-file execution candidate, not proof that the file "
+            "exists, is executable, succeeds, or receives any effective token "
+            "authority. Dynamic commands, wrappers, shell operators and commands "
+            "whose structural or source ownership is incomplete remain outside "
+            "the recognized candidate shape."
+        ),
+        pattern=_OrderedPrBuildPattern(anchor=r"(?!)", script_candidate_mode=True),
+        remediation=(
+            "Review the exact local-file path and the checkout/ref that supplies it. "
+            "Keep PR-controlled files out of jobs with credentials or other "
+            "privileged capabilities; if the local file is required, run it in a "
+            "separate job with minimum permissions and no credential persistence. "
+            "Verify file content, runtime configuration, guards and effective "
+            "provider authority before treating this candidate as exploitable."
+        ),
+        reference="https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/",
+        test_positive=[
+            (
+                "on: pull_request\njobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - uses: actions/checkout@v4\n        with:\n"
+                "          repository: ${{ github.event.pull_request.head.repo.full_name }}\n"
+                "          ref: ${{ github.event.pull_request.head.sha }}\n"
+                "      - run: bash ./scripts/check.sh"
+            ),
+            (
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/checkout@v4\n        with:\n"
+                "          repository: ${{ github.event.pull_request.head.repo.full_name }}\n"
+                "          ref: ${{ github.event.pull_request.head.sha }}\n"
+                "      - run: |\n          python3 scripts/check.py --verify"
+            ),
+        ],
+        test_negative=[
+            (
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/checkout@v4\n        with:\n"
+                "          repository: ${{ github.event.pull_request.head.repo.full_name }}\n"
+                "          ref: ${{ github.event.pull_request.head.sha }}\n"
+                "      - run: echo 'bash ./scripts/check.sh'"
+            ),
+            (
+                "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: actions/checkout@v4\n        with:\n"
+                "          repository: ${{ github.event.pull_request.head.repo.full_name }}\n"
+                "          ref: ${{ github.event.pull_request.head.sha }}\n"
+                "      - run: python -c 'print(1)'"
+            ),
+        ],
+        stride=["T", "E"],
+        threat_narrative=(
+            "A workflow can directly select a local file from a pull-request "
+            "checkout as a command operand. Whether the file exists, what it "
+            "does, whether execution succeeds, and what authority is available "
+            "remain separate questions requiring review."
+        ),
+        finding_family="pipeline_tool_execution",
+        confidence="medium",
+        review_needed=True,
     ),
 ]

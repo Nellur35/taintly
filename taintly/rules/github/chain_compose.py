@@ -21,8 +21,8 @@ layer can't do):
 
 * CHAIN-GH-101 — SEC4-GH-005 + fork-reachable + an externally-triggered
   event that can retain write-token scope + write-token candidate.
-  Also accepts a source-bound configured PR-head checkout/build/persisted-token
-  path without a later Git command. Potential CRITICAL impact, review needed:
+  Also accepts a source-bound configured PR-head checkout/build or local-file
+  invocation/persisted-token path without a later Git command. Potential CRITICAL impact, review needed:
   neither branch proves runtime execution or effective provider authority.
 * CHAIN-GH-102 — SEC3-GH-001 + fork-reachable = HIGH. An unpinned
   third-party action in a workflow attackers can fire; a single
@@ -132,6 +132,35 @@ def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
         # and must not discard this stronger, source-bound configuration path.
         witnessed.add((w.file, w.job, w.checkout_line))
         scopes = ", ".join(f"{scope}:write (line {line})" for scope, line in w.write_scopes)
+        script_invocation = w.execution_kind == "script"
+        configured_execution = (
+            f"{w.interpreter} {w.script_path}"
+            if script_invocation and w.interpreter
+            else w.script_path
+            if script_invocation
+            else w.command
+        )
+        if script_invocation:
+            snippet = (
+                f"Configured pull_request_target path in job '{w.job}': "
+                f"PR-head repository/ref at lines {w.repository_line}/{w.ref_line} "
+                f"-> checkout at line {w.checkout_line} -> configured local-file invocation "
+                f"`{configured_execution}` at line {w.build_line}. File existence and runtime "
+                f"success remain unverified; configured persisted GITHUB_TOKEN candidate "
+                f"at line {w.persistence_line}; requested scopes: {scopes}. Effective provider "
+                "authority remains unverified."
+            )
+        else:
+            # Preserve the accepted build-branch text byte-for-byte.
+            snippet = (
+                f"Configured pull_request_target path in job '{w.job}': "
+                f"PR-head repository/ref at lines {w.repository_line}/{w.ref_line} "
+                f"-> checkout at line {w.checkout_line} -> local build `{w.command}` "
+                f"at line {w.build_line}. The build can execute checkout-provided hooks "
+                f"with a persisted GITHUB_TOKEN candidate (line {w.persistence_line}); "
+                f"requested scopes: {scopes}. Runtime execution and effective provider "
+                "authority remain unverified."
+            )
         yield (
             "composite",
             CompositeFact(
@@ -139,15 +168,7 @@ def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
                 file=w.file,
                 job=w.job,
                 anchor_line=w.checkout_line,
-                snippet=(
-                    f"Configured pull_request_target path in job '{w.job}': "
-                    f"PR-head repository/ref at lines {w.repository_line}/{w.ref_line} "
-                    f"-> checkout at line {w.checkout_line} -> local build `{w.command}` "
-                    f"at line {w.build_line}. The build can execute checkout-provided hooks "
-                    f"with a persisted GITHUB_TOKEN candidate (line {w.persistence_line}); "
-                    f"requested scopes: {scopes}. Runtime execution and effective provider "
-                    "authority remain unverified."
-                ),
+                snippet=snippet,
                 checkout_build=w,
             ),
         )
@@ -975,31 +996,76 @@ def _make_chain_callback(chain_id: str):
             if chain_id == "CHAIN-GH-101":
                 if c.checkout_build is not None:
                     w = c.checkout_build
+                    script_execution = w.execution_kind == "script"
                     reason = (
-                        "The same-source structural witness links PR-head checkout, a "
+                        "The same-source structural witness links PR-head checkout, a configured "
+                        "local-file invocation and persisted GITHUB_TOKEN write scopes. File "
+                        "existence, runtime success, approvals and effective provider authority "
+                        "need review."
+                        if script_execution
+                        else "The same-source structural witness links PR-head checkout, a "
                         "supported local build command and configured persisted GITHUB_TOKEN "
                         "write scopes. Hook existence, tool/configuration behavior, successful "
                         "execution, approvals and effective provider authority need review."
                     )
+                    snippet = c.snippet
+                    if script_execution:
+                        invocation = (
+                            f"{w.interpreter} {w.script_path}"
+                            if w.interpreter
+                            else str(w.script_path)
+                        )
+                        snippet = (
+                            f"Configured pull_request_target path in job '{w.job}': "
+                            f"PR-head repository/ref at lines {w.repository_line}/{w.ref_line} "
+                            f"-> checkout at line {w.checkout_line} -> configured local-file invocation "
+                            f"`{invocation}` at line {w.build_line}; configured persisted "
+                            f"GITHUB_TOKEN candidate at line {w.persistence_line}; requested "
+                            f"scopes: {', '.join(f'{scope}:write (line {line})' for scope, line in w.write_scopes)}. "
+                            "File existence and runtime success remain unverified; effective provider authority remains unverified."
+                        )
                     results.append(
                         CorpusEvidence(
                             file=c.file,
                             line=c.anchor_line,
-                            snippet=c.snippet,
-                            title="Review: PR-head build can access a persisted write-token candidate",
+                            snippet=snippet,
+                            title=(
+                                "Review: PR-head local-file invocation may access a persisted write-token candidate"
+                                if script_execution
+                                else "Review: PR-head build can access a persisted write-token candidate"
+                            ),
                             remediation=(
-                                f"In job '{w.job}', set `persist-credentials: false` on the "
-                                f"checkout at line {w.checkout_line} (persistence input/default "
-                                f"at line {w.persistence_line}), and run the untrusted build at "
-                                f"line {w.build_line} in a separate unprivileged job. Minimize "
-                                f"the requested permissions at line {w.permission_line}. Verify "
-                                "the checked-out build definitions, tool configuration, guards, "
-                                "approvals and provider-granted token scopes before concluding "
-                                "that this path is exploitable."
+                                (
+                                    f"In job '{w.job}', review the configured local-file "
+                                    f"invocation `{invocation}` at line {w.build_line} against "
+                                    f"the PR-head checkout at line {w.checkout_line}; confirm "
+                                    "the named file and interpreter are valid for the runner. "
+                                    f"Set `persist-credentials: false` on that checkout "
+                                    f"(persistence input/default at line {w.persistence_line}) "
+                                    f"and minimize requested write scopes "
+                                    f"{', '.join(f'{scope}:write at line {line}' for scope, line in w.write_scopes)} "
+                                    f"(permissions block at line {w.permission_line}). Verify "
+                                    "whether the workflow step "
+                                    "can execute the file under actual runner/provider "
+                                    "conditions before treating this as an execution path."
+                                )
+                                if script_execution
+                                else (
+                                    f"In job '{w.job}', set `persist-credentials: false` on the "
+                                    f"checkout at line {w.checkout_line} (persistence input/default "
+                                    f"at line {w.persistence_line}), and run the untrusted build at "
+                                    f"line {w.build_line} in a separate unprivileged job. Minimize "
+                                    f"the requested permissions at line {w.permission_line}. Verify "
+                                    "the checked-out build definitions, tool configuration, guards, "
+                                    "approvals and provider-granted token scopes before concluding "
+                                    "that this path is exploitable."
+                                )
                             ),
                             context_notes=(reason,),
                             context_tags=(
-                                "checkout-build-path-evidenced",
+                                "checkout-local-script-path-evidenced"
+                                if script_execution
+                                else "checkout-build-path-evidenced",
                                 "persisted-github-token-configured",
                                 "runtime-execution-unverified",
                                 "effective-token-policy-unresolved",
@@ -1036,7 +1102,8 @@ RULES: list[Rule] = [
         owasp_cicd="CICD-SEC-1",
         description=(
             "CHAIN-GH-101 accepts either a source-bound configured path from "
-            "PR-head repository/ref through a supported local build command to "
+            "PR-head repository/ref through a supported local build command or "
+            "configured local-file invocation to "
             "a persisted GITHUB_TOKEN with explicit requested write scopes, or "
             "a broader join of three findings/contexts: "
             "(1) SEC4-GH-005 fires on an actions/checkout step that "
@@ -1060,10 +1127,13 @@ RULES: list[Rule] = [
             "compatible runtime guards, or the persisted token's identity and "
             "effective authority. A default pull_request_target checkout uses "
             "trusted base code; even an untrusted checkout alone is not execution. "
-            "The configured-path branch cites exact source, build, persistence "
-            "and permission lines without requiring a later fixed Git command. "
-            "Build-hook existence, configuration, runtime success, approvals "
-            "and effective provider permissions remain unverified."
+            "The source-bound configured-path branches cite exact PR-head "
+            "repository/ref and checkout lines, plus their configured build "
+            "command or local-file invocation, persistence and permission lines, "
+            "without requiring a later fixed Git command. Build-hook existence "
+            "and configuration, local-file existence and interpreter details, "
+            "runtime success, approvals and effective provider permissions "
+            "remain unverified."
         ),
         pattern=CorpusPattern(callback=_make_chain_callback("CHAIN-GH-101")),
         remediation=_CHAIN_101_REMEDIATION,

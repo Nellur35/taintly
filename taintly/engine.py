@@ -918,7 +918,7 @@ def _guard_calibration_postprocessor(findings: list[Finding], ctx: _PostProcessC
 
 
 def _lotp_authority_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:
-    if not any(f.rule_id in {"LOTP-GH-001", "LOTP-GH-003"} for f in findings):
+    if not any(f.rule_id in {"LOTP-GH-001", "LOTP-GH-003", "LOTP-GH-006"} for f in findings):
         return
     from .authority_context import calibrate_lotp_authority
 

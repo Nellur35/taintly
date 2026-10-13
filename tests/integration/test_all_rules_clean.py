@@ -188,7 +188,7 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         ]),
         ("github/vulnerable/write_all_permissions.yml", ["SEC2-GH-001"], ["SEC1-GH-001", "SEC10-GH-001"]),
         ("github/vulnerable/injection_run_block.yml",   ["SEC4-GH-004"], ["SEC10-GH-001", "SEC4-GH-002", "SEC4-GH-006"]),
-        ("github/vulnerable/workflow_run_no_conclusion.yml", ["SEC4-GH-003"], ["SEC1-GH-001", "SEC10-GH-001", "SEC4-GH-004", "SEC4-GH-005", "SEC4-GH-005B", "TAINT-GH-008"]),
+        ("github/vulnerable/workflow_run_no_conclusion.yml", ["SEC4-GH-003", "LOTP-GH-006"], ["SEC1-GH-001", "SEC10-GH-001", "SEC4-GH-004", "SEC4-GH-005", "SEC4-GH-005B", "TAINT-GH-008"]),
         ("github/vulnerable/secret_in_with_input.yml", ["SEC6-GH-010"], ["SEC1-GH-001", "SEC10-GH-001", "SEC3-GH-006"]),
         ("github/vulnerable/publish_job_no_environment.yml", ["SEC1-GH-001"], ["SEC10-GH-001"]),
         ("github/vulnerable/release_please_with_publish_step.yml", ["SEC1-GH-001"], ["SEC3-GH-006"]),
@@ -196,7 +196,7 @@ def test_jenkins_fully_hardened_produces_no_findings(jenkins_rules):
         # PSE-GH-006 expected co-fire: the fixture is the canonical
         # "imposter trigger" shape (pull_request_target + tainted
         # head.sha checkout + ./build.sh in the same job).
-        ("github/vulnerable/pull_request_target_head_sha_checkout.yml", ["SEC4-GH-001"], ["PSE-GH-006", "SEC10-GH-001", "SEC2-GH-002", "SEC4-GH-002", "SEC4-GH-005", "SEC4-GH-005B"]),
+        ("github/vulnerable/pull_request_target_head_sha_checkout.yml", ["SEC4-GH-001", "LOTP-GH-006"], ["PSE-GH-006", "SEC10-GH-001", "SEC2-GH-002", "SEC4-GH-002", "SEC4-GH-005", "SEC4-GH-005B"]),
         ("github/vulnerable/ai_trust_remote_code.yml",  ["AI-GH-001"], ["SEC10-GH-001"]),
         ("github/vulnerable/ai_hf_no_revision.yml",     ["AI-GH-002"], ["AI-GH-004", "SEC10-GH-001"]),
         ("github/vulnerable/ai_torch_load_unsafe.yml",  ["AI-GH-003"], ["SEC10-GH-001"]),
