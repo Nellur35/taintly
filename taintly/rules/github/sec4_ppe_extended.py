@@ -7,6 +7,11 @@ Most are directly traceable to documented CVEs and real exploitation campaigns.
 
 import re
 
+from taintly.github_event_availability import (
+    EventSourceAvailability,
+    IssueContextAvailability,
+    direct_issue_expression_paths,
+)
 from taintly.models import (
     _YAML_BOOL_TRUE,
     ContextPattern,
@@ -531,14 +536,39 @@ class GithubScriptDangerousContextPattern:
     # v1 occasion #20 (backport-base) confirms this transit.
     _INPUTS_RE = re.compile(r"\$\{\{\s*inputs\.[A-Za-z0-9_-]+\s*\}\}")
 
+    def __init__(self, *, suppress_unavailable_issue_context: bool = False) -> None:
+        self._suppress_unavailable_issue_context = suppress_unavailable_issue_context
+
     def _is_dangerous(self, line: str) -> bool:
         return bool(self._DANGEROUS_RE.search(line) or self._INPUTS_RE.search(line))
 
-    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         """Walk lines looking for github-script steps; for each,
         find the script: body and match dangerous-context regexes.
         """
         results: list[tuple[int, str]] = []
+        profile: IssueContextAvailability | None = None
+
+        def candidate_is_dangerous(line: str) -> bool:
+            nonlocal profile
+            if not self._is_dangerous(line):
+                return False
+            if not self._suppress_unavailable_issue_context:
+                return True
+            expression_info = direct_issue_expression_paths(line)
+            if expression_info is None:
+                return True
+            paths, outside_text = expression_info
+            if self._is_dangerous(outside_text):
+                return True
+            if profile is None:
+                profile = IssueContextAvailability(content)
+            for source_path in paths:
+                field = source_path.rsplit(".", 1)[-1]
+                if profile.issue_field(field) is not EventSourceAvailability.ABSENT:
+                    return True
+            return False
+
         i = 0
         n = len(lines)
         while i < n:
@@ -611,13 +641,13 @@ class GithubScriptDangerousContextPattern:
                             # simulator's ``comment_embed`` hit on this
                             # pattern is an artifact; it is skipped in
                             # ``fp_simulator._SKIP_PATTERN_TYPES`` instead.
-                            if self._is_dangerous(kline):
+                            if candidate_is_dangerous(kline):
                                 results.append((k + 1, kline.strip()))
                             k += 1
                         j = k
                         continue
                     # Inline form: `script: <expr>` on one line.
-                    if inline_value and self._is_dangerous(inline_value):
+                    if inline_value and candidate_is_dangerous(inline_value):
                         results.append((j + 1, jline.strip()))
                 j += 1
             i = j
@@ -2812,7 +2842,7 @@ RULES: list[Rule] = [
             "context sibling of SEC4-GH-004 (shell sink) and "
             "SEC4-GH-021 (step-output transit into shell)."
         ),
-        pattern=GithubScriptDangerousContextPattern(),
+        pattern=GithubScriptDangerousContextPattern(suppress_unavailable_issue_context=True),
         remediation=(
             "Never interpolate attacker-controllable ``${{ ... }}`` "
             "directly into a github-script ``script:`` body.  "

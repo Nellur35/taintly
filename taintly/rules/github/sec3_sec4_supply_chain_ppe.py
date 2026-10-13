@@ -7,6 +7,11 @@ import re
 from dataclasses import dataclass
 
 from taintly.eventguard import event_guard_verdict
+from taintly.github_event_availability import (
+    EventSourceAvailability,
+    IssueContextAvailability,
+    direct_issue_expression_paths,
+)
 from taintly.models import (
     CompromisedActionPattern,
     ContextPattern,
@@ -1095,6 +1100,36 @@ def _has_dangerous_github_context(value: str, _value_kind: str, _path: tuple[obj
     return False
 
 
+class _EventAwareScriptInjectionPattern(StructuralPattern):
+    """Apply the narrow event-source absence fact to SEC4-GH-004 candidates."""
+
+    def __init__(self) -> None:
+        super().__init__(path="**.run", predicate=_has_dangerous_github_context)
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        profile: IssueContextAvailability | None = None
+
+        def predicate(value: str, value_kind: str, path: tuple[object, ...]) -> bool:
+            nonlocal profile
+            if not _has_dangerous_github_context(value, value_kind, path):
+                return False
+            expression_info = direct_issue_expression_paths(value)
+            if expression_info is None:
+                return True
+            paths, outside_text = expression_info
+            if _DANGEROUS_GITHUB_CONTEXT_RE.search(outside_text):
+                return True
+            if profile is None:
+                profile = IssueContextAvailability(content)
+            for source_path in paths:
+                field = source_path.rsplit(".", 1)[-1]
+                if profile.issue_field(field) is not EventSourceAvailability.ABSENT:
+                    return True
+            return False
+
+        return StructuralPattern(path="**.run", predicate=predicate).check(content, lines)
+
+
 def _is_unpinned_uses_value(value: str, _value_kind: str, _path: tuple[object, ...]) -> bool:
     """Predicate for SEC3-GH-001 (unpinned action).
 
@@ -2014,10 +2049,7 @@ RULES: list[Rule] = [
         # multi-line ``run: |`` block scalars the rule fires once
         # at the block-header line rather than once per dangerous
         # interpolation, by design.
-        pattern=StructuralPattern(
-            path="**.run",
-            predicate=_has_dangerous_github_context,
-        ),
+        pattern=_EventAwareScriptInjectionPattern(),
         remediation=(
             "Pass the value through an environment variable so the "
             "${{ }} interpolation expands into the runner's env map, "
