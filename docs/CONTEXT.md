@@ -190,3 +190,21 @@ dynamically. These remain qualified review candidates; missing or ambiguous
 structure cannot prove their absence. A textual operation indicator still does
 not establish successful execution, effective token authority or that the
 transferred output controls an operation. Verify each of those prerequisites.
+
+## Bounded simplification of execution alternatives
+
+Taintly combines supported event/ref conditions for producers, readers and
+alternative authority owners. It removes a conjunction only when another
+alternative contains a syntactic subset of the same constraint atoms:
+`A OR (A AND B)` has the same possible executions as `A`. This preserves
+useful disjointness proofs when redundant alternatives would otherwise fill
+the branch budget. It does not infer execution, actor trust or effective
+permissions.
+
+The domain retains at most 64 alternatives of at most 64 atoms. Union traversal
+also bounds outer domains and processed branches at 1024 each, including empty
+domains and duplicates. Intersection retains its 1024 attempted-pair limit.
+Exhaustion returns unconstrained/unknown, so very long duplicate streams may
+now conservatively widen. Unsupported conditions and opaque owners stay
+possible. Bounded results may retain different precision under different
+input orders; a later broad alternative need not be reached after exhaustion.

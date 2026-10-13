@@ -56,28 +56,67 @@ GuardConstraints = tuple[frozenset[tuple[str, str, bool]], ...]
 UNCONSTRAINED: GuardConstraints = (frozenset(),)
 _MAX_CONSTRAINT_BRANCHES = 64
 _MAX_CONSTRAINT_JOINS = 1024
+_MAX_CONSTRAINT_DOMAINS = 1024
+_MAX_CONSTRAINT_PROCESSED_BRANCHES = 1024
+_MAX_CONSTRAINT_SUBSET_CHECKS = 2 * _MAX_CONSTRAINT_BRANCHES * _MAX_CONSTRAINT_PROCESSED_BRANCHES
+
+
+def _insert_constraint_branch(
+    branches: list[frozenset[tuple[str, str, bool]]],
+    branch: frozenset[tuple[str, str, bool]],
+    subset_checks: list[int],
+) -> bool:
+    """Insert into a bounded antichain using syntactic set inclusion only."""
+    remove_indices: list[int] = []
+    for index, existing in enumerate(branches):
+        if subset_checks[0] >= _MAX_CONSTRAINT_SUBSET_CHECKS:
+            return False
+        subset_checks[0] += 1
+        if existing <= branch:
+            return True
+        if subset_checks[0] >= _MAX_CONSTRAINT_SUBSET_CHECKS:
+            return False
+        subset_checks[0] += 1
+        if branch < existing:
+            remove_indices.append(index)
+
+    if remove_indices:
+        insertion_index = remove_indices[0]
+        for index in reversed(remove_indices):
+            del branches[index]
+        branches.insert(insertion_index, branch)
+    else:
+        branches.append(branch)
+    return True
 
 
 def union_constraints(domains: Iterable[GuardConstraints]) -> GuardConstraints:
     """Alternative owners are OR, including any unknown alternative."""
     out: list[frozenset[tuple[str, str, bool]]] = []
-    seen: set[frozenset[tuple[str, str, bool]]] = set()
-    for domain in domains:
+    subset_checks = [0]
+    processed_branches = 0
+    for processed_domains, domain in enumerate(domains):
+        if processed_domains >= _MAX_CONSTRAINT_DOMAINS:
+            return UNCONSTRAINED
         for branch in domain:
+            if processed_branches >= _MAX_CONSTRAINT_PROCESSED_BRANCHES:
+                return UNCONSTRAINED
+            processed_branches += 1
             if not branch:
                 return UNCONSTRAINED
-            if branch not in seen:
-                seen.add(branch)
-                out.append(branch)
-                if len(out) > _MAX_CONSTRAINT_BRANCHES:
-                    return UNCONSTRAINED
+            if len(branch) > 64:
+                return UNCONSTRAINED
+            if not _insert_constraint_branch(out, branch, subset_checks):
+                return UNCONSTRAINED
+            if len(out) > _MAX_CONSTRAINT_BRANCHES:
+                return UNCONSTRAINED
     return tuple(out)
 
 
 def intersect_constraints(left: GuardConstraints, right: GuardConstraints) -> GuardConstraints:
     """Conjoin constraints; resource exhaustion widens to unknown."""
     out: list[frozenset[tuple[str, str, bool]]] = []
-    seen: set[frozenset[tuple[str, str, bool]]] = set()
+    subset_checks = [0]
     joins = 0
     for first in left:
         for second in right:
@@ -99,9 +138,9 @@ def intersect_constraints(left: GuardConstraints, right: GuardConstraints) -> Gu
                 not equal and equals.get(path) == value for path, value, equal in branch
             ):
                 possible = False
-            if possible and branch not in seen:
-                seen.add(branch)
-                out.append(branch)
+            if possible:
+                if not _insert_constraint_branch(out, branch, subset_checks):
+                    return UNCONSTRAINED
                 if len(out) > _MAX_CONSTRAINT_BRANCHES:
                     return UNCONSTRAINED
     return tuple(out)
