@@ -34,14 +34,16 @@ def test_sec4_whitespace_variants_only_expect_detection_when_structure_survives(
     variants = mutate_whitespace_pad(content)
 
     # Extra spacing around mapping separators and equals signs preserves the
-    # trigger/checkout structure and should remain detectable directly.
-    assert len(variants) == 3
+    # trigger/checkout structure and should remain detectable directly. The
+    # zero-space colon collapse is excluded by the mutation generator because
+    # the structural reader proves it destroys the original uses mapping.
+    assert len(variants) == 2
     assert rule.pattern.check(variants[0], variants[0].splitlines())
-    assert rule.pattern.check(variants[2], variants[2].splitlines())
+    assert rule.pattern.check(variants[1], variants[1].splitlines())
 
     # The zero-space colon collapse turns the uses mapping into plain scalar
     # text. This block-form trigger survives but no checkout action remains.
-    collapsed = variants[1]
+    collapsed = content.replace(": ", ":")
     assert "pull_request_target" in triggers(collapsed)
     leaves = [
         event

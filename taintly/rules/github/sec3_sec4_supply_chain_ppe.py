@@ -4,11 +4,13 @@ These two categories cover the exact attack vectors used in documented supply ch
 """
 
 import re
+from dataclasses import dataclass
 
 from taintly.eventguard import event_guard_verdict
 from taintly.models import (
     CompromisedActionPattern,
     ContextPattern,
+    IncompletePatternMatches,
     Platform,
     RegexPattern,
     Rule,
@@ -21,7 +23,7 @@ from taintly.parsers.gha_expr import (
     structural_expr_enabled,
 )
 from taintly.parsers.segmentation import for_each_step
-from taintly.parsers.structural import EventKind, triggers, walk_workflow
+from taintly.parsers.structural import Event, EventKind, triggers, walk_workflow
 from taintly.platform import github_archived_check, github_sha_verify
 from taintly.structural_pattern import StructuralPattern
 from taintly.workflow_aware_pattern import PredicateContext
@@ -34,6 +36,484 @@ from taintly.workflow_aware_pattern import PredicateContext
 
 _FULL_SHA_RE = re.compile(r"^[a-f0-9]{40}$")
 _BRANCH_REF_NAMES = frozenset({"main", "master", "develop", "dev"})
+
+
+_EXTERNAL_USES_RE = re.compile(r"([\w.-]+/(?:[\w.-]+/)*[\w.-]+)@([^@\s]+)\Z")
+_MAX_SEC3_CONTEXT_EVENTS = 20_000
+
+
+def _sec3_gh_006_occurrences(
+    content: str,
+    lines: list[str],
+    filepath: str,
+    *,
+    event_limit: int | None = None,
+) -> tuple[list[Event], list[tuple[Event, tuple[int, str]]], bool, bool]:
+    events: list[Event] = []
+    limit_hit = False
+    for event in walk_workflow(
+        filepath,
+        content=content,
+        include_keys=True,
+        include_merge_origins=True,
+    ):
+        if event_limit is not None and len(events) >= event_limit:
+            limit_hit = True
+            break
+        events.append(event)
+    composite = filepath.replace("\\", "/").rsplit("/", 1)[-1].lower() in {
+        "action.yml",
+        "action.yaml",
+    } and any(
+        event.kind is EventKind.LEAF_SCALAR
+        and event.path == ("runs", "using")
+        and event.value == "composite"
+        for event in events
+    )
+    occurrences: list[tuple[Event, tuple[int, str]]] = []
+    for event in events:
+        if event.kind is not EventKind.LEAF_SCALAR or event.path[-1:] != ("uses",):
+            continue
+        if not _GitHubUsesInventoryPattern._is_occurrence(event.path, composite=composite):
+            continue
+        if not _GitHubUsesInventoryPattern._is_external(event.value or ""):
+            continue
+        snippet = (
+            lines[event.line - 1].strip() if 0 < event.line <= len(lines) else (event.value or "")
+        )
+        occurrences.append((event, (event.line, snippet)))
+    incomplete = any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events)
+    return events, occurrences, incomplete, limit_hit
+
+
+def _sec3_gh_006_line_owner_counts(events: list[Event]) -> dict[int, int]:
+    owners_by_line: dict[int, set[tuple[object, ...]]] = {}
+    for event in events:
+        if event.kind not in {EventKind.LEAF_SCALAR, EventKind.MAP_KEY}:
+            continue
+        path = event.path
+        owner: tuple[object, ...] | None = None
+        if len(path) >= 2 and path[0] == "jobs" and isinstance(path[1], str):
+            owner = path[:2]
+            if len(path) >= 4 and path[2] == "steps" and isinstance(path[3], int):
+                owner = path[:4]
+        elif len(path) >= 3 and path[:2] == ("runs", "steps") and isinstance(path[2], int):
+            owner = path[:3]
+        elif len(path) >= 1 and isinstance(path[0], int):
+            owner = path[:1]
+        if owner is not None:
+            owners_by_line.setdefault(event.line, set()).add(owner)
+    counts = {}
+    for line, owners in owners_by_line.items():
+        # Job-level metadata is an ancestor of its step owners. Collapse it
+        # when the same line also has a more specific structural owner so a
+        # sole dead job/step remains suppressible.
+        maximal = {
+            owner
+            for owner in owners
+            if not any(len(other) > len(owner) and other[: len(owner)] == owner for other in owners)
+        }
+        counts[line] = len(maximal)
+    return counts
+
+
+def _expression_contexts(value: str) -> tuple[list[str], bool]:
+    paths: list[str] = []
+    unresolved = False
+    bodies = list(iter_expression_bodies(value))
+    for body in bodies:
+        try:
+            paths.extend(context_paths(body))
+        except (ExprSyntaxError, RecursionError):
+            unresolved = True
+    if "${{" in value and not bodies:
+        unresolved = True
+    return sorted(set(paths)), unresolved
+
+
+def _bounded_items(values: list[str], limit: int = 12, *, total_count: int | None = None) -> str:
+    selected = values[:limit]
+    rendered = ", ".join(selected) if selected else "none"
+    omitted = (len(values) if total_count is None else total_count) - len(selected)
+    if omitted:
+        rendered += f" (+{omitted} omitted)"
+    return rendered
+
+
+def _bounded_context_note(note: str) -> str:
+    if len(note) <= 500:
+        return note
+    marker = " [evidence truncated; remaining context omitted]"
+    return note[: 500 - len(marker)] + marker
+
+
+@dataclass(frozen=True)
+class _InventoryOccurrenceContext:
+    notes: list[str]
+    owner_path: tuple[object, ...] | None
+    line_owner_count: int = 1
+
+
+class _GitHubUsesInventoryPattern:
+    """Inventory external GitHub uses leaves without scanning arbitrary text."""
+
+    @staticmethod
+    def _is_external(value: str) -> bool:
+        match = _EXTERNAL_USES_RE.fullmatch(value.strip())
+        if match is None:
+            return False
+        package = match.group(1)
+        return not (
+            package.startswith(("actions/", "github/", "./", "../", "docker://"))
+            or package.count("/") < 1
+        )
+
+    @staticmethod
+    def _is_occurrence(path: tuple[object, ...], *, composite: bool) -> bool:
+        if (
+            len(path) == 5
+            and path[0] == "jobs"
+            and isinstance(path[1], str)
+            and path[2] == "steps"
+            and isinstance(path[3], int)
+            and path[4] == "uses"
+        ):
+            return True
+        if len(path) == 3 and path[0] == "jobs" and isinstance(path[1], str) and path[2] == "uses":
+            return True
+        if len(path) == 2 and isinstance(path[0], int) and path[1] == "uses":
+            return True
+        return (
+            composite
+            and len(path) == 4
+            and path[:2] == ("runs", "steps")
+            and isinstance(path[2], int)
+            and path[3] == "uses"
+        )
+
+    def _check(self, content: str, lines: list[str], filepath: str) -> list[tuple[int, str]]:
+        _events, occurrences, incomplete, _limit_hit = _sec3_gh_006_occurrences(
+            content, lines, filepath
+        )
+        results = [hit for _, hit in occurrences]
+        if incomplete:
+            return IncompletePatternMatches(
+                results, reason="structural YAML parsing reported an error or cutoff"
+            )
+        return results
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        return self._check(content, lines, "workflow.yml")
+
+    def check_with_filepath(
+        self, content: str, lines: list[str], filepath: str
+    ) -> list[tuple[int, str]]:
+        if not filepath.lower().endswith((".yml", ".yaml")):
+            return []
+        return self._check(content, lines, filepath)
+
+    def context_notes_for_matches(
+        self,
+        content: str,
+        filepath: str,
+        matches: list[tuple[int, str]],
+    ) -> list[_InventoryOccurrenceContext]:
+        if not matches or not filepath.lower().endswith((".yml", ".yaml")):
+            return []
+        events, occurrences, _incomplete, limit_hit = _sec3_gh_006_occurrences(
+            content,
+            content.splitlines(),
+            filepath,
+            event_limit=_MAX_SEC3_CONTEXT_EVENTS,
+        )
+        if limit_hit:
+            note = (
+                f"Context indexing stopped at {_MAX_SEC3_CONTEXT_EVENTS} structural events; "
+                "owner, permissions, and secret mapping context are unknown."
+            )
+            return [_InventoryOccurrenceContext([note], None) for _ in matches]
+        hits = [hit for _, hit in occurrences]
+        if hits != matches:
+            note = (
+                "Occurrence context could not be bound one-to-one to the pre-filter "
+                "match list; owner, permissions, and secret mapping context are unknown."
+            )
+            return [_InventoryOccurrenceContext([note], None) for _ in matches]
+        return _sec3_gh_006_context_notes(content, events, occurrences)
+
+
+def _sec3_gh_006_context_notes(
+    content: str,
+    events: list[Event],
+    occurrences: list[tuple[Event, tuple[int, str]]],
+) -> list[_InventoryOccurrenceContext]:
+    from taintly.authority_context import _Index
+
+    index = _Index(content, events=events)
+    line_owner_counts = _sec3_gh_006_line_owner_counts(events)
+    if index.ambiguous:
+        ambiguous_rows = []
+        for event, _hit in occurrences:
+            path = event.path
+            if len(path) == 5 and path[0] == "jobs":
+                owner = f"jobs.{path[1]}.steps[{path[3]}]"
+                label = "action step"
+            elif len(path) == 3 and path[0] == "jobs":
+                owner = f"jobs.{path[1]}.uses"
+                label = "reusable workflow call"
+            elif len(path) == 2:
+                owner = f"standalone sequence line {event.line}"
+                label = "uses reference"
+            else:
+                owner = f"composite action line {event.line}"
+                label = "action step"
+            ambiguous_notes = [
+                _bounded_context_note(
+                    f"Observed external {label} at {owner}; the reference is {event.value!r}."
+                ),
+                "Structural ownership context is ambiguous (duplicate keys, merge provenance, "
+                "parse error, cutoff, or event bound); authority and secret ownership remain unknown, "
+                "and secret forwarding remains unresolved.",
+            ]
+            if len(path) == 3 and path[0] == "jobs":
+                ambiguous_notes.append(
+                    "No exact inherit or named secret mapping is attributed to this call. "
+                    "GitHub reusable workflows receive github.token/GITHUB_TOKEN under the "
+                    "provider contract; effective token permissions remain unknown, and "
+                    "workflow-level env does not pass into the called workflow."
+                )
+            ambiguous_rows.append(
+                _InventoryOccurrenceContext(
+                    [_bounded_context_note(note) for note in ambiguous_notes],
+                    path,
+                    line_owner_counts.get(event.line, 1),
+                )
+            )
+        return ambiguous_rows
+    leaf_children: dict[tuple[object, ...], list[Event]] = {}
+    for event in events:
+        if event.kind is EventKind.LEAF_SCALAR:
+            leaf_children.setdefault(event.path[:-1], []).append(event)
+
+    complete_cache: dict[tuple[object, ...], bool] = {}
+
+    def complete_mapping(scope: tuple[object, ...]) -> bool:
+        if scope not in complete_cache:
+            complete_cache[scope] = index.mapping_complete(scope)
+        return complete_cache[scope]
+
+    expression_cache: dict[str, tuple[list[str], bool]] = {}
+
+    def expression_paths(value: str) -> tuple[list[str], bool]:
+        if value not in expression_cache:
+            expression_cache[value] = _expression_contexts(value)
+        return expression_cache[value]
+
+    rows: list[_InventoryOccurrenceContext] = []
+    for event, _hit in occurrences:
+        path = event.path
+        notes: list[str] = []
+        mixed_job_shape = (
+            len(path) >= 2
+            and path[0] == "jobs"
+            and index.has(("jobs", path[1], "uses"))
+            and index.has(("jobs", path[1], "steps"))
+        )
+        if len(path) == 5 and path[0] == "jobs" and isinstance(path[3], int):
+            job, step = str(path[1]), path[3]
+            notes.append(
+                _bounded_context_note(
+                    f"Observed external action step at jobs.{job}.steps[{step}]; "
+                    f"the reference is {event.value!r}."
+                )
+            )
+            grants = index.grants(job)
+            if grants.known:
+                notes.append(
+                    "Declared local permission ceiling: "
+                    + _bounded_items([f"{key}={value}" for key, value in grants.levels])
+                    + f" (line {grants.line}); effective provider token permissions remain unknown."
+                )
+            else:
+                notes.append(
+                    "Declared local permission ceiling is ambiguous, absent, or unresolved; "
+                    "effective token permissions remain unknown."
+                )
+            with_path = path[:-1] + ("with",)
+            with_values = leaf_children.get(with_path, [])
+            with_state_opaque = index.has(with_path) and not complete_mapping(with_path)
+            env_scopes = [("env",), ("jobs", job, "env"), path[:-1] + ("env",)]
+            env_values: list[tuple[tuple[object, ...], Event]] = []
+            opaque_env_scopes: list[tuple[object, ...]] = []
+            for scope in env_scopes:
+                if index.has(scope) and not complete_mapping(scope):
+                    opaque_env_scopes.append(scope)
+                env_values.extend((scope, value) for value in leaf_children.get(scope, []))
+                scalar = index.leaves.get(scope)
+                if scalar is not None:
+                    env_values.append((scope, scalar))
+            with_fields = _bounded_items(
+                [f"{value.path[-1]!s} (line {value.line})" for value in with_values[:12]],
+                total_count=len(with_values),
+            )
+            env_fields = _bounded_items(
+                [
+                    f"{'.'.join(map(str, scope))}.{value.path[-1]!s} (line {value.line})"
+                    for scope, value in env_values[:12]
+                ],
+                total_count=len(env_values),
+            )
+            context_paths_seen: list[str] = []
+            expression_unresolved = False
+            visible_values = [entry.value or "" for entry in with_values[:12]] + [
+                entry.value or "" for _scope, entry in env_values[:12]
+            ]
+            with_scalar = index.leaves.get(with_path)
+            if with_scalar is not None:
+                visible_values.append(with_scalar.value or "")
+            for value in visible_values:
+                found, unresolved = expression_paths(value)
+                context_paths_seen.extend(found)
+                expression_unresolved = expression_unresolved or unresolved
+            omitted_value_count = max(0, len(with_values) + len(env_values) - len(visible_values))
+            unique_context_paths = sorted(set(context_paths_seen))
+            opaque_notes = []
+            if with_state_opaque:
+                opaque_notes.append("step with map")
+            if opaque_env_scopes:
+                opaque_notes.append(
+                    "env scope(s) "
+                    + ", ".join(".".join(map(str, scope)) for scope in opaque_env_scopes)
+                )
+            if mixed_job_shape:
+                opaque_notes.append("mixed job-level uses and steps shape")
+            notes.append(
+                _bounded_context_note(
+                    f"Visible owning-step with keys: {with_fields}; visible workflow/job/step "
+                    f"env keys: {env_fields}; expression AST context paths: "
+                    f"{_bounded_items(unique_context_paths)}."
+                )
+            )
+            if omitted_value_count:
+                notes.append(
+                    f"Context inspection omitted {omitted_value_count} additional with/env field(s); "
+                    "their expression paths and effective bindings are unknown."
+                )
+            omitted_path_count = max(0, len(unique_context_paths) - 12)
+            if omitted_path_count:
+                notes.append(
+                    f"Context path display omitted {omitted_path_count} additional expression path(s)."
+                )
+            if opaque_notes:
+                notes.append(
+                    _bounded_context_note(
+                        "Visible with/env declarations are not a complete effective binding: "
+                        + _bounded_items(opaque_notes)
+                        + " remain ambiguous or opaque."
+                    )
+                )
+            if expression_unresolved:
+                notes.append(
+                    "One or more expression bodies could not be parsed; expression context is unresolved."
+                )
+            notes.append(
+                "Context paths do not establish value existence, release, or action consumption. "
+                "Normal actions can access github.token without an explicit input; absence of a "
+                "reference does not prove no token access or effective provider permissions."
+            )
+        elif len(path) == 3 and path[0] == "jobs":
+            job = str(path[1])
+            notes.append(
+                _bounded_context_note(
+                    f"Observed reusable workflow call at jobs.{job}.uses; "
+                    f"the reference is {event.value!r}."
+                )
+            )
+            grants = index.grants(job)
+            if grants.known:
+                notes.append(
+                    "Caller-declared local permission ceiling: "
+                    + _bounded_items([f"{key}={value}" for key, value in grants.levels])
+                    + f" (line {grants.line}); the callee can narrow permissions, "
+                    "while effective provider authority remains unknown."
+                )
+            else:
+                notes.append(
+                    "Caller-declared local permission ceiling is absent or unresolved; "
+                    "effective provider authority remains unknown."
+                )
+            secrets_path = ("jobs", job, "secrets")
+            secret_event = index.leaves.get(secrets_path)
+            mapping_children = leaf_children.get(secrets_path, [])
+            if secret_event is not None and secret_event.value == "inherit":
+                notes.append(
+                    f"This call declares secrets: inherit at line {secret_event.line}; "
+                    "forwarding configuration does not establish secret existence, value, or release."
+                )
+            elif mixed_job_shape or (
+                index.has(secrets_path) and not complete_mapping(secrets_path)
+            ):
+                notes.append(
+                    "Secret forwarding remains unresolved: declaration is ambiguous or opaque; "
+                    "no exact inherit or named mapping is attributed to this call."
+                )
+            elif mapping_children:
+                declarations: list[str] = []
+                for mapping in mapping_children[:12]:
+                    paths, unresolved = expression_paths(mapping.value or "")
+                    detail = _bounded_items(paths) if paths else "no static context path recognized"
+                    suffix = "; expression unresolved" if unresolved else ""
+                    declarations.append(
+                        f"{mapping.path[-1]} (line {mapping.line}; value redacted; {detail}{suffix})"
+                    )
+                notes.append(
+                    "This call declares secret forwarding fields: "
+                    + _bounded_items(declarations, total_count=len(mapping_children))
+                    + "."
+                )
+                if len(mapping_children) > 12:
+                    notes.append(
+                        f"Secret forwarding display omitted {len(mapping_children) - 12} additional field(s); "
+                        "their individual declarations remain unreviewed."
+                    )
+            elif index.has(secrets_path):
+                notes.append(
+                    "A secrets field is present, but no named forwarding mapping could be read; "
+                    "its forwarding semantics remain unresolved."
+                )
+            else:
+                notes.append(
+                    "No explicit secret-forwarding mapping is visible at this call; this does not "
+                    "prove absence of GITHUB_TOKEN or effective provider authority."
+                )
+            notes.append(
+                "Literal mapping values are redacted; configured mappings do not establish other "
+                "secret existence, value, release, or callee consumption. GitHub reusable workflows "
+                "receive github.token/GITHUB_TOKEN under the provider contract, while effective token "
+                "permissions remain unknown. Workflow-level env does not pass into the called workflow."
+            )
+        elif len(path) == 2:
+            notes.append(
+                f"Observed external uses reference in a standalone sequence fragment at line "
+                f"{event.line}; owner, permissions, and secret scope are unknown."
+            )
+        else:
+            notes.append(
+                f"Observed external action step in composite action at line {event.line}; "
+                "runtime caller authority and secret scope are unknown."
+            )
+        if mixed_job_shape:
+            notes.append(
+                "The job declares both job-level uses and steps; invocation validity and ownership are unresolved."
+            )
+        rows.append(
+            _InventoryOccurrenceContext(
+                [_bounded_context_note(note) for note in notes],
+                path,
+                line_owner_counts.get(event.line, 1),
+            )
+        )
+    return rows
 
 
 _PR_HEAD_REF_PATHS = frozenset(
@@ -1225,11 +1705,8 @@ RULES: list[Rule] = [
     # SEC3-GH-006 — third-party action inventory (review-needed)
     # =========================================================================
     #
-    # Fires INFO once per ``uses: <pkg>@<ref>`` where ``<pkg>`` is NOT
-    # under one of the trusted GitHub-published orgs (``actions/``,
-    # ``github/``).  Built for the ``--baseline`` / ``--diff`` workflow:
-    # initial scan lists every external dependency for one-time review;
-    # subsequent scans surface only NEW dependencies as diff entries.
+    # Fires INFO for each parsed external action step or reusable-workflow
+    # call. It also supports a narrow standalone ``- uses:`` fragment.
     #
     # Distinct from SEC3-GH-003 (always-fire on packages with confirmed
     # compromise history) and SEC3-GH-004 (fire on actually-vulnerable
@@ -1237,39 +1714,27 @@ RULES: list[Rule] = [
     # surfaces the dependency surface so a human can decide.
     Rule(
         id="SEC3-GH-006",
-        title="Third-party action used (inventory; review-needed)",
+        title="Third-party GitHub dependency referenced (inventory; review-needed)",
         severity=Severity.INFO,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-3",
         review_needed=True,
-        finding_family="Mutable dependency references",
+        finding_family="dependency_inventory",
         description=(
-            "The workflow references a GitHub Action published outside "
-            "the official ``actions/`` and ``github/`` organisations. "
-            "External actions are supply-chain dependencies — every "
-            "release ships executable code that runs with your "
-            "workflow's full permissions and bound secrets.  Use "
-            "``--baseline`` to snapshot the current set of third-party "
-            "actions and ``--diff`` on subsequent scans to surface only "
-            "new dependencies that need review.  Trusted-default orgs: "
-            "``actions``, ``github``."
+            "The workflow structurally declares an external GitHub action "
+            "step or reusable-workflow call outside the ``actions/`` and "
+            "``github/`` namespaces. This is dependency inventory evidence; "
+            "it does not establish effective permissions, secret availability, "
+            "runtime execution, or malicious behavior. Context notes report "
+            "visible owner-local configuration and unresolved runtime facts."
         ),
-        pattern=RegexPattern(
-            # uses: <org>/<repo>[/<sub>]@<ref>
-            # — match orgs OTHER than actions/ and github/.
-            # Negative lookahead anchors on the slash to prevent
-            # matching ``actions-foundation/`` etc. as also-trusted.
-            match=r"^\s*(?:-\s*)?uses:\s*(?!actions/)(?!github/)(?!\./)(?!\.\./)(?!docker://)([\w.-]+/[\w./-]+)@(\S+)",
-            exclude=[
-                r"^\s*#",
-            ],
-        ),
+        pattern=_GitHubUsesInventoryPattern(),
         remediation=(
-            "Each finding is the *first* occurrence of an external "
-            "action in this scan; review the action's repository, "
-            "publisher, and recent commits, then snapshot the inventory "
-            "with ``--baseline``.  After baseline, only NEW external "
-            "actions surface in ``--diff`` output.  If your organisation "
+            "Review the referenced action or reusable workflow's repository, "
+            "publisher, and recent commits, and pin mutable references where "
+            "appropriate. Each finding represents one structural occurrence; "
+            "baseline and diff compare finding identities, not unique package "
+            "names. If your organisation "
             "publishes its own actions under a stable namespace and you "
             "trust them, suppress with ``# taintly: ignore[SEC3-GH-006]`` "
             "on the line, or add a path-scoped ignore in ``.taintly.yml``."
@@ -1297,16 +1762,12 @@ RULES: list[Rule] = [
         ],
         stride=["T"],
         threat_narrative=(
-            "Third-party GitHub Actions execute with the workflow's "
-            "full GITHUB_TOKEN scope and bound secrets at the time the "
-            "workflow runs.  Every external action is supply-chain "
-            "surface: a force-pushed tag, a maintainer takeover, or a "
-            "compromised publisher account turns into immediate "
-            "execution in your build environment.  This rule does not "
-            "claim any specific action is malicious — it surfaces the "
-            "external dependency set so a human reviewer can make the "
-            "trust decision for each one, with ``--baseline`` / "
-            "``--diff`` ensuring new additions don't slip through."
+            "External action and reusable-workflow references are supply-chain "
+            "dependencies. A mutable or compromised publisher reference can "
+            "change what a workflow uses, but this inventory observation alone "
+            "does not establish runtime execution, effective token authority, "
+            "secret release, or malicious behavior. Review the owner-scoped "
+            "configuration and provider/runtime prerequisites separately."
         ),
         confidence="medium",
     ),

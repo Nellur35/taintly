@@ -412,7 +412,12 @@ def scan_file(
             incomplete_reasons: list[str] = []
 
             try:
-                matches = rule.pattern.check(content, lines)
+                # Patterns that need the current path opt in without changing
+                # the common (content, lines) interface.
+                if hasattr(rule.pattern, "check_with_filepath"):
+                    matches = rule.pattern.check_with_filepath(content, lines, filepath)
+                else:
+                    matches = rule.pattern.check(content, lines)
                 if isinstance(matches, IncompletePatternMatches):
                     incomplete_reasons.append(matches.reason)
                 # Anchor-aware suppression: if the rule opts in and an
@@ -437,10 +442,19 @@ def scan_file(
                                     for eln in expanded_lineset
                                 )
                             ]
+                occurrence_context_builder = getattr(
+                    rule.pattern, "context_notes_for_matches", None
+                )
+                occurrence_context_notes = (
+                    occurrence_context_builder(content, filepath, matches)
+                    if callable(occurrence_context_builder)
+                    else None
+                )
                 _append_incomplete_pattern_diagnostic(
                     findings, rule.id, filepath, incomplete_reasons
                 )
-                for line_num, snippet in matches:
+                for match_index, (line_num, snippet) in enumerate(matches):
+                    match_context = None
                     # Honour inline suppression comments on the matched line.
                     source_line = lines[line_num - 1] if 0 < line_num <= len(lines) else ""
                     if _is_suppressed(source_line, rule.id):
@@ -462,6 +476,15 @@ def scan_file(
                     exploitability = compute_exploitability(family, finding_ctx, rule_id=rule.id)
                     ctx_notes: list[str] = []
                     ctx_tags: list[str] = []
+                    if occurrence_context_notes is not None:
+                        if match_index < len(occurrence_context_notes):
+                            match_context = occurrence_context_notes[match_index]
+                            ctx_notes.extend(getattr(match_context, "notes", []))
+                        else:
+                            ctx_notes.append(
+                                "Occurrence context was truncated before this finding; "
+                                "owner, permissions, and secret mapping context are unknown."
+                            )
                     if rule.id == "TAINT-GH-012" and exploitability == "high":
                         # This rule is a review lint for a safely quoted shell
                         # value: the sink does not re-tokenise the value, so
@@ -539,29 +562,37 @@ def scan_file(
                             f"as highly exploitable."
                         )
                         ctx_tags.append("severity-ceiling")
-                    findings.append(
-                        Finding(
-                            rule_id=rule.id,
-                            severity=rule.severity,
-                            title=rule.title,
-                            description=rule.description,
-                            file=filepath,
-                            line=line_num,
-                            snippet=snippet,
-                            remediation=rule.remediation,
-                            reference=rule.reference,
-                            owasp_cicd=rule.owasp_cicd,
-                            stride=rule.stride,
-                            threat_narrative=rule.threat_narrative,
-                            incidents=rule.incidents,
-                            finding_family=family,
-                            confidence=confidence,
-                            exploitability=exploitability,
-                            review_needed=review_needed,
-                            context_notes=ctx_notes,
-                            context_tags=ctx_tags,
-                        )
+                    finding = Finding(
+                        rule_id=rule.id,
+                        severity=rule.severity,
+                        title=rule.title,
+                        description=rule.description,
+                        file=filepath,
+                        line=line_num,
+                        snippet=snippet,
+                        remediation=rule.remediation,
+                        reference=rule.reference,
+                        owasp_cicd=rule.owasp_cicd,
+                        stride=rule.stride,
+                        threat_narrative=rule.threat_narrative,
+                        incidents=rule.incidents,
+                        finding_family=family,
+                        confidence=confidence,
+                        exploitability=exploitability,
+                        review_needed=review_needed,
+                        context_notes=ctx_notes,
+                        context_tags=ctx_tags,
                     )
+                    owner_path = getattr(match_context, "owner_path", None)
+                    if rule.id == "SEC3-GH-006" and owner_path is not None:
+                        # Internal-only binding used by the dead-range filter
+                        # for same-line mixed-owner inventories; to_dict() does
+                        # not expose this scan-local structural identity.
+                        finding.__dict__["_sec3_gh_006_owner_path"] = owner_path
+                        finding.__dict__["_sec3_gh_006_line_owner_count"] = getattr(
+                            match_context, "line_owner_count", None
+                        )
+                    findings.append(finding)
             except Exception as e:
                 _append_incomplete_pattern_diagnostic(
                     findings, rule.id, filepath, incomplete_reasons
@@ -1104,11 +1135,36 @@ def _suppress_dead_findings(
     dead_ranges = find_dead_line_ranges(content, repoctx)
     if not dead_ranges:
         return
+    inventory_at_site: dict[tuple[str, int], list[Finding]] = {}
+    for finding in findings:
+        if finding.rule_id == "SEC3-GH-006":
+            inventory_at_site.setdefault((finding.file, finding.line), []).append(finding)
+    shared_inventory_sites: set[tuple[str, int]] = set()
+    for site, site_findings in inventory_at_site.items():
+        if not any(start <= site[1] <= end for start, end in dead_ranges):
+            continue
+        owner_counts = [
+            getattr(finding, "_sec3_gh_006_line_owner_count", None) for finding in site_findings
+        ]
+        if any(count is None or count > 1 for count in owner_counts):
+            shared_inventory_sites.add(site)
     findings[:] = [
         f
         for f in findings
-        if f.line <= 0 or not any(start <= f.line <= end for start, end in dead_ranges)
+        if (
+            f.line <= 0
+            or not any(start <= f.line <= end for start, end in dead_ranges)
+            or (f.rule_id == "SEC3-GH-006" and (f.file, f.line) in shared_inventory_sites)
+        )
     ]
+    for site in shared_inventory_sites:
+        for finding in inventory_at_site[site]:
+            note = (
+                "Liveness attribution is unresolved for this shared source line; "
+                "inventory rows were retained because line-based filtering cannot distinguish owners."
+            )
+            if note not in finding.context_notes:
+                finding.context_notes.append(note)
 
 
 def _downgrade_maintainer_gated_findings(findings: list[Finding], content: str) -> None:

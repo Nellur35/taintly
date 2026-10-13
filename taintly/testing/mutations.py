@@ -20,7 +20,9 @@ def mutate_whitespace_pad(sample: str) -> list[str]:
     return [
         m
         for m in mutations
-        if m != sample and not _invalidates_actions_guard(sample, m, allow_guard_loss=True)
+        if m != sample
+        and not _invalidates_actions_guard(sample, m, allow_guard_loss=True)
+        and not _invalidates_supported_uses_mapping(sample, m)
     ]
 
 
@@ -166,6 +168,76 @@ def _invalidates_actions_guard(
         except (ExprSyntaxError, RecursionError):
             return True
     return False
+
+
+def _supported_uses_mappings(
+    source: str, *, composite: bool | None = None
+) -> dict[tuple[object, ...], str] | None:
+    """Return exact supported invocation mappings, or None if parsing is ambiguous.
+
+    This is a mutation-equivalence premise check, not a detector: it only
+    recognizes supported structural `uses` leaves from the shared YAML
+    walker and never searches source text or applies namespace policy.
+    """
+    from taintly.parsers.structural import EventKind, walk_workflow
+
+    events = list(
+        walk_workflow("workflow.yml", content=source, include_keys=True, include_merge_origins=True)
+    )
+    keys: set[tuple[object, ...]] = set()
+    for event in events:
+        if event.kind in {EventKind.ERROR, EventKind.CUTOFF} or event.merge_origins:
+            return None
+        if event.kind is EventKind.MAP_KEY:
+            if event.path in keys:
+                return None
+            keys.add(event.path)
+    if composite is None:
+        composite = any(
+            event.kind is EventKind.LEAF_SCALAR
+            and event.path == ("runs", "using")
+            and event.value == "composite"
+            for event in events
+        )
+    result: dict[tuple[object, ...], str] = {}
+    for event in events:
+        path = event.path
+        if (
+            event.kind is not EventKind.LEAF_SCALAR
+            or path[-1:] != ("uses",)
+            or not (event.value or "").strip()
+        ):
+            continue
+        job_step = (
+            len(path) == 5
+            and path[0] == "jobs"
+            and isinstance(path[1], str)
+            and path[2] == "steps"
+            and isinstance(path[3], int)
+        )
+        reusable_call = len(path) == 3 and path[0] == "jobs" and isinstance(path[1], str)
+        composite_step = (
+            composite
+            and len(path) == 4
+            and path[:2] == ("runs", "steps")
+            and isinstance(path[2], int)
+        )
+        standalone_step = len(path) == 2 and isinstance(path[0], int)
+        if job_step or reusable_call or composite_step or standalone_step:
+            result[path] = event.value or ""
+    return result
+
+
+def _invalidates_supported_uses_mapping(original: str, mutated: str) -> bool:
+    """Reject a mutation only when a complete parse proves an invocation vanished."""
+    before = _supported_uses_mappings(original)
+    if before is None or not before:
+        return False
+    original_composite = any(path[:2] == ("runs", "steps") for path in before)
+    after = _supported_uses_mappings(mutated, composite=original_composite)
+    if after is None:
+        return False
+    return bool(before.keys() - after.keys())
 
 
 def mutate_comment_inject(sample: str) -> list[str]:
