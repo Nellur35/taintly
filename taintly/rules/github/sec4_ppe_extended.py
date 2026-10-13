@@ -1370,19 +1370,22 @@ RULES: list[Rule] = [
         confidence="high",
     ),
     # =========================================================================
-    # SEC4-GH-008: workflow_dispatch inputs used directly in run block — HIGH
+    # SEC4-GH-008: workflow inputs used in executable source — HIGH
     # =========================================================================
     Rule(
         id="SEC4-GH-008",
-        title="workflow_dispatch inputs used directly in shell (not via env var)",
+        title="Workflow input interpolated into executable source",
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "workflow_dispatch input values (${{ inputs.* }} or ${{ github.event.inputs.* }}) "
-            "used directly in workflow expressions outside of a safe env: assignment. "
-            "Manually triggered inputs are user-controlled and may contain shell metacharacters. "
-            "Exploited in the Langflow and Ultralytics supply chain incidents (2024-2025)."
+            "An input expression reaches shell or recognized action-script source, "
+            "directly or through supported local reusable-workflow forwarding. "
+            "Manual workflow_dispatch and reusable "
+            "workflow_call invocations can supply inputs. Review the declaration, "
+            "actual caller values, validation and invocation access before treating "
+            "this as an attacker-controlled path. The splice alone does not prove "
+            "attacker access or sensitive job permissions."
         ),
         pattern=WorkflowAwarePattern(
             path=[
@@ -1393,13 +1396,16 @@ RULES: list[Rule] = [
             predicate=is_workflow_input_executable_sink,
         ),
         remediation=(
-            "Never interpolate ${{ inputs.* }} directly into a run: body\n"
-            "— the value is spliced into shell source before parsing, so\n"
-            "shell metacharacters execute.  Route through env: and reference\n"
-            "as a double-quoted shell var; validate with a case allowlist:\n"
-            "  env:\n    MY_INPUT: ${{ inputs.my_input }}\n"
+            "Pass input values as data rather than interpolating executable source.\n"
+            "For Bash, use env: with a quoted variable and an allowlist:\n"
+            "  shell: bash\n  env:\n    MY_INPUT: ${{ inputs.my_input }}\n"
             '  run: case "$MY_INPUT" in staging|prod) ;; *) exit 1;; esac\n'
-            "For workflow_dispatch, also set `type: choice` with options.\n"
+            "For PowerShell use $env:MY_INPUT; for JavaScript action scripts, read\n"
+            "process.env.MY_INPUT. Keep values out of eval and generated code.\n"
+            "For forwarded inputs, apply this at the callee execution step and\n"
+            "verify the action or workflow's data and environment contract.\n"
+            "Check actual reusable callers or manual-trigger access and validate\n"
+            "values at the consumer; a configured input type is not that check.\n"
             "Run `taintly --guide SEC4-GH-008` for the full checklist."
         ),
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-scripts-to-handle-untrusted-input",
@@ -1446,13 +1452,14 @@ RULES: list[Rule] = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "Workflow dispatch inputs are user-controlled free text that can contain shell "
-            "metacharacters, and anyone with workflow dispatch access or a compromised API token "
-            "with the workflow scope can supply arbitrary values. "
-            "When interpolated directly into a run: block, this creates a command injection path "
-            "exploitable by any authorized triggerer — not only external attackers."
+            "If an operator or workflow caller can choose an input that reaches executable "
+            "source without suitable validation, code syntax in that value can alter the "
+            "command or script. Determine which caller or trigger supplies the value and "
+            "whether it is constrained or validated; a literal or trusted caller is not "
+            "proof of attacker control. Verify actual token permissions, secret release "
+            "and guards before claiming privilege escalation or secret access."
         ),
-        incidents=["Langflow (2024)", "Ultralytics (Dec 2024)"],
+        incidents=[],
         confidence="high",
     ),
     # =========================================================================
