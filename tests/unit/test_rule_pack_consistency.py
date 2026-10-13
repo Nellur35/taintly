@@ -127,7 +127,7 @@ _INCIDENT_REF_RE = re.compile(
 # count GROWS — same growth-only discipline as
 # taintly/testing/self_test.py::_KNOWN_MUTATION_GAPS. Lower this
 # number as you replace free-text references with URL / CVE IDs.
-_INCIDENT_REF_BASELINE = 108  # -1: removed the SEC4-GH-023 exact-duplicate rule
+_INCIDENT_REF_BASELINE = 106  # -2: removed unsupported SEC4-GH-008 incident associations
 
 
 def test_incident_references_are_structured_no_growth(all_rules):

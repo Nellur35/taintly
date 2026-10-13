@@ -1129,37 +1129,43 @@ REFERENCES:
 """,
     "SEC4-GH-008": """
 ═══════════════════════════════════════════════════════════════════════════════
-REMEDIATION GUIDE: workflow_dispatch inputs used directly in shell (SEC4-GH-008)
+REMEDIATION GUIDE: Workflow inputs in executable source (SEC4-GH-008)
 ═══════════════════════════════════════════════════════════════════════════════
 Severity: HIGH
 OWASP:    CICD-SEC-4 — Poisoned Pipeline Execution
-Risk:     Inputs to ``workflow_dispatch`` (and ``workflow_call``) are
-          user-supplied strings.  When ``${{ inputs.X }}`` /
-          ``${{ github.event.inputs.X }}`` is interpolated directly into a
-          ``run:`` block, the VALUE is pasted into the shell literal BEFORE
-          the shell parses it — any ``;``, ``$(...)``, or backtick in the
-          input becomes live code.  Exploited in Langflow (2024) and
-          Ultralytics (Dec 2024).  Unlike ``github.event.*`` payloads,
-          dispatch inputs are exploitable by ANY user with workflow-trigger
-          access, not only external attackers.
+Risk:     Inputs may come from a manual ``workflow_dispatch`` invocation or
+          a reusable ``workflow_call`` caller. An input expression in shell
+          or recognized action-script source can insert executable syntax
+          if the caller or operator can supply such a value. Review actual
+          callers, input declarations, validation and invocation access.
+          Interpolation alone does not prove attacker control, privilege
+          escalation or secret access.
+
+          Use ``inputs.X`` for both invocation routes. The separate
+          ``github.event.inputs.X`` namespace belongs to workflow_dispatch;
+          it is not the reusable workflow's input interface.
 
 WHY THIS CAN'T BE AUTO-FIXED:
   The safe pattern is to route the value through an ``env:`` key and
-  reference it as ``$SHELL_VAR`` — but doing so mechanically requires
+  read it using the configured runtime — but doing so mechanically requires
   picking a variable name and restructuring the step, which a tool
   can't always do without breaking adjacent lines.  A naive rewrite
-  could also miss the case where the same input appears in a `with:`
-  param (correct there) vs a `run:` body (dangerous).
+  could also miss an executable action ``with: script`` / ``command`` slot
+  or confuse one of those slots with an ordinary data argument.
 
 STEP-BY-STEP REMEDIATION:
 
-  1. UNDERSTAND THE TWO USE SITES
-     - ``with: some_param: ${{ inputs.x }}``  → SAFE.  The value is
-       passed to the action as a string argument; the action decides
-       how to use it.
-     - ``run: deploy.sh ${{ inputs.x }}``  → DANGEROUS.  The value is
-       spliced into shell source at workflow parse time.
-     This rule fires only on the second form.
+  1. IDENTIFY THE INPUT AND EXECUTION SITE
+     - Inspect the actual manual trigger or reusable callers and values.
+     - In ``run: deploy.sh ${{ inputs.x }}``, the expression result is
+       inserted into executable shell source before shell parsing.
+     - An ordinary action data argument depends on that action's contract.
+       Known ``script`` / ``command`` inputs can also be executable source.
+     This rule covers run bodies and recognized executable action slots;
+     it does not establish that an external actor can select the input.
+     It can also follow supported local reusable-workflow input forwarding.
+     Apply the mitigation at the callee execution step, and verify the
+     workflow or action contract carries the value as intended.
 
   2. MOVE THE VALUE INTO AN env: KEY
      Reference the input exactly once in ``env:``; let the shell read
@@ -1167,24 +1173,28 @@ STEP-BY-STEP REMEDIATION:
 
        # BEFORE — shell source carries the user input literally
        - name: Deploy
-         run: deploy.sh ${{ github.event.inputs.environment }}
+         run: deploy.sh ${{ inputs.environment }}
 
        # AFTER — Actions ${{ }} interpolation is confined to env:
        - name: Deploy
+         shell: bash
          env:
-           DEPLOY_ENV: ${{ github.event.inputs.environment }}
+           DEPLOY_ENV: ${{ inputs.environment }}
          run: deploy.sh "$DEPLOY_ENV"
 
-     Always ``"$VAR"`` (double-quoted).  Unquoted `$VAR` re-enables
-     word splitting and partially undoes the fix — see SEC4-GH-018.
+     In Bash, use ``"$VAR"`` to avoid word splitting. PowerShell reads
+     ``$env:VAR``; JavaScript action scripts can read ``process.env.VAR``.
+     Keep the value out of eval, shell -c and generated code. Environment
+     routing does not make a later code-parsing operation safe.
 
   3. VALIDATE AT THE SHELL, NOT THE GITHUB EXPRESSION LAYER
      Shell parameter expansion gives you a strict allowlist in three
      lines.  Fail closed.
 
        - name: Deploy
+         shell: bash
          env:
-           DEPLOY_ENV: ${{ github.event.inputs.environment }}
+           DEPLOY_ENV: ${{ inputs.environment }}
          run: |
            case "$DEPLOY_ENV" in
              staging|production) ;;
@@ -1192,12 +1202,12 @@ STEP-BY-STEP REMEDIATION:
            esac
            deploy.sh "$DEPLOY_ENV"
 
-  4. FOR workflow_dispatch (NOT workflow_call), CONSTRAIN AT DISPATCH TIME
-     ``type: choice`` with an ``options:`` list is enforced by GitHub
-     before the workflow starts — the value simply cannot arrive
-     outside the allowlist.  (This does NOT work on ``workflow_call``
-     inputs — those only accept string/boolean/number.  See
-     SEC4-GH-016's guide for the workflow_call validation pattern.)
+  4. REVIEW INPUT DECLARATIONS AND RETAIN CONSUMER VALIDATION
+     ``workflow_dispatch`` can offer ``type: choice`` options to users.
+     ``workflow_call`` inputs accept string, boolean or number types.
+     Check the applicable declaration and actual caller values; keep the
+     consumer allowlist instead of treating a dropdown alone as validation.
+     See SEC4-GH-016's guide for reusable-workflow input validation.
 
        on:
          workflow_dispatch:
@@ -1207,22 +1217,18 @@ STEP-BY-STEP REMEDIATION:
                required: true
                options: [staging, production]
 
-     Belt-and-braces: do both dispatch-time ``type: choice`` AND the
-     step-3 ``case`` allowlist.  The first defends against direct API
-     dispatch with a handcrafted value; the second defends against a
-     future refactor that drops the ``type: choice`` line.
+     Use the step-3 consumer allowlist with either invocation route.
 
   5. VERIFY
-     - Run the workflow with ``--field environment="staging; id"`` via
-       ``gh workflow run``.  With ``type: choice``, the dispatch should
-       be rejected.  Without it, the ``case`` allowlist should exit 1.
-     - Grep every ``run:`` in the file for ``${{ inputs.``.  If any
-       remains outside an ``env:`` key, the fix is incomplete.
+     - Test allowed and rejected values in a disposable workflow. Confirm
+       that rejected values reach neither the deployment command nor eval.
+     - Inspect run bodies and executable action inputs for interpolation.
+       Verify the configured runtime reads the value as data and validates
+       it before any operation that parses executable syntax.
 
 REFERENCES:
   - https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-scripts-to-handle-untrusted-input
-  - https://github.com/langflow-ai/langflow/security/advisories/GHSA-87cc-65ph-2j4w
-  - https://github.com/ultralytics/actions/security/advisories/GHSA-7x29-qqmq-v6qc
+  - https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onworkflow_callinputs
 """,
     "SEC4-GH-012": """
 ═══════════════════════════════════════════════════════════════════════════════
