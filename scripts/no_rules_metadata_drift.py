@@ -47,6 +47,11 @@ _TRACKED_FIELDS = (
     "review_needed",
     "finding_family",
     "remediation",
+    "description",
+    "threat_narrative",
+    "reference",
+    "stride",
+    "incidents",
 )
 
 

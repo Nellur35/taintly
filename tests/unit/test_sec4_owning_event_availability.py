@@ -305,6 +305,6 @@ def test_owner_exclusion_proves_issue_source_absent_without_execution(
 
     assert not _rule(findings, "SEC4-GH-004")
     assert not _rule(findings, "SEC4-GH-025")
-    interpolation_cautions = _rule(findings, "TAINT-GH-013")
-    assert len(interpolation_cautions) == 1
-    assert interpolation_cautions[0].line == _line(content, "const title")
+    # These two owners cannot execute on any declared event. The general
+    # event proof therefore also excludes the syntax-only interpolation caution.
+    assert not _rule(findings, "TAINT-GH-013")

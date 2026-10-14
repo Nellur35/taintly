@@ -213,6 +213,11 @@ def test_ambiguous_or_malformed_trigger_never_becomes_a_clean_negative(tmp_path,
     expected = [
         ("Structural coverage degraded:", 9, "unsupported YAML construct"),
         (
+            "Rule TAINT-GH-020 returned incomplete pattern results for ",
+            0,
+            "structural YAML parsing reported an error or cutoff",
+        ),
+        (
             "Rule LOTP-GH-006 returned incomplete pattern results for ",
             0,
             "Structural run ownership was incomplete",

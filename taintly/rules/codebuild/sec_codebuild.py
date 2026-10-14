@@ -8,8 +8,9 @@ Rules map to the OWASP CI/CD Top 10 (``owasp_cicd``) using the same
 
 import re
 import shlex
+import unicodedata
 
-from taintly.models import Platform, Rule, Severity
+from taintly.models import IncompletePatternMatches, Platform, Rule, Severity
 from taintly.parsers.structural import EventKind, walk_workflow
 
 # ---------------------------------------------------------------------------
@@ -687,6 +688,177 @@ def _is_quoted_at(text: str, position: int, quote: str) -> bool:
     return opened
 
 
+_BUILD_SPEC_DOUBLE_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "0": "\0",
+    "a": "\a",
+    "b": "\b",
+    "t": "\t",
+    "n": "\n",
+    "v": "\v",
+    "f": "\f",
+    "r": "\r",
+    "e": "\x1b",
+    " ": " ",
+    "N": "\x85",
+    "_": "\xa0",
+    "L": "\u2028",
+    "P": "\u2029",
+}
+
+
+def _decode_buildspec_command_scalar(line: str, event: object) -> str | None:
+    """Decode a uniquely owned, complete one-line YAML command scalar."""
+    if getattr(event, "value_kind", None) != "quoted":
+        return None
+    value = getattr(event, "value", None)
+    column = getattr(event, "column", 0)
+    if not isinstance(value, str) or column < 1:
+        return None
+    start = column - 1
+    if start >= len(line) or line[start] not in "'\"":
+        return None
+    quote = line[start]
+    index = start + 1
+    decoded: list[str] = []
+    while index < len(line):
+        char = line[index]
+        if quote == "'":
+            if char == "'":
+                if index + 1 < len(line) and line[index + 1] == "'":
+                    decoded.append("'")
+                    index += 2
+                    continue
+                index += 1
+                break
+            decoded.append(char)
+            index += 1
+            continue
+        if char == '"':
+            index += 1
+            break
+        if char != "\\":
+            decoded.append(char)
+            index += 1
+            continue
+        index += 1
+        if index >= len(line):
+            return None
+        escape = line[index]
+        index += 1
+        if escape in _BUILD_SPEC_DOUBLE_ESCAPES:
+            decoded.append(_BUILD_SPEC_DOUBLE_ESCAPES[escape])
+            continue
+        width = {"x": 2, "u": 4, "U": 8}.get(escape)
+        if width is None:
+            return None
+        digits = line[index : index + width]
+        if len(digits) != width or any(ch not in "0123456789abcdefABCDEF" for ch in digits):
+            return None
+        codepoint = int(digits, 16)
+        if codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+            return None
+        decoded.append(chr(codepoint))
+        index += width
+    else:
+        return None
+    suffix = line[index:].lstrip()
+    if suffix and not suffix.startswith("#"):
+        return None
+    result = "".join(decoded)
+    if "\n" in result or "\r" in result or "\0" in result:
+        return None
+    if any(
+        (char.isspace() and char not in " \t")
+        or (unicodedata.category(char).startswith("C") and char != "\t")
+        or (unicodedata.category(char) == "Zs" and char != " ")
+        for char in result
+    ):
+        return None
+    raw_inner = line[start + 1 : index - 1]
+    if quote == "'":
+        return result if result == value else None
+    return result if raw_inner == value else None
+
+
+def _buildspec_command_scalar_events(
+    content: str, lines: list[str], command_lines: set[int]
+) -> tuple[dict[int, object], list[str]]:
+    owned_events = []
+    candidates = []
+    incomplete: list[str] = []
+    all_events = list(
+        walk_workflow(
+            "buildspec.yml",
+            content=content,
+            recover=True,
+            include_keys=True,
+            include_merge_origins=True,
+        )
+    )
+    for event in all_events:
+        if event.kind in {EventKind.CUTOFF, EventKind.ERROR}:
+            if command_lines and (
+                event.kind == EventKind.ERROR or any(line >= event.line for line in command_lines)
+            ):
+                incomplete.append(
+                    "CodeBuild structural YAML parsing has an error or cutoff in command coverage"
+                )
+            continue
+        path = event.path
+        if (
+            event.kind == EventKind.LEAF_SCALAR
+            and len(path) == 4
+            and path[0] == "phases"
+            and path[1] in {"install", "pre_build", "build", "post_build"}
+            and path[2] == "commands"
+            and isinstance(path[3], int)
+            and event.line in command_lines
+            and 0 < event.line <= len(lines)
+        ):
+            if event.merge_origins:
+                incomplete.append("CodeBuild command is inherited through a YAML merge")
+                continue
+            raw = lines[event.line - 1]
+            if event.column > 0 and raw[event.column - 1 : event.column] == "*":
+                incomplete.append("CodeBuild command is an unresolved YAML alias")
+                continue
+            owned_events.append(event)
+            if event.value_kind != "quoted":
+                continue
+            candidates.append(event)
+    key_counts: dict[tuple[object, ...], int] = {}
+    for event in all_events:
+        if event.kind == EventKind.MAP_KEY:
+            key_counts[event.path] = key_counts.get(event.path, 0) + 1
+    counts: dict[tuple[object, ...], int] = {}
+    for event in owned_events:
+        key = event.path
+        counts[key] = counts.get(key, 0) + 1
+    normalized: dict[int, object] = {}
+    for event in candidates:
+        owner_path = event.path[:-1]
+        if any(
+            key_counts.get(owner_path[:depth], 0) != 1 for depth in range(1, len(owner_path) + 1)
+        ):
+            incomplete.append(
+                "CodeBuild command owner is ambiguous because of a duplicate YAML mapping"
+            )
+            continue
+        if counts[event.path] != 1:
+            incomplete.append(
+                "CodeBuild command owner is ambiguous because of a duplicate YAML path"
+            )
+            continue
+        if _decode_buildspec_command_scalar(lines[event.line - 1], event) is None:
+            incomplete.append("CodeBuild quoted command uses an unsupported or multiline scalar")
+            continue
+        normalized[event.line] = event
+    return normalized, incomplete
+
+
 def _strip_shell_comment(command: str) -> str:
     """Strip a real shell comment while preserving quoted hash bytes."""
     single = False
@@ -933,12 +1105,27 @@ class _SecondEvaluationWebhookRefPattern:
 
     def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
         results: list[tuple[int, str]] = []
-        for start, end in _phases_commands_line_ranges(lines):
+        ranges = _phases_commands_line_ranges(lines)
+        command_lines = {i + 1 for start, end in ranges for i in range(start, end)}
+        scalar_events, incomplete = _buildspec_command_scalar_events(
+            _content or "\n".join(lines), lines, command_lines
+        )
+        for start, end in ranges:
             for i in range(start, end):
                 stripped = lines[i].strip()
                 if not stripped or stripped.startswith("#"):
                     continue
-                command = stripped[1:].lstrip() if stripped.startswith("-") else stripped
+                event = scalar_events.get(i + 1)
+                normalized = (
+                    _decode_buildspec_command_scalar(lines[i], event) if event is not None else None
+                )
+                command = (
+                    normalized
+                    if normalized is not None
+                    else stripped[1:].lstrip()
+                    if stripped.startswith("-")
+                    else stripped
+                )
                 code = _strip_shell_comment(command)
                 for variable in _WEBHOOK_VAR_RE.finditer(code):
                     eval_sink = next(
@@ -975,6 +1162,8 @@ class _SecondEvaluationWebhookRefPattern:
                     else:
                         continue
                     break
+        if incomplete:
+            return IncompletePatternMatches(results, reason="; ".join(dict.fromkeys(incomplete)))
         return results
 
 

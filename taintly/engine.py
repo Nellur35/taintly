@@ -940,6 +940,23 @@ def _github_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext
         findings.clear()
         return
     _suppress_dead_findings(findings, ctx.content, ctx.repoctx)
+    if findings:
+        from .owning_event import OwningEventExclusion
+
+        event_exclusion = OwningEventExclusion(ctx.content, ctx.repoctx)
+        findings[:] = [
+            finding
+            for finding in findings
+            if finding.rule_id.startswith("ENGINE-")
+            or not event_exclusion.excludes_line(finding.line)
+        ]
+        for finding in findings:
+            if finding.rule_id.startswith("ENGINE-"):
+                continue
+            guard_note = event_exclusion.unresolved_guard_note(finding.line)
+            if guard_note:
+                finding.context_notes.append(guard_note)
+                finding.review_needed = True
 
 
 def _gitlab_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext) -> None:

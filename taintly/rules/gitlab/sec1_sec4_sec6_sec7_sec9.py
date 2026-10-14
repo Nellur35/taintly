@@ -5,9 +5,11 @@ These were entirely missing or undercovered in the initial implementation.
 """
 
 import re
+import unicodedata
 
 from taintly.models import (
     ContextPattern,
+    IncompletePatternMatches,
     PathPattern,
     Platform,
     RegexPattern,
@@ -16,6 +18,7 @@ from taintly.models import (
     Severity,
 )
 from taintly.parsers.shell_words import shell_words_with_expansion
+from taintly.parsers.structural import EventKind, walk_workflow
 
 # Identity-gate shape shared by SEC4-GL-007: ``$GITLAB_USER_*`` compared against
 # a literal / slash-regex / bareword — the spoofable access-control match.
@@ -35,6 +38,220 @@ _REEVALUATION_CI_VARIABLE_RE = re.compile(
 
 def _shell_words_with_expansion(line: str) -> list[tuple[str, bool, bool]]:
     return shell_words_with_expansion(line, _REEVALUATION_CI_VARIABLE_RE)
+
+
+_YAML_DOUBLE_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "0": "\0",
+    "a": "\a",
+    "b": "\b",
+    "t": "\t",
+    "n": "\n",
+    "v": "\v",
+    "f": "\f",
+    "r": "\r",
+    "e": "\x1b",
+    " ": " ",
+    "N": "\x85",
+    "_": "\xa0",
+    "L": "\u2028",
+    "P": "\u2029",
+}
+
+
+def _decode_single_line_command_scalar(line: str, event: object) -> str | None:
+    """Decode a complete, one-physical-line YAML command scalar.
+
+    Structural events establish scalar ownership and kind, but the YAML
+    tokenizer deliberately leaves double-quoted escapes raw. Decode only the
+    bounded one-line subset here; unsupported escapes and multiline scalars
+    remain on the legacy source-text path rather than being treated as known.
+    """
+    kind = getattr(event, "value_kind", None)
+    value = getattr(event, "value", None)
+    column = getattr(event, "column", 0)
+    if kind != "quoted" or not isinstance(value, str) or column < 1:
+        return None
+    start = column - 1
+    if start >= len(line) or line[start] not in "'\"":
+        return None
+    quote = line[start]
+    index = start + 1
+    decoded: list[str] = []
+    while index < len(line):
+        char = line[index]
+        if quote == "'":
+            if char == "'":
+                if index + 1 < len(line) and line[index + 1] == "'":
+                    decoded.append("'")
+                    index += 2
+                    continue
+                index += 1
+                break
+            decoded.append(char)
+            index += 1
+            continue
+        if char == '"':
+            index += 1
+            break
+        if char != "\\":
+            decoded.append(char)
+            index += 1
+            continue
+        index += 1
+        if index >= len(line):
+            return None
+        escape = line[index]
+        index += 1
+        if escape in _YAML_DOUBLE_ESCAPES:
+            decoded.append(_YAML_DOUBLE_ESCAPES[escape])
+            continue
+        widths = {"x": 2, "u": 4, "U": 8}
+        width = widths.get(escape)
+        if width is None:
+            return None
+        digits = line[index : index + width]
+        if len(digits) != width or any(ch not in "0123456789abcdefABCDEF" for ch in digits):
+            return None
+        codepoint = int(digits, 16)
+        if codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+            return None
+        decoded.append(chr(codepoint))
+        index += width
+    else:
+        return None
+    # The scalar must end here, apart from YAML whitespace or a comment. A
+    # single sequence item may also be followed by its flow-sequence closer.
+    suffix = line[index:].lstrip()
+    if suffix and not suffix.startswith("#"):
+        path = getattr(event, "path", ())
+        sequence_indexes = sum(isinstance(part, int) for part in path)
+        if sequence_indexes != 1 or not suffix.startswith("]"):
+            return None
+        suffix = suffix[1:].lstrip()
+        if suffix and not suffix.startswith("#"):
+            return None
+    result = "".join(decoded)
+    if "\n" in result or "\r" in result or "\0" in result:
+        return None
+    if any(
+        (char.isspace() and char not in " \t")
+        or (unicodedata.category(char).startswith("C") and char != "\t")
+        or (unicodedata.category(char) == "Zs" and char != " ")
+        for char in result
+    ):
+        return None
+    # For single quotes, the tokenizer already performs the YAML doubled-quote
+    # rule. For double quotes it intentionally preserves escape pairs verbatim.
+    raw_inner = line[start + 1 : index - 1]
+    if quote == "'":
+        return result if result == value else None
+    if raw_inner != value:
+        return None
+    return result
+
+
+def _gitlab_command_scalar_events(
+    content: str, lines: list[str], command_lines: set[int]
+) -> tuple[dict[int, object], list[str]]:
+    """Return uniquely owned quoted GitLab script leaves and uncertainty."""
+    # Script sequence leaves have an integer tail; inline script leaves end
+    # at the script key. Keep only the exact supported GitLab script owners.
+    owned_events = []
+    candidates = []
+    incomplete: list[str] = []
+    all_events = list(
+        walk_workflow(
+            ".gitlab-ci.yml",
+            content=content,
+            recover=True,
+            include_keys=True,
+            include_merge_origins=True,
+        )
+    )
+    key_counts: dict[tuple[object, ...], int] = {}
+    for event in all_events:
+        if event.kind == EventKind.MAP_KEY:
+            key_counts[event.path] = key_counts.get(event.path, 0) + 1
+    script_keys = {"script", "before_script", "after_script"}
+    from taintly.gitlab_taint import _RESERVED_GITLAB_TOP_KEYS
+
+    def is_job_name(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and value not in _RESERVED_GITLAB_TOP_KEYS
+            and not value.startswith(".")
+        )
+
+    for event in all_events:
+        if event.kind in {EventKind.CUTOFF, EventKind.ERROR}:
+            if command_lines and (
+                event.kind == EventKind.ERROR or any(line >= event.line for line in command_lines)
+            ):
+                incomplete.append(
+                    "GitLab structural YAML parsing has an error or cutoff in script coverage"
+                )
+            continue
+        if event.kind != EventKind.LEAF_SCALAR:
+            continue
+        path = event.path
+        owned = (
+            (len(path) == 1 and path[0] in {"before_script", "after_script"})
+            or (
+                len(path) == 2
+                and (
+                    (path[0] in {"before_script", "after_script"} and isinstance(path[1], int))
+                    or (path[0] == "default" and path[1] in script_keys)
+                    or (is_job_name(path[0]) and path[1] in script_keys)
+                )
+            )
+            or (
+                len(path) == 3
+                and (path[0] == "default" or is_job_name(path[0]))
+                and path[1] in script_keys
+                and isinstance(path[2], int)
+            )
+        )
+        if not owned or event.line not in command_lines or not (0 < event.line <= len(lines)):
+            continue
+        if event.merge_origins:
+            incomplete.append("GitLab script command is inherited through a YAML merge")
+            continue
+        raw = lines[event.line - 1]
+        if event.column > 0 and raw[event.column - 1 : event.column] == "*":
+            incomplete.append("GitLab script command is an unresolved YAML alias")
+            continue
+        owner_path = event.path[:-1] if isinstance(event.path[-1], int) else event.path
+        if any(
+            key_counts.get(owner_path[:depth], 0) != 1 for depth in range(1, len(owner_path) + 1)
+        ):
+            incomplete.append(
+                "GitLab script command owner is ambiguous because of a duplicate YAML mapping"
+            )
+            continue
+        owned_events.append(event)
+        if event.value_kind == "quoted":
+            candidates.append(event)
+    counts: dict[tuple[object, ...], int] = {}
+    for event in owned_events:
+        key = event.path
+        counts[key] = counts.get(key, 0) + 1
+    normalized: dict[int, object] = {}
+    for event in candidates:
+        if counts[event.path] != 1:
+            incomplete.append(
+                "GitLab script command owner is ambiguous because of a duplicate YAML path"
+            )
+            continue
+        if _decode_single_line_command_scalar(lines[event.line - 1], event) is None:
+            incomplete.append(
+                "GitLab quoted script command uses an unsupported or multiline scalar"
+            )
+            continue
+        normalized[event.line] = event
+    return normalized, incomplete
 
 
 class _ReevaluatedCiVariablePattern:
@@ -104,6 +321,7 @@ class _ReevaluatedCiVariablePattern:
         from taintly.gitlab_taint import _iter_script_lines
         from taintly.models import _quoted_heredoc_body_lines, _split_into_job_segments
 
+        content = _content or "\n".join(lines)
         commands: list[tuple[int, str]] = []
         for start, segment in _split_into_job_segments(lines):
             commands.extend(_iter_script_lines(segment, start))
@@ -114,14 +332,25 @@ class _ReevaluatedCiVariablePattern:
         if not commands and len(lines) == 1 and self._line_is_sink(lines[0]):
             return [(1, lines[0].strip())]
 
+        scalar_events, incomplete = _gitlab_command_scalar_events(
+            content, lines, {line_no for line_no, _command in commands}
+        )
         quoted_heredoc_body = _quoted_heredoc_body_lines(lines)
-        return [
-            (line_no, lines[line_no - 1].strip())
-            for line_no, command in commands
-            if 0 < line_no <= len(lines)
-            and line_no - 1 not in quoted_heredoc_body
-            and self._line_is_sink(command)
-        ]
+        results: list[tuple[int, str]] = []
+        for line_no, command in commands:
+            if not (0 < line_no <= len(lines)) or line_no - 1 in quoted_heredoc_body:
+                continue
+            event = scalar_events.get(line_no)
+            normalized = (
+                _decode_single_line_command_scalar(lines[line_no - 1], event)
+                if event is not None
+                else None
+            )
+            if self._line_is_sink(normalized if normalized is not None else command):
+                results.append((line_no, lines[line_no - 1].strip()))
+        if incomplete:
+            return IncompletePatternMatches(results, reason="; ".join(dict.fromkeys(incomplete)))
+        return results
 
 
 _RESTRICTIVE_ARTIFACT_ACCESS_RE = re.compile(

@@ -26,6 +26,8 @@ def _assert_state(
     findings: dict[str, Finding],
     state: str,
     path: Path,
+    *,
+    runtime_guard: bool = False,
 ) -> None:
     for rule_id, finding in findings.items():
         tags = set(finding.context_tags)
@@ -39,7 +41,19 @@ def _assert_state(
 
         if state == "authority-evidenced":
             assert finding.severity == _RULE_BY_ID[rule_id].severity
-            assert finding.review_needed is False
+            assert finding.review_needed is runtime_guard
+            runtime_notes = [
+                note
+                for note in finding.context_notes
+                if note.startswith(
+                    "Owning job/step guard requires runtime evaluation for declared events:"
+                )
+            ]
+            assert bool(runtime_notes) is runtime_guard
+            if runtime_guard:
+                assert runtime_notes == [
+                    "Owning job/step guard requires runtime evaluation for declared events: pull_request_target. Execution and effective consuming credentials remain unverified."
+                ]
         elif state == "authority-limited":
             assert finding.severity == Severity.MEDIUM
             assert finding.exploitability == "low"
@@ -114,7 +128,7 @@ def test_inline_control_workflows_calibrate_authority_and_keep_source(tmp_path):
     threat_path, threat = _scan_text(tmp_path, threat_content, "control_threat")
 
     _assert_state(safe, "authority-limited", safe_path)
-    _assert_state(threat, "authority-evidenced", threat_path)
+    _assert_state(threat, "authority-evidenced", threat_path, runtime_guard=True)
 
     for finding in threat.values():
         evidence = " ".join([*finding.context_notes, finding.calibration_reason]).lower()
@@ -360,7 +374,7 @@ def test_checkout_v6_persisted_credentials_remain_evidenced(tmp_path):
     )
     path, findings = _scan_text(tmp_path, content, "checkout_v6")
 
-    _assert_state(findings, "authority-evidenced", path)
+    _assert_state(findings, "authority-evidenced", path, runtime_guard=True)
 
 
 def test_flow_write_permissions_are_evidenced(tmp_path):
@@ -370,7 +384,7 @@ def test_flow_write_permissions_are_evidenced(tmp_path):
         "flow_write",
     )
 
-    _assert_state(findings, "authority-evidenced", path)
+    _assert_state(findings, "authority-evidenced", path, runtime_guard=True)
 
 
 @pytest.mark.parametrize(
@@ -384,7 +398,7 @@ def test_pull_request_target_nonshortlist_write_permission_is_evidenced(tmp_path
         "target_issues_write",
     )
 
-    _assert_state(findings, "authority-evidenced", path)
+    _assert_state(findings, "authority-evidenced", path, runtime_guard=True)
 
 
 def test_self_hosted_pull_request_target_with_persisted_token_is_evidenced(tmp_path):
@@ -394,7 +408,7 @@ def test_self_hosted_pull_request_target_with_persisted_token_is_evidenced(tmp_p
         "target_self_hosted_persisted",
     )
 
-    _assert_state(findings, "authority-evidenced", path)
+    _assert_state(findings, "authority-evidenced", path, runtime_guard=True)
 
 
 def test_write_token_explicitly_available_with_persist_false_is_evidenced(tmp_path):
@@ -407,4 +421,13 @@ def test_write_token_explicitly_available_with_persist_false_is_evidenced(tmp_pa
         "write_token_env_persist_false",
     )
 
+    _assert_state(findings, "authority-evidenced", path, runtime_guard=True)
+
+
+@pytest.mark.parametrize("guard", [None, "true", "github.event_name == 'pull_request_target'"])
+def test_known_owning_guard_keeps_evidenced_authority_without_runtime_review(tmp_path, guard):
+    original_guard = "    if: github.event.pull_request.head.repo.fork == true\n"
+    replacement = f"    if: {guard}\n" if guard is not None else ""
+    content = _workflow().replace(original_guard, replacement)
+    path, findings = _scan_text(tmp_path, content, "known_guard")
     _assert_state(findings, "authority-evidenced", path)

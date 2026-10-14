@@ -138,21 +138,23 @@ def test_malformed_owner_guard_retains_chain_candidate(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "on_block",
+    ("on_block", "expected_taint"),
     [
-        "on: pull_request_target",
-        "on: [push, pull_request_target]",
-        "on:\n  - push\n  - pull_request_target",
-        "on: {push: {}, pull_request_target: {}}",
+        ("on: pull_request_target", False),
+        ("on: [push, pull_request_target]", True),
+        ("on:\n  - push\n  - pull_request_target", True),
+        ("on: {push: {}, pull_request_target: {}}", True),
     ],
 )
-def test_supported_trigger_shapes_honor_owning_push_only_job_guard(tmp_path, on_block):
+def test_supported_trigger_shapes_honor_owning_push_only_job_guard(
+    tmp_path, on_block, expected_taint
+):
     _workflow(
         tmp_path,
         _taint_workflow(job_if="github.event_name == 'push'", on_block=on_block),
     )
     findings = _findings(tmp_path)
-    assert "TAINT-GH-001" in _ids(findings)
+    assert ("TAINT-GH-001" in _ids(findings)) is expected_taint
     assert "CHAIN-GH-103" not in _ids(findings)
 
 
