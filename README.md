@@ -619,6 +619,14 @@ that an attack succeeded. Follow the cited source-to-sink path and read the
 confidence, `review_needed`, context notes and remediation together. Missing
 runtime information remains a review question.
 
+For Jenkins, `LOTP-JK-001` and `LOTP-JK-003` report build or install commands
+in a Jenkinsfile that references PR metadata. That combination requires review:
+it does not prove that the job builds an untrusted revision or exposes credentials.
+Context notes distinguish supported checkout declarations and enclosing credential
+bindings from unknown runtime state. Check the job's plugin configuration, source
+revision, workspace and credential permissions before treating the candidate as
+an exploitable path.
+
 Environment transport, shell source interpolation and interpreter input have
 different meanings. Ordinary shell parameter expansion does not recursively
 execute syntax stored in a variable. Unquoted expansion can still split words

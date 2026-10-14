@@ -38,7 +38,7 @@ if str(_ROOT) not in sys.path:
 from taintly.testing.self_test import _KNOWN_MUTATION_GAPS  # noqa: E402
 
 # Per rule-family-prefix baseline of allowlisted mutation gaps. The SUM is the
-# global baseline (currently 102); tracking per prefix is what makes a flat-count
+# global baseline; tracking per prefix is what makes a flat-count
 # cross-family swap detectable. Update an entry — never paper over a regression
 # by editing a different one — when a gap is intentionally added or closed.
 #
@@ -47,8 +47,8 @@ from taintly.testing.self_test import _KNOWN_MUTATION_GAPS  # noqa: E402
 # SEC4-GH shrank after retirement of SEC4-GH-026 and its gaps;
 # TAINT-GH grew by one documented structural-parser mutation for TAINT-GH-006.
 _PER_PREFIX_BASELINE: dict[str, int] = {
-    # 0 -> 1: LOTP-JK-003 quote_swap changes live Groovy context to inert data.
-    "LOTP-JK": 1,
+    # Conditional LOTP-JK-001 plus LOTP-JK-003 quote-swap applicability entries.
+    "LOTP-JK": 2,
     # 20 -> 21: AI-GH-018 whitespace_pad gap documented (phase1-aigh-forkguard).
     # The rule's new ``anchor_step_exclude`` (suppresses agent-CLI flags that
     # land on a ``claude_args: |`` block-scalar continuation inside a ``uses:``

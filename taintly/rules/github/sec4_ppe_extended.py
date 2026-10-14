@@ -2403,18 +2403,33 @@ RULES: list[Rule] = [
         ),
         pattern=StepOutputShellInterpolationPattern(),
         remediation=(
-            "Route the step output through an ``env:`` mapping at the "
-            "consuming step, then reference as a double-quoted shell "
-            "variable.  Validate against an allowlist if the upstream "
-            "value can come from a fork PR:\n"
-            "  env:\n    TITLE: ${{ steps.read-pr.outputs.title }}\n"
-            '  run: case "$TITLE" in [A-Za-z0-9\\ -]*) ;; *) exit 1;; esac\n'
-            "If the upstream step is itself sanitising attacker input "
-            "(``jq -R`` shell-escape, allowlist regex), document that "
-            "in a comment on the producing step so future readers see "
-            "the chain.  This rule is review-needed because the "
-            "taint source is not visible from the consuming line "
-            "alone — it depends on the upstream producer."
+            "Do not splice the output into shell source. If the consumer "
+            "expects a finite set of values, pass it through that step's "
+            "``env:`` mapping and validate the complete value against the "
+            "consumer's exact choices. The Bash example below assumes the "
+            "deployment selector accepts only ``staging`` or ``production``; "
+            "use an exact allowlist only when the operation's domain is finite:\n"
+            "  shell: bash\n"
+            "  env:\n    DEPLOY_ENV: ${{ steps.choose.outputs.environment }}\n"
+            "  run: |\n"
+            '    case "$DEPLOY_ENV" in staging|production) ;; *) '
+            'echo "Unsupported deployment environment" >&2; exit 1 ;; esac\n'
+            '    ./deploy.sh "$DEPLOY_ENV"\n'
+            "For arbitrary or free-text output, this finite allowlist is not "
+            "appropriate: decide whether the specific operation should accept "
+            "that text and apply validation that matches its semantics. An "
+            "environment variable and quoted expansion carry a value as data "
+            "to this shell command; that data boundary does not authorize the "
+            "operation. Inspect the producing step and its inputs to learn "
+            "who controls the output, and make the consuming operation enforce "
+            "its own accepted-value and authorization rules. Quoting does not "
+            "make a later reparse with ``eval`` or ``sh -c`` safe. Do not "
+            "reparse the value. The exact alternatives above reject every "
+            "other value, including an allowed prefix followed by attacker-"
+            "controlled text. "
+            "This rule is review-needed because the taint source depends "
+            "on the upstream producer and is not visible from the consuming "
+            "line alone."
         ),
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable",
         test_positive=[

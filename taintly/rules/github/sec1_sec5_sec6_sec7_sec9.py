@@ -401,10 +401,9 @@ def _is_unmasked_secret_input(
     * the leaf is at ``jobs.<j>.steps[<i>].with.<input_slot>`` with
       a credential-shape ``<input_slot>``
     * the value is exactly ``${{ secrets.X }}``
-    * AND the step has no ``env:`` block routing any secret (the
-      runner registers env-block secret values with the log
-      redactor on process start; without an env entry, the with-
-      input value is unredacted in the action's stdout)
+    * AND the step has no ``env:`` block routing any secret (an
+      existing heuristic exclusion; this is not proof that the
+      action cannot receive or disclose the credential)
     * AND the ``(action, input_slot)`` pair is not in the safe-
       consumer allowlist
     """
@@ -1788,11 +1787,13 @@ RULES: list[Rule] = [
             "A workflow_dispatch trigger defines an input with `type: string` but no "
             "`options:` list. Without an allowlist, the input accepts arbitrary free-text "
             "from anyone who can trigger the workflow manually or via the GitHub API. "
-            "If the input value is used in a shell step, environment variable, or passed "
-            "to another workflow, it becomes an injection vector. "
+            "Free-text input is not inherently an injection: risk depends on how the "
+            "workflow uses the value. Directly interpolating it into shell source can "
+            "alter the command before validation runs; passing it as data to a quoted "
+            "runtime variable does not by itself execute its contents. "
             "The `type: choice` input type restricts accepted values to a predefined "
-            "list and is the correct choice for any input that influences execution logic "
-            "rather than purely informational fields."
+            "list and is appropriate when the input's intended domain is finite, such as "
+            "an environment selector."
         ),
         pattern=PathPattern(
             path=r"on\.workflow_dispatch\.inputs\.[^.]+\.type",
@@ -1801,7 +1802,8 @@ RULES: list[Rule] = [
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Replace `type: string` with `type: choice` and enumerate allowed values:\n\n"
+            "Use `type: choice` and enumerate allowed values when the input has a finite "
+            "domain, such as an environment selector:\n\n"
             "on:\n"
             "  workflow_dispatch:\n"
             "    inputs:\n"
@@ -1810,12 +1812,19 @@ RULES: list[Rule] = [
             "        options:\n"
             "          - staging\n"
             "          - production\n\n"
-            "For inputs that genuinely require free text (e.g. a commit message), "
-            "validate and sanitize the value before use in any shell command:\n"
+            "For free-text values, do not interpolate the expression into shell source. "
+            "Pass it through an environment entry, then use a quoted runtime variable "
+            "as data. If the application has a defined input domain, validate it before "
+            "using it; this Bash example keeps the static regular expression in a "
+            "variable so the expression is not reparsed as shell code:\n"
             "  run: |\n"
-            "    if [[ ! '${{ inputs.message }}' =~ ^[a-zA-Z0-9 .,!?-]+$ ]]; then\n"
+            "    allowed='^[a-zA-Z0-9 .,!?-]+$'\n"
+            "    if [[ ! $MESSAGE =~ $allowed ]]; then\n"
             "      echo 'Invalid input' && exit 1\n"
-            "    fi"
+            "    fi\n"
+            "    printf '%s\\n' \"$MESSAGE\"\n"
+            "  env:\n"
+            "    MESSAGE: ${{ inputs.message }}"
         ),
         reference="https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#providing-inputs",
         test_positive=[
@@ -1829,10 +1838,11 @@ RULES: list[Rule] = [
         ],
         stride=["E", "T"],
         threat_narrative=(
-            "Unconstrained string inputs accept any value, including shell metacharacters, from anyone "
-            "who can trigger the workflow via the UI or GitHub API with the workflow scope. "
-            "When the input value reaches a shell command, an authorized user or attacker with a "
-            "compromised token can inject arbitrary commands that run with the workflow's full permissions."
+            "An unconstrained string accepts arbitrary text from users authorized to trigger the "
+            "workflow; that alone is not an injection. If the expression is interpolated directly "
+            "into shell source, the value can alter the command before it runs. Risk depends on the "
+            "actual use and handling of the value, while finite domains can be constrained with "
+            "choice inputs."
         ),
         confidence="high",
     ),
@@ -2593,40 +2603,35 @@ RULES: list[Rule] = [
     # through env: is over-defensive — the secret is already at
     # its destination — and produces noise without precision gain.
     # =========================================================================
-    # SEC6-GH-010: Secret passed as action input without env-block masking
+    # SEC6-GH-010: Credential-shaped action input receives a workflow secret
     # =========================================================================
-    # GitHub auto-masks secrets that flow through a step's ``env:`` block:
-    # the runner registers each secret value with the log-redactor on
-    # process start.  The same secret routed through a ``with:`` input
-    # is passed to the action's process directly and may be echoed by
-    # the receiving action — actions that print their inputs to stdout
-    # for debugging, or that write inputs to a file the action then
-    # `cat`s, bypass the runner's redaction pass.
-    #
-    # The safe pattern routes the secret through ``env:`` and references
-    # it in ``with:`` via ``${{ env.NAME }}``; the env: declaration
-    # re-registers the value with the redactor before the action sees it.
+    # A credential supplied via ``with:`` is available to the receiving
+    # action. Review whether that action needs the credential, its source
+    # and pin, and the credential's scope and lifetime. Routing the same
+    # value through ``env:`` does not isolate it from the action or make
+    # it safe to disclose; log masking is not a security boundary.
     Rule(
         id="SEC6-GH-010",
-        title="Secret passed as action input without env-block masking",
+        title="Credential-shaped action input receives a workflow secret",
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-6",
         description=(
             "An action input whose name suggests a credential "
             "(``token``, ``key``, ``secret``, ``password``, ``pass``) "
-            "receives a ``${{ secrets.X }}`` value directly via "
-            "``with:``.  Secrets routed through ``with:`` are passed to "
-            "the action as raw input; secrets routed through ``env:`` "
-            "are registered with the runner's log-redactor at process "
-            "start and consistently masked.  An action that echoes its "
-            "inputs to stdout (a common debugging pattern) leaks the "
-            "secret into job logs where the redactor cannot see it.\n"
+            "receives a ``${{ secrets.X }}`` value via ``with:``. This "
+            "makes the receiving action a credential recipient. Review "
+            "whether that action needs the value, inspect and pin the "
+            "action, and use a narrowly scoped credential with an "
+            "appropriate lifetime. GitHub log masking is intended to "
+            "reduce accidental log disclosure; it is not a boundary "
+            "against an action that can read the credential. Routing the "
+            "same value through ``env:`` does not isolate the action from "
+            "it or guarantee masking of derived values.\n"
             "\n"
-            "The safe pattern declares the secret in the step's "
-            "``env:`` block and references it from ``with:`` via "
-            "``${{ env.NAME }}`` — the env-block path is masked, the "
-            "with-input is then a non-secret reference."
+            "This heuristic covers a bounded set of direct secret-to-input "
+            "shapes; the presence of an ``env:`` entry is not evidence that "
+            "the action cannot receive or disclose the credential."
         ),
         # Path-aware (structural): a credential-shape ``with:`` input slot set
         # to ``${{ secrets.X }}`` on a step whose ``env:`` block routes no
@@ -2645,19 +2650,15 @@ RULES: list[Rule] = [
             requires="secrets.",
         ),
         remediation=(
-            "Route the secret through the step's ``env:`` block and\n"
-            "reference it from ``with:`` via ``${{ env.NAME }}``:\n"
-            "\n"
-            "    - uses: some-org/some-action@<sha>\n"
-            "      with:\n"
-            "        token: ${{ env.GH_TOKEN }}\n"
-            "      env:\n"
-            "        GH_TOKEN: ${{ secrets.GH_TOKEN }}\n"
-            "\n"
-            "The env-block declaration registers the value with the\n"
-            "runner's log-redactor on process start, so any later\n"
-            "echo of the value is masked.  The with-input is then a\n"
-            "non-secret reference to a redacted env var."
+            "Review the receiving action's source and pin, and confirm that "
+            "it needs this credential. Remove the input if it is unnecessary. "
+            "Otherwise provide the narrowest credential with the shortest "
+            "practical lifetime, and avoid granting unrelated permissions. "
+            "Passing the value through ``env:`` and then referencing it from "
+            "``with:`` still gives the action the credential; it does not "
+            "isolate the recipient or guarantee log masking. Treat log masking "
+            "as defense against accidental disclosure, not as protection from "
+            "an action that can read the value."
         ),
         reference=(
             "https://docs.github.com/en/actions/security-for-github-actions/"
@@ -2756,18 +2757,18 @@ RULES: list[Rule] = [
         ],
         stride=["I"],
         threat_narrative=(
-            "An action receives a credential as a ``with:`` input.  "
-            "The action's implementation includes a debug-style log "
-            "line that echoes its inputs to stdout — a pattern the "
-            "runner's log-redactor will not catch because the input "
-            "value was never registered with the redactor (only "
-            "``env:`` values are).  The secret appears in the job "
-            "log; anyone with read access to the workflow run "
-            "(including, for many repos, anyone with public-fork "
-            "logs visibility) can copy it."
+            "A configured action input references a workflow secret. If the "
+            "value is available and the action is compromised or handles it "
+            "unsafely, the recipient may disclose or misuse it. The declaration "
+            "does not establish that the secret exists, that the action logged "
+            "it, or that any disclosure occurred. Automatic log masking is "
+            "independent of choosing with: versus env: and does not isolate "
+            "a recipient that can access the credential. Review source, "
+            "credential scope, event availability and actual handling."
         ),
         confidence="high",
         finding_family="credential_persistence",
+        review_needed=True,
     ),
     # =========================================================================
     # SEC6-GH-011: ``secrets: inherit`` in reusable-workflow caller
