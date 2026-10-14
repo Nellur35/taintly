@@ -28,6 +28,21 @@ class ShellUse(str, Enum):
 
 
 @dataclass(frozen=True)
+class NonemptyParameterDefault:
+    """A bounded ``${NAME:-literal}`` condition attached to source evidence."""
+
+    variable: str
+    fallback: str
+
+    @property
+    def note(self) -> str:
+        return (
+            f"{self.variable} contributes only when it is set and nonempty; "
+            "otherwise the fixed fallback literal is used."
+        )
+
+
+@dataclass(frozen=True)
 class ShellUseEvidence:
     disposition: ShellUse
     reason: str
@@ -38,10 +53,14 @@ class ShellUseEvidence:
     path_key: tuple[object, ...]
     command_sha256: str
     shell_basis: str
+    parameter_default: NonemptyParameterDefault | None = None
 
     @property
     def notes(self) -> tuple[str, ...]:
-        return (self.reason,)
+        if not _valid_nonempty_parameter_default(self.parameter_default):
+            return (self.reason,)
+        condition = cast("NonemptyParameterDefault", self.parameter_default)
+        return (self.reason, condition.note)
 
 
 _SHELL_VAR = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -49,6 +68,20 @@ _SHELL_WORD_VAR = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
 _STARTUP_NAMES = {"BASH_ENV", "ENV", "BASH_FUNC_"}
 _PRINTF_FORMAT = re.compile(r"(?:[^%]|%(?:[0-9.-]*s))*\Z")
 _PRINTF_CODE_FORMAT = re.compile(r"(?:[^%]|%s)*\Z")
+_PARAMETER_DEFAULT = re.compile(
+    r"\$\{(?P<variable>[A-Za-z_][A-Za-z0-9_]*):-(?P<fallback>[A-Za-z0-9_]+)\}"
+)
+_PARAMETER_DEFAULT_FALLBACK = re.compile(r"[A-Za-z0-9_]+\Z")
+
+
+def _valid_nonempty_parameter_default(value: object) -> bool:
+    return (
+        isinstance(value, NonemptyParameterDefault)
+        and isinstance(value.variable, str)
+        and _SHELL_VAR.fullmatch(value.variable) is not None
+        and isinstance(value.fallback, str)
+        and _PARAMETER_DEFAULT_FALLBACK.fullmatch(value.fallback) is not None
+    )
 
 
 def _path_key(path: TaintPath) -> tuple[object, ...]:
@@ -77,6 +110,7 @@ def _make_evidence(
     owner_path: tuple[object, ...] = (),
     command: str = "",
     shell_basis: str = "unresolved",
+    parameter_default: NonemptyParameterDefault | None = None,
 ) -> ShellUseEvidence:
     return ShellUseEvidence(
         disposition=disposition,
@@ -88,7 +122,47 @@ def _make_evidence(
         path_key=_path_key(path),
         command_sha256=_sha(command) if command else "",
         shell_basis=shell_basis,
+        parameter_default=parameter_default,
     )
+
+
+def _parameter_default_projection(
+    command: str, variable: str
+) -> tuple[str, NonemptyParameterDefault] | None:
+    """Project one exact quoted default operand for existing bounded role checks."""
+    if not _SHELL_VAR.fullmatch(variable) or not _shell_quotes_are_complete(command):
+        return None
+    matches = list(_PARAMETER_DEFAULT.finditer(command))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    if (
+        match.group("variable") != variable
+        or _shell_quote_context_at(command, match.start()) != "double"
+        or command.count("$") != 1
+        or any(char in match.group("fallback") for char in "\\'\"$`{} \t\r\n")
+    ):
+        return None
+    projected = command[: match.start()] + f"${variable}" + command[match.end() :]
+    words = shell_words_with_expansion(projected, re.compile(rf"\$\{{?{re.escape(variable)}\}}?"))
+    if (
+        not words
+        or any(separator for _, _, separator in words)
+        or sum(1 for _, expanded, _ in words if expanded) != 1
+        or not any(token == f"${variable}" and expanded for token, expanded, _ in words)
+    ):
+        return None
+    if words[0][0] == "eval":
+        if len(words) != 2 or words[1][0] != f"${variable}":
+            return None
+    elif words[0][0] == "printf":
+        if len(words) < 3 or not any(
+            token == f"${variable}" and expanded for token, expanded, _ in words[2:]
+        ):
+            return None
+    else:
+        return None
+    return projected, NonemptyParameterDefault(variable, match.group("fallback"))
 
 
 @dataclass(frozen=True)
@@ -462,6 +536,10 @@ def classify_shell_use(content: str, path: TaintPath, file: str = "") -> ShellUs
     command, mapping_reason = _logical_command(leaf, path.sink_line)
     if command is None:
         return _make_evidence(ShellUse.UNKNOWN, mapping_reason, identity, source_sha, path, owner)
+    parameter_projection = _parameter_default_projection(command, path.env_var)
+    role_command, parameter_default = (
+        parameter_projection if parameter_projection is not None else (command, None)
+    )
     shell, basis = _configured_shell(doc, owner)
     if shell is None:
         return _make_evidence(
@@ -492,7 +570,9 @@ def classify_shell_use(content: str, path: TaintPath, file: str = "") -> ShellUs
             basis,
         )
 
-    if _has_unsupported_braced_parameter_operator(command, path.env_var):
+    if parameter_default is None and _has_unsupported_braced_parameter_operator(
+        command, path.env_var
+    ):
         return _make_evidence(
             ShellUse.UNKNOWN,
             "unsupported braced parameter operator is present",
@@ -504,7 +584,7 @@ def classify_shell_use(content: str, path: TaintPath, file: str = "") -> ShellUs
             basis,
         )
 
-    if _expression_splices_path(command, path):
+    if _expression_splices_path(role_command, path):
         return _make_evidence(
             ShellUse.CODE,
             "tracked Actions expression is spliced into shell source",
@@ -516,7 +596,7 @@ def classify_shell_use(content: str, path: TaintPath, file: str = "") -> ShellUs
             basis,
         )
 
-    refs = _tracked_shell_refs(command, path.env_var)
+    refs = _tracked_shell_refs(role_command, path.env_var)
     if not refs:
         return _make_evidence(
             ShellUse.UNKNOWN,
@@ -529,7 +609,7 @@ def classify_shell_use(content: str, path: TaintPath, file: str = "") -> ShellUs
             basis,
         )
 
-    printf_pipeline = _printf_pipeline_profile(command, path.env_var)
+    printf_pipeline = _printf_pipeline_profile(role_command, path.env_var)
     if printf_pipeline is False:
         return _make_evidence(
             ShellUse.UNKNOWN,
@@ -542,7 +622,7 @@ def classify_shell_use(content: str, path: TaintPath, file: str = "") -> ShellUs
             basis,
         )
 
-    verdict = _local_shell_sink(command, path.env_var)
+    verdict = _local_shell_sink(role_command, path.env_var)
     if verdict is True:
         return _make_evidence(
             ShellUse.CODE,
@@ -553,8 +633,9 @@ def classify_shell_use(content: str, path: TaintPath, file: str = "") -> ShellUs
             owner,
             command,
             basis,
+            parameter_default,
         )
-    if _strict_assignment_data(command, path.env_var):
+    if _strict_assignment_data(role_command, path.env_var):
         return _make_evidence(
             ShellUse.DATA,
             "tracked value is only copied by one shell assignment",
@@ -564,8 +645,9 @@ def classify_shell_use(content: str, path: TaintPath, file: str = "") -> ShellUs
             owner,
             command,
             basis,
+            parameter_default,
         )
-    if _strict_printf_data(command, path.env_var):
+    if _strict_printf_data(role_command, path.env_var):
         return _make_evidence(
             ShellUse.DATA,
             "tracked value is a fixed-format printf argument",
@@ -575,6 +657,7 @@ def classify_shell_use(content: str, path: TaintPath, file: str = "") -> ShellUs
             owner,
             command,
             basis,
+            parameter_default,
         )
     reason = "bounded local-call profile did not establish a supported data or code role"
     if verdict is False:
@@ -587,6 +670,10 @@ def classify_shell_use(content: str, path: TaintPath, file: str = "") -> ShellUs
 def validate_shell_use(evidence: ShellUseEvidence, content: str, file: str, line: int) -> bool:
     """Re-derive the exact analyzer path and classification for this evidence."""
     if not isinstance(cast("object", evidence.disposition), ShellUse):
+        return False
+    if evidence.parameter_default is not None and not _valid_nonempty_parameter_default(
+        evidence.parameter_default
+    ):
         return False
     if evidence.disposition is ShellUse.UNKNOWN and not evidence.owner_path:
         return False

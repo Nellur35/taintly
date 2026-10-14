@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
+from typing import cast
 
 from .families import classify_rule, default_confidence, default_review_needed
 from .gitlabguard import (
@@ -62,21 +63,57 @@ from .workflow_corpus import (
 
 def _qualify_shell_use(finding: Finding, evidence: object, content: str) -> None:
     """Apply one source-bound shell-role interpretation after context calibration."""
-    from .shell_use import ShellUse, ShellUseEvidence, validate_shell_use
+    from .shell_use import (
+        NonemptyParameterDefault,
+        ShellUse,
+        ShellUseEvidence,
+        _valid_nonempty_parameter_default,
+        validate_shell_use,
+    )
 
     witness = evidence if isinstance(evidence, ShellUseEvidence) else None
-    if witness is not None and validate_shell_use(witness, content, finding.file, finding.line):
+    validated = witness is not None and validate_shell_use(
+        witness, content, finding.file, finding.line
+    )
+    if (
+        witness is not None
+        and not validated
+        and _valid_nonempty_parameter_default(witness.parameter_default)
+    ):
+        # Conditional claims are surfaced only after exact source revalidation.
+        # Keep any independent owner/ambiguity notes from the occurrence context.
+        unvalidated_condition_note = cast(
+            "NonemptyParameterDefault", witness.parameter_default
+        ).note
+        finding.context_notes[:] = [
+            note for note in finding.context_notes if note != unvalidated_condition_note
+        ]
+    if witness is not None and validated:
         finding._shell_use = witness
         disposition = witness.disposition
     else:
         finding._shell_use = None
         disposition = ShellUse.UNKNOWN
+    condition_note = (
+        cast("NonemptyParameterDefault", witness.parameter_default).note
+        if witness is not None
+        and validated
+        and _valid_nonempty_parameter_default(witness.parameter_default)
+        else None
+    )
+    if condition_note is not None and condition_note not in finding.context_notes:
+        finding.context_notes.append(condition_note)
     if disposition is ShellUse.CODE:
         finding.context_notes.append(
             "Supported configured shell code use is bound to this source path; "
             "actual triggering, successful execution and effective credentials are unverified."
         )
         finding.context_tags.append("shell-use-code")
+        if condition_note is not None:
+            finding.review_needed = True
+            finding.description += " " + condition_note
+            finding.threat_narrative += " " + condition_note
+            finding.remediation += " Review the set-and-nonempty condition separately."
         return
 
     finding.review_needed = True
@@ -126,6 +163,10 @@ def _qualify_shell_use(finding: Finding, evidence: object, content: str) -> None
         "Review downstream option parsing, splitting/globbing, configured shell and runtime bindings. "
         "For workflow inputs, separately verify who can supply the caller's value."
     )
+    if condition_note is not None:
+        finding.description += " " + condition_note
+        finding.threat_narrative += " " + condition_note
+        finding.remediation += " Review the set-and-nonempty condition separately."
     finding.context_notes.append(finding.calibration_reason)
 
 

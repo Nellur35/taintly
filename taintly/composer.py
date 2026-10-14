@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from taintly.eventguard import GuardConstraints
     from taintly.models import CheckoutBuildWitness, Finding
     from taintly.parsers.segmentation import JobSegment
+    from taintly.shell_use import NonemptyParameterDefault
     from taintly.workflow_corpus import WorkflowCorpus
 
 # ---------------------------------------------------------------------------
@@ -74,6 +75,7 @@ class FindingFact:
     snippet: str = field(default="", compare=False)
     shell_use: str = field(default="unknown", compare=False)
     """Conservative role aggregation of source-bound contributors at this key."""
+    parameter_default: NonemptyParameterDefault | None = field(default=None, compare=False)
 
     def fact_key(self):
         return (self.rule_id, self.file, self.job, self.line)
@@ -279,6 +281,7 @@ def _seed_findings(
             and validate_shell_use(shell, index.content, f.file, line)
         ):
             role = shell.disposition
+            fact = replace(fact, parameter_default=shell.parameter_default)
         if key not in facts or role_priority[role] > role_priority[representatives[key]]:
             facts[key] = fact
             representatives[key] = role
