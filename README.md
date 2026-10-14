@@ -626,6 +626,12 @@ or expand file globs; `eval`, interpreter code operands and interpreter stdin
 can treat values as code. Quoting alone does not establish what an arbitrary
 downstream program does with a value.
 
+For a supported quoted default such as `eval "${TITLE:-fallback}"`, Taintly
+records that TITLE supplies code only when it is set and nonempty. The finding
+and chain retain that condition and require review. A supported fixed-format
+`printf` argument remains data use; other parameter operators and unresolved
+shell bindings remain review questions.
+
 Static coverage is bounded by supported syntax, available local files and
 configured tool profiles. Review incomplete-scan diagnostics and unsupported
 cases alongside findings. A clean scan or a high score is not a security

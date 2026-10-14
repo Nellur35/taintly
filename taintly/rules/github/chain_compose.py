@@ -351,12 +351,18 @@ def _compose_chain_gh_103(db: Database) -> Iterable[tuple[str, Fact]]:
             if f.shell_use == "code"
             else " Shell code/data consumption remains unresolved."
         )
+        condition_note = (
+            f" {f.parameter_default.note}"
+            if f.shell_use == "code" and f.parameter_default is not None
+            else ""
+        )
         snippet = (
             "Review: TAINT-GH-001 source-to-shell candidate in externally triggered "
             "context. Verify attacker control, owning guards and shell interpretation. "
             "A trusted triggering actor does not establish input integrity; runtime "
             "execution, secret availability and token authority remain unverified."
             + role_note
+            + condition_note
             + path_note
         )
         yield (
