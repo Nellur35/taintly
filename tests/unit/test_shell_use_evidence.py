@@ -349,3 +349,62 @@ def test_structural_profile_cache_reuses_only_within_scan_session():
             classify_shell_use(content, path, "workflow.yml")
             classify_shell_use(content, path, "workflow.yml")
             assert constructions == 4
+
+
+def test_long_printf_formats_are_bounded_and_keep_classification():
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    child = """import json, sys
+sys.path.insert(0, sys.argv[1])
+from taintly.shell_use import classify_shell_use
+from taintly.taint import analyze
+content = json.load(sys.stdin)
+paths = [p for p in analyze(content, content.splitlines()) if p.env_var == 'TITLE' and p.sink_kind == 'run']
+if len(paths) != 1:
+    raise RuntimeError(f'expected one TITLE run path, got {len(paths)}')
+print(classify_shell_use(content, paths[0], 'workflow.yml').disposition.value)
+"""
+    repeated_format = "%s" + r"\n" * 128
+    cases = (
+        (repeated_format, False, ShellUse.DATA),
+        (repeated_format + "%", False, ShellUse.UNKNOWN),
+        (repeated_format, True, ShellUse.CODE),
+        (repeated_format + "%", True, ShellUse.UNKNOWN),
+    )
+    results = []
+    for format_word, pipeline, expected in cases:
+        argument = '"$TITLE"' if pipeline else "$TITLE"
+        command = f"printf '{format_word}' {argument}" + (" | sh" if pipeline else "")
+        content = (
+            "on: pull_request_target\n"
+            "jobs:\n"
+            "  greet:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    env:\n"
+            "      TITLE: ${{ github.event.pull_request.title }}\n"
+            "    steps:\n"
+            "      - name: consume\n"
+            "        shell: bash\n"
+            "        run: |\n"
+            f"          {command}\n"
+        )
+        try:
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", "-S", "-c", child, str(root)],
+                input=json.dumps(content),
+                text=True,
+                capture_output=True,
+                timeout=3,
+                check=False,
+                cwd=root,
+            )
+            actual = result.stdout.strip() if result.returncode == 0 else f"exit {result.returncode}"
+        except subprocess.TimeoutExpired:
+            actual = "timeout"
+        results.append((actual, expected.value))
+
+    assert results == [(expected.value, expected.value) for _, _, expected in cases]

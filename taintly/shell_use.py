@@ -47,8 +47,8 @@ class ShellUseEvidence:
 _SHELL_VAR = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _SHELL_WORD_VAR = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
 _STARTUP_NAMES = {"BASH_ENV", "ENV", "BASH_FUNC_"}
-_PRINTF_FORMAT = re.compile(r"(?:[^%]|%(?:[0-9.-]*s)|\\[nt])*\Z")
-_PRINTF_CODE_FORMAT = re.compile(r"(?:[^%]|%s|\\[nt])*\Z")
+_PRINTF_FORMAT = re.compile(r"(?:[^%]|%(?:[0-9.-]*s))*\Z")
+_PRINTF_CODE_FORMAT = re.compile(r"(?:[^%]|%s)*\Z")
 
 
 def _path_key(path: TaintPath) -> tuple[object, ...]:
