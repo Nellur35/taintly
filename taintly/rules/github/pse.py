@@ -1,30 +1,12 @@
 """GitHub Actions — Permission Slip Effect (PSE) family.
 
-The PSE family flags workflows where three conditions co-exist:
-
-  1. A fork-reachable trigger (anyone can send input)
-  2. An AI coding agent or LLM SDK call (the input sink)
-  3. A grant that lets the job mint or assume cloud credentials
-     (``permissions: id-token: write``, or an explicit OIDC login
-     action like ``aws-actions/configure-aws-credentials``,
-     ``google-github-actions/auth``, ``azure/login``)
-
-Existing rules treat (1)+(2) and (2)+(3) separately: ``AI-GH-005``
-/ ``AI-GH-006`` flag the agent-plus-untrusted-input shape, and other
-rules flag credential handling.  PSE fires only when all three
-co-occur — an attacker who can steer the agent via prompt injection
-reaches a step that already holds a valid OIDC grant.
-
-Starter version:
-  - Severity is ``HIGH`` because the IAM scope of the OIDC role
-    is unknown at this layer (no IAM policy parsing yet).  A follow-up
-    PR parses local IAM JSON and upgrades to ``CRITICAL`` when the
-    role grants sensitive actions (``s3:*``, ``sts:AssumeRole``,
-    ``secretsmanager:*``, etc.).
-  - The third ingredient is intentionally broad: both explicit OIDC
-    auth actions AND bare ``id-token: write`` grants fire the rule.
-    The grant alone is a slip — any agent with a shell tool can
-    request a federated token and trade it for cloud credentials.
+PSE-GH-001 is a file-level review candidate: an external-event declaration,
+agent/SDK declaration and token-request/authentication declaration co-occur.
+The matcher does not prove that they share an owning job or executable path.
+Token-request permission does not establish accepted cloud trust, successful
+authentication, effective credentials, or attacker control of an agent.
+Potential consequence remains HIGH; review and source-bound authority checks
+are required. Optional IAM snapshot enrichment has separate evidence limits.
 """
 
 import re
@@ -139,27 +121,19 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="PSE-GH-001",
-        title="AI agent with cloud-credential grant on a fork-reachable event",
+        title="Review candidate: AI agent and OIDC declarations with external-event context",
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A workflow combines three ingredients: "
-            "(1) a fork-reachable trigger (pull_request, pull_request_target, "
-            "issue_comment, issues, discussion, workflow_run), "
-            "(2) an AI coding agent action or LLM SDK call, and "
-            "(3) a grant that lets the job mint or assume cloud credentials — "
-            "either `permissions: id-token: write` or an explicit OIDC auth "
-            "action (aws-actions/configure-aws-credentials, "
-            "google-github-actions/auth, azure/login). "
-            "The agent is reachable from attacker-controlled input (PR body, "
-            "issue comment, etc.) and holds a valid OIDC grant. An attacker "
-            "who steers the agent via prompt injection can use the federated "
-            "token for any action the IAM role permits — reading "
-            "terraform.tfstate, exfiltrating via allowed side channels, etc. "
-            "Distinct from AI-GH-005 (untrusted input reaches agent) and "
-            "AI-GH-006 (agent on fork trigger) — this rule fires when both "
-            "conditions hold AND the agent sits on a credential grant."
+            "A file-level candidate combines an external-event declaration, "
+            "an AI agent/SDK declaration and id-token: write or a supported "
+            "authentication declaration. These may belong to different jobs. "
+            "This does not establish agent reachability, attacker control, "
+            "a shared execution path, accepted cloud trust or effective "
+            "credentials. Token-request permission can serve non-cloud "
+            "authentication. Review exact owning jobs, guards, action versions, "
+            "token consumers and provider trust policies before deciding impact."
         ),
         pattern=ContextPattern(
             anchor=_AI_AGENT_ANCHOR,
@@ -180,18 +154,17 @@ RULES: list[Rule] = [
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Treat the AI agent on a fork-reachable trigger as an arbitrary\n"
-            "code-execution primitive holding your cloud permission slip.\n"
-            "Break at least one leg of the triangle:\n"
-            "  1. Gate the agent job by same-repo identity so fork PRs can't\n"
-            "     reach it (`github.event.pull_request.head.repo.full_name\n"
-            "     == github.repository`), OR\n"
-            "  2. Drop the `id-token: write` / OIDC step from the agent job\n"
-            "     and move credential-using work to a separate job that has\n"
-            "     no AI agent, OR\n"
-            "  3. Narrow the agent's `allowedTools` to forbid shell / file\n"
-            "     write / `gh` tools — the federated token is useless to\n"
-            "     the agent without a way to use it.\n"
+            "First identify the owning agent job and its actual authentication "
+            "requirements. Preserve required GitHub App or other non-cloud "
+            "authentication when considering id-token changes. Verify event "
+            "guards for each supported trigger; a PR identity guard does not "
+            "validate issue or workflow_run input. Isolate sensitive "
+            "credential-using work and validate every transferred artifact or "
+            "output before privileged use; upstream success alone is not trust. "
+            "For Claude Code, allowedTools controls automatic approval, not "
+            "complete tool availability. Verify the exact runtime's tools and "
+            "disallowedTools controls, MCP servers, settings and plugins. "
+            "Tool restrictions alone do not prove that credentials are isolated.\n"
             "Run `taintly --guide PSE-GH-001` for the full checklist."
         ),
         reference=(
@@ -262,17 +235,16 @@ RULES: list[Rule] = [
         ],
         stride=["E", "T", "I"],
         threat_narrative=(
-            "An attacker opens a PR, issue, or comment carrying a "
-            "prompt-injection payload. The payload reaches the agent "
-            "step in a workflow that has `id-token: write` or an "
-            "explicit OIDC auth action. With shell or file-system tools "
-            "enabled, the agent mints the federated token, trades it "
-            "for cloud credentials, and uses those credentials for an "
-            "action the workflow author never intended but the IAM "
-            "role permits."
+            "If attacker-controlled content reaches an agent that can act on "
+            "it, and that same execution path has accepted provider trust and "
+            "usable credentials, prompt injection may redirect authorized "
+            "operations. The file-level declarations alone do not prove those "
+            "prerequisites; missing ownership, runtime and trust evidence "
+            "remains unresolved."
         ),
         confidence="medium",
         incidents=[],
+        review_needed=True,
     ),
 ]
 

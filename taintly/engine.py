@@ -601,6 +601,7 @@ def scan_file(
     # opt in pay nothing.  See parsers/anchor_expander for the
     # capability/scope.
     _expanded_cache: dict[str, tuple[str, list[str]]] = {}
+    jenkins_lotp_profile = None
 
     def _get_expanded() -> tuple[str, list[str]]:
         if "v" not in _expanded_cache:
@@ -693,9 +694,17 @@ def scan_file(
                     if occurrence_context_notes is not None:
                         if match_index < len(occurrence_context_notes):
                             match_context = occurrence_context_notes[match_index]
-                            if rule.id != "TAINT-GL-001":
+                            if rule.id not in {
+                                "TAINT-GL-001",
+                                "LOTP-JK-001",
+                                "LOTP-JK-003",
+                            }:
                                 ctx_notes.extend(getattr(match_context, "notes", []))
-                        elif rule.id != "TAINT-GL-001":
+                        elif rule.id not in {
+                            "TAINT-GL-001",
+                            "LOTP-JK-001",
+                            "LOTP-JK-003",
+                        }:
                             ctx_notes.append(
                                 "Occurrence context was truncated before this finding; "
                                 "owner, permissions, and secret mapping context are unknown."
@@ -798,6 +807,15 @@ def scan_file(
                         context_notes=ctx_notes,
                         context_tags=ctx_tags,
                     )
+                    if rule.id in {"LOTP-JK-001", "LOTP-JK-003"}:
+                        from .rules.jenkins.lotp import (
+                            build_jenkins_lotp_profile,
+                            qualify_jenkins_lotp,
+                        )
+
+                        if jenkins_lotp_profile is None:
+                            jenkins_lotp_profile = build_jenkins_lotp_profile(content)
+                        qualify_jenkins_lotp(finding, content, jenkins_lotp_profile)
                     if rule.id in {
                         "TAINT-GH-001",
                         "TAINT-GH-002",

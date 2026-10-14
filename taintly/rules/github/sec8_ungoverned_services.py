@@ -258,27 +258,27 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC8-GH-005",
-        title="Dependabot update spec missing ``cooldown:`` — no post-release window",
+        title="Dependabot update spec has no explicit cooldown policy",
         severity=Severity.LOW,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-8",
         review_needed=True,
         confidence="low",
         description=(
-            "A ``.github/dependabot.yml`` update spec does not declare "
-            "a ``cooldown:`` block.  Without cooldown, Dependabot "
-            "opens a PR within minutes of a new release — including "
-            "releases that turn out to be compromised hours later "
-            "(tj-actions, xz-utils, several Node ecosystem incidents).  "
-            "Set a short cooldown (3-7 days) to bound the window where "
-            "a freshly-published malicious version can reach your "
-            "main branch through automated bump PRs."
+            "A Dependabot update spec does not declare a ``cooldown:`` block. "
+            "GitHub.com currently applies a default cooldown of 3 days to "
+            "version updates even without this configuration. Security updates "
+            "are not subject to cooldown. This finding identifies missing "
+            "explicit policy; it does not establish immediate updates or "
+            "exposure to a malicious release. Check the provider/version and "
+            "choose a custom delay only if your update policy requires one."
         ),
         pattern=DependabotMissingCooldownPattern(),
         remediation=(
-            "Add a ``cooldown:`` block to each update spec.  3-7 days "
-            "covers the common-case where a malicious release is "
-            "spotted within a week:\n"
+            "Review the provider's default before adding explicit policy. "
+            "GitHub.com's documented default is 3 days for version updates; "
+            "cooldown does not delay security updates. If a longer custom "
+            "version-update delay is desired, an example is:\n"
             "\n"
             "  version: 2\n"
             "  updates:\n"
@@ -314,24 +314,13 @@ RULES: list[Rule] = [
         ],
         stride=["T"],
         threat_narrative=(
-            "Several documented supply-chain compromises (tj-actions, "
-            "xz-utils, lottie-player, ua-parser-js, event-stream) "
-            "published malicious versions that were detected within "
-            "hours-to-days of release.  Repositories without "
-            "Dependabot cooldown auto-opened bump PRs on the "
-            "compromised version inside that detection window — and "
-            "any repo with auto-merge enabled merged before the alarm "
-            "was raised.  A short cooldown converts an "
-            "intra-minute exposure window into an intra-week one, "
-            "during which community detection routinely flags the "
-            "bad release."
+            "A delay before adopting new dependency versions can leave time "
+            "for reports of a compromised release, but no fixed delay "
+            "guarantees detection. Missing explicit cooldown does not prove "
+            "there is no release delay: GitHub.com currently defaults to "
+            "3 days for version updates. Actual exposure also depends on "
+            "provider behavior, update selection and merge policy."
         ),
-        incidents=[
-            "tj-actions/changed-files (Mar 2025)",
-            "xz-utils (Mar 2024)",
-            "lottie-player (Oct 2024)",
-            "event-stream (Nov 2018)",
-        ],
     ),
     # =========================================================================
     # SEC8-GH-009: hardcoded credential in a Dependabot registries: block

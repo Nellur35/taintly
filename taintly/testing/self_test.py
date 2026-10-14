@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from taintly.models import Rule
@@ -92,6 +93,15 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
 #
 # Each value documents the failure flavour and follow-up pointer.
 _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
+    ("LOTP-JK-001", "quote_swap"): (
+        "Conditional positive-only applicability: quote_swap changes the sole live "
+        "Groovy GString PR-context reference into single-quoted literal data. The "
+        "mutated source no longer expresses PR context, so no_trigger is correct. "
+        "Only complete tokenization proving exactly one original live PR GString "
+        "reference and none after the emitted quote swap can qualify; negatives, "
+        "non-quote operators, malformed input, and a remaining independent PR "
+        "reference stay ordinary mutation checks."
+    ),
     ("LOTP-JK-003", "quote_swap"): (
         "Mutation-framework limitation: swapping the positive examples' "
         "sole Groovy PR-context GString to single quotes makes it inert "
@@ -624,6 +634,117 @@ _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
 }
 
 
+_MUTATION_PR_REFERENCE = re.compile(
+    r"(?:env\.CHANGE_(?:ID|BRANCH|TARGET|URL|AUTHOR|TITLE|FORK)"
+    r"|ghprb(?:ActualCommit|PullId|PullTitle|SourceBranch|TargetBranch|PullAuthorEmail)"
+    r"|GERRIT_(?:CHANGE_ID|BRANCH|REFSPEC|PATCHSET_REVISION))"
+)
+_MUTATION_PR_LIKE = re.compile(
+    r"(?:env\s*(?:\.\s*CHANGE_|\[\s*['\"]?CHANGE_)"
+    r"(?:ID|BRANCH|TARGET|URL|AUTHOR|TITLE|FORK)"
+    r"|ghprb(?:ActualCommit|PullId|PullTitle|SourceBranch|TargetBranch|PullAuthorEmail)"
+    r"|GERRIT_(?:CHANGE_ID|BRANCH|REFSPEC|PATCHSET_REVISION))"
+)
+_MUTATION_ENV_IDENTIFIER = re.compile(r"(?<![A-Za-z0-9_$])env(?![A-Za-z0-9_$])")
+
+
+def _mutation_pr_reference_counts(source: str) -> tuple[int, int] | None:
+    """Count complete live PR references independently of a rule predicate.
+
+    The result is ``(all_references, gstring_references)``. Comments and
+    non-interpolating string tokens cannot donate evidence. ``None`` means the
+    tolerant lexer could not establish complete string boundaries or a
+    PR-looking interpolation used a shape outside this bounded proof.
+    """
+    from taintly.parsers.jenkinsfile.groovy_lex import TokKind, tokenize
+
+    tokens = list(tokenize(source))
+    if not tokens or tokens[-1].kind is not TokKind.EOF:
+        return None
+    if sum(token.kind is TokKind.EOF for token in tokens) != 1:
+        return None
+    if any(token.unterminated for token in tokens):
+        return None
+    if any(
+        token.kind is TokKind.COMMENT
+        and token.value.startswith("/*")
+        and not token.value.endswith("*/")
+        for token in tokens
+    ):
+        return None
+
+    closing_for = {
+        TokKind.LBRACE: TokKind.RBRACE,
+        TokKind.LPAREN: TokKind.RPAREN,
+        TokKind.LBRACKET: TokKind.RBRACKET,
+    }
+    opening_for = {closing: opening for opening, closing in closing_for.items()}
+    delimiter_stack = []
+    for token in tokens:
+        if token.kind in closing_for:
+            delimiter_stack.append(closing_for[token.kind])
+        elif token.kind in opening_for:
+            if not delimiter_stack or delimiter_stack.pop() is not token.kind:
+                return None
+    if delimiter_stack:
+        return None
+
+    significant = [
+        token
+        for token in tokens
+        if token.kind not in (TokKind.COMMENT, TokKind.NEWLINE, TokKind.SEMI)
+    ]
+    all_references = 0
+    gstring_references = 0
+    for index, token in enumerate(significant):
+        if token.kind is TokKind.IDENT and _MUTATION_PR_REFERENCE.fullmatch(token.value):
+            all_references += 1
+        if token.kind is TokKind.IDENT and token.value == "env":
+            if (
+                index + 2 < len(significant)
+                and significant[index + 1].kind is TokKind.OP
+                and significant[index + 1].value == "."
+                and significant[index + 2].kind is TokKind.IDENT
+                and re.fullmatch(
+                    r"CHANGE_(?:ID|BRANCH|TARGET|URL|AUTHOR|TITLE|FORK)",
+                    significant[index + 2].value,
+                )
+            ):
+                all_references += 1
+            else:
+                return None
+        if token.kind is not TokKind.STRING or token.interpolations is None:
+            continue
+        for span in token.interpolations:
+            if span.brace_form and (
+                span.start < 0
+                or span.end > len(token.value)
+                or token.value[span.start : span.start + 2] != "${"
+                or token.value[span.end - 1 : span.end] != "}"
+            ):
+                return None
+            expression = span.expr.strip()
+            if _MUTATION_PR_REFERENCE.fullmatch(expression):
+                all_references += 1
+                gstring_references += 1
+            elif _MUTATION_ENV_IDENTIFIER.search(expression) or _MUTATION_PR_LIKE.search(
+                expression
+            ):
+                return None
+    return all_references, gstring_references
+
+
+def _is_lotp_jk_001_quote_swap_gap(source: str, mutant: str) -> bool:
+    """Prove this positive quote swap removed exactly its sole live PR signal."""
+    from .mutations import mutate_quote_swap
+
+    if mutant not in mutate_quote_swap(source):
+        return False
+    original_counts = _mutation_pr_reference_counts(source)
+    mutant_counts = _mutation_pr_reference_counts(mutant)
+    return original_counts == (1, 1) and mutant_counts == (0, 0)
+
+
 def run_mutation_tests(
     rules: list[Rule],
     *,
@@ -646,11 +767,24 @@ def run_mutation_tests(
 
     results = []
 
-    def _mark(passed: bool, rule_id: str, op_name: str) -> tuple[bool, bool]:
+    def _mark(
+        passed: bool,
+        rule_id: str,
+        op_name: str,
+        *,
+        test_type: str,
+        source: str,
+        mutant: str,
+    ) -> tuple[bool, bool]:
         """Return (final_passed, was_known_gap)."""
         if passed:
             return True, False
         if (rule_id, op_name) in _KNOWN_MUTATION_GAPS:
+            if (rule_id, op_name) == ("LOTP-JK-001", "quote_swap"):
+                if test_type != "mutation_positive" or not _is_lotp_jk_001_quote_swap_gap(
+                    source, mutant
+                ):
+                    return False, False
             return True, True
         return False, False
 
@@ -662,7 +796,14 @@ def run_mutation_tests(
                 for mutant in mutants:
                     lines = mutant.splitlines()
                     matches = rule.pattern.check(mutant, lines)
-                    passed, known_gap = _mark(len(matches) > 0, rule.id, op_name)
+                    passed, known_gap = _mark(
+                        len(matches) > 0,
+                        rule.id,
+                        op_name,
+                        test_type="mutation_positive",
+                        source=sample,
+                        mutant=mutant,
+                    )
                     results.append(
                         TestResult(
                             rule_id=rule.id,
@@ -683,7 +824,14 @@ def run_mutation_tests(
                 for mutant in mutants:
                     lines = mutant.splitlines()
                     matches = rule.pattern.check(mutant, lines)
-                    passed, known_gap = _mark(len(matches) == 0, rule.id, op_name)
+                    passed, known_gap = _mark(
+                        len(matches) == 0,
+                        rule.id,
+                        op_name,
+                        test_type="mutation_negative",
+                        source=sample,
+                        mutant=mutant,
+                    )
                     results.append(
                         TestResult(
                             rule_id=rule.id,
