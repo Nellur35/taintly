@@ -764,7 +764,15 @@ class _Document:
 
 def _resolve(root: str, ref: str, kind: str) -> str | None:
     rel = ref[2:]
-    parts = rel.split("/")
+    if kind == "action":
+        if rel == "":
+            parts = []
+        else:
+            if rel.endswith("/"):
+                rel = rel[:-1]
+            parts = rel.split("/")
+    else:
+        parts = rel.split("/")
     if any(p in {"", ".", ".."} for p in parts) or any(c in rel for c in "\\:$*?["):
         return None
     if kind == "workflow" and (
