@@ -394,6 +394,10 @@ def compute_exploitability(family_id: str, ctx: WorkflowContext, *, rule_id: str
     scorer weights, so the same rule firing in a privileged workflow
     vs.  a sandbox workflow is distinguishable in both views.
     """
+    # SEC4-GH-023 proves a configured artifact-to-script consumer candidate only.
+    if rule_id == "SEC4-GH-023":
+        return _MEDIUM
+
     if not family_id:
         return _MEDIUM
 

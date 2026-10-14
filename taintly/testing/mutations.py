@@ -106,6 +106,10 @@ def mutate_quote_swap(sample: str) -> list[str]:
             continue
         if _invalidates_actions_guard(sample, mutated):
             continue
+        from taintly.testing._quote_semantics import invalidates_owned_printf_expansion
+
+        if invalidates_owned_printf_expansion(sample, mutated):
+            continue
         mutations.append(mutated)
     return mutations
 

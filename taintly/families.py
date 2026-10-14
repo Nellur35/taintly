@@ -438,6 +438,7 @@ _FAMILIES: tuple[FindingFamily, ...] = (
             {
                 "SEC6-GH-006",  # base64-decoded payload executed
                 "SEC6-GH-007",  # curl/wget piped to shell
+                "SEC4-GH-023",  # workflow_run artifact consumer candidate
                 "SEC6-GL-002",  # curl piped to shell
                 "SEC6-GL-004",  # eval in script block
                 "SEC6-GL-006",  # wget|bash / curl-subshell

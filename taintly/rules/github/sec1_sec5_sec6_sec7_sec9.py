@@ -936,21 +936,19 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC5-GH-001",
-        title="id-token: write granted without any OIDC action present",
+        review_needed=True,
+        title="id-token: write declaration needs OIDC usage review",
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-5",
         description=(
-            "The workflow grants 'id-token: write' permission — which allows minting "
-            "OIDC tokens that can authenticate to cloud providers or a package registry "
-            "via trusted publishing — but does not use any OIDC-consuming action or "
-            "command.  Recognised consumers include the federated-credential actions "
-            "(aws-actions/configure-aws-credentials, google-github-actions/auth, "
-            "azure/login) and modern trusted-publishing flows (pypa/gh-action-pypi-publish, "
-            "sigstore/gh-action-sigstore-python, actions/attest-build-provenance, "
-            "uv publish, twine upload --use-oidc, cargo publish, npm publish --provenance). "
-            "Without one of these the permission is over-provisioned and unnecessarily "
-            "expands token capabilities."
+            "The file contains an id-token: write declaration and no consumer marker "
+            "recognized by this rule. The recognizer covers a finite set of action "
+            "and command markers; custom code or unsupported actions may consume "
+            "OIDC. This is a request to review intended use, not proof that the "
+            "permission is unused or that any cloud or registry access exists. "
+            "Effective permissions, the owning job and reachable consumers require "
+            "inspection."
         ),
         pattern=ContextPattern(
             anchor=r"id-token:\s*write",
@@ -964,8 +962,13 @@ RULES: list[Rule] = [
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Remove 'id-token: write' if OIDC is not used. "
-            "If OIDC is used, ensure the consuming action is present and pinned to a SHA."
+            "Inspect the declaration scope, job overrides and reachable code, "
+            "including the pinned implementations of called actions or workflows. "
+            "Remove id-token: write only where OIDC is not needed; otherwise scope it "
+            "to jobs that need token requests. Review the relying party trust policy, "
+            "audience, subject and other claims, the granted resource permissions, "
+            "and credential expiry/lifetime. A legitimate consumer alone does not "
+            "establish least privilege or an acceptable trust policy."
         ),
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect",
         test_positive=[
@@ -990,34 +993,33 @@ RULES: list[Rule] = [
         ],
         stride=["E"],
         threat_narrative=(
-            "An over-provisioned id-token: write permission that isn't consumed by a legitimate "
-            "OIDC action is available for any compromised step to mint and exchange for cloud credentials. "
-            "Attackers who compromise a single step in a workflow with this permission can silently "
-            "obtain persistent cloud access beyond the workflow run."
+            "If code compromised in a job has effective id-token: write permission, "
+            "it may request an OIDC token. Access to a cloud provider, registry or "
+            "other relying party additionally requires a configured trust "
+            "relationship accepting its claims and authorizing an exchange. Actual "
+            "issuance, access scope, expiry and any later persistence are not "
+            "established by this finding."
         ),
-        confidence="high",
+        confidence="low",
     ),
     # =========================================================================
     # SEC5-GH-001B: id-token: write + an unseeable consumer (composite/reusable)
     # =========================================================================
     Rule(
         id="SEC5-GH-001B",
-        title="id-token: write granted; OIDC consumer may live in a called composite/workflow",
+        title="id-token: write declaration and called code need OIDC usage review",
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-5",
         confidence="low",
         review_needed=True,
         description=(
-            "The workflow grants 'id-token: write' and has no OIDC-consuming "
-            "action or command visible in this file, but it DOES invoke a local "
-            "composite action (uses: ./...) or a reusable workflow call. The "
-            "legitimate OIDC consumer is very likely inside that called "
-            "composite/workflow, which taintly cannot see from this file alone "
-            "(shallow checkout). Rather than assert over-provisioning with false "
-            "confidence, this is surfaced for human review: confirm the called "
-            "composite/workflow actually mints and exchanges the OIDC token, and "
-            "that the grant is scoped to the job that needs it."
+            "The file contains an id-token: write declaration and a local action or "
+            "reusable-workflow reference, with no consumer marker recognized by this "
+            "rule. Called code may consume OIDC, but neither consumer presence nor "
+            "absence is established; the file-wide markers do not prove that the "
+            "declaration governs that call. Review the effective owning job "
+            "permissions and exact referenced implementation."
         ),
         pattern=ContextPattern(
             anchor=r"id-token:\s*write",
@@ -1030,13 +1032,12 @@ RULES: list[Rule] = [
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Open the referenced composite action / reusable workflow and "
-            "confirm it consumes the OIDC token (e.g. "
-            "aws-actions/configure-aws-credentials, azure/login, a "
-            "trusted-publishing step). If it does, no change is needed — the "
-            "grant is justified. If it does NOT, remove 'id-token: write' as "
-            "over-provisioned. Scope the grant to the specific job that calls "
-            "the consumer rather than the whole workflow."
+            "Inspect the exact referenced action or reusable workflow and its "
+            "reachable call path. Retain id-token: write only where needed and scope "
+            "it to the required job. Verify effective overrides, relying-party trust "
+            "conditions and audience/subject claims, authorized operations and "
+            "credential expiry; finding a consumer alone does not justify every "
+            "grant."
         ),
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect",
         test_positive=[
@@ -1055,10 +1056,11 @@ RULES: list[Rule] = [
         ],
         stride=["E"],
         threat_narrative=(
-            "id-token: write is granted but the OIDC consumer (if any) is hidden "
-            "behind a composite/reusable indirection. If the called unit does "
-            "not actually consume the token, the permission is silently "
-            "over-provisioned and any compromised step can mint cloud credentials."
+            "The configured declaration may enable token requests in an effectively "
+            "authorized job. A compromised reachable consumer could obtain external "
+            "access only if the relying party accepts the token claims and authorizes "
+            "an exchange. This source does not establish actual consumer behavior, "
+            "external trust, authority, credential issuance or persistence."
         ),
     ),
     # =========================================================================
@@ -1513,22 +1515,7 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-9",
         description=(
-            "A caching action is used in a workflow triggered by a release event "
-            "or tag push. Cache scope is per-branch: caches written by unmerged "
-            "PR workflows are keyed to refs/pull/<n>/merge and are NOT restorable "
-            "by release/tag workflows running on the default branch. The real "
-            "poisoning vector is writes to the default-branch cache after a "
-            "malicious PR merges — those entries are then inherited by later "
-            "release/tag workflows, and by feature branches that fall back to "
-            "the parent ref cache.\n\n"
-            "Anchor list policy (precision): actions for which caching is "
-            "ALWAYS on OR on by DEFAULT. Explicit-opt-in setups "
-            "(`actions/setup-python`, `actions/setup-node`, `actions/setup-java`, "
-            "`actions/setup-dotnet`, `actions/setup-ruby`) only cache when "
-            "`with: cache:` is set — using them without `cache:` is the common "
-            "case and firing on bare `uses: actions/setup-python@` produces FPs "
-            "everywhere someone just wants an interpreter. Those cases are "
-            "an accepted recall gap until a per-action cache-default model lands."
+            "This rule anchors on `actions/cache` and `actions/setup-go` in a release- or tag-triggered workflow. `actions/setup-go` enables its module cache by default in supported versions unless caching is disabled. Other setup actions have version-specific cache contracts: for example, setup-node v4 requires a `cache` package-manager input, while setup-node v6 can automatically cache npm based on package metadata unless `package-manager-cache` is disabled. This rule does not cover every such setup-action behavior; SEC9-GH-003 covers matched explicit `cache:` inputs, and automatic behavior may remain outside these anchors. A finding identifies configured cache use, not a proven write by an untrusted workflow or later consumption by a release job. Review the pinned action version, cache scope, keys, writers, readers, and actual build inputs."
         ),
         pattern=ContextPattern(
             # actions/cache — caching is the action's whole purpose.
@@ -1548,18 +1535,7 @@ RULES: list[Rule] = [
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Disable caching in release/tag workflows, or use a cache key that "
-            "includes the full commit SHA so the release workflow cannot fall "
-            "back to a cache entry written by a prior default-branch push:\n"
-            "\n"
-            "key: release-${{ github.sha }}-${{ hashFiles('**/package-lock.json') }}\n"
-            "\n"
-            "For actions/setup-go specifically, pass `cache: false` in the "
-            "release-workflow invocation to opt out of the default cache.\n"
-            "\n"
-            "If you must share cache across workflows, review every job that "
-            "writes to the default-branch cache and ensure a merged malicious "
-            "PR cannot place hostile content there."
+            "If a release job does not need a cache, disable it using the pinned action's documented contract: remove the `actions/cache` step, or for `actions/setup-go` set its documented `cache: false` input. A cache key containing `github.sha` is not, by itself, a writer-trust boundary or an isolated namespace.\n\nIf caching is required, review which events and jobs can write each cache and which jobs can restore it. Keep privileged release jobs from restoring entries written by less-trusted workflows; avoid broad `restore-keys` fallbacks. Separate cache contents when trust domains differ, and verify the exact action's cache scope and key behavior for its pinned version."
         ),
         reference="https://docs.zizmor.sh/audits/cache-poisoning/",
         test_positive=[
@@ -1581,13 +1557,7 @@ RULES: list[Rule] = [
         ],
         stride=["T"],
         threat_narrative=(
-            "After a malicious PR merges, its follow-up default-branch workflow "
-            "runs write to the default-branch cache entries that release/tag "
-            "workflows later restore. Injected dependency caches — modified "
-            "node_modules, compiled objects, or tool binaries — then flow "
-            "directly into the release artefacts that ship to production or "
-            "the package registry, with no integrity check between cache write "
-            "and cache restore."
+            "If a less-trusted workflow can write cache content within the scope used by a release or tag job, and that job later restores the content into build inputs, the restored files could affect release output. Whether this path exists depends on the pinned action's cache behavior, keys, scope, restore fallbacks, writer permissions, and consumer commands. This rule does not establish a particular writer, cross-workflow restoration, file contents, or incorporation into a published artifact."
         ),
         confidence="high",
     ),
@@ -1609,16 +1579,7 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-9",
         description=(
-            "A setup-* action (`actions/setup-python`, `actions/setup-node`, "
-            "`actions/setup-java`, `actions/setup-dotnet`, `actions/setup-ruby`) "
-            "is configured with an explicit `cache:` input in a workflow "
-            "triggered by a release or tag push. These actions only cache when "
-            "`cache:` is set and not `false`. The cache-poisoning surface is "
-            "identical to SEC9-GH-002: entries written by default-branch "
-            "workflows after a malicious PR merges are restored by later "
-            "release/tag runs. This rule targets the explicit-opt-in case "
-            "SEC9-GH-002 deliberately excludes to keep its anchor from firing "
-            "on bare `uses: actions/setup-python@` (interpreter-only) usage."
+            "A matched setup-* action has a non-false `cache:` input in a release- or tag-triggered workflow. This anchor covers explicit inputs for setup-python, setup-node, setup-java, setup-dotnet, and setup-ruby; whether an input enables caching depends on the action and pinned version. The rule does not model every automatic cache mode: for example, setup-node v6 can enable npm caching from package metadata without this explicit input, while its v4 contract uses the `cache` selector. Treat a match as a configuration candidate, not proof that a less-trusted writer can affect a release. Inspect the actual writer, reader, scope, keys, and contents."
         ),
         pattern=ContextPattern(
             # Anchor on the `cache:` input line itself. Matches an indented
@@ -1687,24 +1648,7 @@ RULES: list[Rule] = [
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "In release or tag workflows, either disable the cache:\n"
-            "\n"
-            "  - uses: actions/setup-node@v4\n"
-            "    with:\n"
-            "      cache: false\n"
-            "\n"
-            "or scope the cache key to the full commit SHA so the release "
-            "workflow cannot restore an entry written by a prior default-branch "
-            "push:\n"
-            "\n"
-            "  - uses: actions/setup-node@v4\n"
-            "    with:\n"
-            "      cache: npm\n"
-            "      cache-dependency-path: 'package-lock.json'\n"
-            "\n"
-            "Note: setup-* actions do not expose a per-step cache-key override; "
-            "the safest posture in release pipelines is `cache: false` and a "
-            "separate `actions/cache@` block keyed on `${{ github.sha }}`."
+            "If this release/tag job does not need dependency caching, disable the cache using the exact setup action's documented input. For example, remove the `cache:` input from `actions/setup-node`; on versions that enable npm caching automatically from `packageManager` or `devEngines.packageManager`, set `package-manager-cache: false` when that input is supported. Do not use `cache: false` as a universal opt-out: `cache` is a package-manager selector for many setup actions. Check the contract for the pinned action and version.\n\n`cache-dependency-path` selects dependency files to hash; it does not add a commit-specific cache namespace. If caching is required in this workflow, use a cache action with an explicit release-only key namespace and no broad `restore-keys` that can fall back to entries written by less-trusted workflows. Review writer and reader triggers together; a full commit SHA alone does not distinguish trusted and untrusted writers."
         ),
         reference="https://docs.zizmor.sh/audits/cache-poisoning/",
         test_positive=[
@@ -1764,13 +1708,7 @@ RULES: list[Rule] = [
         ],
         stride=["T"],
         threat_narrative=(
-            "setup-<lang>'s opt-in cache uses the same GitHub Actions cache "
-            "backend as actions/cache, so entries written from the default "
-            "branch after a malicious merge are restorable by later release "
-            "and tag workflows. The opt-in form is where real projects "
-            "actually store language-specific dependency caches (node_modules "
-            "via setup-node, pip wheels via setup-python), making this the "
-            "highest-traffic cache-poisoning surface in practice."
+            "If a less-trusted workflow can write content to a cache that a release or tag job later restores, and the restored files are used as build inputs, that content could affect release output. The existence of this path depends on the pinned action's cache contract, writer and reader permissions, key and scope behavior, and consumer steps. This rule does not prove those conditions, actual cache contents, or artifact incorporation. It does not establish that setup-node caches `node_modules`; setup-node documents package-manager cache paths, not that directory."
         ),
         confidence="high",
     ),

