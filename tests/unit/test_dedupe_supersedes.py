@@ -16,8 +16,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from taintly.engine import _dedupe_supersedes
-from taintly.models import Finding, Severity
+from taintly.engine import _dedupe_supersedes, scan_repo
+from taintly.models import Finding, Platform, RegexPattern, Rule, Severity
 
 
 # ---------------------------------------------------------------------------
@@ -145,19 +145,92 @@ def test_supersede_only_takes_effect_when_supersedor_fires():
 
 def test_mutual_supersedes_is_not_silently_recursive():
     # Pathological config: A supersedes B AND B supersedes A.
-    # Both fire on the same line.  We don't promise a stable winner —
-    # but we MUST NOT drop both (that would silently lose all
-    # coverage on the line).
+    # Both fire on the same line. Conflicting specificity declarations
+    # cannot justify choosing a winner: preserve both original findings.
     rules = [
         _StubRule("A", supersedes=["B"]),
         _StubRule("B", supersedes=["A"]),
     ]
     findings = [_finding("A", line=1), _finding("B", line=1)]
     result = _dedupe_supersedes(findings, rules)
-    # Current implementation drops both — the contract should be that
-    # at LEAST one survives.  This test pins current behaviour and
-    # flags the mutual-supersedes case as a config error that future
-    # work should refuse to load (or warn at startup).
-    # If/when we add a cycle check, this test should be updated to
-    # assert exactly-one survives.
-    assert len(result) <= 2  # never increase
+    assert result == findings
+    assert all(actual is original for actual, original in zip(result, findings))
+
+
+def test_self_supersedes_cannot_erase_its_own_finding():
+    findings = [_finding("A")]
+    assert _dedupe_supersedes(findings, [_StubRule("A", ["A"])]) == findings
+
+
+def test_three_member_cycle_preserves_members_and_regular_outgoing_suppression():
+    rules = [
+        _StubRule("A", ["B"]),
+        _StubRule("B", ["C", "D"]),
+        _StubRule("C", ["A"]),
+        _StubRule("D"),
+        _StubRule("E", ["A"]),
+        _StubRule("F"),
+    ]
+    findings = [_finding(rule_id) for rule_id in ("F", "C", "D", "A", "E", "B")]
+    result = _dedupe_supersedes(findings, rules)
+    # Even E's incoming edge cannot choose between conflicting A/B/C.
+    # B remains present and still legitimately supersedes noncyclic D.
+    assert result == [findings[i] for i in (0, 1, 3, 4, 5)]
+    assert all(actual is findings[i] for actual, i in zip(result, (0, 1, 3, 4, 5)))
+
+
+def test_cycle_requires_all_members_at_the_same_file_and_line():
+    rules = [_StubRule("A", ["B"]), _StubRule("B", ["C"]), _StubRule("C", ["A"])]
+    findings = [
+        _finding("A", file="x.yml", line=1),
+        _finding("B", file="x.yml", line=1),
+        _finding("C", file="y.yml", line=1),
+        _finding("B", file="x.yml", line=2),
+        _finding("C", file="x.yml", line=2),
+    ]
+    assert _dedupe_supersedes(findings, rules) == [findings[i] for i in (0, 2, 3)]
+
+
+def test_acyclic_chain_keeps_existing_direct_edge_behavior():
+    rules = [_StubRule("A", ["B"]), _StubRule("B", ["C"]), _StubRule("C")]
+    findings = [_finding("C"), _finding("B"), _finding("A")]
+    assert _dedupe_supersedes(findings, rules) == [findings[2]]
+
+
+def test_absent_middle_rule_does_not_create_transitive_suppression():
+    rules = [_StubRule("A", ["B"]), _StubRule("B", ["C"]), _StubRule("C")]
+    findings = [_finding("A"), _finding("C")]
+    assert _dedupe_supersedes(findings, rules) == findings
+
+
+def test_supplied_cyclic_rules_retain_detected_findings_in_scan_repo(tmp_path):
+    workflow = tmp_path / ".github" / "workflows" / "control.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "on: push\njobs:\n  check:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: echo DEDUPE_CONTROL\n",
+        encoding="utf-8",
+    )
+    rules = [
+        Rule(
+            id=rule_id,
+            title="Authored supplied-rule deduplication control",
+            severity=Severity.HIGH,
+            platform=Platform.GITHUB,
+            owasp_cicd="CICD-SEC-4",
+            description="Mechanism control, not a security judgment.",
+            pattern=RegexPattern(match="DEDUPE_CONTROL"),
+            remediation="Authored control only.",
+            reference="",
+            supersedes=[other_id],
+        )
+        for rule_id, other_id in (("CONTROL-A", "CONTROL-B"), ("CONTROL-B", "CONTROL-A"))
+    ]
+    reports = scan_repo(str(tmp_path), rules, Platform.GITHUB)
+    assert len(reports) == 1
+    assert reports[0].files_scanned == 1
+    assert reports[0].engine_errors() == []
+    assert [(f.rule_id, f.line, f.snippet) for f in reports[0].findings] == [
+        ("CONTROL-A", 6, "- run: echo DEDUPE_CONTROL"),
+        ("CONTROL-B", 6, "- run: echo DEDUPE_CONTROL"),
+    ]
