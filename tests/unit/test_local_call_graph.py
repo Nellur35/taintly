@@ -2,6 +2,7 @@
 
 import pytest
 
+from taintly import local_call_graph
 from taintly.cross_artifact_facts import find_cross_artifact_taint
 from taintly.cross_workflow_facts import find_cross_file_taint
 from taintly.engine import scan_repo
@@ -499,3 +500,124 @@ runs:
     assert findings[0].severity.name == "HIGH"
     assert findings[0].confidence == "medium"
     assert findings[0].review_needed is (kind == "action")
+
+
+@pytest.mark.parametrize(
+    ("uses", "action_path"),
+    [
+        ("./.github/actions/check", ".github/actions/check/action.yml"),
+        ("./.github/actions/check/", ".github/actions/check/action.yml"),
+        ("./", "action.yml"),
+    ],
+)
+def test_local_action_root_and_single_trailing_slash_paths_keep_flow(
+    tmp_path, uses, action_path
+):
+    _repo(
+        tmp_path,
+        {
+            ".github/workflows/caller.yml": f"""on: issues
+permissions: {{contents: read}}
+jobs:
+  audit:
+    if: github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: {uses}
+        with:
+          payload: ${{{{ github.event.issue.body }}}}
+""",
+            action_path: """inputs:
+  payload: {required: true}
+runs:
+  using: composite
+  steps:
+    - env:
+        PAYLOAD: ${{ inputs.payload }}
+      run: eval "$PAYLOAD"
+      shell: bash
+""",
+        },
+    )
+
+    flows = _flows(tmp_path)
+
+    assert len(flows) == 1
+    assert flows[0].source_expr == "github.event.issue.body"
+    assert flows[0].input == "payload"
+    assert flows[0].callee.endswith(action_path)
+    assert flows[0].sink_snippet.strip() == 'run: eval "$PAYLOAD"'
+
+
+def test_root_local_action_data_only_step_does_not_create_sink_flow(tmp_path):
+    _repo(
+        tmp_path,
+        {
+            ".github/workflows/caller.yml": """on: issues
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./
+        with:
+          payload: ${{ github.event.issue.body }}
+""",
+            "action.yml": """inputs:
+  payload: {required: true}
+runs:
+  using: composite
+  steps:
+    - env:
+        PAYLOAD: ${{ inputs.payload }}
+      run: printf '%s' "$PAYLOAD"
+      shell: bash
+""",
+        },
+    )
+
+    assert _flows(tmp_path) == []
+
+
+def test_root_action_path_does_not_expand_reusable_workflow_resolution(tmp_path):
+    _repo(tmp_path, {"action.yml": "runs: {using: composite, steps: []}\n"})
+
+    assert local_call_graph._resolve(str(tmp_path), "./", "workflow") is None
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "./.github/actions/check//",
+        "./.github//actions/check",
+        "./.github/actions/./check",
+        "./.github/actions/../check",
+        "./.github/actions/$dynamic",
+        "./.github\\actions\\check",
+    ],
+)
+def test_local_action_paths_keep_rejecting_ambiguous_components(tmp_path, ref):
+    _repo(
+        tmp_path,
+        {
+            ".github/workflows/caller.yml": f"""on: issues
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: {ref}
+        with:
+          payload: ${{{{ github.event.issue.body }}}}
+""",
+            ".github/actions/check/action.yml": """inputs:
+  payload: {required: true}
+runs:
+  using: composite
+  steps:
+    - run: eval "${{ inputs.payload }}"
+      shell: bash
+""",
+        },
+    )
+
+    assert _flows(tmp_path) == []
