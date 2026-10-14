@@ -107,13 +107,19 @@ _FAMILIES: tuple[FindingFamily, ...] = (
     ),
     FindingFamily(
         id="script_injection",
-        title="User-controlled input reaching shell execution",
+        title="Untrusted input handling in CI scripts",
         why=(
-            "PR titles, commit messages, issue bodies, and branch names are "
-            "attacker-controlled. When these values are expanded into run: "
-            "blocks or written to $GITHUB_ENV / $GITHUB_OUTPUT, the "
-            "attacker gets arbitrary code execution with the workflow's "
-            "full permissions."
+            "Untrusted input may become code when a shell or interpreter "
+            "parses it as source. For example, a GitHub expression inserted "
+            "into a code-bearing ``run:`` position or a GitLab value passed "
+            "to ``eval`` can be interpreted as code. Ordinary shell parameter "
+            "expansion does not recursively parse the value, and "
+            "ordinary argument passing does not execute the value by itself; "
+            "writing a value to ``$GITHUB_ENV`` or ``$GITHUB_OUTPUT`` also "
+            "does not execute it by itself, although a later consumer may "
+            "interpret it. Review the exact command and quoting, downstream "
+            "consumer, trigger, runtime shell, and effective permissions "
+            "before deciding impact."
         ),
         # NB: the LOTP-GH-* rules used to live here.  P1.2 (targeted) moved
         # them to ``pipeline_tool_execution`` after the corpus measurement
