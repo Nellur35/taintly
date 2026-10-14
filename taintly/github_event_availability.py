@@ -1,9 +1,12 @@
 """Conservative availability facts for selected GitHub event fields.
 
-This module intentionally proves only one absence fact: an explicit,
-unambiguous ``push``-only workflow does not provide ``github.event.issue.title``
-or ``github.event.issue.body``. GitHub documents missing context properties as
-empty strings and the push payload without an issue root; see
+This module proves only that direct ``github.event.issue.title`` and
+``github.event.issue.body`` sources are absent for a structurally supported
+candidate when the explicit workflow trigger profile is push-only, or when a
+unique owning job/step guard excludes the ``issues`` invocation. The latter
+remains a source-availability result even when no declared event can execute
+that candidate. GitHub documents missing context properties as empty strings
+and the push payload without an issue root; see
 https://docs.github.com/en/actions/reference/workflows-and-actions/contexts and
 https://docs.github.com/en/webhooks/webhook-events-and-payloads#push.
 
@@ -16,6 +19,7 @@ from __future__ import annotations
 import re
 from enum import Enum
 
+from .eventguard import event_guard_verdict
 from .parsers.gha_expr import ExprSyntaxError, canonical_path, context_paths, parse
 from .parsers.structural import Event, EventKind, walk_workflow
 from .parsers.structural.tokenizer import Token, TokenizerError, TokenKind, tokenize
@@ -376,6 +380,8 @@ class IssueContextAvailability:
 
     def __init__(self, content: str) -> None:
         self._triggers = _explicit_trigger_names(content)
+        self._content = content
+        self._owner_events: list[Event] | None = None
 
     def issue_field(self, field: str) -> EventSourceAvailability:
         """Classify a supported issue field without generalizing other paths."""
@@ -390,13 +396,230 @@ class IssueContextAvailability:
             return EventSourceAvailability.MAY_BE_PRESENT
         return EventSourceAvailability.UNKNOWN
 
+    def issue_field_at(self, field: str, owner_path: tuple[object, ...]) -> EventSourceAvailability:
+        """Classify issue availability using this candidate's owning guards."""
+        base = self.issue_field(field)
+        if base is not EventSourceAvailability.MAY_BE_PRESENT:
+            return base
+        try:
+            return self._issue_field_at_proven_owner(owner_path, base)
+        except Exception:
+            # Pattern predicates treat exceptions as a miss. Preserve the
+            # candidate whenever an ownership proof cannot be completed.
+            return base
+
+    def _issue_field_at_proven_owner(
+        self,
+        owner_path: tuple[object, ...],
+        base: EventSourceAvailability,
+    ) -> EventSourceAvailability:
+        if self._owner_events is None:
+            self._owner_events = list(
+                walk_workflow(
+                    "workflow.yml",
+                    content=self._content,
+                    include_keys=True,
+                    include_merge_origins=True,
+                )
+            )
+        events = self._owner_events
+        # Any structural ambiguity can hide an owner or guard, so keep the
+        # source candidate. YAML aliases/merges also obscure direct ownership.
+        if any(
+            event.kind in {EventKind.ERROR, EventKind.CUTOFF} or event.merge_origins
+            for event in events
+        ) or _contains_alias_or_anchor(self._content):
+            return base
+        if (
+            len(owner_path) != 5
+            or owner_path[0] != "jobs"
+            or not isinstance(owner_path[1], str)
+            or owner_path[2] != "steps"
+            or not isinstance(owner_path[3], int)
+            or owner_path[4] not in {"run", "script"}
+        ):
+            return base
+        job_path = owner_path[:2]
+        step_path = owner_path[:4]
+        structural_paths = [("jobs",), job_path, job_path + ("steps",)]
+        if owner_path[4] == "run":
+            structural_paths.append(owner_path)
+        for structural_path in structural_paths:
+            if (
+                sum(
+                    event.kind is EventKind.MAP_KEY and event.path == structural_path
+                    for event in events
+                )
+                != 1
+            ):
+                return base
+        guard_values: list[str | None] = []
+        for path in (job_path, step_path):
+            keys = [
+                event
+                for event in events
+                if event.kind is EventKind.MAP_KEY and event.path == path + ("if",)
+            ]
+            values = [
+                event
+                for event in events
+                if event.kind is EventKind.LEAF_SCALAR and event.path == path + ("if",)
+            ]
+            if len(keys) > 1 or (keys and len(values) != 1):
+                return base
+            if keys:
+                if values[0].value is None or values[0].value_kind not in {"plain", "quoted"}:
+                    return base
+                if values[0].value.strip().casefold() in {"", "null", "~"}:
+                    return base
+                guard_values.append(values[0].value)
+        if not guard_values:
+            return base
+        # Push lacks the issue root, so only the issues invocation must be
+        # excluded by this candidate's owning conditions.
+        if any(event_guard_verdict(guard, "issues") is False for guard in guard_values):
+            return EventSourceAvailability.ABSENT
+        return base
+
+    def script_owner_at_line(self, line: int) -> tuple[object, ...] | None:
+        """Return a unique direct github-script owner for a physical line."""
+        try:
+            return self._script_owner_at_line(line)
+        except Exception:
+            return None
+
+    def _script_owner_at_line(self, line: int) -> tuple[object, ...] | None:
+        if self._owner_events is None:
+            self._owner_events = list(
+                walk_workflow(
+                    "workflow.yml",
+                    content=self._content,
+                    include_keys=True,
+                    include_merge_origins=True,
+                )
+            )
+        events = self._owner_events
+        if any(
+            event.kind in {EventKind.ERROR, EventKind.CUTOFF} or event.merge_origins
+            for event in events
+        ) or _contains_alias_or_anchor(self._content):
+            return None
+        line_owners: set[tuple[object, ...] | None] = set()
+        for item in events:
+            if item.kind not in {EventKind.LEAF_SCALAR, EventKind.MAP_KEY}:
+                continue
+            source_lines = {item.line}
+            if item.block_lines:
+                source_lines.update(source_line for source_line, _ in item.block_lines)
+            if line not in source_lines:
+                continue
+            path = item.path
+            step_owner = (
+                path[:4]
+                if len(path) >= 4
+                and path[0] == "jobs"
+                and isinstance(path[1], str)
+                and path[2] == "steps"
+                and isinstance(path[3], int)
+                else None
+            )
+            line_owners.add(step_owner)
+        if len(line_owners) != 1:
+            return None
+        owners: set[tuple[object, ...]] = set()
+        for event in events:
+            if event.kind is not EventKind.LEAF_SCALAR or event.path[-1:] != ("script",):
+                continue
+            source_lines = {event.line}
+            if event.block_lines:
+                source_lines.update(source_line for source_line, _ in event.block_lines)
+            if line not in source_lines:
+                continue
+            script_path = event.path
+            if (
+                len(script_path) != 6
+                or script_path[0] != "jobs"
+                or not isinstance(script_path[1], str)
+                or script_path[2] != "steps"
+                or not isinstance(script_path[3], int)
+                or script_path[4:] != ("with", "script")
+            ):
+                continue
+            step_path = script_path[:4]
+            job_path = script_path[:2]
+            structural_paths = (
+                ("jobs",),
+                job_path,
+                job_path + ("steps",),
+                step_path + ("with",),
+            )
+            if any(
+                sum(
+                    item.kind is EventKind.MAP_KEY and item.path == structural_path
+                    for item in events
+                )
+                != 1
+                for structural_path in structural_paths
+            ):
+                continue
+            if (
+                sum(item.kind is EventKind.MAP_KEY and item.path == script_path for item in events)
+                != 1
+                or sum(
+                    item.kind is EventKind.LEAF_SCALAR and item.path == script_path
+                    for item in events
+                )
+                != 1
+            ):
+                continue
+            uses_path = step_path + ("uses",)
+            uses = [
+                item
+                for item in events
+                if item.kind is EventKind.LEAF_SCALAR and item.path == uses_path
+            ]
+            uses_keys = [
+                item for item in events if item.kind is EventKind.MAP_KEY and item.path == uses_path
+            ]
+            if (
+                len(uses) == 1
+                and len(uses_keys) == 1
+                and uses[0].value is not None
+                and uses[0]
+                .value.strip()
+                .startswith(("actions/github-script@", "actions/github-script/"))
+            ):
+                owners.add(step_path + ("script",))
+        return next(iter(owners)) if len(owners) == 1 else None
+
+    def issue_field_at_script_line(self, field: str, line: int) -> EventSourceAvailability:
+        base = self.issue_field(field)
+        if base is not EventSourceAvailability.MAY_BE_PRESENT:
+            return base
+        owner = self.script_owner_at_line(line)
+        if owner is None:
+            return base
+        return self.issue_field_at(field, owner)
+
+
+def _contains_alias_or_anchor(content: str) -> bool:
+    try:
+        tokens = list(tokenize(content))
+    except Exception:
+        return True
+    return any(
+        token.kind in {TokenKind.ANCHOR, TokenKind.ALIAS, TokenKind.MERGE_KEY} for token in tokens
+    )
+
 
 def direct_issue_expression_paths(text: str) -> tuple[tuple[str, ...], str] | None:
     """Return direct issue-field expression paths and text outside expressions.
 
-    Only fully delimited direct AST paths are eligible. Fallbacks, calls,
-    dynamic access, compound expressions, and unfinished expressions return
-    ``None`` so callers retain their existing finding.
+    Only fully delimited expressions that resolve to a direct issue-field AST
+    path and reference only that field are eligible. Parser-supported exact
+    ``fromJSON(toJSON(...))`` round trips may canonicalize to that path.
+    Fallbacks, other calls, dynamic access, compound expressions, and
+    unfinished expressions return ``None`` so callers retain their finding.
     """
     spans: list[tuple[int, int, str]] = []
     cursor = 0

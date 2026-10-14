@@ -549,7 +549,7 @@ class GithubScriptDangerousContextPattern:
         results: list[tuple[int, str]] = []
         profile: IssueContextAvailability | None = None
 
-        def candidate_is_dangerous(line: str) -> bool:
+        def candidate_is_dangerous(line: str, line_number: int) -> bool:
             nonlocal profile
             if not self._is_dangerous(line):
                 return False
@@ -565,7 +565,10 @@ class GithubScriptDangerousContextPattern:
                 profile = IssueContextAvailability(content)
             for source_path in paths:
                 field = source_path.rsplit(".", 1)[-1]
-                if profile.issue_field(field) is not EventSourceAvailability.ABSENT:
+                if (
+                    profile.issue_field_at_script_line(field, line_number)
+                    is not EventSourceAvailability.ABSENT
+                ):
                     return True
             return False
 
@@ -641,13 +644,13 @@ class GithubScriptDangerousContextPattern:
                             # simulator's ``comment_embed`` hit on this
                             # pattern is an artifact; it is skipped in
                             # ``fp_simulator._SKIP_PATTERN_TYPES`` instead.
-                            if candidate_is_dangerous(kline):
+                            if candidate_is_dangerous(kline, k + 1):
                                 results.append((k + 1, kline.strip()))
                             k += 1
                         j = k
                         continue
                     # Inline form: `script: <expr>` on one line.
-                    if inline_value and candidate_is_dangerous(inline_value):
+                    if inline_value and candidate_is_dangerous(inline_value, j + 1):
                         results.append((j + 1, jline.strip()))
                 j += 1
             i = j
