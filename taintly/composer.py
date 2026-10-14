@@ -31,7 +31,7 @@ from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from itertools import pairwise
 from typing import TYPE_CHECKING
@@ -72,6 +72,8 @@ class FindingFact:
     # ``fact_key``) are unaffected; composer rules can surface the path
     # on the upgraded finding so triage sees WHY it chained.
     snippet: str = field(default="", compare=False)
+    shell_use: str = field(default="unknown", compare=False)
+    """Conservative role aggregation of source-bound contributors at this key."""
 
     def fact_key(self):
         return (self.rule_id, self.file, self.job, self.line)
@@ -223,12 +225,19 @@ def _seed_findings(
     prior_findings: Iterable[Finding],
     job_indexes: dict[str, _JobIndex],
 ) -> None:
-    """Push each prior finding into the database as a FindingFact.
+    """Push prior findings into the database with conservative role aggregation.
 
-    The composer derives job identity from the finding's source line
-    when a rule has not set it explicitly. Findings outside a known
-    job remain unscoped and cannot satisfy job-sensitive chains.
+    The composer derives job identity from the finding's source line when a
+    rule has not set it explicitly. Findings outside a known job remain
+    unscoped and cannot satisfy job-sensitive chains. Shell roles are accepted
+    only from a same-source, same-line, same-owner validated witness.
     """
+    from taintly.shell_use import ShellUse, ShellUseEvidence, validate_shell_use
+
+    facts: dict[tuple, FindingFact] = {}
+    roles: dict[tuple, list[ShellUse]] = {}
+    representatives: dict[tuple, ShellUse] = {}
+    role_priority = {ShellUse.DATA: 0, ShellUse.UNKNOWN: 1, ShellUse.CODE: 2}
     for f in prior_findings:
         if f.rule_id == "ENGINE-ERR":
             continue  # don't compose error-class findings into chains
@@ -237,19 +246,46 @@ def _seed_findings(
         if not job:
             index = job_indexes.get(f.file or "")
             job = index.at_line(line) if index is not None else None
-        db.add(
-            "finding",
-            FindingFact(
-                rule_id=f.rule_id,
-                file=f.file or "",
-                job=job,
-                line=line,
-                severity_value=f.severity.value if f.severity else "info",
-                snippet=getattr(f, "snippet", "") or "",
-            ),
+        fact = FindingFact(
+            rule_id=f.rule_id,
+            file=f.file or "",
+            job=job,
+            line=line,
+            severity_value=f.severity.value if f.severity else "info",
+            snippet=getattr(f, "snippet", "") or "",
         )
-        witness = getattr(f, "_checkout_build", None)
+        key = fact.fact_key()
         index = job_indexes.get(f.file or "")
+        shell = getattr(f, "_shell_use", None)
+        role = ShellUse.UNKNOWN
+        if (
+            f.rule_id
+            in {
+                "TAINT-GH-001",
+                "TAINT-GH-002",
+                "TAINT-GH-003",
+                "TAINT-GH-004",
+                "TAINT-GH-005",
+                "TAINT-GH-009",
+                "TAINT-GH-012",
+                "TAINT-GH-017",
+            }
+            and f.origin == "file"
+            and isinstance(shell, ShellUseEvidence)
+            and index is not None
+            and shell.source_sha256 == index.source_sha256
+            and len(shell.owner_path) >= 2
+            and shell.owner_path[:2] == ("jobs", job)
+            and validate_shell_use(shell, index.content, f.file, line)
+        ):
+            role = shell.disposition
+        if key not in facts or role_priority[role] > role_priority[representatives[key]]:
+            facts[key] = fact
+            representatives[key] = role
+        roles.setdefault(key, []).append(role)
+
+        # Preserve PUBLIC's existing checkout/build witness validation exactly.
+        witness = getattr(f, "_checkout_build", None)
         if (
             witness is not None
             and f.rule_id in {"LOTP-GH-001", "LOTP-GH-003", "LOTP-GH-006"}
@@ -272,6 +308,17 @@ def _seed_findings(
             )
         ):
             db.add("checkout_build", CheckoutBuildFact(witness))
+
+    for key, fact in facts.items():
+        contributors = roles[key]
+        aggregate = (
+            ShellUse.CODE
+            if ShellUse.CODE in contributors
+            else ShellUse.UNKNOWN
+            if ShellUse.UNKNOWN in contributors
+            else ShellUse.DATA
+        )
+        db.add("finding", replace(fact, shell_use=aggregate.value))
 
 
 def _flow_value_end(tokens, start: int, depth: int = 0) -> int | None:
@@ -927,7 +974,10 @@ def run_composer(
     # Keep this index local: a later invocation may see changed source content.
     prior_findings = tuple(prior_findings)
     witnessed_files = {
-        f.file for f in prior_findings if getattr(f, "_checkout_build", None) is not None
+        f.file
+        for f in prior_findings
+        if getattr(f, "_checkout_build", None) is not None
+        or getattr(f, "_shell_use", None) is not None
     }
     job_indexes = {}
     for workflow in corpus.all():

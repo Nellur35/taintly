@@ -11,7 +11,10 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import cached_property
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from .shell_use import ShellUseEvidence
 
 # Structural ``${{ }}`` expression parser — used to OPTIONALLY normalise an
 # attacker-context ``requires`` regex over its documented-equivalent encodings
@@ -45,6 +48,9 @@ _JOB_SEGMENT_CACHE: ContextVar[dict[int, tuple[list[str], list[tuple[int, list[s
 )
 _JOB_SEGMENT_CONTENT_CACHE: ContextVar[dict[str, list[tuple[int, list[str]]]] | None] = ContextVar(
     "taintly_job_segment_content_cache", default=None
+)
+_SHELL_USE_PROFILE_CACHE: ContextVar[dict[tuple[str, str, int], object] | None] = ContextVar(
+    "taintly_shell_use_profile_cache", default=None
 )
 _DEFER_CONTEXT_REGEX: ContextVar[bool] = ContextVar("taintly_defer_context_regex", default=False)
 
@@ -111,6 +117,7 @@ class scan_session:
         self._installed = False
         self._job_segment_cache_token = _JOB_SEGMENT_CACHE.set({})
         self._job_segment_content_cache_token = _JOB_SEGMENT_CONTENT_CACHE.set({})
+        self._shell_use_profile_cache_token = _SHELL_USE_PROFILE_CACHE.set({})
         if os.name != "posix":
             return self
         try:
@@ -126,6 +133,7 @@ class scan_session:
                 signal.alarm(0)  # type: ignore[attr-defined,unused-ignore]
                 signal.signal(signal.SIGALRM, self._old_handler)  # type: ignore[attr-defined,unused-ignore]
         finally:
+            _SHELL_USE_PROFILE_CACHE.reset(self._shell_use_profile_cache_token)
             _JOB_SEGMENT_CONTENT_CACHE.reset(self._job_segment_content_cache_token)
             _JOB_SEGMENT_CACHE.reset(self._job_segment_cache_token)
 
@@ -1853,6 +1861,8 @@ class Finding:
 
     _checkout_build: CheckoutBuildWitness | None = field(default=None, repr=False, compare=False)
     """Internal static path from this scan; never reconstructed from prose/tags."""
+    _shell_use: ShellUseEvidence | None = field(default=None, repr=False, compare=False)
+    """Internal source-bound shell-role witness, excluded from serialized reports."""
 
     def to_dict(self) -> dict[str, Any]:
         return {

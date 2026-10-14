@@ -59,6 +59,76 @@ from .workflow_corpus import (
     is_fork_reachable,
 )
 
+
+def _qualify_shell_use(finding: Finding, evidence: object, content: str) -> None:
+    """Apply one source-bound shell-role interpretation after context calibration."""
+    from .shell_use import ShellUse, ShellUseEvidence, validate_shell_use
+
+    witness = evidence if isinstance(evidence, ShellUseEvidence) else None
+    if witness is not None and validate_shell_use(witness, content, finding.file, finding.line):
+        finding._shell_use = witness
+        disposition = witness.disposition
+    else:
+        finding._shell_use = None
+        disposition = ShellUse.UNKNOWN
+    if disposition is ShellUse.CODE:
+        finding.context_notes.append(
+            "Supported configured shell code use is bound to this source path; "
+            "actual triggering, successful execution and effective credentials are unverified."
+        )
+        finding.context_tags.append("shell-use-code")
+        return
+
+    finding.review_needed = True
+    finding.confidence = (
+        "medium" if disposition is ShellUse.DATA and finding.rule_id != "TAINT-GH-012" else "low"
+    )
+    if finding.exploitability == "high":
+        finding.exploitability = "medium"
+    if finding.severity in {Severity.CRITICAL, Severity.HIGH}:
+        finding.severity = Severity.MEDIUM
+    finding.context_tags.append("shell-use-" + disposition.value)
+    if disposition is ShellUse.DATA:
+        finding.title = "Untrusted workflow value reaches shell data use (review)"
+        finding.description = (
+            "This source path reaches an ordinary argument or assignment under the supported "
+            "configured shell profile. Parameter expansion does not recursively execute "
+            "shell syntax contained in the value. This is not sanitization: word splitting, "
+            "globbing, option handling and later consumers may still require review."
+        )
+        finding.threat_narrative = (
+            "The tracked value is used as data at this command. No code-bearing role is "
+            "established here. Later use and runtime bindings remain outside this bounded proof."
+        )
+        finding.calibration_reason = (
+            "Source-bound ordinary shell data use; execution is not established."
+        )
+    else:
+        finding.title = "Untrusted workflow value reaches unresolved shell consumption (review)"
+        finding.description = (
+            "A tracked source reaches a shell command, but its exact code or data role "
+            "cannot be established under the supported ownership, shell and syntax profile. "
+            "The candidate remains visible for review; quoting and privileged context "
+            "do not resolve that uncertainty."
+        )
+        finding.threat_narrative = (
+            "Check the exact source, configured shell, command role and downstream consumer. "
+            "Unsupported semantics do not establish safety or confirmed execution. "
+            "Event reachability and credential availability need separate evidence."
+        )
+        finding.calibration_reason = (
+            "Shell consumption is unresolved under the bounded source profile."
+        )
+    finding.remediation = (
+        "Pass untrusted values through an environment variable and consume them as quoted "
+        "data with a literal format, for example printf '%s\\n' \"$VALUE\". "
+        "Keep them out of command position, eval, interpreter code operands and interpreter stdin. "
+        "Review downstream option parsing, splitting/globbing, configured shell and runtime bindings. "
+        "For workflow inputs, separately verify who can supply the caller's value."
+    )
+    finding.context_notes.append(finding.calibration_reason)
+
+
 # Hygiene families that ``classify_rule`` falls back to from broad OWASP
 # categories (CICD-SEC-1 → resource_controls, CICD-SEC-10 → logging_visibility).
 # ``compute_exploitability`` scores these "low" unconditionally, so a
@@ -606,6 +676,20 @@ def scan_file(
                         context_notes=ctx_notes,
                         context_tags=ctx_tags,
                     )
+                    if rule.id in {
+                        "TAINT-GH-001",
+                        "TAINT-GH-002",
+                        "TAINT-GH-003",
+                        "TAINT-GH-004",
+                        "TAINT-GH-005",
+                        "TAINT-GH-009",
+                        "TAINT-GH-012",
+                        "TAINT-GH-017",
+                    }:
+                        from .rules.github.taint import TaintPattern
+
+                        if isinstance(rule.pattern, TaintPattern):
+                            _qualify_shell_use(finding, match_context, content)
                     owner_path = getattr(match_context, "owner_path", None)
                     if rule.id == "SEC3-GH-006" and owner_path is not None:
                         # Internal-only binding used by the dead-range filter
