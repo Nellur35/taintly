@@ -17,6 +17,7 @@ These pin the decoupling of composer ROUTING from the reporting
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -169,29 +170,37 @@ def test_family_coverage_baseline_is_accurate() -> None:
     assert data["count"] == len(baseline_ids)
 
 
-def test_family_coverage_gate_blocks_new_unmarked() -> None:
+def test_family_coverage_gate_blocks_new_unmarked(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     """A new unmarked rule ID (not in the baseline) fails the gate.
 
-    Simulates "a new unmarked rule appeared since the baseline was cut" by
-    temporarily shrinking the committed baseline by one entry, then asserting
-    the gate exits non-zero and names the now-missing id.  The baseline file
-    is backed up and restored so the test leaves no residue.
+    Simulates "a new unmarked rule appeared since the baseline was cut" using
+    a temporary baseline and the real gate entry point. The tracked baseline is
+    never modified.
     """
-    baseline_path = ROOT / "tests" / "_family_fallback_baseline.json"
-    original_text = baseline_path.read_text()
-    data = json.loads(original_text)
-    full_ids = list(data["rule_ids"])
+    gate_path = ROOT / "scripts" / "check_family_coverage.py"
+    spec = importlib.util.spec_from_file_location(
+        "check_family_coverage_isolated", gate_path
+    )
+    assert spec is not None and spec.loader is not None
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+
+    full_ids = sorted({rule.id for rule in load_all_rules() if not rule.finding_family})
     assert full_ids, "expected some rules to rely on the fallback"
 
     dropped = full_ids[0]
     shrunk = full_ids[1:]  # the dropped id now looks like a 'new' unmarked rule
-    try:
-        baseline_path.write_text(
-            json.dumps({"count": len(shrunk), "rule_ids": shrunk}, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        res = _run_gate("--check")
-        assert res.returncode == 1, res.stdout + res.stderr
-        assert dropped in res.stderr
-    finally:
-        baseline_path.write_text(original_text, encoding="utf-8")
+    baseline_path = tmp_path / "_family_fallback_baseline.json"
+    baseline_path.write_text(
+        json.dumps({"count": len(shrunk), "rule_ids": shrunk}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gate, "BASELINE", baseline_path)
+    monkeypatch.setattr(sys, "argv", [str(gate_path), "--check"])
+
+    assert gate.main() == 1
+    captured = capsys.readouterr()
+    assert "FAIL: 1 new rule(s) rely on the OWASP family fallback" in captured.err
+    assert dropped in captured.err

@@ -52,6 +52,9 @@ _JOB_SEGMENT_CONTENT_CACHE: ContextVar[dict[str, list[tuple[int, list[str]]]] | 
 _SHELL_USE_PROFILE_CACHE: ContextVar[dict[tuple[str, str, int], object] | None] = ContextVar(
     "taintly_shell_use_profile_cache", default=None
 )
+_GITLAB_SHELL_PROFILE_CACHE: ContextVar[dict[tuple[str, str, str], object] | None] = ContextVar(
+    "taintly_gitlab_shell_profile_cache", default=None
+)
 _DEFER_CONTEXT_REGEX: ContextVar[bool] = ContextVar("taintly_defer_context_regex", default=False)
 
 
@@ -118,6 +121,7 @@ class scan_session:
         self._job_segment_cache_token = _JOB_SEGMENT_CACHE.set({})
         self._job_segment_content_cache_token = _JOB_SEGMENT_CONTENT_CACHE.set({})
         self._shell_use_profile_cache_token = _SHELL_USE_PROFILE_CACHE.set({})
+        self._gitlab_shell_profile_cache_token = _GITLAB_SHELL_PROFILE_CACHE.set({})
         if os.name != "posix":
             return self
         try:
@@ -133,6 +137,7 @@ class scan_session:
                 signal.alarm(0)  # type: ignore[attr-defined,unused-ignore]
                 signal.signal(signal.SIGALRM, self._old_handler)  # type: ignore[attr-defined,unused-ignore]
         finally:
+            _GITLAB_SHELL_PROFILE_CACHE.reset(self._gitlab_shell_profile_cache_token)
             _SHELL_USE_PROFILE_CACHE.reset(self._shell_use_profile_cache_token)
             _JOB_SEGMENT_CONTENT_CACHE.reset(self._job_segment_content_cache_token)
             _JOB_SEGMENT_CACHE.reset(self._job_segment_cache_token)

@@ -626,11 +626,22 @@ or expand file globs; `eval`, interpreter code operands and interpreter stdin
 can treat values as code. Quoting alone does not establish what an arbitrary
 downstream program does with a value.
 
-For a supported quoted default such as `eval "${TITLE:-fallback}"`, Taintly
-records that TITLE supplies code only when it is set and nonempty. The finding
-and chain retain that condition and require review. A supported fixed-format
-`printf` argument remains data use; other parameter operators and unresolved
-shell bindings remain review questions.
+In the GitHub shell-use profile, a supported quoted default such as
+`eval "${TITLE:-fallback}"` uses TITLE as code only when TITLE is set and nonempty. The
+finding and chain retain that condition and require review. A supported
+fixed-format `printf` argument remains data use; other parameter operators and
+unresolved shell bindings remain review questions.
+
+GitLab shallow variable findings use a separate bounded, source-bound profile:
+ordinary fixed-format `printf` arguments are data; supported `eval` and literal
+interpreter-input forms are conditional code candidates; unsupported shell
+syntax, variable precedence, or ownership stays unknown for review. Ordinary
+quoted data arguments retain their existing quiet behavior. The composite OIDC
+chain requires the exact sink job to declare a token with an audience and
+respects supported ordered MR-rule exclusions. Unresolved MR activation remains
+qualified for review. This does not
+establish runner behavior, variable availability, token issuance, federation,
+or cloud permissions.
 
 Static coverage is bounded by supported syntax, available local files and
 configured tool profiles. Review incomplete-scan diagnostics and unsupported
