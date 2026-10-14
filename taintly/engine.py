@@ -140,6 +140,10 @@ def _dedupe_supersedes(findings: list[Finding], rules: list[Rule]) -> list[Findi
     relationship is strict: only declare it when every shape the
     superseded rule detects is also detected by the superseding rule
     — otherwise we silently drop real coverage.
+
+    Conflicting declarations cannot establish specificity. Preserve every
+    member of a cycle formed by rules firing at that same location, including
+    self-supersession; keep ordinary direct-edge suppression elsewhere.
     """
     # Build a lookup: superseded_id -> set of rule IDs that supersede it.
     superseded_by: dict[str, set[str]] = {}
@@ -155,12 +159,31 @@ def _dedupe_supersedes(findings: list[Finding], rules: list[Rule]) -> list[Findi
     for f in findings:
         rules_at_loc.setdefault((f.file, f.line), set()).add(f.rule_id)
 
+    cycle_status: dict[tuple[str, int, str], bool] = {}
     kept: list[Finding] = []
     for f in findings:
         supersedors = superseded_by.get(f.rule_id)
-        if supersedors and supersedors & rules_at_loc[(f.file, f.line)]:
-            # A superseding rule fired on the same line — drop this finding.
-            continue
+        active = rules_at_loc[(f.file, f.line)]
+        if supersedors and supersedors & active:
+            key = (f.file, f.line, f.rule_id)
+            if key not in cycle_status:
+                # Follow incoming edges only through rules at this location.
+                # Returning to this rule proves a conflicting cycle. Iteration
+                # avoids recursion limits for caller-supplied rule lists.
+                pending = list(supersedors & active)
+                seen: set[str] = set()
+                cycle_status[key] = False
+                while pending:
+                    current = pending.pop()
+                    if current == f.rule_id:
+                        cycle_status[key] = True
+                        break
+                    if current not in seen:
+                        seen.add(current)
+                        pending.extend(superseded_by.get(current, set()) & active - seen)
+            if not cycle_status[key]:
+                # An unambiguous superseding rule fired on the same line.
+                continue
         kept.append(f)
     return kept
 
