@@ -17,10 +17,10 @@ from taintly.models import (
     Severity,
 )
 from taintly.parsers.shell_words import shell_words_with_expansion
+from taintly.parsers.structural import EventKind, walk_workflow
 from taintly.parsers.yaml_command_scalar import (
     decode_single_line_command_scalar as _decode_single_line_command_scalar,
 )
-from taintly.parsers.structural import EventKind, walk_workflow
 
 # Identity-gate shape shared by SEC4-GL-007: ``$GITLAB_USER_*`` compared against
 # a literal / slash-regex / bareword — the spoofable access-control match.
@@ -40,10 +40,6 @@ _REEVALUATION_CI_VARIABLE_RE = re.compile(
 
 def _shell_words_with_expansion(line: str) -> list[tuple[str, bool, bool]]:
     return shell_words_with_expansion(line, _REEVALUATION_CI_VARIABLE_RE)
-
-
-
-
 
 
 def _gitlab_command_scalar_events(
