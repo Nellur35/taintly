@@ -1123,7 +1123,7 @@ class _EventAwareScriptInjectionPattern(StructuralPattern):
                 profile = IssueContextAvailability(content)
             for source_path in paths:
                 field = source_path.rsplit(".", 1)[-1]
-                if profile.issue_field(field) is not EventSourceAvailability.ABSENT:
+                if profile.issue_field_at(field, path) is not EventSourceAvailability.ABSENT:
                     return True
             return False
 
