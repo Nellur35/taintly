@@ -14,6 +14,9 @@ from taintly.eventguard import event_guard_verdict
 from taintly.models import IncompletePatternMatches, Platform, Rule, Severity
 from taintly.parsers.structural import Event, EventKind, walk_workflow
 from taintly.parsers.structural.tokenizer import TokenKind, tokenize
+from taintly.parsers.yaml_command_scalar import (
+    decode_single_line_command_scalar as _decode_single_line_command_scalar,
+)
 from taintly.rules.github.secret_cache import _ROOT, _path, _scoped_env
 
 _UPLOAD = "actions/upload-artifact"
@@ -28,6 +31,14 @@ _PRINTF_SECRET = re.compile(
     r"^[ \t]*printf[ \t]+"
     + _PRINTF_FMT
     + r"[ \t]+\"(?P<var>\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\}))\"[ \t]+>[ \t]*(?P<path>[A-Za-z0-9_./-]+)[ \t]*$"
+)
+_PRINTF_LITERAL_ARGUMENT = r"""(?:'[^'\r\n]*'|"[^"$`\\\r\n]*"|[A-Za-z0-9_./-]+)"""
+_PRINTF_DATA = re.compile(
+    r"^[ \t]*printf[ \t]+"
+    + _PRINTF_FMT
+    + r"[ \t]+(?P<literal>"
+    + _PRINTF_LITERAL_ARGUMENT
+    + r")[ \t]+>[ \t]*(?P<path>[A-Za-z0-9_./-]+)[ \t]*$"
 )
 _PRINTF_LITERAL = re.compile(
     r"^[ \t]*printf[ \t]+" + _PRINTF_FMT + r"[ \t]+>[ \t]*(?P<path>[A-Za-z0-9_./-]+)[ \t]*$"
@@ -326,15 +337,52 @@ def _matched_format(match: re.Match[str]) -> str:
     raise AssertionError("printf format did not match either supported quote form")
 
 
+def _inert_printf_literal(argument: str) -> bool:
+    """Prove one shell argument is a literal, without evaluating shell syntax."""
+    quote = argument[:1]
+    if quote in {"'", '"'} and argument[-1:] == quote:
+        value = argument[1:-1]
+    else:
+        value = argument
+    return all(32 <= ord(char) <= 126 for char in value)
+
+
 def _run_writer_profile(
-    event: Event,
+    event: Event, source_lines: list[str]
 ) -> tuple[int, str | None, str] | list[tuple[int, str | None, str]] | None:
     """Return the sole supported write, [] for no write, or None if script is unsupported."""
-    if event.value_kind != "block_literal" or not event.block_lines:
+    if event.value_kind == "block_literal" and event.block_lines:
+        command_lines = event.block_lines
+    elif event.value_kind in {"plain", "quoted"} and isinstance(event.value, str):
+        if not 0 < event.line <= len(source_lines) or event.block_lines is not None:
+            return None
+        decoded: str | None = None
+        if event.value_kind == "plain":
+            physical_line = source_lines[event.line - 1]
+            start = event.column - 1
+            if start < 0 or physical_line[start:].rstrip() != event.value:
+                return None
+            owner_indent = len(physical_line) - len(physical_line.lstrip(" "))
+            for following in source_lines[event.line :]:
+                if not following.strip() or following.lstrip().startswith("#"):
+                    continue
+                indent = len(following) - len(following.lstrip(" "))
+                if indent > owner_indent:
+                    return None
+                break
+            decoded = event.value
+        else:
+            decoded = _decode_single_line_command_scalar(source_lines[event.line - 1], event)
+        if decoded is None or "\n" in decoded or "\r" in decoded:
+            return None
+        command_lines = ((event.line, decoded),)
+    else:
+        return None
+    if any("${{" in raw for _line_no, raw in command_lines):
         return None
     writes: list[tuple[int, str | None, str]] = []
     saw_write = False
-    for line_no, raw in event.block_lines:
+    for line_no, raw in command_lines:
         stripped = raw.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -352,6 +400,15 @@ def _run_writer_profile(
                 var = var[1:-1]
             target = match.group("path")
             writes.append((line_no, var, target))
+            saw_write = True
+            continue
+        match = _PRINTF_DATA.fullmatch(raw)
+        if match:
+            fmt = _format_profile(_matched_format(match))
+            literal = match.group("literal")
+            if fmt is None or fmt.count("%s") != 1 or not _inert_printf_literal(literal):
+                return None
+            writes.append((line_no, None, match.group("path")))
             saw_write = True
             continue
         match = _PRINTF_LITERAL.fullmatch(raw)
@@ -465,6 +522,7 @@ class SecretArtifactFlowPattern:
             job_env = _scoped_env(env_fields, job_scope, workflow_env)
             uploads: dict[int, tuple[str | None, Event, set[str]]] = {}
             ambiguous_uploads: set[int] = set()
+            run_uses_ambiguous: set[int] = set()
             step_envs: dict[int, dict[str, str]] = {}
             step_domains: dict[int, set[str]] = {}
             step_inputs: dict[int, tuple[Event | None, dict[str, str], bool]] = {}
@@ -480,19 +538,28 @@ class SecretArtifactFlowPattern:
                 step_domains[index] = possible
                 run_event = _single(leaves, scope + ("run",))
                 uses = _single(leaves, scope + ("uses",))
+                has_run_owner = scope + ("run",) in keys or scope + ("run",) in leaves
+                has_uses_owner = scope + ("uses",) in keys or scope + ("uses",) in leaves
+                if has_run_owner and has_uses_owner:
+                    run_uses_ambiguous.add(index)
                 if uses is None and scope + ("uses",) in keys:
                     ambiguous_uploads.add(index)
                 if uses and (uses.value or "").split("@", 1)[0].lower() == _UPLOAD:
-                    path_event = _single(leaves, scope + ("with", "path"))
-                    uploads[index] = (
-                        path_event.value if path_event else None,
-                        path_event or uses,
-                        possible,
-                    )
-                    if not _supported_upload(uses.value or ""):
+                    if has_run_owner and has_uses_owner:
+                        # A step with both command and action owners is invalid or
+                        # ambiguous; do not treat its upload declaration as an endpoint.
                         ambiguous_uploads.add(index)
-                    if path_event and _SECRET_HINT.search(path_event.value or ""):
-                        job_unresolved = True
+                    else:
+                        path_event = _single(leaves, scope + ("with", "path"))
+                        uploads[index] = (
+                            path_event.value if path_event else None,
+                            path_event or uses,
+                            possible,
+                        )
+                        if not _supported_upload(uses.value or ""):
+                            ambiguous_uploads.add(index)
+                        if path_event and _SECRET_HINT.search(path_event.value or ""):
+                            job_unresolved = True
                 raw_env = _layered_env(env_fields, job, index)
                 step_envs[index] = _scoped_env(env_fields, scope, job_env)
                 secret_states = {name: _secret_state(raw_env, name) for name in raw_env}
@@ -511,11 +578,14 @@ class SecretArtifactFlowPattern:
                     if not has_candidate_source:
                         continue
                     scope = job_scope + ("steps", index)
+                    if index in run_uses_ambiguous:
+                        job_unresolved = True
+                        continue
                     if run_event is None:
                         if scope + ("run",) in keys or scope + ("run",) in leaves:
                             job_unresolved = True
                         continue
-                    profile = _run_writer_profile(run_event)
+                    profile = _run_writer_profile(run_event, lines)
                     if profile is None:
                         job_unresolved = True
                         continue
@@ -545,27 +615,29 @@ class SecretArtifactFlowPattern:
                     if target is None:
                         job_unresolved = True
                         continue
+                    container_shape = _value_shape(
+                        keys, leaves, yaml_tokens, job_scope + ("container",)
+                    )
+                    shell = _effective_shell(
+                        keys,
+                        leaves,
+                        yaml_tokens,
+                        job,
+                        index,
+                        container=container_shape != "missing",
+                    )
+                    if shell is None:
+                        job_unresolved = True
+                        continue
                     if variable is None:
+                        # A literal formatter argument can be called DATA only after
+                        # the owning POSIX shell profile is established.
                         continue
                     state = _secret_state(raw_env, variable)
                     if state is None:
                         job_unresolved = True
                     elif state is True:
-                        container_shape = _value_shape(
-                            keys, leaves, yaml_tokens, job_scope + ("container",)
-                        )
-                        shell = _effective_shell(
-                            keys,
-                            leaves,
-                            yaml_tokens,
-                            job,
-                            index,
-                            container=container_shape != "missing",
-                        )
-                        if shell is None:
-                            job_unresolved = True
-                        else:
-                            writers[index] = (target, line_no, step_domains[index])
+                        writers[index] = (target, line_no, step_domains[index])
             for upload_index, (
                 raw_path,
                 evidence_event,

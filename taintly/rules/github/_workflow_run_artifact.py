@@ -22,7 +22,8 @@ from taintly.workflow_corpus import CorpusEvidence, WorkflowCorpus, WorkflowSumm
 SUPPORTED_DOWNLOAD_USES = frozenset(
     {"actions/download-artifact@v4", "actions/download-artifact@v5"}
 )
-_REQUIRED_INPUTS = frozenset({"name", "run-id", "repository", "github-token", "path"})
+_REQUIRED_INPUTS = frozenset({"name", "run-id", "github-token", "path"})
+_SUPPORTED_INPUTS = _REQUIRED_INPUTS | {"repository"}
 _RUN_ID_PATH = "github.event.workflow_run.id"
 _REPOSITORY_PATH = "github.repository"
 _TOKEN_PATHS = frozenset({"github.token", "secrets.GITHUB_TOKEN"})
@@ -245,22 +246,27 @@ def _download_for_step(
             )
             return None
         inputs[name] = (value, event)
+    # v4/v5 action.yml defaults a genuinely absent repository input to
+    # github.repository. Present empty, non-scalar, merged or duplicate
+    # inputs cannot borrow that default. Other transfer inputs stay explicit.
+    repository, repository_event, error = _unique_scalar(index, with_path + ("repository",), owners)
+    if error:
+        issues.append(CoverageIssue(filepath, "download repository input is ambiguous"))
+        return None
+    if repository_event is None:
+        repository = "${{ github.repository }}"
     input_keys = {
         str(path[-1])
         for path in index.keys
         if len(path) == len(with_path) + 1 and path[: len(with_path)] == with_path
     }
-    if input_keys != _REQUIRED_INPUTS:
+    if not _REQUIRED_INPUTS <= input_keys <= _SUPPORTED_INPUTS:
         issues.append(
             CoverageIssue(filepath, "download action has unsupported or duplicate inputs")
         )
         return None
     name, path = inputs["name"][0], inputs["path"][0]
-    run_id, repository, token = (
-        inputs["run-id"][0],
-        inputs["repository"][0],
-        inputs["github-token"][0],
-    )
+    run_id, token = inputs["run-id"][0], inputs["github-token"][0]
     destination = _safe_directory(path)
     if not _LITERAL_NAME.fullmatch(name):
         issues.append(
@@ -277,6 +283,7 @@ def _download_for_step(
         return None
     if (
         not _is_exact_identifier_expression(run_id, _RUN_ID_PATH)
+        or repository is None
         or not _is_exact_identifier_expression(repository, _REPOSITORY_PATH)
         or not any(_is_exact_identifier_expression(token, path) for path in _TOKEN_PATHS)
     ):
@@ -470,6 +477,19 @@ def _is_fixed_jq_data(command: str, destination: str) -> bool:
     return bool(match and _under_directory(match.group("operand"), destination))
 
 
+def _is_literal_digest_data(command: str, destination: str) -> bool:
+    """Recognize one literal digest read; this establishes no trust check."""
+    match = re.fullmatch(
+        r"[ \t]*sha256sum[ \t]+(?P<operand>(?:\./)?[A-Za-z0-9._/-]+)[ \t]*",
+        command,
+    )
+    return bool(
+        match
+        and not match.group("operand").startswith("-")
+        and _under_directory(match.group("operand"), destination)
+    )
+
+
 def _analyze_workflow(
     workflow: WorkflowSummary,
 ) -> tuple[list[CorpusEvidence], list[CoverageIssue]]:
@@ -562,8 +582,18 @@ def _analyze_workflow(
             continue
         invocation = recognize_local_file_invocation(step.run.value)
         if invocation is None:
-            if _is_fixed_jq_data(step.run.value, download.destination):
-                _effective_shell(index, step, filepath, issues)
+            if _is_fixed_jq_data(step.run.value, download.destination) or _is_literal_digest_data(
+                step.run.value, download.destination
+            ):
+                if step.fields.get("uses") is not None:
+                    issues.append(
+                        CoverageIssue(
+                            filepath,
+                            "data run step is combined with an action invocation",
+                        )
+                    )
+                else:
+                    _effective_shell(index, step, filepath, issues)
                 continue
             if download.destination in step.run.value:
                 issues.append(
