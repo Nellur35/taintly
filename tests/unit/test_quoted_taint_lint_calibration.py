@@ -134,14 +134,16 @@ jobs:
 
 
 @pytest.mark.parametrize(
-    "run_line",
+    ("run_line", "code_bearing"),
     [
-        "run: echo $TITLE",
-        'run: eval "$TITLE"',
+        ("run: echo $TITLE", False),
+        ('run: eval "$TITLE"', True),
     ],
     ids=["unquoted-shell-reference", "eval-reparser"],
 )
-def test_unsafe_taint_stays_high_under_taint_gh_001(run_line, tmp_path, taint_rules):
+def test_taint_metadata_distinguishes_unresolved_argument_from_code(
+    run_line, code_bearing, tmp_path, taint_rules
+):
     content = f"""name: unsafe taint control
 on:
   pull_request_target:
@@ -161,9 +163,17 @@ jobs:
     injection = [finding for finding in findings if finding.rule_id == "TAINT-GH-001"]
 
     assert len(injection) == 1
-    assert injection[0].exploitability == "high"
-    assert injection[0].confidence == "high"
-    assert injection[0].review_needed is False
+    if code_bearing:
+        assert injection[0].exploitability == "high"
+        assert injection[0].confidence == "high"
+        assert injection[0].review_needed is False
+        assert injection[0].severity is Severity.CRITICAL
+    else:
+        assert injection[0].exploitability != "high"
+        assert injection[0].confidence == "low"
+        assert injection[0].review_needed is True
+        assert injection[0].severity is Severity.MEDIUM
+        assert "shell-use-unknown" in injection[0].context_tags
     assert not any(finding.rule_id == "TAINT-GH-012" for finding in findings)
 
 

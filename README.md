@@ -12,13 +12,13 @@ Security scanner for CI/CD pipelines. Reads GitHub Actions, GitLab CI, Jenkins, 
 
 
 
-- Multi-stage taint analysis with provenance — traces attacker-controlled values through `env`, `$GITHUB_ENV`, `$GITHUB_OUTPUT`, and AI-agent step outputs across steps, with full source-to-sink chains.
+- Multi-stage taint analysis with provenance — traces tracked values through environment variables, `$GITHUB_ENV`, step outputs and job outputs, with source locations and propagation paths.
 
 - Cross-artifact and cross-workflow input-flow analysis across local composite `action.yml` and reusable-workflow calls. Findings describe configured local source-to-sink candidates; execution, checkout correspondence, token authority and secrets remain review questions.
 
-- Kill-chain composition — correlates findings that are individually lower-severity (e.g. a persisted checkout credential + a fork-reachable trigger + a write-scoped token) into a single CRITICAL composite when together they form an exploitable chain.
+- Attack-path composition — combines compatible source, execution and privilege evidence in the relevant jobs and steps. Composite findings retain review requirements where runtime prerequisites are unverified.
 
-- Contextual exploitability — same rule, different verdict depending on whether the job has secrets, write permissions, or a fork-reachable trigger.
+- Contextual exploitability — uses owning events, guards, declared permissions and credential references to qualify findings. A reference or configured grant does not establish effective runtime access.
 
 - AI / ML category — pickle deserialization, `trust_remote_code=True`, agent-output taint, MCP server hygiene.
 
@@ -254,7 +254,7 @@ findings. Three patterns, each with a recipe.
 
 |------|---------|
 
-| `0` | Scan completed cleanly (no findings above the configured threshold, or `--fail-on` not set) |
+| `0` | No HIGH or CRITICAL findings, no configured `--fail-on` threshold reached, and no coverage error |
 
 | `1` | Scan completed with HIGH-severity findings (or with findings at or above `--fail-on` severity) |
 
@@ -584,9 +584,9 @@ Each finding carries three signals:
 
 | Severity | How serious the policy violation is |
 
-| Confidence | How sure the detector is it found a real instance |
+| Confidence | How strongly the supported detector evidence establishes the reported pattern |
 
-| Exploitability | How much damage is reachable in this particular workflow |
+| Exploitability | Static estimate of leverage suggested by workflow context; runtime authority may be unknown |
 
 
 
@@ -612,6 +612,25 @@ scores or machine-readable output, and does not prove a shared attack path.
 
 
 ## Coverage
+
+### Interpreting findings
+Taintly analyzes configuration; it does not execute your workflows or prove
+that an attack succeeded. Follow the cited source-to-sink path and read the
+confidence, `review_needed`, context notes and remediation together. Missing
+runtime information remains a review question.
+
+Environment transport, shell source interpolation and interpreter input have
+different meanings. Ordinary shell parameter expansion does not recursively
+execute syntax stored in a variable. Unquoted expansion can still split words
+or expand file globs; `eval`, interpreter code operands and interpreter stdin
+can treat values as code. Quoting alone does not establish what an arbitrary
+downstream program does with a value.
+
+Static coverage is bounded by supported syntax, available local files and
+configured tool profiles. Review incomplete-scan diagnostics and unsupported
+cases alongside findings. A clean scan or a high score is not a security
+certificate.
+
 
 
 

@@ -330,6 +330,8 @@ def _is_high_blast_radius_action(db: Database, file: str, line: int) -> bool:  #
 def _compose_chain_gh_103(db: Database) -> Iterable[tuple[str, Fact]]:
     """Taint candidate plus compatible external event context, review needed."""
     for f in findings_by_rule(db, "TAINT-GH-001"):
+        if f.shell_use == "data":
+            continue  # All contributors are validated data uses, not execution paths.
         if not f.job:
             continue
         ctx = context_for(db, f.file, f.job)
@@ -344,11 +346,18 @@ def _compose_chain_gh_103(db: Database) -> Iterable[tuple[str, Fact]]:
         # source→hop→sink path (its snippet) so the upgraded finding shows
         # WHY it chained, not just the conclusion.
         path_note = f" Taint path: {f.snippet}" if f.snippet else ""
+        role_note = (
+            " Supported configured code use is source-bound."
+            if f.shell_use == "code"
+            else " Shell code/data consumption remains unresolved."
+        )
         snippet = (
             "Review: TAINT-GH-001 source-to-shell candidate in externally triggered "
             "context. Verify attacker control, owning guards and shell interpretation. "
             "A trusted triggering actor does not establish input integrity; runtime "
-            "execution, secret availability and token authority remain unverified." + path_note
+            "execution, secret availability and token authority remain unverified."
+            + role_note
+            + path_note
         )
         yield (
             "composite",

