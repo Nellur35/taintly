@@ -88,11 +88,14 @@ _FAMILIES: tuple[FindingFamily, ...] = (
         id="privileged_pr_trigger",
         title="Privileged PR-trigger exposure",
         why=(
-            "Workflows that run with write permissions or secrets in "
-            "response to fork-controlled events (pull_request_target, "
-            "issue_comment) are the single biggest source of public CI "
-            "compromises. Each finding in this family expands the attacker's "
-            "control surface."
+            "This family groups pull_request_target trigger and PR-head checkout candidates with "
+            "workflow_run observations. A member finding describes configured workflow structure; "
+            "it does not by itself prove a later command executes PR-controlled source, the "
+            "effective token has write authority, or a referenced secret is available to the "
+            "consuming job. Review the owning event, job and step, commands and local inputs, "
+            "permission settings, and explicit credential references at the actual consumer. "
+            "These checks are conditional case review, not a prevalence estimate; family "
+            "membership alone does not mean every configuration is an exploitable exposure."
         ),
         # Only trigger-level rules belong here.  SEC4-GH-004 is script
         # injection and SEC4-GH-005 is credential persistence — those
@@ -134,6 +137,7 @@ _FAMILIES: tuple[FindingFamily, ...] = (
                 "SEC4-GH-008",
                 "SEC4-GH-011",
                 "TAINT-GH-001",
+                "TAINT-GH-020",
             }
         ),
     ),

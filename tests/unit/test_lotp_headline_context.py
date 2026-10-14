@@ -81,6 +81,11 @@ def test_evidenced_candidate_keeps_legacy_identity_and_configured_title(tmp_path
     assert finding.rule_id == _RULE_ID
     assert finding.severity == rule.severity == Severity.CRITICAL
     assert finding.title == rule.title
-    assert finding.review_needed is False
+    assert finding.review_needed is True
+    assert "authority-evidenced" in finding.context_tags
+    assert (
+        "Owning job/step guard requires runtime evaluation for declared events: pull_request_target. Execution and effective consuming credentials remain unverified."
+        in finding.context_notes
+    )
     assert "may run" in finding.title.lower()
     assert "executed" not in finding.title.lower()

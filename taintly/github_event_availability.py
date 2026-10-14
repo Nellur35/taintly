@@ -309,7 +309,9 @@ def _walker_matches_map_keys(
     return tuple(names)
 
 
-def _explicit_trigger_names(content: str) -> tuple[str, ...] | None:
+def _explicit_trigger_names(
+    content: str, *, supported_events: frozenset[str] = frozenset({"push", "issues"})
+) -> tuple[str, ...] | None:
     events = tuple(
         walk_workflow(
             "workflow.yml",
@@ -331,6 +333,9 @@ def _explicit_trigger_names(content: str) -> tuple[str, ...] | None:
     try:
         tokens = list(tokenize(content))
     except TokenizerError:
+        return None
+    # A recoverable trigger subtree is insufficient if the full token structure is incomplete.
+    if _flow_structure(tokens) is None:
         return None
     root_tokens = [
         index
@@ -365,7 +370,7 @@ def _explicit_trigger_names(content: str) -> tuple[str, ...] | None:
         names = None if keys is None else _walker_matches_map_keys(events, keys)
     else:
         return None
-    if not names or any(name not in {"push", "issues"} for name in names):
+    if not names or any(name not in supported_events for name in names):
         return None
     return names
 

