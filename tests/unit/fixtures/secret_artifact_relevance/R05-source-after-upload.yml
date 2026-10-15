@@ -1,0 +1,20 @@
+name: source-after-upload
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upload existing public report
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-report
+          path: reports/build.txt
+      - name: Write credential report later
+        env:
+          REPORT_TOKEN: ${{ secrets.REPORT_TOKEN }}
+        run: |
+          mkdir -p reports
+          printf 'credential=%s\n' "$REPORT_TOKEN" > reports/build.txt

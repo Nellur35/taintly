@@ -1,0 +1,169 @@
+{
+  "schema": "sec6-gh-016-relevance-unit-fixtures/2",
+  "source_manifest_sha256": "bb79f1e92ba8d69f2a73365e2e3af262188311a76947b3a4e556ae2a47b43c00",
+  "source_review_receipt_sha256": "506f24787ed62a0754345cff8c3d697cd31d7841545a0778e1f35565d8bbabec",
+  "cases": [
+    {
+      "case_id": "R01-ordered-direct-secret-write",
+      "fixture": "R01-ordered-direct-secret-write.yml",
+      "source_sha256": "8acd75ad6e0abd4ee4d17c52a183dd71c272ad3fcfe1e32ee8080bc3db7dcbee",
+      "canonical_lf_sha256": "8acd75ad6e0abd4ee4d17c52a183dd71c272ad3fcfe1e32ee8080bc3db7dcbee",
+      "expected": "confirmed_candidate",
+      "expected_hit": {
+        "line": 15,
+        "snippet": "printf 'credential=%s\\n' \"$REPORT_TOKEN\" > reports/build.txt [literal artifact path at line 20]",
+        "owning_job": "build"
+      }
+    },
+    {
+      "case_id": "R02-action-input-only",
+      "fixture": "R02-action-input-only.yml",
+      "source_sha256": "f8d530035b857aa51ba3e96296e089608505a2705b619e76e2c9a6c474ddcb72",
+      "canonical_lf_sha256": "f8d530035b857aa51ba3e96296e089608505a2705b619e76e2c9a6c474ddcb72",
+      "expected": "complete_no_named_finding"
+    },
+    {
+      "case_id": "R03-sibling-job-only",
+      "fixture": "R03-sibling-job-only.yml",
+      "source_sha256": "45b7314a98deb2efd60159d3b7ad63bb6e2a2195656a5483edc82a7ab4ae62af",
+      "canonical_lf_sha256": "45b7314a98deb2efd60159d3b7ad63bb6e2a2195656a5483edc82a7ab4ae62af",
+      "expected": "complete_no_named_finding"
+    },
+    {
+      "case_id": "R04-literal-log-hint",
+      "fixture": "R04-literal-log-hint.yml",
+      "source_sha256": "cfe53d3791aec12584504d7fbb3cca000d319251bcd574beca408e49a059de15",
+      "canonical_lf_sha256": "cfe53d3791aec12584504d7fbb3cca000d319251bcd574beca408e49a059de15",
+      "expected": "complete_no_named_finding"
+    },
+    {
+      "case_id": "R05-source-after-upload",
+      "fixture": "R05-source-after-upload.yml",
+      "source_sha256": "fa7ccc2aacb308268b532caea117299cf2560e925088415923ed981dd003a196",
+      "canonical_lf_sha256": "fa7ccc2aacb308268b532caea117299cf2560e925088415923ed981dd003a196",
+      "expected": "complete_no_named_finding"
+    },
+    {
+      "case_id": "R06-reusable-action-input-only",
+      "fixture": "R06-reusable-action-input-only.yml",
+      "source_sha256": "c6d0fedc62869de5ace7298a0f5c5e8cd63ba67a14d918644706625e769dd9b0",
+      "canonical_lf_sha256": "c6d0fedc62869de5ace7298a0f5c5e8cd63ba67a14d918644706625e769dd9b0",
+      "expected": "complete_no_named_finding"
+    },
+    {
+      "case_id": "R07-same-job-dynamic-writer-unknown",
+      "fixture": "R07-same-job-dynamic-writer-unknown.yml",
+      "source_sha256": "643e4de254c6db979c3d83620b9ceddb222113f26e3840f2e570f423cc5741c5",
+      "canonical_lf_sha256": "643e4de254c6db979c3d83620b9ceddb222113f26e3840f2e570f423cc5741c5",
+      "expected": "incomplete_unknown_no_confirmed_finding"
+    },
+    {
+      "case_id": "R08-unrelated-action-alias",
+      "fixture": "R08-unrelated-action-alias.yml",
+      "source_sha256": "94f9b07dd2cb369c061fcae92b4e7a9888f1656c0bdcffa97f81c2ce3c6171ac",
+      "canonical_lf_sha256": "94f9b07dd2cb369c061fcae92b4e7a9888f1656c0bdcffa97f81c2ce3c6171ac",
+      "expected": "complete_no_named_finding"
+    },
+    {
+      "case_id": "R09-finite-matrix-data",
+      "fixture": "R09-finite-matrix-data.yml",
+      "source_sha256": "140cb5dc5436062ba6d87ff3f86fc82cdb91f03f0a0b68e86dc09ce20f1d836f",
+      "canonical_lf_sha256": "140cb5dc5436062ba6d87ff3f86fc82cdb91f03f0a0b68e86dc09ce20f1d836f",
+      "expected": "complete_no_named_finding"
+    },
+    {
+      "case_id": "R10-mixed-valid-and-unknown-jobs",
+      "fixture": "R10-mixed-valid-and-unknown-jobs.yml",
+      "source_sha256": "7648b0b02e04986e55213df9bcc64466c3700e7be028c5cbcaccb59de9810be2",
+      "canonical_lf_sha256": "7648b0b02e04986e55213df9bcc64466c3700e7be028c5cbcaccb59de9810be2",
+      "expected": "incomplete_unknown_with_independent_finding",
+      "expected_hit": {
+        "line": 15,
+        "snippet": "printf 'credential=%s\\n' \"$REPORT_TOKEN\" > reports/build.txt [literal artifact path at line 20]",
+        "owning_job": "publish"
+      }
+    },
+    {
+      "case_id": "R11-mixed-matrix-secret-expression",
+      "fixture": "R11-mixed-matrix-secret-expression.yml",
+      "source_sha256": "b7397220636b79509d90ccb9bd25e56511d4848c8f225dab92131cb9a7cdf9db",
+      "canonical_lf_sha256": "b7397220636b79509d90ccb9bd25e56511d4848c8f225dab92131cb9a7cdf9db",
+      "expected": "incomplete_unknown_no_confirmed_finding"
+    },
+    {
+      "case_id": "R12-opaque-env-consumer",
+      "fixture": "R12-opaque-env-consumer.yml",
+      "source_sha256": "243615561ca6f456fcae42a28949897d328112d27c8eea729bf71bf9d4abdd9d",
+      "canonical_lf_sha256": "243615561ca6f456fcae42a28949897d328112d27c8eea729bf71bf9d4abdd9d",
+      "expected": "incomplete_unknown_no_confirmed_finding"
+    },
+    {
+      "case_id": "R13-aliased-secret-env-consumer",
+      "fixture": "R13-aliased-secret-env-consumer.yml",
+      "source_sha256": "0b4ea02dbfcc77ac0e5b3ea312aefda92df248f9c4aacde8218ec53c8c7ad968",
+      "canonical_lf_sha256": "0b4ea02dbfcc77ac0e5b3ea312aefda92df248f9c4aacde8218ec53c8c7ad968",
+      "expected": "incomplete_unknown_no_confirmed_finding"
+    },
+    {
+      "case_id": "R14-unsupported-run-owner",
+      "fixture": "R14-unsupported-run-owner.yml",
+      "source_sha256": "89e38bdc7208fbf714cf50024e6a7ed16a1e427555588752ad8b942d3f51b333",
+      "canonical_lf_sha256": "89e38bdc7208fbf714cf50024e6a7ed16a1e427555588752ad8b942d3f51b333",
+      "expected": "incomplete_unknown_no_confirmed_finding"
+    },
+    {
+      "case_id": "R15-dynamic-matrix-source",
+      "fixture": "R15-dynamic-matrix-source.yml",
+      "source_sha256": "283ffe061ce57affb076933fad93962c6d5d934e4154dd95bf67e77891e5b1b3",
+      "canonical_lf_sha256": "283ffe061ce57affb076933fad93962c6d5d934e4154dd95bf67e77891e5b1b3",
+      "expected": "incomplete_unknown_no_confirmed_finding"
+    },
+    {
+      "case_id": "R16-embedded-mixed-secret-expression",
+      "fixture": "R16-embedded-mixed-secret-expression.yml",
+      "source_sha256": "3d60c9970c272f2e09840edf5c9c4ed1c7a9055d18155ea0e69cc21c3eb8cccb",
+      "canonical_lf_sha256": "3d60c9970c272f2e09840edf5c9c4ed1c7a9055d18155ea0e69cc21c3eb8cccb",
+      "expected": "incomplete_unknown_no_confirmed_finding"
+    },
+    {
+      "case_id": "R17-supported-event-dynamic-matrix",
+      "fixture": "R17-supported-event-dynamic-matrix.yml",
+      "source_sha256": "273f01c2857a65df3b3cbd46ce9c4be68efef684bddd242b90ed1bcf40b737d3",
+      "canonical_lf_sha256": "273f01c2857a65df3b3cbd46ce9c4be68efef684bddd242b90ed1bcf40b737d3",
+      "expected": "incomplete_unknown_no_confirmed_finding"
+    },
+    {
+      "case_id": "R18-heterogeneous-matrix-domain",
+      "fixture": "R18-heterogeneous-matrix-domain.yml",
+      "source_sha256": "d8e9a1cfd820173303650e484b7194986237747d1dd493265fc2da3c77a95245",
+      "canonical_lf_sha256": "d8e9a1cfd820173303650e484b7194986237747d1dd493265fc2da3c77a95245",
+      "expected": "incomplete_unknown_no_confirmed_finding"
+    },
+    {
+      "case_id": "R19-trailing-empty-matrix-container",
+      "fixture": "R19-trailing-empty-matrix-container.yml",
+      "source_sha256": "fa8e949a84e00f7280d589f03188b467f81ca55d12327188d8edea448ed81bab",
+      "canonical_lf_sha256": "fa8e949a84e00f7280d589f03188b467f81ca55d12327188d8edea448ed81bab",
+      "expected": "incomplete_unknown_no_confirmed_finding"
+    },
+    {
+      "case_id": "R20-R09-block-finite-matrix",
+      "fixture": "R20-R09-block-finite-matrix.yml",
+      "source_sha256": "a90419ee231809d47aaa127e8c7bf9d25bb03b1825b56818dfd6897e821356da",
+      "canonical_lf_sha256": "a90419ee231809d47aaa127e8c7bf9d25bb03b1825b56818dfd6897e821356da",
+      "expected": "complete_no_named_finding",
+      "equivalent_to": "R09-finite-matrix-data"
+    },
+    {
+      "case_id": "R21-R19-block-empty-matrix-member",
+      "fixture": "R21-R19-block-empty-matrix-member.yml",
+      "source_sha256": "da4aa5d92bc31fc219f9514ec3f8ef837095ec34eb0a1aa02673b30669080490",
+      "canonical_lf_sha256": "da4aa5d92bc31fc219f9514ec3f8ef837095ec34eb0a1aa02673b30669080490",
+      "expected": "incomplete_unknown_no_confirmed_finding",
+      "equivalent_to": "R19-trailing-empty-matrix-container"
+    }
+  ],
+  "status": "19 source-reviewed cases plus 2 Astra-accepted related matrix-spelling controls",
+  "supplemental_source_manifest_sha256": "3f5efede628aa48387d2d26f22b9c3ed9556f8f2c886178a89e568bbfcc9fbca",
+  "supplemental_source_review_receipt_sha256": "4542514a2889b22973cb083c7bc538631806a5320914926889830704b7a84092"
+}

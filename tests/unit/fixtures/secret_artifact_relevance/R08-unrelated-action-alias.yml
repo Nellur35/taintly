@@ -1,0 +1,21 @@
+name: unrelated-action-alias
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: &private_key ${{ secrets.APP_PRIVATE_KEY }}
+      - name: Upload public report
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: reports/public.txt
+      - uses: vendor/report-action@v1
+        with:
+          credential: *private_key

@@ -1,0 +1,29 @@
+name: finite-matrix-data
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rid:
+          - linux-x64
+          - win-x64
+    steps:
+      - name: Prepare finite matrix report
+        env:
+          RUNTIME_SUFFIX: ${{ matrix.rid }}
+        run: |
+          mkdir -p reports
+          printf 'runtime=%s\n' "$RUNTIME_SUFFIX" > reports/runtime.txt
+      - name: Upload runtime report
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-report
+          path: reports/runtime.txt
+      - uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}

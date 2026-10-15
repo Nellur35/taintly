@@ -1,0 +1,19 @@
+name: unsupported-run-owner
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Unsupported command owner
+        env:
+          REPORT_TOKEN: ${{ secrets.REPORT_TOKEN }}
+        run:
+          command: python scripts/export_report.py
+      - name: Upload generated report
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: reports/build.txt

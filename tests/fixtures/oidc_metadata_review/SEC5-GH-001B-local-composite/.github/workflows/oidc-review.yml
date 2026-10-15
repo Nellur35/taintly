@@ -1,0 +1,22 @@
+name: OIDC declaration and local action review
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Run the repository local composite action
+        uses: ./.github/actions/harmless-check
+  documentation:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: none
+    steps:
+      - run: echo 'documentation only'

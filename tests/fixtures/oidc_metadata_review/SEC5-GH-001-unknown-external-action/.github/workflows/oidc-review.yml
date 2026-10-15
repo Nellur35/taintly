@@ -1,0 +1,24 @@
+name: OIDC declaration review boundary
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request the App token through the external action
+        id: app-token
+        uses: shogo82148/actions-github-app-token@d75b03a80d0450d087a12b72dff2d987a4ced993
+      - name: Use the issued token for a harmless verification
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: test -n "$APP_TOKEN"
+  documentation:
+    permissions:
+      contents: read
+      id-token: none
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "documentation check"

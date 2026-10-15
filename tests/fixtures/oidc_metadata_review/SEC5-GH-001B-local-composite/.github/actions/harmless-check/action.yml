@@ -1,0 +1,8 @@
+name: Harmless local check
+description: A local composite action with no OIDC request or exchange logic.
+runs:
+  using: composite
+  steps:
+    - name: Emit a harmless marker
+      shell: bash
+      run: echo "local check"

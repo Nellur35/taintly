@@ -1,0 +1,13 @@
+name: unrelated multi-event workflow without artifact transfer
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  push:
+    branches: [main]
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record triggering run metadata
+        run: echo "run ${{ github.event.workflow_run.id }}"
