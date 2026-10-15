@@ -1,0 +1,30 @@
+name: relevant artifact workflow with unrelated sibling execution context
+on:
+  workflow_run:
+    workflows: [PR Preview]
+    types: [completed]
+jobs:
+  consume:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Download preview artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: pr-preview
+          run-id: ${{ github.event.workflow_run.id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: incoming
+      - name: Execute downloaded script
+        run: bash incoming/preview.sh
+  unrelated:
+    runs-on: ubuntu-latest
+    container: alpine:latest
+    steps:
+      - name: Unrelated custom-context step
+        run: |
+          echo setup
+          ./local-check.sh

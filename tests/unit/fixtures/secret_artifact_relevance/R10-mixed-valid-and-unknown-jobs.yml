@@ -1,0 +1,35 @@
+name: mixed-valid-and-unknown-jobs
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write supported credential file
+        env:
+          REPORT_TOKEN: ${{ secrets.REPORT_TOKEN }}
+        run: |
+          mkdir -p reports
+          printf 'credential=%s\n' "$REPORT_TOKEN" > reports/build.txt
+      - name: Upload supported credential file
+        uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: reports/build.txt
+  investigate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write to unresolved destination
+        env:
+          REPORT_TOKEN: ${{ secrets.REPORT_TOKEN }}
+          REPORT_PATH: ${{ vars.REPORT_PATH }}
+        run: |
+          mkdir -p reports
+          printf 'credential=%s\n' "$REPORT_TOKEN" > "$REPORT_PATH"
+      - name: Upload investigated report
+        uses: actions/upload-artifact@v4
+        with:
+          name: investigated
+          path: reports/investigated.txt

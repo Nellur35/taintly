@@ -490,12 +490,47 @@ def _is_literal_digest_data(command: str, destination: str) -> bool:
     )
 
 
+def _possible_download_jobs(index: _Index) -> set[str]:
+    """Return jobs with a structurally visible plausible download action.
+
+    Relevance is established before trigger or unrelated command diagnostics:
+    workflow_run and API/logging steps alone do not make this rule applicable.
+    A plausible but unsupported action reference remains in scope for UNKNOWN.
+    """
+    jobs: set[str] = set()
+    for event in index.events:
+        path = event.path
+        if (
+            event.kind is EventKind.LEAF_SCALAR
+            and len(path) >= 5
+            and path[0] == "jobs"
+            and isinstance(path[1], str)
+            and path[2] == "steps"
+            and isinstance(path[3], int)
+            and path[4] == "uses"
+            and isinstance(event.value, str)
+            and "download-artifact" in event.value.casefold()
+        ):
+            jobs.add(path[1])
+    return jobs
+
+
 def _analyze_workflow(
     workflow: WorkflowSummary,
 ) -> tuple[list[CorpusEvidence], list[CoverageIssue]]:
     filepath = workflow.filepath
     issues: list[CoverageIssue] = []
     if "workflow_run" not in workflow.raw_event_names:
+        return [], []
+    index = _Index.build(workflow)
+    possible_jobs = _possible_download_jobs(index)
+    if index.error:
+        # When ownership is damaged, keep a possible artifact endpoint UNKNOWN.
+        # Otherwise an unrelated malformed workflow_run file is out of scope.
+        if possible_jobs or "download-artifact" in workflow.content.casefold():
+            return [], [CoverageIssue(filepath, index.error)]
+        return [], []
+    if not possible_jobs:
         return [], []
     if _explicit_trigger_names(workflow.content, supported_events=frozenset({"workflow_run"})) != (
         "workflow_run",
@@ -506,20 +541,12 @@ def _analyze_workflow(
                 "workflow_run trigger profile is malformed, aliased, or has unsupported event union",
             )
         ]
-    index = _Index.build(workflow)
-    if index.error:
-        return [], [CoverageIssue(filepath, index.error)]
     if len(index.keys.get(("jobs",), ())) != 1:
         return [], [CoverageIssue(filepath, "jobs mapping is missing or duplicated")]
-    job_names = {
-        str(path[1])
-        for path in set(index.keys) | set(index.values)
-        if len(path) >= 2 and path[0] == "jobs" and isinstance(path[1], str)
-    }
-    steps = _steps(index, job_names, issues, filepath)
+    steps = _steps(index, possible_jobs, issues, filepath)
     downloads: list[_Download] = []
     for step in steps:
-        if step.uses and "download-artifact" in step.uses:
+        if step.uses and "download-artifact" in step.uses.casefold():
             if step.run is not None:
                 issues.append(
                     CoverageIssue(
@@ -559,7 +586,10 @@ def _analyze_workflow(
     # No container or working-directory translation is modeled.
     for path in index.keys:
         if path == ("container",) or (
-            len(path) == 3 and path[0] == "jobs" and path[2] == "container"
+            len(path) == 3
+            and path[0] == "jobs"
+            and path[1] == download.job
+            and path[2] == "container"
         ):
             issues.append(
                 CoverageIssue(
@@ -568,7 +598,10 @@ def _analyze_workflow(
                 )
             )
             return [], issues
-        if path[-1:] == ("working-directory",):
+        if path[-1:] == ("working-directory",) and (
+            path[:2] == ("defaults", "run")
+            or (len(path) >= 3 and path[0] == "jobs" and path[1] == download.job)
+        ):
             issues.append(
                 CoverageIssue(filepath, "working-directory changes are outside prototype coverage")
             )

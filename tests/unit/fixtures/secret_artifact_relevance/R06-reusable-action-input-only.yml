@@ -1,0 +1,16 @@
+name: reusable-action-input-only
+on:
+  workflow_call:
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - name: Upload public metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: metadata
+          path: reports/metadata.json

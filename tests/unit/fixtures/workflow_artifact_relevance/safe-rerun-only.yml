@@ -1,0 +1,15 @@
+name: unrelated workflow_run rerun only
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+permissions:
+  actions: write
+jobs:
+  rerun:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request rerun for the triggering run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api --method POST repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}/rerun

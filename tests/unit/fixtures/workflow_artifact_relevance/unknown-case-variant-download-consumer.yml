@@ -1,0 +1,21 @@
+name: plausible case-variant artifact consumer
+on:
+  workflow_run:
+    workflows: [PR Preview]
+    types: [completed]
+jobs:
+  consume:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Download preview artifact
+        uses: third-party/Download-Artifact@main
+        with:
+          name: pr-preview
+          run-id: ${{ github.event.workflow_run.id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: incoming
+      - name: Execute possible downloaded script
+        run: bash incoming/preview.sh

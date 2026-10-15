@@ -1,0 +1,21 @@
+name: same-job-dynamic-writer-unknown
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write to selected destination
+        env:
+          REPORT_TOKEN: ${{ secrets.REPORT_TOKEN }}
+          REPORT_PATH: ${{ vars.REPORT_PATH }}
+        run: |
+          mkdir -p reports
+          printf 'credential=%s\n' "$REPORT_TOKEN" > "$REPORT_PATH"
+      - name: Upload selected report
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: reports/build.txt

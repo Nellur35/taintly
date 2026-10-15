@@ -1,0 +1,23 @@
+name: plausible artifact consumer with unsupported event union
+on:
+  workflow_run:
+    workflows: [PR Preview]
+    types: [completed]
+  push:
+    branches: [main]
+jobs:
+  consume:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Download preview artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: pr-preview
+          run-id: ${{ github.event.workflow_run.id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          path: incoming
+      - name: Execute downloaded script
+        run: bash incoming/preview.sh

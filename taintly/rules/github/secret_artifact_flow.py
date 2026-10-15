@@ -22,7 +22,64 @@ from taintly.rules.github.secret_cache import _ROOT, _path, _scoped_env
 _UPLOAD = "actions/upload-artifact"
 _GLOB = re.compile(r"[*?\[]")
 _SECRET_REF = re.compile(r"\s*\$\{\{\s*secrets\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}\s*\Z")
-_SECRET_HINT = re.compile(r"\b(?:secrets\s*(?:\.|\[)|github\.token\b)", re.IGNORECASE)
+_SECRET_TERM = re.compile(
+    r"(?<![A-Za-z0-9_.])(?:secrets\s*(?:\.|\[)|github\.token\b)",
+    re.IGNORECASE,
+)
+_CONTEXT_DATA_EXPRESSION = re.compile(
+    r"\s*\$\{\{\s*(?:"
+    r"vars\.[A-Za-z_][A-Za-z0-9_.-]*|"
+    r"github\.(?!token\b)[A-Za-z_][A-Za-z0-9_.]*"
+    r")\s*\}\}\s*",
+    re.IGNORECASE,
+)
+_MATRIX_DATA_EXPRESSION = re.compile(
+    r"\s*\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}\s*",
+    re.IGNORECASE,
+)
+
+
+def _has_secret_expression(value: str) -> bool:
+    """Find secret-context references inside expressions, outside string literals."""
+    position = 0
+    while True:
+        start = value.find("${{", position)
+        if start < 0:
+            return False
+        index = start + 3
+        quoted = False
+        body: list[str] = []
+        while index < len(value):
+            char = value[index]
+            if quoted:
+                if char == "'":
+                    if index + 1 < len(value) and value[index + 1] == "'":
+                        index += 2
+                        continue
+                    quoted = False
+                index += 1
+                continue
+            if char == "'":
+                quoted = True
+                index += 1
+                continue
+            if value.startswith("}}", index):
+                if _SECRET_TERM.search("".join(body)):
+                    return True
+                position = index + 2
+                break
+            body.append(char)
+            index += 1
+        else:
+            # An unfinished expression cannot establish safety. Preserve a
+            # candidate if a secret reference is visible anywhere in the tail.
+            return _SECRET_TERM.search(value[start + 3 :]) is not None
+
+
+_FILE_SINK_HINT = re.compile(
+    r">|\b(?:tee|install|cp|mv)\b|\b(?:open|write_text|write_bytes|writeFile|createWriteStream)\s*\(",
+    re.IGNORECASE,
+)
 _VAR_STATE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 _SINGLE_QUOTED_FMT = r"(?P<single_format>(?:[^'\\\r\n]|\\n)*)"
 _DOUBLE_QUOTED_FMT = r'(?P<double_format>(?:[^"\\$`\r\n]|\\n)*)'
@@ -47,6 +104,17 @@ _MKDIR = re.compile(r"^[ \t]*mkdir[ \t]+-p[ \t]+[A-Za-z0-9_./-]+[ \t]*$")
 _SUPPORTED_UPLOAD_REFS = {"v4", "v5", "v6", "v7"}
 
 
+def _malformed_candidate_hint(content: str, scalar_values: list[str]) -> bool:
+    """Use raw and recovered text only to retain UNKNOWN for malformed candidates."""
+    has_secret = _has_secret_expression(content) or any(
+        _has_secret_expression(value) for value in scalar_values
+    )
+    has_upload = _UPLOAD in content.lower() or any(
+        _UPLOAD in value.lower() for value in scalar_values
+    )
+    return has_secret and has_upload
+
+
 def _event_map(events: tuple[Event, ...]):
     keys: dict[tuple[object, ...], list[Event]] = {}
     leaves: dict[tuple[object, ...], list[Event]] = {}
@@ -56,6 +124,24 @@ def _event_map(events: tuple[Event, ...]):
         elif event.kind is EventKind.LEAF_SCALAR:
             leaves.setdefault(event.path, []).append(event)
     return keys, leaves
+
+
+def _flow_tokens_are_unbalanced(tokens) -> bool:
+    """Identify malformed flow containers when the tokenizer emits no cutoff."""
+    closes = {
+        TokenKind.FLOW_OPEN_SEQ: TokenKind.FLOW_CLOSE_SEQ,
+        TokenKind.FLOW_OPEN_MAP: TokenKind.FLOW_CLOSE_MAP,
+    }
+    close_kinds = frozenset(closes.values())
+    expected: list[TokenKind] = []
+    for token in tokens:
+        closing = closes.get(token.kind)
+        if closing is not None:
+            expected.append(closing)
+        elif token.kind in close_kinds:
+            if not expected or expected.pop() is not token.kind:
+                return True
+    return bool(expected)
 
 
 def _single(leaves: dict[tuple[object, ...], list[Event]], path: tuple[object, ...]):
@@ -97,6 +183,8 @@ def _env_fields(keys, leaves, tokens):
                 continue
             if len(events) != 1 or events[0].merge_origins:
                 ambiguous = True
+                if any(_has_secret_expression(event.value or "") for event in events):
+                    unknown_source_owners.add(owner)
                 continue
             fields.setdefault(owner, {})[name] = events[0].value or ""
     return fields, ambiguous, invalid_owners, invalid_values, unknown_source_owners
@@ -123,7 +211,7 @@ def _subtree_has_secret_hint(path: tuple[object, ...], leaves) -> bool:
     return any(
         len(candidate) >= len(path)
         and candidate[: len(path)] == path
-        and any(_SECRET_HINT.search(event.value or "") for event in events)
+        and any(_has_secret_expression(event.value or "") for event in events)
         for candidate, events in leaves.items()
     )
 
@@ -135,16 +223,96 @@ def _layered_env(fields, job: str, step: int) -> dict[str, str]:
     return result
 
 
-def _secret_state(raw_env: dict[str, str], name: str) -> bool | None:
-    """True = directly declared secret source, False = literal non-secret, None = unknown."""
+def _secret_state(
+    raw_env: dict[str, str],
+    name: str,
+    *,
+    job: str | None = None,
+    keys=None,
+    leaves=None,
+    tokens=None,
+) -> bool | None:
+    """True = direct secret, False = proven non-secret data/literal, None = unknown."""
     value = raw_env.get(name)
     if value is None:
         return False
     if _SECRET_REF.fullmatch(value):
         return True
-    if "${{" in value or _SECRET_HINT.search(value):
+    if _has_secret_expression(value):
+        return None
+    if "${{" in value:
+        if _CONTEXT_DATA_EXPRESSION.fullmatch(value):
+            return False
+        matrix_match = _MATRIX_DATA_EXPRESSION.fullmatch(value)
+        if (
+            matrix_match
+            and job is not None
+            and keys is not None
+            and leaves is not None
+            and tokens is not None
+            and _matrix_field_is_finite(keys, leaves, tokens, job, matrix_match.group(1))
+        ):
+            return False
         return None
     return False
+
+
+def _possible_flow_jobs(keys, leaves, env_fields, unknown_source_owners, tokens) -> set[str]:
+    """Find same-job secret-source/run candidates with a later upload.
+
+    This is only relevance gating. Once an effective secret or unresolved env
+    source is available to a preceding run step, opaque programs may consume it
+    implicitly, so no variable spelling or shell-writer token is required here.
+    The bounded writer analyzer below remains responsible for findings.
+    """
+    steps: dict[str, set[int]] = {}
+    for path in (*keys.keys(), *leaves.keys()):
+        if len(path) >= 4 and path[0] == "jobs" and path[2] == "steps" and isinstance(path[3], int):
+            steps.setdefault(str(path[1]), set()).add(path[3])
+
+    possible_jobs: set[str] = set()
+    for job, indices in steps.items():
+        job_scope = ("jobs", job)
+        upload_indices = {
+            index
+            for index in indices
+            if any(
+                _UPLOAD in (event.value or "").lower()
+                for event in leaves.get(job_scope + ("steps", index, "uses"), [])
+            )
+        }
+        if not upload_indices:
+            continue
+        for index in sorted(indices):
+            if not any(upload_index > index for upload_index in upload_indices):
+                continue
+            scope = job_scope + ("steps", index)
+            run_path = scope + ("run",)
+            run_present = any(
+                path == run_path
+                or (len(path) > len(run_path) and path[: len(run_path)] == run_path)
+                for path in (*keys.keys(), *leaves.keys())
+            )
+            if not run_present:
+                continue
+
+            raw_env = _layered_env(env_fields, job, index)
+            has_possible_env_source = any(
+                _secret_state({name: value}, name, job=job, keys=keys, leaves=leaves, tokens=tokens)
+                is not False
+                for name, value in raw_env.items()
+            ) or _env_has_unknown_source(unknown_source_owners, job, index)
+            run_values = [
+                event.value or ""
+                for path, occurrences in leaves.items()
+                if len(path) >= len(run_path) and path[: len(run_path)] == run_path
+                for event in occurrences
+            ]
+            has_inline_secret_source = any(_has_secret_expression(value) for value in run_values)
+            if has_possible_env_source or has_inline_secret_source:
+                possible_jobs.add(job)
+                break
+    return possible_jobs
 
 
 _SUPPORTED_GUARD_EVENTS = frozenset(
@@ -194,6 +362,7 @@ def _value_shape(keys, leaves, tokens, path: tuple[object, ...]) -> str:
     )
     if key_index is None:
         return "unknown"
+    owner_token = tokens[key_index]
     following = next(
         (
             token
@@ -208,15 +377,171 @@ def _value_shape(keys, leaves, tokens, path: tuple[object, ...]) -> str:
         return "sequence"
     if following.kind is TokenKind.FLOW_OPEN_MAP:
         return "mapping"
-    if following.kind is TokenKind.SEQUENCE_DASH and following.indent > owner.indent:
+    if following.kind is TokenKind.SEQUENCE_DASH and following.indent > owner_token.indent:
         return "sequence"
     if (
         following.kind is TokenKind.KEY
         and following.line > owner.line
-        and following.indent > owner.indent
+        and following.indent > owner_token.indent
     ):
         return "mapping"
     return "scalar"
+
+
+def _matrix_token_sequence_is_scalar(tokens, keys, field_path) -> bool:
+    """Reject nested/empty YAML containers the event walker cannot represent."""
+    occurrences = keys.get(field_path, [])
+    if len(occurrences) != 1:
+        return False
+    owner = occurrences[0]
+    key_index = next(
+        (
+            index
+            for index, token in enumerate(tokens)
+            if token.kind is TokenKind.KEY
+            and token.line == owner.line
+            and token.column == owner.column
+        ),
+        None,
+    )
+    if key_index is None:
+        return False
+    value_index = next(
+        (
+            index
+            for index in range(key_index + 1, len(tokens))
+            if tokens[index].kind not in {TokenKind.INDENT, TokenKind.COMMENT}
+        ),
+        None,
+    )
+    if value_index is None:
+        return False
+    first = tokens[value_index]
+    if first.kind is TokenKind.FLOW_OPEN_SEQ:
+        saw_value = False
+        expect_value = True
+        for token in tokens[value_index + 1 :]:
+            if token.kind is TokenKind.FLOW_CLOSE_SEQ:
+                return saw_value and not expect_value
+            if token.kind in {TokenKind.FLOW_OPEN_SEQ, TokenKind.FLOW_OPEN_MAP}:
+                return False
+            if token.kind in {TokenKind.SCALAR_PLAIN, TokenKind.SCALAR_QUOTED}:
+                if not expect_value:
+                    return False
+                saw_value = True
+                expect_value = False
+                continue
+            if token.kind is TokenKind.FLOW_COMMA:
+                if expect_value:
+                    return False
+                expect_value = True
+                continue
+            if token.kind in {TokenKind.INDENT, TokenKind.COMMENT}:
+                continue
+            return False
+        return False
+    if first.kind is not TokenKind.SEQUENCE_DASH:
+        return False
+
+    sequence_indent = first.indent
+    current_item_line: int | None = None
+    current_item_has_scalar = False
+    saw_item = False
+    for token in tokens[value_index:]:
+        if token.kind is TokenKind.INDENT:
+            if token.indent < sequence_indent:
+                break
+            if token.indent > sequence_indent:
+                return False
+            continue
+        if token.kind is TokenKind.COMMENT:
+            continue
+        if token.indent < sequence_indent:
+            break
+        if token.indent > sequence_indent:
+            return False
+        if token.kind is TokenKind.SEQUENCE_DASH:
+            if current_item_line is not None and not current_item_has_scalar:
+                return False
+            current_item_line = token.line
+            current_item_has_scalar = False
+            saw_item = True
+            continue
+        if token.line != current_item_line:
+            return False
+        if (
+            token.kind in {TokenKind.SCALAR_PLAIN, TokenKind.SCALAR_QUOTED}
+            and not current_item_has_scalar
+        ):
+            current_item_has_scalar = True
+            continue
+        return False
+    return saw_item and current_item_has_scalar
+
+
+def _matrix_field_is_finite(keys, leaves, tokens, job: str, field: str) -> bool:
+    """Prove every direct matrix field item is a static scalar."""
+    matrix_path = ("jobs", job, "strategy", "matrix")
+    field_path = matrix_path + (field,)
+    for path in (
+        ("jobs", job),
+        ("jobs", job, "strategy"),
+        matrix_path,
+        field_path,
+    ):
+        occurrences = keys.get(path, [])
+        if len(occurrences) != 1 or occurrences[0].merge_origins:
+            return False
+    all_paths = (*keys.keys(), *leaves.keys())
+    if any(
+        path == matrix_path + ("include",)
+        or (
+            len(path) > len(matrix_path) + 1
+            and path[: len(matrix_path) + 1] == matrix_path + ("include",)
+        )
+        for path in all_paths
+    ):
+        return False
+    if any(
+        event.merge_origins
+        for path, events in (*keys.items(), *leaves.items())
+        if len(path) >= len(matrix_path) and path[: len(matrix_path)] == matrix_path
+        for event in events
+    ):
+        return False
+    if _value_shape(keys, leaves, tokens, matrix_path) != "mapping":
+        return False
+    if _value_shape(keys, leaves, tokens, field_path) != "sequence":
+        return False
+    if not _matrix_token_sequence_is_scalar(tokens, keys, field_path):
+        return False
+
+    item_indices = {
+        path[len(field_path)]
+        for path in all_paths
+        if len(path) > len(field_path) and path[: len(field_path)] == field_path
+    }
+    if (
+        not item_indices
+        or any(not isinstance(index, int) for index in item_indices)
+        or item_indices != set(range(len(item_indices)))
+    ):
+        return False
+    for index in item_indices:
+        item_path = field_path + (index,)
+        occurrences = leaves.get(item_path, [])
+        if keys.get(item_path) or len(occurrences) != 1:
+            return False
+        if occurrences[0].merge_origins:
+            return False
+        value = occurrences[0].value
+        if value is None or "${{" in value:
+            return False
+        if any(
+            len(path) > len(item_path) and path[: len(item_path)] == item_path for path in all_paths
+        ):
+            return False
+    return True
 
 
 def _valid_run_defaults(keys, leaves, tokens, job: str) -> bool:
@@ -444,30 +769,54 @@ class SecretArtifactFlowPattern:
         events = tuple(
             walk_workflow("workflow.yml", content=content, include_keys=True, recover=True)
         )
-        scalar_values = [
-            event.value or "" for event in events if event.kind is EventKind.LEAF_SCALAR
-        ]
-        candidate_hint = any(_SECRET_HINT.search(value) for value in scalar_values) and any(
-            _UPLOAD in value.lower() for value in scalar_values
-        )
-        if not candidate_hint:
-            return []
-        if any(event.kind in {EventKind.CUTOFF, EventKind.ERROR} for event in events):
-            return IncompletePatternMatches(
-                [], reason="SEC6-GH-016 candidate workflow structure is incomplete"
-            )
         keys, leaves = _event_map(events)
-        if any(len(occurrences) != 1 for occurrences in keys.values()):
-            return IncompletePatternMatches(
-                [], reason="SEC6-GH-016 candidate mapping owner is ambiguous"
-            )
         try:
             # The tokenizer yields a one-shot iterator. Keep all tokens because
             # owner-shape checks revisit the same stream for every env/default.
             yaml_tokens = tuple(tokenize(content))
         except Exception:
+            scalar_values = [
+                event.value or "" for event in events if event.kind is EventKind.LEAF_SCALAR
+            ]
+            candidate_hint = _malformed_candidate_hint(content, scalar_values)
+            if candidate_hint:
+                return IncompletePatternMatches(
+                    [], reason="SEC6-GH-016 candidate YAML tokens are incomplete"
+                )
+            return []
+        (
+            env_fields,
+            ambiguous_env,
+            invalid_env_owners,
+            invalid_env_values,
+            unknown_env_sources,
+        ) = _env_fields(keys, leaves, yaml_tokens)
+        possible_jobs = _possible_flow_jobs(
+            keys, leaves, env_fields, unknown_env_sources, yaml_tokens
+        )
+        scalar_values = [
+            event.value or "" for event in events if event.kind is EventKind.LEAF_SCALAR
+        ]
+        if not possible_jobs:
+            # Recovery failures can obscure a candidate's ownership. Retain a
+            # conservative incomplete result only for malformed candidate-like
+            # input; ordinary unrelated action-input mentions do not qualify.
+            candidate_hint = _malformed_candidate_hint(content, scalar_values)
+            if candidate_hint and (
+                any(event.kind in {EventKind.CUTOFF, EventKind.ERROR} for event in events)
+                or _flow_tokens_are_unbalanced(yaml_tokens)
+            ):
+                return IncompletePatternMatches(
+                    [], reason="SEC6-GH-016 candidate workflow structure is incomplete"
+                )
+            return []
+        if any(event.kind in {EventKind.CUTOFF, EventKind.ERROR} for event in events):
             return IncompletePatternMatches(
-                [], reason="SEC6-GH-016 candidate YAML tokens are incomplete"
+                [], reason="SEC6-GH-016 candidate workflow structure is incomplete"
+            )
+        if any(len(occurrences) != 1 for occurrences in keys.values()):
+            return IncompletePatternMatches(
+                [], reason="SEC6-GH-016 candidate mapping owner is ambiguous"
             )
         if any(
             token.kind in {TokenKind.MERGE_KEY, TokenKind.ALIAS, TokenKind.ANCHOR}
@@ -477,22 +826,15 @@ class SecretArtifactFlowPattern:
                 [],
                 reason="SEC6-GH-016 candidate aliases or merged owners are unsupported",
             )
-        event_names = _event_profile(content)
-        if not event_names:
-            return IncompletePatternMatches(
-                [], reason="SEC6-GH-016 candidate trigger profile is incomplete"
-            )
-        (
-            env_fields,
-            ambiguous_env,
-            invalid_env_owners,
-            invalid_env_values,
-            unknown_env_sources,
-        ) = _env_fields(keys, leaves, yaml_tokens)
         if ambiguous_env:
             return IncompletePatternMatches(
                 [],
                 reason="SEC6-GH-016 merged or duplicate env value prevents source proof",
+            )
+        event_names = _event_profile(content)
+        if not event_names:
+            return IncompletePatternMatches(
+                [], reason="SEC6-GH-016 candidate trigger profile is incomplete"
             )
         workflow_env = _scoped_env(env_fields, (), {"GITHUB_WORKSPACE": _ROOT})
         guard_events = {
@@ -512,6 +854,8 @@ class SecretArtifactFlowPattern:
         hits: list[tuple[int, str]] = []
         unresolved = False
         for job, step_indices in jobs.items():
+            if job not in possible_jobs:
+                continue
             job_scope = ("jobs", job)
             job_guard = guard_events.get(job_scope + ("if",))
             job_possible = _possible_events(job_guard.value if job_guard else None, event_names)
@@ -558,17 +902,22 @@ class SecretArtifactFlowPattern:
                         )
                         if not _supported_upload(uses.value or ""):
                             ambiguous_uploads.add(index)
-                        if path_event and _SECRET_HINT.search(path_event.value or ""):
+                        if path_event and _has_secret_expression(path_event.value or ""):
                             job_unresolved = True
                 raw_env = _layered_env(env_fields, job, index)
                 step_envs[index] = _scoped_env(env_fields, scope, job_env)
-                secret_states = {name: _secret_state(raw_env, name) for name in raw_env}
+                secret_states = {
+                    name: _secret_state(
+                        raw_env, name, job=job, keys=keys, leaves=leaves, tokens=yaml_tokens
+                    )
+                    for name in raw_env
+                }
                 has_candidate_source = any(
                     state is True or state is None for state in secret_states.values()
                 )
                 if _env_has_unknown_source(unknown_env_sources, job, index):
                     has_candidate_source = True
-                if run_event and _SECRET_HINT.search(run_event.value or ""):
+                if run_event and _has_secret_expression(run_event.value or ""):
                     has_candidate_source = True
                 step_inputs[index] = (run_event, raw_env, has_candidate_source)
             any_upload_declared = bool(uploads or ambiguous_uploads)
@@ -633,7 +982,9 @@ class SecretArtifactFlowPattern:
                         # A literal formatter argument can be called DATA only after
                         # the owning POSIX shell profile is established.
                         continue
-                    state = _secret_state(raw_env, variable)
+                    state = _secret_state(
+                        raw_env, variable, job=job, keys=keys, leaves=leaves, tokens=yaml_tokens
+                    )
                     if state is None:
                         job_unresolved = True
                     elif state is True:
