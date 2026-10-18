@@ -849,27 +849,16 @@ _PERSIST_FALSE_RE = re.compile(
 # - ``gh release create`` — uses ``GITHUB_TOKEN`` from the env, but
 #   not from .git/config; intentionally NOT a consumer.
 _GIT_CREDENTIAL_OP_RE = re.compile(r"\bgit\s+(?:push|fetch\s+(?:https?://|ssh://|git@))\b")
-# Actions whose documented behaviour is to either reuse the persisted
-# checkout token directly (a ``git push`` under the hood) OR to package
-# the working tree — including the ``.git/`` directory whose ``config``
-# now references the token helper — into a publish/release/PR artifact
-# that leaves the runner.  Both shapes are credential consumers under
-# the artipacked threat model:
+# Publishing-action candidates. Recognition alone does not establish which
+# credential the implementation selects; configured tokens may be independent
+# of the checkout credential. Retain the candidate without claiming that edge.
 #
-# - ``peaceiris/actions-gh-pages``, ``crazy-max/ghaction-github-pages``,
-#   ``JamesIves/github-pages-deploy-action``, ``s0/git-publish-subdir-action``,
-#   ``cpina/github-action-push-to-another-repository``,
-#   ``ad-m/github-push-action``, ``stefanzweifel/git-auto-commit-action``,
-#   ``EndBug/add-and-commit`` — direct git-push consumers.
-# - ``peter-evans/create-pull-request`` — pushes a new branch via the
-#   persisted helper to open the PR.
-# - ``pypa/gh-action-pypi-publish`` — uploads the built wheel/sdist to
-#   PyPI; if the working tree's ``.git/`` (with the token-helper config
-#   reference) is included in the bundle, the token leaks via the
-#   published artifact.  Same shape covers the ``cibuildwheel`` →
-#   ``pypa-publish`` two-step (publish step is the consumer).
-# - ``softprops/action-gh-release`` — uploads release assets to a tag;
-#   same artifact-credential-leak shape as pypa-publish.
+# Candidate names include ``peaceiris/actions-gh-pages``,
+# ``crazy-max/ghaction-github-pages``, ``JamesIves/github-pages-deploy-action``,
+# ``s0/git-publish-subdir-action``, ``cpina/github-action-push-to-another-repository``,
+# ``ad-m/github-push-action``, ``stefanzweifel/git-auto-commit-action``,
+# ``EndBug/add-and-commit``, ``peter-evans/create-pull-request``,
+# ``pypa/gh-action-pypi-publish`` and ``softprops/action-gh-release``.
 _GIT_PUSH_ACTION_RE = re.compile(
     r"uses:\s*(?:"
     r"peaceiris/actions-gh-pages"
@@ -924,9 +913,9 @@ class _CheckoutDownstreamCredentialConsumerPattern:
     * a step uses ``actions/checkout@<ref>`` AND
     * that step does NOT explicitly set ``persist-credentials: false``
       within an 8-line lookahead AND
-    * a subsequent step IN THE SAME JOB consumes the persisted
-      credential — either a ``git push`` / ``git fetch <url>`` /
-      ``git config user`` shell op, OR a documented git-pushing
+    * a subsequent step IN THE SAME JOB contains a possible credential
+      consumer — either a ``git push`` / ``git fetch <url>`` shell op,
+      OR a recognized git-pushing
       action (peaceiris/actions-gh-pages, ad-m/github-push-action,
       stefanzweifel/git-auto-commit-action, etc.).
 
@@ -2090,34 +2079,41 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC4-GH-005",
-        title="Checkout persists credentials AND a downstream step consumes them",
+        title="Checkout persists credentials before downstream Git activity",
         # Tightened from "fires on every actions/checkout without
         # persist-credentials: false" to "fires only when a downstream
-        # step in the same job actually uses the persisted credential"
-        # (git push/fetch/config or a documented git-pushing action).
-        # Severity is MEDIUM because remaining fires are real risk,
-        # not posture-density noise.  See
+        # step in the same job contains a possible credential consumer"
+        # (git push/fetch or a recognized publishing action). Recognition
+        # does not prove credential selection or runtime use. Severity is
+        # MEDIUM; review the actual credential path. See
         # _CheckoutDownstreamCredentialConsumerPattern above for the
         # consumer detector.
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "actions/checkout persists the GITHUB_TOKEN by default "
-            "(`persist-credentials: true`). v4+ writes the token into a helper file "
-            "under $RUNNER_TEMP and configures `.git/config` to reference it, so any "
-            "subsequent step — including third-party actions — can read the token off "
-            "disk and reuse it against the GitHub API without going through the secrets "
-            "facility. This rule fires only when a downstream step in the same job "
-            "actually consumes that credential — a `git push` / `git fetch <url>` / "
-            "`git config user` shell op, or a documented git-pushing action "
-            "(peaceiris/actions-gh-pages, ad-m/github-push-action, "
-            "stefanzweifel/git-auto-commit-action, EndBug/add-and-commit, etc.). "
-            "Set `persist-credentials: false` on the checkout step (or scope the "
-            "downstream push to its own minimal-permissions checkout)."
+            "actions/checkout is configured to persist authentication, and a later "
+            "step in the same job contains `git push`, `git fetch <url>`, or a "
+            "recognized publishing action. Credential storage depends on the exact "
+            "checkout implementation: v4/v5 use local Git configuration; v6 "
+            "introduced a separate credential file under $RUNNER_TEMP. Moving the "
+            "credential does not establish isolation from later same-job code. "
+            "The downstream operation may use the checkout credential, but action "
+            "recognition alone does not prove that connection: a publishing action "
+            "can receive its own token through inputs or environment variables. "
+            "Review the exact action source and credential configuration before "
+            "attributing credential use. This finding does not establish runtime "
+            "execution, successful authentication, or credential disclosure."
         ),
         pattern=_CheckoutDownstreamCredentialConsumerPattern(),
-        remediation="Add 'persist-credentials: false' to the checkout step.",
+        remediation=(
+            "Set `persist-credentials: false` when later steps do not need checkout "
+            "authentication. If a Git push or fetch needs it, preserve the required "
+            "behavior with explicitly scoped, least-privilege authentication. "
+            "Check publishing-action token inputs and environment separately; "
+            "disabling checkout persistence does not remove an independently "
+            "supplied credential."
+        ),
         reference="https://github.com/actions/checkout#usage",
         test_positive=[
             # Checkout + downstream git push in the same job.
@@ -2167,14 +2163,13 @@ RULES: list[Rule] = [
         ],
         stride=["I", "T"],
         threat_narrative=(
-            "The GITHUB_TOKEN persisted by actions/checkout (stored in a file under "
-            "$RUNNER_TEMP and referenced from .git/config on v4+) can be read by any "
-            "subsequent step — including third-party actions — from the filesystem "
-            "without any secrets API call. With write repository permissions, a token "
-            "extracted this way can push malicious commits, modify branch protections, "
-            "or inject code into other workflows.  The risk is concrete only when a "
-            "downstream step actually uses the credential; this rule scopes to that "
-            "case to keep the signal-to-noise ratio actionable."
+            "Persisted checkout authentication can remain accessible to later "
+            "same-job code. The configured checkout may use GITHUB_TOKEN or a "
+            "separately supplied credential with different authority. A downstream "
+            "Git command or recognized publishing action identifies a possible "
+            "consumer, not proof of which credential it uses or of exfiltration. "
+            "Effective permissions, action source, execution and credential "
+            "selection require separate evidence."
         ),
         confidence="high",
     ),
