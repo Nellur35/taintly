@@ -30,6 +30,7 @@ def scan_repositories(
     platform: Platform | None = None,
     *,
     max_scan_seconds: float | None = None,
+    respect_inline_suppressions: bool = True,
 ) -> list[RepositoryScanResult]:
     """Scan directory roots in order, including duplicates, loading packs once.
 
@@ -39,6 +40,8 @@ def scan_repositories(
     and does not hide later roots. ENGINE-ERR findings remain in normal reports;
     callers must check those and files_scanned before treating a scan as clean.
     No cross-repository configuration or explicit GitHub identity is inherited.
+    ``respect_inline_suppressions`` applies to every root in this batch; it
+    does not change the policy of subsequent calls.
     """
     paths = [os.fspath(path) for path in repo_paths]
     if not paths:
@@ -65,7 +68,13 @@ def scan_repositories(
             if not Path(path).is_dir():
                 results.append(RepositoryScanResult(path, error=f"NotADirectoryError: {path}"))
                 continue
-            reports = scan_repo(path, rules, platform, max_scan_seconds=max_scan_seconds)
+            reports = scan_repo(
+                path,
+                rules,
+                platform,
+                max_scan_seconds=max_scan_seconds,
+                respect_inline_suppressions=respect_inline_suppressions,
+            )
             results.append(RepositoryScanResult(path, reports=reports))
         except Exception as exc:
             results.append(RepositoryScanResult(path, error=f"{type(exc).__name__}: {exc}"))

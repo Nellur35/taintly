@@ -373,6 +373,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--no-inline-suppressions",
+        action="store_true",
+        help=(
+            "Disregard inline suppression comments, including opted-in foreign "
+            "markers. Config-file exceptions still apply."
+        ),
+    )
+    parser.add_argument(
         "--score",
         action="store_true",
         help="Compute a 0-100 security score and per-category breakdown after scanning",
@@ -992,6 +1000,7 @@ def main():
                 platform_rules,
                 _content=content,
                 max_scan_seconds=args.max_scan_seconds,
+                respect_inline_suppressions=not args.no_inline_suppressions,
             ):
                 report.add(finding)
 
@@ -1077,6 +1086,7 @@ def main():
                 platform_rules,
                 _content=content,
                 max_scan_seconds=args.max_scan_seconds,
+                respect_inline_suppressions=not args.no_inline_suppressions,
             ):
                 report.add(finding)
 
@@ -1240,6 +1250,7 @@ def main():
         explicit_github_repoctx=explicit_repoctx,
         max_scan_seconds=args.max_scan_seconds,
         coalesce_overlaps=False,
+        respect_inline_suppressions=not args.no_inline_suppressions,
     )
 
     # Surface config-driven exclusions on every report so the summary
