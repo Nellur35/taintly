@@ -140,6 +140,19 @@ ignore:
 
 CLI flags override config values.
 
+For enforcement against an untrusted checkout, use a trusted scanner invocation
+and an explicit policy from protected state:
+
+```bash
+python -m taintly /work/target --config /policy/taintly.yml --no-inline-suppressions --fail-on HIGH
+```
+
+`--no-inline-suppressions` disregards source-comment waivers, including opted-in
+zizmor markers. Exceptions in the selected config still apply. The scanner,
+launcher, policy and any baseline must come from trusted state; an external
+pathname alone does not make them trusted. `--strict-config` rejects config rule
+exclusions and does not reject `ignore` exceptions. Default behavior is unchanged.
+
 
 
 ### Inline suppressions

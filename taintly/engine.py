@@ -463,11 +463,14 @@ def scan_file(
     gitlabctx: GitLabContext | None = None,
     jenkinsctx: JenkinsContext | None = None,
     max_scan_seconds: float | None = None,
+    respect_inline_suppressions: bool = True,
 ) -> list[Finding]:
     """Scan a single file against a list of rules.
 
     If _content is provided, use it directly instead of reading from disk.
     filepath is still used for Finding.file attribution.
+    Set respect_inline_suppressions=False to disregard user-authored inline
+    waivers. This does not change semantic guards or caller-applied filters.
     """
     findings = []
     if _content is not None:
@@ -672,7 +675,7 @@ def scan_file(
                     match_context = None
                     # Honour inline suppression comments on the matched line.
                     source_line = lines[line_num - 1] if 0 < line_num <= len(lines) else ""
-                    if _is_suppressed(source_line, rule.id):
+                    if respect_inline_suppressions and _is_suppressed(source_line, rule.id):
                         continue
                     # Propagate v2 reporting metadata. Rule-level overrides win;
                     # otherwise fall back to the family/confidence defaults in
@@ -2203,6 +2206,7 @@ def scan_repo(
     explicit_github_repoctx: StaticGuardContext | None = None,
     max_scan_seconds: float | None = None,
     coalesce_overlaps: bool = True,
+    respect_inline_suppressions: bool = True,
 ) -> list[AuditReport]:
     """Scan an entire repository. Returns one report per platform detected.
 
@@ -2215,6 +2219,8 @@ def scan_repo(
     Callers applying their own finding filters may set ``coalesce_overlaps``
     false, then call ``coalesce_input_script_findings`` after those filters
     and before baseline creation, diffing, scoring or serialization.
+    ``respect_inline_suppressions`` controls source-comment waivers separately
+    for this scan, without changing configuration or semantic guard handling.
     """
     import sys as _sys
 
@@ -2376,6 +2382,7 @@ def scan_repo(
                     gitlabctx=gitlabctx,
                     jenkinsctx=jenkinsctx,
                     max_scan_seconds=max_scan_seconds,
+                    respect_inline_suppressions=respect_inline_suppressions,
                 )
             )
             # Surface-evaluation pass (reusing the content read above): a
