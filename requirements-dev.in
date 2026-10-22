@@ -33,3 +33,4 @@ pytest-xdist
 
 # Security floor for the dev/CI dependency stack; no runtime dependency.
 urllib3>=2.8.0
+certifi>=2026.10.19
