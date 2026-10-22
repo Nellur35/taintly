@@ -53,6 +53,9 @@ jobs:
           python -m pip install --upgrade build
           python -m build
 
+      - name: Verify wheel payload matches checked-out source
+        run: python scripts/check_wheel_source_parity.py dist/*.whl
+
       - name: Version sanity — built dists must carry the tag
         run: |
           python - <<'PY'
