@@ -9,8 +9,10 @@ functions returns RUNTIME.
 from __future__ import annotations
 
 import re
+import stat
 import subprocess
 from enum import Enum
+from pathlib import Path
 from typing import Any, NamedTuple
 
 
@@ -199,7 +201,21 @@ def is_workflow_whole_dead(content: str, ctx: WorkflowContext | None = None) -> 
 
 
 def detect_github_workflow_context(repo_path: str) -> WorkflowContext:
-    """Best-effort repository identity from ``git remote get-url origin``."""
+    """Infer an origin only when the scan root owns its Git checkout.
+
+    Git searches parent directories for ``.git``. A copied repository nested
+    under another checkout must not inherit that checkout's identity: doing so
+    can incorrectly exclude repository-guarded findings.
+    """
+    try:
+        root = Path(repo_path).resolve(strict=True)
+        if not stat.S_ISDIR(root.stat().st_mode):
+            return WorkflowContext()
+        marker = (root / ".git").lstat()
+        if not (stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)):
+            return WorkflowContext()
+    except (OSError, RuntimeError, ValueError):
+        return WorkflowContext()
     try:
         result = subprocess.run(  # nosec B603 B607 - fixed git command, no shell.
             ["git", "-C", repo_path, "remote", "get-url", "origin"],

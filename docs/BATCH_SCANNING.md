@@ -43,6 +43,12 @@ the call, not in a new process-global registry. Calls are sequential and retain
 all reports in memory; split very large input lists into bounded batches.
 `max_scan_seconds` forwards the existing scanner time-budget option.
 
+Automatic GitHub repository identity requires the scanned directory to own a
+Git checkout (`.git` directory or worktree file). A copied directory nested
+inside another checkout has unknown identity, so repository-specific guards
+stay unresolved. Supply `explicit_github_repoctx` to `scan_repo` or
+`--github-repo OWNER/REPO` to the CLI when the identity is known independently.
+
 Repository reports consolidate SEC4-GH-008 with SEC4-GH-025 only when both
 describe the same simple input splice in a structurally verified
 `actions/github-script` JavaScript body. The JavaScript warning and its

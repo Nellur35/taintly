@@ -1,14 +1,124 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from taintly.staticguard import (
     Verdict,
     WorkflowContext,
+    detect_github_workflow_context,
     evaluate_if,
     find_dead_line_ranges,
     is_workflow_whole_dead,
 )
+
+
+def test_auto_repository_identity_requires_scan_root_checkout(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/outer/project.git",
+        ],
+        check=True,
+    )
+    copied_repo = tmp_path / "corpus" / "repos" / "inner"
+    copied_repo.mkdir(parents=True)
+
+    assert detect_github_workflow_context(str(tmp_path)).repository == "outer/project"
+    assert detect_github_workflow_context(str(copied_repo)).repository is None
+
+
+def test_nested_scan_keeps_repository_guarded_finding_visible(tmp_path):
+    from taintly.engine import scan_repo
+    from taintly.models import Platform
+    from taintly.rules.github.sec10_logging_visibility import RULES
+
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/outer/project.git",
+        ],
+        check=True,
+    )
+    copied_repo = tmp_path / "corpus" / "repos" / "inner"
+    workflow = copied_repo / ".github" / "workflows" / "test.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "on: push\njobs:\n  build:\n"
+        "    if: github.repository == 'inner/project'\n"
+        "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+        encoding="utf-8",
+    )
+    rule = next(rule for rule in RULES if rule.id == "SEC10-GH-001")
+
+    (report,) = scan_repo(str(copied_repo), [rule], Platform.GITHUB)
+    assert report.repo_identity_source == "unset"
+    assert [(finding.rule_id, finding.line) for finding in report.findings] == [("SEC10-GH-001", 5)]
+
+    (explicit,) = scan_repo(
+        str(copied_repo),
+        [rule],
+        Platform.GITHUB,
+        explicit_github_repoctx=WorkflowContext("outer/project", "outer"),
+    )
+    assert explicit.repo_identity_source == "explicit"
+    assert explicit.findings == []
+
+
+def test_linked_git_worktree_retains_its_own_identity(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/project.git",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Taintly test",
+            "-c",
+            "user.email=taintly@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "-C", str(source), "worktree", "add", "--detach", str(linked)],
+        check=True,
+        capture_output=True,
+    )
+    assert (linked / ".git").is_file()
+    assert detect_github_workflow_context(str(linked)).repository == "owner/project"
 
 
 def test_evaluate_if_static_true_cases():
