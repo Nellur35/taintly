@@ -40,7 +40,8 @@ jobs:
       # (pypi.org, files.pythonhosted.org), checkout (github.com,
       # codeload.github.com), and setup-python's manifest lookup when a
       # requested version is absent from the runner cache (api.github.com,
-      # raw.githubusercontent.com). MUST be the first step so it can monitor
+      # raw.githubusercontent.com, release-assets.githubusercontent.com).
+      # MUST be the first step so it can monitor
       # every later step's egress. Linux-only — deliberately NOT added to
       # the windows-test job (harden-runner supports Ubuntu runners only).
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
@@ -53,6 +54,7 @@ jobs:
             codeload.github.com:443
             api.github.com:443
             raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -151,6 +153,7 @@ jobs:
             codeload.github.com:443
             api.github.com:443
             raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -194,6 +197,7 @@ jobs:
             codeload.github.com:443
             api.github.com:443
             raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -271,6 +275,7 @@ jobs:
             codeload.github.com:443
             api.github.com:443
             raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -348,6 +353,7 @@ jobs:
             codeload.github.com:443
             api.github.com:443
             raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
