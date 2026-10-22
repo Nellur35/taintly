@@ -41,9 +41,8 @@ def format_csv(report: AuditReport) -> str:
         # inventory items so spreadsheet consumers can filter without
         # carrying a hardcoded inventory rule list.
         row["kind"] = "inventory" if f.rule_id in INVENTORY_RULE_IDS else "finding"
-        # Truncate long fields for readability
-        row["description"] = row["description"][:200]
-        row["remediation"] = row["remediation"].split("\n")[0][:200]
+        # Preserve the full evidence and fix instructions. DictWriter quotes
+        # embedded commas and newlines for CSV consumers.
         # Flatten list fields to delimited strings
         row["stride"] = "+".join(row.get("stride") or [])
         row["incidents"] = "; ".join(row.get("incidents") or [])
