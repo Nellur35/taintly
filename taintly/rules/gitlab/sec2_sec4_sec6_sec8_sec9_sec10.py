@@ -15,11 +15,72 @@ from taintly.models import (
     SequencePattern,
     Severity,
 )
+from taintly.parsers.structural import EventKind, walk_workflow
 
 _CACHE_RE = re.compile(r"^(\s*)cache:\s*$")
 _KEY_INLINE_RE = re.compile(r"^\s*key:\s*(\S.*?)\s*$")
 _KEY_BLOCK_RE = re.compile(r"^\s*key:\s*$")
 _BLOCK_SCALAR = {"|", ">", "|-", ">-", "|+", ">+"}
+_DOCKER_AUTH_KEY = re.compile(r"^\s*DOCKER_AUTH_CONFIG\s*:\s*(.+?)\s*$")
+_VARIABLE_REFERENCE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})\Z")
+
+
+class DockerAuthMaterialPattern:
+    """Exclude only source-agreeing, exact external variable references.
+
+    This decides whether the assignment embeds credentials in this source
+    scalar. It cannot decide the referenced variable's runtime value or
+    protection. Mixed expressions, aliases and parser cutoffs keep the prior
+    finding for review.
+    """
+
+    def __init__(self) -> None:
+        self._candidate = RegexPattern(
+            match=r"DOCKER_AUTH_CONFIG\s*:(?:\s|$|['\"]\s*\{|\{)",
+            exclude=[r"^\s*#"],
+        )
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        return self.check_with_filepath(content, lines, ".gitlab-ci.yml")
+
+    def check_with_filepath(
+        self, content: str, lines: list[str], filepath: str
+    ) -> list[tuple[int, str]]:
+        candidates = self._candidate.check(content, lines)
+        if not candidates:
+            return []
+        events = tuple(walk_workflow(filepath, content=content, include_keys=True))
+        if any(event.kind is EventKind.CUTOFF for event in events):
+            return candidates
+        defined_keys = {event.value for event in events if event.kind is EventKind.MAP_KEY}
+        leaves = {
+            (event.line, event.value)
+            for event in events
+            if event.kind is EventKind.LEAF_SCALAR
+            and event.path
+            and event.path[-1] == "DOCKER_AUTH_CONFIG"
+        }
+        matches: list[tuple[int, str]] = []
+        for line, snippet in candidates:
+            key = _DOCKER_AUTH_KEY.fullmatch(lines[line - 1])
+            if key is None:
+                matches.append((line, snippet))
+                continue
+            raw = key.group(1)
+            if len(raw) >= 2 and raw[0] in "\"'" and raw[-1] == raw[0]:
+                raw = raw[1:-1]
+            if (line, raw) not in leaves or _VARIABLE_REFERENCE.fullmatch(raw) is None:
+                matches.append((line, snippet))
+                continue
+            variable_name = raw[2:-1] if raw.startswith("${") else raw[1:]
+            # The referenced name might instead be defined as literal auth
+            # in this file. A partial structural read must not hide that.
+            definition = re.compile(rf"^\s*{re.escape(variable_name)}\s*:")
+            if variable_name in defined_keys or any(
+                definition.match(other) and not other.lstrip().startswith("#") for other in lines
+            ):
+                matches.append((line, snippet))
+        return matches
 
 
 class StaticCacheKeyPattern:
@@ -93,10 +154,7 @@ RULES: list[Rule] = [
             "Registry credentials should be stored as masked, protected CI/CD variables in "
             "GitLab project or group settings, never in the pipeline file."
         ),
-        pattern=RegexPattern(
-            match=r"DOCKER_AUTH_CONFIG\s*:",
-            exclude=[r"^\s*#"],
-        ),
+        pattern=DockerAuthMaterialPattern(),
         remediation=(
             "Move DOCKER_AUTH_CONFIG to GitLab CI/CD variables (Settings > CI/CD > Variables) "
             "with 'Masked' and 'Protected' flags enabled. The variable is injected at runtime "
@@ -105,11 +163,12 @@ RULES: list[Rule] = [
         reference="https://docs.gitlab.com/ee/ci/docker/using_docker_images.html#configure-a-registry-authentication-file",
         test_positive=[
             'variables:\n  DOCKER_AUTH_CONFIG: \'{"auths": {"registry.example.com": {"auth": "abc"}}}\'',
-            "  DOCKER_AUTH_CONFIG: $MY_ENCODED_AUTH",
         ],
         test_negative=[
             "  # DOCKER_AUTH_CONFIG: should be a protected CI/CD variable",
             "  DOCKER_HOST: tcp://docker:2376",
+            "variables:\n  DOCKER_AUTH_CONFIG: $MY_ENCODED_AUTH",
+            'variables:\n  DOCKER_AUTH_CONFIG: "${DOCKER_AUTH_CONFIG_OVERRIDE}"',
         ],
         stride=["I", "E"],
         threat_narrative=(
