@@ -632,6 +632,15 @@ that an attack succeeded. Follow the cited source-to-sink path and read the
 confidence, `review_needed`, context notes and remediation together. Missing
 runtime information remains a review question.
 
+For GitHub Actions, a direct `uses:` reference to a mutable tag or branch is
+treated as commit-bound only when the on-disk `.github/workflows/actions.lock`
+lists that exact reference for that exact workflow and records a full commit
+identifier and repository identity. This supports the documented v0.0.2 and
+v0.0.3 direct-reference formats. Missing, malformed, unsupported or mismatched
+lockfiles leave the original finding in place. A lockfile binding does not prove
+that the action is safe, ran successfully, or that a called reusable workflow's
+own dependencies are pinned. See [GitHub's workflow lockfile documentation](https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles).
+
 For Jenkins, `LOTP-JK-001` and `LOTP-JK-003` report build or install commands
 in a Jenkinsfile that references PR metadata. That combination requires review:
 it does not prove that the job builds an untrusted revision or exposes credentials.

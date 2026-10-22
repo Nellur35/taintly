@@ -6,6 +6,7 @@ These two categories cover the exact attack vectors used in documented supply ch
 import re
 from dataclasses import dataclass
 
+from taintly.actions_lock import ActionsLockAwarePattern
 from taintly.eventguard import event_guard_verdict
 from taintly.github_event_availability import (
     EventSourceAvailability,
@@ -1489,9 +1490,11 @@ RULES: list[Rule] = [
             "documented supply chain attacks against popular GitHub Actions "
             "(Trivy, Checkmarx, tj-actions)."
         ),
-        pattern=StructuralPattern(
-            path="**.uses",
-            predicate=_is_unpinned_third_party_action,
+        pattern=ActionsLockAwarePattern(
+            StructuralPattern(
+                path="**.uses",
+                predicate=_is_unpinned_third_party_action,
+            )
         ),
         remediation="Pin to full 40-char commit SHA: uses: org/action@<sha> # vtag",
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#using-third-party-actions",
@@ -1539,9 +1542,11 @@ RULES: list[Rule] = [
             "change with every commit — any push to the branch changes what your workflow runs. "
             "This is the most dangerous form of unpinned reference."
         ),
-        pattern=RegexPattern(
-            match=r"uses:\s*[^@\s]+@(main|master|develop|dev)(\s*(#.*)?)?\s*$",
-            exclude=[r"^\s*#", r"docker://", r"uses:\s*\./"],
+        pattern=ActionsLockAwarePattern(
+            RegexPattern(
+                match=r"uses:\s*[^@\s]+@(main|master|develop|dev)(\s*(#.*)?)?\s*$",
+                exclude=[r"^\s*#", r"docker://", r"uses:\s*\./"],
+            )
         ),
         remediation="Pin to a specific commit SHA, not a branch name.",
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions",
