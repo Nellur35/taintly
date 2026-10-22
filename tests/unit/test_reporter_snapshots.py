@@ -70,7 +70,7 @@ def canonical_report() -> AuditReport:
         incident citation (covers richest reporter rendering paths).
       * One HIGH PSE-GH-001 with a long multi-line remediation
         (exercises the text reporter's collapse behaviour and the
-        CSV reporter's first-line-of-remediation truncation).
+        CSV reporter's preservation of full remediation text).
       * One MEDIUM finding with a multi-stride list (exercises the
         SARIF tags assembly).
       * One LOW finding flagged review_needed=True (exercises the
