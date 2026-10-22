@@ -12,6 +12,7 @@ and build artefacts within the job.
 
 import re
 
+from taintly.actions_lock import ActionsLockAwarePattern
 from taintly.models import Platform, RegexPattern, Rule, Severity
 
 
@@ -203,24 +204,20 @@ RULES: list[Rule] = [
             "available to your workflow. The risk is higher than unpinned actions because "
             "the called workflow can itself call further nested workflows."
         ),
-        pattern=RegexPattern(
-            match=(
-                # Matches: uses: org/repo/.github/workflows/file.yml@non-sha-ref
-                # The .github/workflows/ path distinguishes reusable workflows from actions.
-                r"uses:\s+[a-zA-Z0-9_-][a-zA-Z0-9_.-]*/[a-zA-Z0-9_.-]+"
-                r"/\.github/workflows/[^@\s]+@(?![a-f0-9]{40}\b)\S+"
-            ),
-            exclude=[
-                r"^\s*#",
-                # When a reusable workflow is pinned to a *branch*
-                # (main/master/develop/dev), SEC3-GH-002 already
-                # fires CRITICAL on the same line; letting
-                # SEC8-GH-003 also fire HIGH would be a 1:1 dup.
-                # SEC8-GH-003 keeps the tag-pin case (e.g.
-                # ``@v2.1.0``) which SEC3-GH-002 doesn't cover —
-                # that's where the rules diverge.
-                r"@(?:main|master|develop|dev)\s*(?:#.*)?$",
-            ],
+        pattern=ActionsLockAwarePattern(
+            RegexPattern(
+                match=(
+                    # Matches: uses: org/repo/.github/workflows/file.yml@non-sha-ref
+                    # The .github/workflows/ path distinguishes reusable workflows from actions.
+                    r"uses:\s+[a-zA-Z0-9_-][a-zA-Z0-9_.-]*/[a-zA-Z0-9_.-]+"
+                    r"/\.github/workflows/[^@\s]+@(?![a-f0-9]{40}\b)\S+"
+                ),
+                exclude=[
+                    r"^\s*#",
+                    # Branch refs belong to SEC3-GH-002, so this rule owns tags.
+                    r"@(?:main|master|develop|dev)\s*(?:#.*)?$",
+                ],
+            )
         ),
         remediation=(
             "Pin reusable workflow calls to a full commit SHA:\n"
