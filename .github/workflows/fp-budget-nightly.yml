@@ -73,4 +73,16 @@ jobs:
         # checked-out tree without an install (same pattern as the
         # self-audit job in ci.yml). --strict-skips makes a clone or
         # scan failure a visible non-pass instead of a silent green.
-        run: python scripts/check_public_repo_fp_budget.py --strict-skips
+        run: >-
+          python scripts/check_public_repo_fp_budget.py
+          --strict-skips
+          --receipt fp-budget-receipt.json
+
+      - name: Preserve measurement receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fp-budget-receipt
+          path: fp-budget-receipt.json
+          if-no-files-found: warn
+          retention-days: 14
