@@ -40,6 +40,9 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- The hash-pinned dev toolchain now selects an unaffected `filelock` release on
+  Python 3.10 and a patched release on newer Python versions, preserving the
+  dependency audit without changing Taintly's zero-dependency runtime.
 - Composer job attribution reuses an immutable interval index per invocation.
   Scan sessions reuse exact-content job segmentation, and corpus passes reuse
   unchanged workflow summaries while retaining separate filesystem reads and
