@@ -11,6 +11,10 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 ## [Unreleased]
 
 ### Added
+- `SEC6-GH-019`: bounded GitHub Actions Bash analysis traces directly configured
+  secrets through assignments, file writes, and Base64 into a `curl` request body.
+  Findings are review level and retain source, owner, and hop evidence; execution,
+  destination trust, secret availability, and delivery remain unknown.
 - Runtime package data explicitly includes the grandfather baseline and existing data/fixture assets,
   keeping checkout and installed-package confidence fallback inputs aligned.
 - Local workflow/action input tracing now follows declared job outputs through

@@ -14,6 +14,8 @@ Security scanner for CI/CD pipelines. Reads GitHub Actions, GitLab CI, Jenkins, 
 
 - Multi-stage taint analysis with provenance — traces tracked values through environment variables, `$GITHUB_ENV`, step outputs and job outputs, with source locations and propagation paths.
 
+- [Secret-to-request-body review](docs/SECRET_NETWORK_FLOW.md) — traces directly configured GitHub Actions secrets through supported Bash assignments, file writes and Base64 into a `curl` body, while keeping execution and destination trust unresolved.
+
 - Cross-artifact and cross-workflow input-flow analysis across local composite `action.yml` and reusable-workflow calls. Findings describe configured local source-to-sink candidates; execution, checkout correspondence, token authority and secrets remain review questions.
 
 - Attack-path composition — combines compatible source, execution and privilege evidence in the relevant jobs and steps. Composite findings retain review requirements where runtime prerequisites are unverified.
@@ -682,7 +684,7 @@ certificate.
 
 
 <!-- AUTOGEN:summary -->
-324 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+325 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 
@@ -695,7 +697,7 @@ certificate.
 | SEC-3 — Dependency Chain Abuse | 34 | 18 | 14 | 3 |
 | SEC-4 — Poisoned Pipeline Execution | 77 | 30 | 24 | 2 |
 | SEC-5 — Insufficient PBAC | 3 | 1 | 2 | 0 |
-| SEC-6 — Insufficient Credential Hygiene | 16 | 10 | 12 | 2 |
+| SEC-6 — Insufficient Credential Hygiene | 17 | 10 | 12 | 2 |
 | SEC-7 — Insecure System Configuration | 4 | 1 | 4 | 0 |
 | SEC-8 — Ungoverned 3rd Party Services | 6 | 3 | 5 | 0 |
 | SEC-9 — Improper Artifact Integrity | 7 | 5 | 4 | 2 |

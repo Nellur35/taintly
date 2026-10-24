@@ -13,6 +13,7 @@ import pytest
 from taintly._pattern_contract import assert_snippet_matches_line
 from taintly.models import AbsencePattern
 from taintly.rules.registry import load_all_rules
+from taintly.testing.self_test import _check_sample
 
 
 def _is_taint_pattern(pattern) -> bool:
@@ -48,7 +49,7 @@ def test_pattern_contract_every_rule(rule):
         # Positive samples promise a match, as in run_self_test. A crashing
         # pattern must fail this check; skipping or accepting an empty result
         # would leave the source-location assertions unexercised.
-        matches = rule.pattern.check(sample, lines)
+        matches = _check_sample(rule, sample, lines)
         assert matches, f"{rule.id} positive sample produced no snippet to validate"
         for line_num, snippet in matches:
             assert_snippet_matches_line(line_num, snippet, lines)
