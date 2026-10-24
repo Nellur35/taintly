@@ -14,7 +14,7 @@ Security scanner for CI/CD pipelines. Reads GitHub Actions, GitLab CI, Jenkins, 
 
 - Multi-stage taint analysis with provenance — traces tracked values through environment variables, `$GITHUB_ENV`, step outputs and job outputs, with source locations and propagation paths.
 
-- [Secret-to-request-body review](docs/SECRET_NETWORK_FLOW.md) — traces directly configured GitHub Actions secrets through supported Bash assignments, file writes and Base64 into a `curl` body, while keeping execution and destination trust unresolved.
+- [Secret-to-request-body review](docs/SECRET_NETWORK_FLOW.md) — traces supported GitHub Actions secrets, GitLab job-token references, Jenkins credential bindings and CodeBuild Secrets Manager variables through bounded shell operations into a `curl` body. Each platform has its own source and execution limits.
 
 - Cross-artifact and cross-workflow input-flow analysis across local composite `action.yml` and reusable-workflow calls. Findings describe configured local source-to-sink candidates; execution, checkout correspondence, token authority and secrets remain review questions.
 

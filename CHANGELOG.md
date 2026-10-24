@@ -11,6 +11,11 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 ## [Unreleased]
 
 ### Added
+- `SEC6-GL-010`, `SEC6-JK-012` and `SEC6-CB-003`: source-bound review findings
+  for a GitLab `CI_JOB_TOKEN` reference, direct Jenkins `withCredentials`
+  string binding or CodeBuild Secrets Manager variable
+  reaching a `curl` request body through supported shell operations. Unknown
+  runner context, credential availability and delivery remain explicit.
 - `SEC6-GH-019`: bounded GitHub Actions Bash analysis traces directly configured
   secrets through assignments, file writes, and Base64 into a `curl` request body.
   Findings are review level and retain source, owner, and hop evidence; execution,
