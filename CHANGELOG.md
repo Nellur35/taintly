@@ -11,6 +11,10 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 ## [Unreleased]
 
 ### Added
+- `SEC6-GH-019`: bounded GitHub Actions Bash analysis traces directly configured
+  secrets through assignments, file writes, and Base64 into a `curl` request body.
+  Findings are review level and retain source, owner, and hop evidence; execution,
+  destination trust, secret availability, and delivery remain unknown.
 - Runtime package data explicitly includes the grandfather baseline and existing data/fixture assets,
   keeping checkout and installed-package confidence fallback inputs aligned.
 - Local workflow/action input tracing now follows declared job outputs through
@@ -36,6 +40,9 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- The hash-pinned dev toolchain now selects an unaffected `filelock` release on
+  Python 3.10 and a patched release on newer Python versions, preserving the
+  dependency audit without changing Taintly's zero-dependency runtime.
 - Composer job attribution reuses an immutable interval index per invocation.
   Scan sessions reuse exact-content job segmentation, and corpus passes reuse
   unchanged workflow summaries while retaining separate filesystem reads and
