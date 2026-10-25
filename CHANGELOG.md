@@ -61,6 +61,12 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- `TAINT-GL-007` now reviews a job-owned structured GitLab Vault path whose
+  selector references external CI values. The short Vault syntax is reported
+  as unresolved when variable expansion cannot be established from source;
+  script text and fixed paths are not treated as selectors. The finding still
+  has HIGH potential impact, but requires review of runner behavior, caller
+  control and Vault policy before drawing a disclosure conclusion.
 - `SEC9-GL-001` now names the selected artifact paths and owning job in each
   review finding. Its description and advice distinguish credential-like paths
   from intended signed outputs and security reports, and state that GitLab

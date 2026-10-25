@@ -43,7 +43,8 @@ from taintly.gitlab_workflow_corpus import (
     GitLabCorpusPattern,
     GitLabWorkflowCorpus,
 )
-from taintly.models import ContextPattern, Platform, RegexPattern, Rule, Severity
+from taintly.models import ContextPattern, Platform, Rule, Severity
+from taintly.rules.gitlab.vault_selector import GitLabVaultSelectorPattern
 from taintly.taint import _shell_quote_context_at
 
 # Re-parsing commands that defeat double-quote protection. Mirror of
@@ -1151,90 +1152,79 @@ RULES = [
         confidence="high",
     ),
     # =========================================================================
-    # TAINT-GL-007 — Vault secret PATH built from an attacker-controlled CI
-    # variable.  GitLab ``secrets:`` resolves a Vault path at job time; if
-    # that path interpolates a ref/branch/free-text variable an attacker can
-    # influence (a fork MR's source-branch name, a commit title), the
-    # attacker redirects WHICH secret the job fetches — e.g. point it at a
-    # higher-privilege path, or at a path whose value they can then exfil
-    # via the job.  No existing rule inspects ``secrets:vault:``.  Scoped to
-    # the inline ``vault:`` short form interpolating a known-tainted CI var
-    # (gitlab_taint._TAINTED_VARS family) so static paths do not fire; the
-    # multi-line ``vault: { path: ... }`` long form is a known follow-up gap.
+    # TAINT-GL-007 — source-owned, structured Vault path selector. The short
+    # form is retained as an explicit coverage question because GitLab reports
+    # version-dependent expansion behavior for that form.
     # =========================================================================
     Rule(
         id="TAINT-GL-007",
-        title="Vault secret path built from an attacker-controlled CI variable",
+        title="Review: external CI input selects a structured Vault secret path",
         severity=Severity.HIGH,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A ``secrets:`` entry resolves a Vault path that interpolates an "
-            "attacker-influenceable CI variable — a ref/branch name "
-            "(``$CI_COMMIT_REF_NAME``, ``$CI_COMMIT_BRANCH``, "
-            "``$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME``) or commit free-text "
-            "(``$CI_COMMIT_TITLE`` / ``MESSAGE``). On a fork merge request "
-            "the source branch name and commit metadata are chosen by the "
-            "attacker, so they steer which Vault secret the job reads. That "
-            "lets them redirect the lookup to a path whose value the job "
-            "then exposes, or probe the Vault namespace — a confused-deputy "
-            "secret-disclosure primitive distinct from script injection."
+            "A GitLab job's structured ``secrets:vault`` path references a CI "
+            "ref or merge-request value that may be controlled by an external "
+            "actor. The supported source shape has an explicit engine and "
+            "field. GitLab Runner can expand that path, so the value may "
+            "select a different secret. The scan does not establish whether "
+            "the relevant job ran, the value was attacker-controlled in this "
+            "run, the Vault role permits the selected path, or a secret was "
+            "retrieved or disclosed. Review the trigger and Vault policy."
         ),
-        pattern=RegexPattern(
-            # Inline ``vault:`` short form whose path interpolates a tainted
-            # CI variable.  Static paths (``vault: prod/db@ops``) and
-            # non-attacker vars (``$CI_ENVIRONMENT_NAME``) do not match.
-            match=(
-                r"vault\s*:\s*['\"]?[^'\"\n]*"
-                r"\$\{?(?:CI_COMMIT_(?:REF_NAME|REF_SLUG|BRANCH|TITLE|MESSAGE|DESCRIPTION|AUTHOR|TAG_NAME)"
-                r"|CI_MERGE_REQUEST_(?:SOURCE_BRANCH_NAME|TITLE|DESCRIPTION|LABELS)"
-                r"|CI_EXTERNAL_PULL_REQUEST_\w+)\b"
-            ),
-            exclude=[r"^\s*#"],
-        ),
+        pattern=GitLabVaultSelectorPattern(),
         remediation=(
-            "Never build a Vault path from a CI variable an attacker can "
-            "influence. Use a fixed path, or scope the lookup by the "
-            "protected environment / project, not by the ref:\n"
+            "Bind each job to a fixed Vault path or map caller-selected "
+            "values to a reviewed, finite set of paths. Restrict the Vault "
+            "role to the intended project and protected references; test "
+            "that out-of-scope paths are denied. Avoid using branch or "
+            "merge-request text as an arbitrary secret selector:\n"
             "\n"
-            "# BAD — fork MR branch name steers the secret lookup\n"
+            "# Review — ref value may choose a Vault path\n"
             "job:\n"
             "  secrets:\n"
             "    DB_PASSWORD:\n"
-            '      vault: "$CI_COMMIT_REF_NAME/db/password@ops"\n'
+            "      vault:\n"
+            "        engine: {name: kv-v2, path: ops}\n"
+            '        path: "$CI_COMMIT_REF_NAME/db"\n'
+            "        field: password\n"
             "\n"
-            "# GOOD — fixed path; gate the job on a protected ref so only\n"
-            "# trusted pipelines can reach it\n"
+            "# Fixed path; separately restrict the job and Vault role\n"
             "job:\n"
             "  secrets:\n"
             "    DB_PASSWORD:\n"
-            '      vault: "production/db/password@ops"\n'
-            "  rules:\n"
-            "    - if: '$CI_COMMIT_REF_PROTECTED == \"true\"'"
+            "      vault:\n"
+            "        engine: {name: kv-v2, path: ops}\n"
+            "        path: production/db\n"
+            "        field: password"
         ),
-        reference="https://docs.gitlab.com/ci/secrets/",
+        reference="https://docs.gitlab.com/ci/secrets/hashicorp_vault/",
         test_positive=[
-            '      vault: "$CI_COMMIT_REF_NAME/db/password@ops"',
-            "      vault: '${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}/secret@kv'",
-            '      vault: "secrets/$CI_COMMIT_BRANCH/token@ops"',
+            "job:\n  secrets:\n    TOKEN:\n      vault:\n"
+            "        engine: {name: kv-v2, path: ops}\n"
+            '        path: "$CI_COMMIT_REF_NAME/db"\n'
+            "        field: password\n",
+            "job:\n  secrets:\n    TOKEN:\n"
+            '      vault: {engine: {name: kv-v2, path: ops}, path: "${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}/db", field: password}\n',
         ],
         test_negative=[
-            # Static path — safe.
-            "      vault: production/db/password@ops",
-            '      vault: "ops/data/$CI_ENVIRONMENT_NAME/db"',
-            '      # vault: "$CI_COMMIT_REF_NAME/db@ops"',
+            "job:\n  secrets:\n    TOKEN:\n      vault:\n"
+            "        engine: {name: kv-v2, path: ops}\n"
+            "        path: production/db\n        field: password\n",
+            "job:\n  script: |\n    cat > example.yml <<'EOF'\n"
+            "    vault: {engine: {name: kv-v2, path: ops}, "
+            'path: "$CI_COMMIT_REF_NAME/db", field: password}\n    EOF\n',
         ],
         stride=["S", "I"],
         threat_narrative=(
-            "GitLab resolves the Vault path at job runtime. A path built "
-            "from ``$CI_COMMIT_REF_NAME`` (or another fork-controlled "
-            "variable) lets an attacker who opens a merge request choose "
-            "the secret the job retrieves — redirecting it to a "
-            "higher-privilege path or one whose value the job subsequently "
-            "leaks, all without changing a line of the committed pipeline."
+            "If an external actor controls the referenced CI value and the "
+            "job's Vault role can read multiple paths, that actor may steer "
+            "which secret the job requests. Job execution, Vault access, "
+            "and any later disclosure require separate evidence."
         ),
         incidents=[],
-        confidence="high",
+        confidence="medium",
+        review_needed=True,
     ),
     # =========================================================================
     # TAINT-GL-008 — cross-file / inheritance-laundered taint (corpus rule)
