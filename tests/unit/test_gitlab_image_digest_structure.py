@@ -89,3 +89,40 @@ def test_scan_repo_pinned_image_has_no_unpinned_finding(tmp_path):
     assert not any(
         finding.rule_id == "SEC3-GL-005" for report in reports for finding in report.findings
     )
+
+
+def test_service_scalar_map_and_default_are_owned_image_references():
+    for source in (
+        "build:\n  services:\n    - postgres:17\n  script: echo ok\n",
+        "build:\n  services: [{name: postgres:17}]\n  script: echo ok\n",
+        "default:\n  services:\n    - name: postgres:17\nbuild:\n  script: echo ok\n",
+        "services:\n  - postgres:17\nbuild:\n  script: echo ok\n",
+    ):
+        assert _matches(source), source
+
+
+def test_service_digest_unknown_and_script_decoy_remain_distinct():
+    source = (
+        "build:\n  services:\n    - name: postgres@sha256:"
+        + "a" * 64
+        + "\n  script: |\n    cat > example.yml <<'EOF'\n"
+        "    services:\n    - name: redis:latest\n    EOF\n"
+    )
+    assert _matches(source) == []
+    unknown = "build:\n  services:\n    - name: $SERVICE_IMAGE\n  script: echo ok\n"
+    assert isinstance(_matches(unknown), IncompletePatternMatches)
+
+
+def test_scan_repo_service_finding_supersedes_same_line_latest_rule(tmp_path):
+    (tmp_path / ".gitlab-ci.yml").write_text(
+        "build:\n  services:\n    - postgres:latest\n  script: echo ok\n",
+        encoding="utf-8",
+    )
+    reports = scan_repo(str(tmp_path), load_rules_for_platform(Platform.GITLAB))
+    relevant = [
+        finding
+        for report in reports
+        for finding in report.findings
+        if finding.rule_id in {"SEC3-GL-005", "SEC8-GL-003"}
+    ]
+    assert [(finding.rule_id, finding.line) for finding in relevant] == [("SEC3-GL-005", 3)]

@@ -14,6 +14,7 @@ import re
 
 from taintly.actions_lock import ActionsLockAwarePattern
 from taintly.models import Platform, RegexPattern, Rule, Severity
+from taintly.rules.github.image_refs import GithubImageReferencePattern
 
 
 class DependabotMissingCooldownPattern:
@@ -82,22 +83,11 @@ RULES: list[Rule] = [
         description=(
             "A job container or service container references a Docker image with the "
             "':latest' tag. ':latest' resolves to whatever the registry currently points "
-            "at — it changes silently on every push to the image repository. "
-            "If the upstream image is compromised or updated unexpectedly, the new image "
-            "executes inside your job with full access to all runner secrets and artefacts. "
-            "Pin to a specific digest to guarantee the exact image version."
+            "at, so a later run may use different image bytes without a workflow edit. "
+            "Actual execution, available secrets and registry control are not established "
+            "by this configured reference. Pin to a reviewed digest."
         ),
-        pattern=RegexPattern(
-            match=(
-                # Covers both forms:
-                #   container:                       container: ubuntu:latest
-                #     image: ubuntu:latest
-                # Also catches services.X.image: postgres:latest
-                r"^\s+(?:image|container):\s+['\"]?[a-zA-Z0-9][^@'\"\s]*:latest['\"]?"
-                r"\s*(#.*)?$"
-            ),
-            exclude=[r"^\s*#", r"@sha256:"],
-        ),
+        pattern=GithubImageReferencePattern("latest"),
         remediation=(
             "Pin container images to a SHA256 digest:\n"
             "  container:\n"
@@ -107,16 +97,14 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.docker.com/reference/cli/docker/image/pull/#pull-an-image-by-digest-immutable-identifier",
         test_positive=[
-            "    container:\n      image: ubuntu:latest",
-            "    container: node:latest",
-            "        image: postgres:latest",
-            '        image: "python:latest"',
+            "jobs:\n  test:\n    container:\n      image: ubuntu:latest",
+            "jobs:\n  test:\n    container: node:latest",
+            "jobs:\n  test:\n    services:\n      db:\n        image: postgres:latest",
         ],
         test_negative=[
-            "    container:\n      image: ubuntu@sha256:abc1234",
-            "      image: ubuntu:22.04",
-            "      image: postgres:14-alpine",
-            "      # image: ubuntu:latest",
+            "jobs:\n  test:\n    container: ubuntu@sha256:" + "a" * 64,
+            "jobs:\n  test:\n    container: ubuntu:22.04",
+            "jobs:\n  test:\n    steps:\n      - run: echo 'image: ubuntu:latest'",
         ],
         stride=["T"],
         threat_narrative=(
@@ -143,22 +131,7 @@ RULES: list[Rule] = [
             "effectively the same risk as ':latest' but less visible. "
             "The image version is uncontrolled and changes without any signal in the workflow."
         ),
-        pattern=RegexPattern(
-            match=(
-                # image: name_with_no_colon_or_digest — bare image name
-                # Must have at least one slash or be a well-known image name pattern
-                # Excludes names containing : (tagged) or @ (digest) or / (path, caught separately)
-                r"^\s+(?:image|container):\s+['\"]?"
-                r"[a-zA-Z0-9][a-zA-Z0-9._/-]+"  # image name (no colon, no @)
-                r"['\"]?\s*(#.*)?$"
-            ),
-            exclude=[
-                r"^\s*#",
-                r"@sha256:",  # digest-pinned — safe
-                r":(?!latest)[a-zA-Z0-9]",  # has a non-latest tag — specific version, acceptable
-                r"uses:",  # action references, not container images
-            ],
-        ),
+        pattern=GithubImageReferencePattern("untagged"),
         remediation=(
             "Always specify an explicit version tag and prefer digest pinning:\n"
             "  container:\n"
@@ -168,15 +141,15 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.docker.com/reference/cli/docker/image/pull/#pull-an-image-by-digest-immutable-identifier",
         test_positive=[
-            "    container:\n      image: ubuntu",
-            "      image: postgres",
-            "    container: node",
+            "jobs:\n  test:\n    container:\n      image: ubuntu",
+            "jobs:\n  test:\n    services:\n      db:\n        image: postgres",
+            "jobs:\n  test:\n    container: node",
         ],
         test_negative=[
-            "      image: ubuntu:22.04",
-            "      image: ubuntu:latest",
-            "      image: ubuntu@sha256:abc123",
-            "      # image: ubuntu",
+            "jobs:\n  test:\n    container: ubuntu:22.04",
+            "jobs:\n  test:\n    container: ubuntu:latest",
+            "jobs:\n  test:\n    container: ubuntu@sha256:" + "a" * 64,
+            "jobs:\n  test:\n    steps:\n      - run: echo 'image: ubuntu'",
         ],
         stride=["T"],
         threat_narrative=(

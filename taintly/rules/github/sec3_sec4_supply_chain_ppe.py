@@ -31,6 +31,7 @@ from taintly.parsers.gha_expr import (
 from taintly.parsers.segmentation import for_each_step
 from taintly.parsers.structural import Event, EventKind, triggers, walk_workflow
 from taintly.platform import github_archived_check, github_sha_verify
+from taintly.rules.github.image_refs import GithubImageReferencePattern
 from taintly.structural_pattern import StructuralPattern
 from taintly.workflow_aware_pattern import PredicateContext
 
@@ -2287,8 +2288,8 @@ RULES: list[Rule] = [
         confidence="high",
     ),
     # =========================================================================
-    # SEC3-GH-007: Docker image reference (services.<name>.image: or
-    # container.image:) without SHA256 digest pin.
+    # SEC3-GH-007: directly configured job/service image with a version
+    # tag but without a literal SHA256 digest.
     #
     # GitHub-side counterpart of SEC3-GL-005.  The cross-tool corpus
     # (88 labelled rows across 12 repos) measured taintly's
@@ -2296,9 +2297,9 @@ RULES: list[Rule] = [
     # was a GitHub workflow with a tag-pinned ``services.<svc>.image:``
     # block (postgres, redis, etc.).  This rule closes that gap.
     #
-    # Same pattern as the GitLab rule: ``image: <name>:<tag>`` fires
-    # when no ``@sha256:`` digest is present.  Excludes commented-out
-    # lines and digests-with-tags (``alpine:3.18@sha256:abc...``).
+    # Structural ownership now separates actual image consumers from
+    # strategy.matrix values and script text. Latest and bare references
+    # remain with the more specific SEC8-GH-001/002 rules.
     # =========================================================================
     Rule(
         id="SEC3-GH-007",
@@ -2307,30 +2308,12 @@ RULES: list[Rule] = [
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-3",
         description=(
-            "A GitHub Actions workflow references a Docker image by tag "
-            "(``image: postgres:15``) under a ``services.<name>:`` or "
-            "top-level ``container:`` block.  Image tags are mutable: a "
-            "registry push under the same tag silently swaps what runs "
-            "alongside or as the host of every job.  Pin to an immutable "
-            "SHA256 digest so the registry can't change the bytes "
-            "executed by a future workflow run."
+            "A GitHub job container or service image is directly configured by a version "
+            "tag without a literal SHA256 digest. Tags can be repointed, changing the image "
+            "a future job uses without a workflow edit. This finding does not establish "
+            "the image actually pulled, registry control or job execution."
         ),
-        pattern=RegexPattern(
-            # Match `image: <name>[:<tag>]` lines that don't contain
-            # a digest reference.  The trailing ``\s*$`` (with optional
-            # comment) anchors at end-of-line so we don't match
-            # ``image: foo  # comment`` style annotations partial-way.
-            # Allow expressions in the tag portion (``:${{ matrix.x }}``)
-            # — those still resolve to a mutable tag at runtime.
-            match=r"^\s*image:\s*['\"]?[a-zA-Z0-9._/-]+(?::[a-zA-Z0-9._${}\s-]+)?['\"]?\s*(#.*)?$",
-            exclude=[
-                r"^\s*#",
-                # Digest pin in any position on the line — safe.
-                r"@sha256:",
-                # Bare ``image:`` block opener (no value on same line).
-                r"^\s*image:\s*$",
-            ],
-        ),
+        pattern=GithubImageReferencePattern("tagged"),
         remediation=(
             "Pin the image to a SHA256 digest:\n"
             "  services:\n"
@@ -2342,26 +2325,22 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.docker.com/reference/cli/docker/image/pull/#pull-an-image-by-digest-immutable-identifier",
         test_positive=[
-            "      image: postgres:15-alpine",
-            "      image: redis:6",
-            "      image: postgis/postgis:${{ matrix.postgis-version }}",
-            "      image: 'ghcr.io/example/app:latest'",
+            "jobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      db:\n        image: postgres:15-alpine",
+            "jobs:\n  test:\n    runs-on: ubuntu-latest\n    container: redis:6",
+            "jobs:\n  test:\n    container:\n      image: 'ghcr.io/example/app:v2'",
         ],
         test_negative=[
-            "      image: postgres@sha256:abcdef1234567890",
-            "      image: alpine:3.18@sha256:abcdef1234567890",
-            "      # image: postgres:15-alpine",
-            "    image:",  # bare opener — not a pin reference
+            "jobs:\n  test:\n    container: postgres@sha256:" + "a" * 64,
+            "jobs:\n  test:\n    container: alpine:latest",
+            "jobs:\n  test:\n    container: ${{ matrix.image }}",
+            "jobs:\n  test:\n    steps:\n      - run: echo 'image: postgres:15-alpine'",
         ],
         stride=["T"],
         threat_narrative=(
-            "An attacker who controls the upstream registry image (compromised "
-            "publisher, account takeover, typosquat under a similar tag) can "
-            "replace the bytes pulled by your jobs without changing the workflow "
-            "file.  Service containers run alongside the job with access to job "
-            "secrets via service ``env:`` and shared ``volumes``; container-runtime "
-            "jobs (``container.image:``) run AS that image.  Pinning to a SHA256 "
-            "digest makes the image reference immutable and breaks this attack."
+            "A publisher or attacker able to repoint the image tag can change a later pull "
+            "without editing this workflow. The resulting exposure depends on the job's "
+            "execution, variables, mounts and service network access; none is proven by "
+            "the image declaration alone."
         ),
         incidents=[
             # No high-profile published incident specifically for GitHub Actions

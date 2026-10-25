@@ -61,6 +61,14 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- `SEC3-GL-005` now checks structurally owned GitLab service images as well as
+  job images. Scalar and `name:` service forms are covered; dynamic whole-image
+  references remain unresolved, and `SEC8-GL-003` is superseded for the same
+  declaration in repository reports.
+- GitHub image rules `SEC3-GH-007`, `SEC8-GH-001` and `SEC8-GH-002` now use
+  the owning job container or service image node. Matrix values and script text
+  no longer masquerade as direct consumers, while scalar `container:` values
+  are checked. Dynamic image expressions remain incomplete rather than safe.
 - `SEC3-GL-005` now inspects structurally owned GitLab job/default/global image
   declarations, including variable-backed tags, instead of matching only
   literal `image:` lines. It keeps script text out of the finding and marks

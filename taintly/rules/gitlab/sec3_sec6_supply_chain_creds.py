@@ -34,7 +34,7 @@ _NON_IMAGE_OWNERS = frozenset(
 
 
 class GitlabUnpinnedImagePattern:
-    """Inspect owned GitLab image scalars, not image-looking script text.
+    """Inspect owned GitLab job and service image scalars.
 
     This checks the configured reference. A variable supplying the whole image
     or a nonliteral digest cannot be resolved from this scalar alone.
@@ -58,7 +58,7 @@ class GitlabUnpinnedImagePattern:
         return self.check(content, lines)
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        if "image" not in content:
+        if "image" not in content and "services" not in content:
             return []
         matches: list[tuple[int, str]] = []
         unresolved = False
@@ -71,14 +71,28 @@ class GitlabUnpinnedImagePattern:
             if event.kind is not EventKind.LEAF_SCALAR or event.value is None:
                 continue
             path = event.path
-            if not (
+            is_image = (
                 path == ("image",)
                 or path == ("image", "name")
                 or (len(path) == 2 and path[1] == "image")
                 or (len(path) == 3 and path[1:] == ("image", "name"))
-            ):
+            )
+            service_tail = path[1:] if path and path[0] == "services" else path[2:]
+            is_service = (
+                (path and path[0] == "services") or (len(path) > 1 and path[1] == "services")
+            ) and (
+                (len(service_tail) == 1 and isinstance(service_tail[0], int))
+                or (
+                    len(service_tail) == 2
+                    and isinstance(service_tail[0], int)
+                    and service_tail[1] == "name"
+                )
+            )
+            if not (is_image or is_service):
                 continue
-            if not isinstance(path[0], str) or path[0] in _NON_IMAGE_OWNERS:
+            if not isinstance(path[0], str) or (
+                path[0] in _NON_IMAGE_OWNERS and not (is_service and path[0] == "services")
+            ):
                 continue
             reference = event.value.strip()
             if not reference or _IMAGE_VARIABLE_RE.fullmatch(reference):
@@ -549,13 +563,13 @@ RULES: list[Rule] = [
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-3",
         description=(
-            "A GitLab job, default or global image declaration lacks a literal SHA256 digest. "
+            "A GitLab job image or service declaration lacks a literal SHA256 digest. "
             "The configured reference may change; variable values and the image actually "
             "pulled at runtime are not established by this finding."
         ),
         pattern=GitlabUnpinnedImagePattern(),
         remediation=(
-            "Bind the intended image to a reviewed SHA256 digest in the GitLab image "
+            "Bind the intended job or service image to a reviewed SHA256 digest in its GitLab "
             "declaration. If variables can override the reference, verify their allowed "
             "values and the effective pipeline configuration."
         ),
@@ -565,10 +579,13 @@ RULES: list[Rule] = [
             "build:\n  script: echo ok\n  image: node:20-slim",
             "build:\n  script: echo ok\n  image: 'registry.example.com/app:latest'",
             "build:\n  image: registry.example.com/app:$IMAGE_TAG",
+            "build:\n  services:\n    - name: postgres:17",
+            "build:\n  services: [postgres:17]",
         ],
         test_negative=[
             "build:\n  image: alpine@sha256:" + "a" * 64,
             "build:\n  script: |\n    echo 'image: alpine:3.18'",
+            "build:\n  services:\n    - name: postgres@sha256:" + "a" * 64,
         ],
         stride=["T"],
         threat_narrative=(
@@ -578,6 +595,7 @@ RULES: list[Rule] = [
             "effective credential exposure are not established by this source."
         ),
         confidence="high",
+        supersedes=["SEC8-GL-003"],
     ),
     # =========================================================================
     # SEC3-GL-004: pip --extra-index-url without --index-url — dependency
