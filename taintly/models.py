@@ -1787,6 +1787,27 @@ class CheckoutBuildWitness:
     interpreter: str | None = None
 
 
+@dataclass(frozen=True)
+class EvidenceStep:
+    """One source-bound point in an ordered, configured evidence path."""
+
+    label: str
+    file: str
+    line: int
+    relation_to_next: str = ""
+
+
+@dataclass(frozen=True)
+class EvidenceTrace:
+    """Scan-local path for explanation, never a new security conclusion."""
+
+    basis: str
+    context: str
+    steps: tuple[EvidenceStep, ...]
+    unknowns: tuple[str, ...]
+    runtime_status: str
+
+
 @dataclass
 class Finding:
     """A single finding from scanning a file or platform setting."""
@@ -1867,6 +1888,8 @@ class Finding:
     """Internal static path from this scan; never reconstructed from prose/tags."""
     _shell_use: ShellUseEvidence | None = field(default=None, repr=False, compare=False)
     """Internal source-bound shell-role witness, excluded from serialized reports."""
+    _evidence_trace: EvidenceTrace | None = field(default=None, repr=False, compare=False)
+    """Rule-produced ordered evidence for text only; absent from JSON/SARIF conclusions."""
 
     def to_dict(self) -> dict[str, Any]:
         return {

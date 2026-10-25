@@ -135,7 +135,9 @@ def _physical_source(filepath: str, content: str) -> str | None:
         decoded = raw.decode("utf8")
     except UnicodeError:
         return None
-    if decoded not in {content, content.replace("\n", "\r\n")}:
+    # Text-mode scanning normalizes line endings. A file may mix CRLF and
+    # LF, so compare that exact normalization while retaining the raw digest.
+    if decoded != content and decoded.replace("\r\n", "\n").replace("\r", "\n") != content:
         return None
     return hashlib.sha256(raw).hexdigest()
 

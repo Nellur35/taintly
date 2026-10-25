@@ -1,4 +1,4 @@
-# Secret-derived HTTP request bodies
+# Secret-derived HTTP transfers
 
 These rules report a **configured potential transfer**, not confirmed
 exfiltration. `SEC6-GH-019` requires a source-bound GitHub Actions workflow, a direct
@@ -41,6 +41,28 @@ explicit variables, and multiple script items remain unresolved in this
 profile; they are not treated as clean scans for this path.
 
 ## Jenkins
+
+`SEC6-JK-013` separately reviews a directly bound Jenkins credential in the
+query of a direct `curl` HTTP(S) URL. It requires an exact physical Jenkinsfile,
+one structurally owned `withCredentials` string or password binding, and an
+owned `sh` operand whose simple command passes the URL directly to `curl`.
+It distinguishes Groovy GString interpolation from shell expansion. An
+authentication header or `curl -u` alone is not this URL-query path. A prior
+shell command that may change the variable, an ambiguous binding owner, an
+unrecognized command form, or shell quoting that may prevent URL delivery
+remains unresolved. The rule does not classify the endpoint as malicious or
+prove that the job ran, the credential was available, the request succeeded,
+or a third party saw the URL. Review whether the API accepts a header and
+whether URLs are recorded in logs or telemetry. Mixed line endings are
+normalized only for source comparison; the reported SHA256 still identifies
+the original bytes.
+
+The text report renders an ASCII evidence path for supported `SEC6-JK-013`
+findings. Its steps and references are produced by the rule's validated
+binding-to-shell-to-query witness; the reporter does not reparse Jenkinsfile
+text or infer a missing hop. It shows the owning scope, interpolation stage,
+source lines and unresolved runtime conditions. JSON and SARIF retain their
+existing finding contracts. If the witness is unavailable, no path is drawn.
 
 `SEC6-JK-012` requires a direct `withCredentials([string(...)])` binding
 whose closure contains one literal triple-single-quoted `sh` body. The
