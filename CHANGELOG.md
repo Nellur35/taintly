@@ -11,6 +11,10 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 ## [Unreleased]
 
 ### Added
+- `SEC6-GL-011` reviews direct GitLab `CI_JOB_TOKEN` form submission to a
+  literal cleartext HTTP endpoint, with exact source ownership and runtime
+  uncertainty. HTTPS form authentication is not classified as this transport
+  risk.
 - Extend the source-bound Jenkins URL-query profile to command-style
   `sh script:` calls, class-qualified legacy username/password bindings, and
   a small set of `curl` options before the direct URL operand. The reader
