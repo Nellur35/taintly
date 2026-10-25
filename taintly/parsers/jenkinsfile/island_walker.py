@@ -233,6 +233,23 @@ class _IslandWalker:
             return
 
         if nxt_tok.kind == TokKind.IDENT:
+            # Groovy command-style named argument: ``sh script: 'cmd'``.
+            # This can also occur on the RHS of an assignment.  Require the
+            # complete IDENT ':' STRING shape before emitting a shell body;
+            # arbitrary nearby strings are not executable shell evidence.
+            if name in _SHELL_CALLS and nxt_tok.value == "script":
+                colon = self._next_significant(nxt - self._i + 1)
+                value = self._next_significant(colon - self._i + 1)
+                if (
+                    colon < self._n
+                    and self._toks[colon].kind == TokKind.OP
+                    and self._toks[colon].value == ":"
+                    and value < self._n
+                    and self._toks[value].kind == TokKind.STRING
+                ):
+                    self._i = value
+                    yield from self._emit_command_call(name, path)
+                    return
             # ``agent any`` / ``agent none`` / ``tool jdk`` — directive with
             # a bareword argument.
             if name in ("agent", "tool"):
@@ -665,6 +682,40 @@ class _IslandWalker:
                 # A list/map literal is not a named scope — pass the path
                 # through unchanged so nested calls attribute correctly.
                 yield from _named_arg_leaves(arg.nested, path, call_name)
+                if call_name == "withCredentials":
+                    # Preserve the identity of one legacy Jenkins credential
+                    # map. Flat named leaves cannot prove that $class and a
+                    # passwordVariable came from the same map when a list
+                    # contains multiple entries.
+                    classes = [
+                        item
+                        for item in arg.nested
+                        if item.kind == "named" and item.key == "$class" and item.is_string
+                    ]
+                    ids = [
+                        item
+                        for item in arg.nested
+                        if item.kind == "named" and item.key == "credentialsId" and item.is_string
+                    ]
+                    passwords = [
+                        item
+                        for item in arg.nested
+                        if item.kind == "named"
+                        and item.key == "passwordVariable"
+                        and item.is_string
+                    ]
+                    if (
+                        len(classes) == len(ids) == len(passwords) == 1
+                        and classes[0].value == "UsernamePasswordMultiBinding"
+                    ):
+                        for item in (ids[0], passwords[0]):
+                            yield Event(
+                                kind=EventKind.LEAF,
+                                path=base + ("UsernamePasswordMultiBinding", item.key),
+                                value=item.value,
+                                value_kind="string",
+                                line=item.line,
+                            )
                 yield from self._emit_nested_arg_calls(arg.nested, path, call_name)
             elif arg.kind == "call":
                 inner_name = arg.name or call_name

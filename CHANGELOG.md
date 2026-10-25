@@ -11,6 +11,10 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 ## [Unreleased]
 
 ### Added
+- Extend the source-bound Jenkins URL-query profile to command-style
+  `sh script:` calls, class-qualified legacy username/password bindings, and
+  a small set of `curl` options before the direct URL operand. The reader
+  preserves binding ownership; unsupported command shapes remain unresolved.
 - `SEC6-JK-013` reviews a source-bound Jenkins credential in a direct `curl`
   URL query. Its text finding includes an ASCII path from the same structured
   evidence, with runtime and endpoint uncertainties preserved. Mixed line

