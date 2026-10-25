@@ -294,7 +294,9 @@ class HighRiskArtifactAccessPattern:
         if not matches:
             return []
         _matches, notes = self._analyze(content, content.splitlines())
-        return [_ArtifactReviewNotes((notes[match],)) if match in notes else None for match in matches]
+        return [
+            _ArtifactReviewNotes((notes[match],)) if match in notes else None for match in matches
+        ]
 
     def _analyze(
         self, _content: str, lines: list[str]
@@ -372,7 +374,8 @@ class HighRiskArtifactAccessPattern:
         if ambiguous or any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
             return (
                 IncompletePatternMatches(
-                    results, reason="SEC9-GL-001 GitLab artifact structure is ambiguous or incomplete"
+                    results,
+                    reason="SEC9-GL-001 GitLab artifact structure is ambiguous or incomplete",
                 ),
                 notes,
             )
