@@ -3,6 +3,7 @@
 Repository: /snapshot/repo
 Platform:   github
 Files:      4
+Coverage:   incomplete (semantic completeness is not proven)
 Rules:      215
 
 ! Coverage degraded on 1 file(s)

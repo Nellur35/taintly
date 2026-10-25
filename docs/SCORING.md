@@ -141,8 +141,14 @@ distinct security risk. Third-party inventory observations are also separate
 from security risk clusters. Review-needed security candidates remain visible.
 
 JSON reports and SARIF run properties expose `security_findings_count`,
-`engine_error_count` and `coverage_status` (`complete` or `incomplete`). These
-counts describe emitted records, not unique risks or affected files. Existing
+`engine_error_count` and `coverage_status`. `incomplete` means the engine emitted
+at least one coverage diagnostic; `not_established` means no engine error was
+reported but semantic completeness has not been proved. Earlier versions used
+`complete` for the latter state. Consumers should migrate from treating that
+value as a security assurance. Candidate-anchor telemetry covers only a subset
+of rules, so a zero-finding family is labelled `No finding`, never `Strong` or
+`Not applicable` based on that telemetry. These counts describe emitted records,
+not unique risks or affected files. Existing
 `findings_count` remains the legacy non-inventory record count, including
 `ENGINE-ERR`; `inventory_count` remains separate. Raw finding and error channels
 are retained. JSON `distinct_risk_count`, `review_needed_count` and `families`

@@ -242,14 +242,6 @@ class _ReevaluatedCiVariablePattern:
         return results
 
 
-_RESTRICTIVE_ARTIFACT_ACCESS_RE = re.compile(
-    r"^access\s*:\s*['\"]?(?:developer|maintainer|none)['\"]?(?:\s+#.*)?$",
-    re.IGNORECASE,
-)
-_PRIVATE_ARTIFACT_VISIBILITY_RE = re.compile(
-    r"^public\s*:\s*['\"]?(?:false|no|off|0)['\"]?(?:\s+#.*)?$",
-    re.IGNORECASE,
-)
 _HIGH_RISK_ARTIFACT_PATH_RE = re.compile(
     r"(?:"
     r"(?:^|[/\\])\.env(?:\.[^/\\]+)?(?:$|[/\\])|"
@@ -275,68 +267,86 @@ class HighRiskArtifactAccessPattern:
 
     The old SEC9-GL-001 matcher treated every ``artifacts:`` block as a
     possible data leak. This matcher first proves a stronger local fact: the
-    exact artifact block contains a literal path (or strongly named variable)
-    associated with secrets, private keys, signed pre-release packages, or
-    security findings. Indentation bounds keep evidence, access controls, and
-    inheritance inside that block. An inherited access policy is not treated
-    as restrictive unless its effective value can be proved locally.
+    exact job artifact mapping contains a literal path (or strongly named
+    variable) associated with sensitive material. Structural ownership keeps
+    script text, sibling jobs and YAML presentation from changing the answer.
+    An inherited access policy is not treated as restrictive unless its
+    effective value can be proved locally.
     """
 
+    def self_test_mutation_applicable(self, source: str, mutant: str, operator: str) -> bool:
+        # The mutation operator's zero-space variant turns ``paths: [x]``
+        # into ``paths:[x]`` (and ``script: make`` into ``script:make``).
+        # YAML then has a scalar, not the original mapping. Keep the valid
+        # spacing-added mutant in the gate; reject only that exact transform.
+        return not (
+            operator == "whitespace_pad" and ": " in source and mutant == source.replace(": ", ":")
+        )
+
     def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
-        results: list[tuple[int, str]] = []
-        for i, line in enumerate(lines):
-            stripped = line.lstrip(" \t")
-            if stripped.startswith("#") or not re.fullmatch(r"artifacts\s*:\s*(?:#.*)?", stripped):
+        # Safe lexical gate: every supported artifact mapping key contains
+        # these bytes, including quoted keys and flow-style mappings.
+        if "artifacts" not in _content:
+            return []
+        events = tuple(
+            walk_workflow(".gitlab-ci.yml", content=_content, include_keys=True, recover=True)
+        )
+        artifact_keys: dict[str, tuple[int, str]] = {}
+        duplicate_owners: set[str] = set()
+        child_keys: set[tuple[str, str]] = set()
+        settings: dict[tuple[str, str], set[str]] = {}
+        risky: set[str] = set()
+        for event in events:
+            path = event.path
+            if len(path) < 2 or not isinstance(path[0], str) or path[1] != "artifacts":
                 continue
-            block_indent = len(line) - len(stripped)
-            block = self._block(lines, i + 1, block_indent)
-            if not block:
-                continue
-            child_indent = min(indent for _, _, indent in block)
-            direct_children = [text for _, text, indent in block if indent == child_indent]
-            if any(_RESTRICTIVE_ARTIFACT_ACCESS_RE.fullmatch(text) for text in direct_children):
-                continue
-            if any(_PRIVATE_ARTIFACT_VISIBILITY_RE.fullmatch(text) for text in direct_children):
-                continue
-            if self._has_sensitive_path(block, child_indent):
-                results.append((i + 1, stripped.strip()))
+            owner = path[0]
+            if event.kind is EventKind.MAP_KEY and len(path) == 2:
+                if 0 < event.line <= len(lines):
+                    if owner in artifact_keys:
+                        duplicate_owners.add(owner)
+                    artifact_keys[owner] = (event.line, lines[event.line - 1].strip())
+            elif event.kind is EventKind.MAP_KEY and len(path) == 3:
+                child_key = (owner, str(path[2]))
+                if child_key in child_keys:
+                    duplicate_owners.add(owner)
+                child_keys.add(child_key)
+            elif event.kind is EventKind.LEAF_SCALAR and len(path) == 3:
+                value = (event.value or "").strip().strip("'\"").lower()
+                if path[2] in {"access", "public"}:
+                    settings.setdefault((owner, str(path[2])), set()).add(value)
+            elif (
+                event.kind is EventKind.LEAF_SCALAR
+                and len(path) == 4
+                and path[2] == "paths"
+                and type(path[3]) is int
+                and self._path_is_high_risk(event.value or "")
+            ):
+                risky.add(owner)
+        ambiguous = {
+            owner for (owner, _key), values in settings.items() if len(values) > 1
+        } | duplicate_owners
+        restricted = {
+            owner
+            for owner in artifact_keys
+            if settings.get((owner, "access"), set()) & {"developer", "maintainer", "none"}
+            or settings.get((owner, "public"), set()) & {"false", "no", "off", "0"}
+        }
+        results = [
+            artifact_keys[owner]
+            for owner in artifact_keys
+            if owner in risky and owner not in restricted and owner not in ambiguous
+        ]
+        if not artifact_keys:
+            # Incidental artifact-looking text in another language is not
+            # a GitLab job artifact. Actual malformed CI files retain the
+            # engine's file-level structural diagnostic.
+            return []
+        if ambiguous or any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
+            return IncompletePatternMatches(
+                results, reason="SEC9-GL-001 GitLab artifact structure is ambiguous or incomplete"
+            )
         return results
-
-    @staticmethod
-    def _block(lines: list[str], start: int, parent_indent: int) -> list[tuple[int, str, int]]:
-        block: list[tuple[int, str, int]] = []
-        for i in range(start, len(lines)):
-            raw = lines[i]
-            text = raw.lstrip(" \t")
-            if not text or text.startswith("#"):
-                continue
-            indent = len(raw) - len(text)
-            if indent <= parent_indent:
-                break
-            block.append((i, text.strip(), indent))
-        return block
-
-    @staticmethod
-    def _has_sensitive_path(block: list[tuple[int, str, int]], child_indent: int) -> bool:
-        for pos, (_, text, indent) in enumerate(block):
-            if indent != child_indent:
-                continue
-            inline = re.fullmatch(r"paths\s*:\s*\[(.*)]\s*(?:#.*)?", text)
-            if inline:
-                return any(
-                    HighRiskArtifactAccessPattern._path_is_high_risk(item)
-                    for item in inline.group(1).split(",")
-                )
-            if not re.fullmatch(r"paths\s*:\s*(?:#.*)?", text):
-                continue
-            paths_indent = indent
-            for _, candidate, candidate_indent in block[pos + 1 :]:
-                if candidate_indent <= paths_indent:
-                    break
-                item = re.fullmatch(r"-\s*(.+)", candidate)
-                if item and HighRiskArtifactAccessPattern._path_is_high_risk(item.group(1)):
-                    return True
-        return False
 
     @staticmethod
     def _path_is_high_risk(value: str) -> bool:

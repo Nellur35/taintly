@@ -2327,12 +2327,9 @@ def scan_repo(
                 report.repo_identity_value = repoctx.repository
         else:
             repoctx = None
-        # ContextPattern rules whose finding_family is set are the
-        # subset we can answer "did this family have a candidate
-        # location?" for.  We compute anchor-match counts per file
-        # and populate report.families_with_surface, which the scorer
-        # uses to label "Strong" vs "Not applicable" on families
-        # with zero findings.
+        # Retain anchor telemetry for ContextPattern rules with a family.
+        # It describes only this subset of rules and cannot prove a
+        # family-wide negative result.
         from taintly.models import ContextPattern as _ContextPattern
 
         ctx_rules_by_family: dict[str, list[Rule]] = {}
@@ -2385,10 +2382,8 @@ def scan_repo(
                     respect_inline_suppressions=respect_inline_suppressions,
                 )
             )
-            # Surface-evaluation pass (reusing the content read above): a
-            # family whose ContextPattern anchors find a candidate is marked
-            # "has surface"; a family with no candidates anywhere stays
-            # "Not applicable".
+            # Legacy anchor telemetry (reusing the content read above).
+            # No anchor match does not establish inapplicability.
             if ctx_rules_by_family and _content is not None:
                 _lines = _content.splitlines()
                 for family, fam_rules in ctx_rules_by_family.items():

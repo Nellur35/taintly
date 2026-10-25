@@ -430,6 +430,9 @@ def format_text(
     out.append(f"Repository: {report.repo_path}")
     out.append(f"Platform:   {report.platform or 'auto-detected'}")
     out.append(f"Files:      {report.files_scanned}")
+    out.append(
+        f"Coverage:   {report.semantic_coverage_status()} (semantic completeness is not proven)"
+    )
     if report.rules_loaded:
         out.append(f"Rules:      {report.rules_loaded}")
     out.append("")
