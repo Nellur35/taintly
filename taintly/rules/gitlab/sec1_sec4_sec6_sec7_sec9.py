@@ -5,6 +5,7 @@ These were entirely missing or undercovered in the initial implementation.
 """
 
 import re
+from dataclasses import dataclass
 
 from taintly.models import (
     ContextPattern,
@@ -268,7 +269,7 @@ class HighRiskArtifactAccessPattern:
     The old SEC9-GL-001 matcher treated every ``artifacts:`` block as a
     possible data leak. This matcher first proves a stronger local fact: the
     exact job artifact mapping contains a literal path (or strongly named
-    variable) associated with sensitive material. Structural ownership keeps
+    variable) selected for review. Structural ownership keeps
     script text, sibling jobs and YAML presentation from changing the answer.
     An inherited access policy is not treated as restrictive unless its
     effective value can be proved locally.
@@ -284,10 +285,24 @@ class HighRiskArtifactAccessPattern:
         )
 
     def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+        matches, _notes = self._analyze(_content, lines)
+        return matches
+
+    def context_notes_for_matches(
+        self, content: str, _filepath: str, matches: list[tuple[int, str]]
+    ) -> list["_ArtifactReviewNotes | None"]:
+        if not matches:
+            return []
+        _matches, notes = self._analyze(content, content.splitlines())
+        return [_ArtifactReviewNotes((notes[match],)) if match in notes else None for match in matches]
+
+    def _analyze(
+        self, _content: str, lines: list[str]
+    ) -> tuple[list[tuple[int, str]], dict[tuple[int, str], str]]:
         # Safe lexical gate: every supported artifact mapping key contains
         # these bytes, including quoted keys and flow-style mappings.
         if "artifacts" not in _content:
-            return []
+            return [], {}
         events = tuple(
             walk_workflow(".gitlab-ci.yml", content=_content, include_keys=True, recover=True)
         )
@@ -295,7 +310,7 @@ class HighRiskArtifactAccessPattern:
         duplicate_owners: set[str] = set()
         child_keys: set[tuple[str, str]] = set()
         settings: dict[tuple[str, str], set[str]] = {}
-        risky: set[str] = set()
+        risky: dict[str, list[str]] = {}
         for event in events:
             path = event.path
             if len(path) < 2 or not isinstance(path[0], str) or path[1] != "artifacts":
@@ -322,7 +337,7 @@ class HighRiskArtifactAccessPattern:
                 and type(path[3]) is int
                 and self._path_is_high_risk(event.value or "")
             ):
-                risky.add(owner)
+                risky.setdefault(owner, []).append((event.value or "").strip())
         ambiguous = {
             owner for (owner, _key), values in settings.items() if len(values) > 1
         } | duplicate_owners
@@ -337,16 +352,31 @@ class HighRiskArtifactAccessPattern:
             for owner in artifact_keys
             if owner in risky and owner not in restricted and owner not in ambiguous
         ]
+        notes: dict[tuple[int, str], str] = {}
+        for owner, match in artifact_keys.items():
+            if match not in results:
+                continue
+            selectors = risky[owner]
+            shown = ", ".join(repr(value[:100]) for value in selectors[:4])
+            remainder = f" (+{len(selectors) - 4} more)" if len(selectors) > 4 else ""
+            notes[match] = (
+                f"Job {owner[:100]!r} selects artifact path(s) {shown}{remainder}. "
+                "These names are review signals; actual file contents, upload, and "
+                "effective audience are not established by this source."
+            )
         if not artifact_keys:
             # Incidental artifact-looking text in another language is not
             # a GitLab job artifact. Actual malformed CI files retain the
             # engine's file-level structural diagnostic.
-            return []
+            return [], {}
         if ambiguous or any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
-            return IncompletePatternMatches(
-                results, reason="SEC9-GL-001 GitLab artifact structure is ambiguous or incomplete"
+            return (
+                IncompletePatternMatches(
+                    results, reason="SEC9-GL-001 GitLab artifact structure is ambiguous or incomplete"
+                ),
+                notes,
             )
-        return results
+        return results, notes
 
     @staticmethod
     def _path_is_high_risk(value: str) -> bool:
@@ -354,6 +384,11 @@ class HighRiskArtifactAccessPattern:
         # characters do not change the security meaning of the path.
         scalar = value.split(" #", 1)[0].strip().strip("'\"")
         return bool(scalar and _HIGH_RISK_ARTIFACT_PATH_RE.search(scalar))
+
+
+@dataclass(frozen=True)
+class _ArtifactReviewNotes:
+    notes: tuple[str, ...]
 
 
 class GitlabIdentityGatePattern:
@@ -985,36 +1020,35 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC9-GL-001",
-        title="High-risk artifact path lacks an access restriction",
+        title="Review artifact path and intended access",
         severity=Severity.MEDIUM,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-9",
         # 2026-09-23 precision audit: the earlier matcher fired on every
         # artifacts block and proved neither sensitive content nor effective
-        # public visibility. Require a strong secret-bearing path signal while
+        # public visibility. Require a specific path-name review signal while
         # retaining review-needed because project/pipeline visibility remains
         # external context.
         review_needed=True,
         confidence="low",
         description=(
-            "A job uploads a path whose name strongly indicates credentials, private keys, "
-            "environment secrets, kubeconfig or Terraform state, signed pre-release packages, "
-            "or security scan results, without setting "
-            "a restrictive `artifacts:access:` value or `artifacts:public: false`. In a "
-            "public project whose pipelines are public, `access: all` is the default and "
-            "the artifact can be downloaded by non-members. Project and pipeline visibility "
-            "are not proven by CI YAML, so this finding requires review."
+            "A GitLab job selects an artifact path with a credential-like name, a signed "
+            "release-output name, or a security-report name without a local access restriction. "
+            "The name is a review signal, not evidence of secret contents or an unauthorized "
+            "download. In public pipelines, GitLab's default `access: all` can permit "
+            "non-member UI/API downloads. Actual file contents, job execution, project and "
+            "pipeline visibility, and intended audience need review."
         ),
         pattern=HighRiskArtifactAccessPattern(),
         remediation=(
-            "Keep secret material out of job artifacts. If the artifact is intentional, "
-            "set an explicit restrictive access level (`developer`, `maintainer`, or "
-            "`none`; `maintainer` requires GitLab 18.4+):\n"
-            "\n"
-            "artifacts:\n"
-            "  access: developer   # was: implicit `all`\n"
-            "  paths:\n"
-            "    - dist/"
+            "Check the selected paths and who should receive them. If a credential-like "
+            "path contains sensitive material, keep it out of artifacts. For intended signed "
+            "build outputs or security reports, review the audience and retention; restrict "
+            "UI/API access when that audience is narrower (for example, "
+            "`artifacts: {access: developer}`). GitLab 18.4+ also supports `maintainer`. "
+            "This access setting does not block job-token retrieval through the runner API "
+            "or forwarding to downstream pipelines; review those routes and project CI/CD "
+            "visibility separately."
         ),
         reference="https://docs.gitlab.com/ci/yaml/#artifactsaccess",
         test_positive=[
