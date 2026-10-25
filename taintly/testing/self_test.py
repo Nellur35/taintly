@@ -43,6 +43,12 @@ class TestResult:
     known_gap: bool = False
 
 
+def _check_sample(rule: Rule, sample: str, lines: list[str]):
+    """Let source-bound rules materialize a sample before checking it."""
+    source_bound = getattr(rule.pattern, "self_test_check", None)
+    return source_bound(sample) if callable(source_bound) else rule.pattern.check(sample, lines)
+
+
 def _mutation_applicable(rule: Rule, source: str, mutant: str, operator: str) -> bool:
     """Let a rule reject a mutation proved to change the input semantics."""
     predicate = getattr(rule.pattern, "self_test_mutation_applicable", None)
@@ -57,7 +63,7 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
         # Positive samples — must trigger
         for sample in rule.test_positive:
             lines = sample.splitlines()
-            matches = rule.pattern.check(sample, lines)
+            matches = _check_sample(rule, sample, lines)
             passed = len(matches) > 0
             results.append(
                 TestResult(
@@ -73,7 +79,7 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
         # Negative samples — must NOT trigger
         for sample in rule.test_negative:
             lines = sample.splitlines()
-            matches = rule.pattern.check(sample, lines)
+            matches = _check_sample(rule, sample, lines)
             passed = len(matches) == 0
             results.append(
                 TestResult(
@@ -803,7 +809,7 @@ def run_mutation_tests(
                     if not _mutation_applicable(rule, sample, mutant, op_name):
                         continue
                     lines = mutant.splitlines()
-                    matches = rule.pattern.check(mutant, lines)
+                    matches = _check_sample(rule, mutant, lines)
                     passed, known_gap = _mark(
                         len(matches) > 0,
                         rule.id,
@@ -833,7 +839,7 @@ def run_mutation_tests(
                     if not _mutation_applicable(rule, sample, mutant, op_name):
                         continue
                     lines = mutant.splitlines()
-                    matches = rule.pattern.check(mutant, lines)
+                    matches = _check_sample(rule, mutant, lines)
                     passed, known_gap = _mark(
                         len(matches) == 0,
                         rule.id,
