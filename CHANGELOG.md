@@ -61,6 +61,11 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- `SEC3-GL-005` now inspects structurally owned GitLab job/default/global image
+  declarations, including variable-backed tags, instead of matching only
+  literal `image:` lines. It keeps script text out of the finding and marks
+  whole-variable or unresolvable image references as incomplete. Findings
+  describe configured digest binding, not the image pulled at runtime.
 - `SEC9-GL-001` now names the selected artifact paths and owning job in each
   review finding. Its description and advice distinguish credential-like paths
   from intended signed outputs and security reports, and state that GitLab
