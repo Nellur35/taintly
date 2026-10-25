@@ -93,3 +93,36 @@ def test_unsupported_structure_before_artifact_is_not_reported_as_complete(
     report = scan_repo(str(tmp_path), load_rules_for_platform(Platform.GITLAB), Platform.GITLAB)[0]
     assert report.semantic_coverage_status() == "incomplete"
     assert any(f.rule_id == "ENGINE-ERR" for f in report.findings)
+
+
+def test_artifact_review_evidence_and_guidance_stay_job_scoped(tmp_path: Path) -> None:
+    source = (
+        "release:\n  script: make\n  artifacts:\n    paths: [signed/app.snap]\n"
+        "report:\n  script: scan\n  artifacts:\n"
+        "    paths: [gl-container-scanning-report.json]\n"
+        "secrets:\n  script: prepare\n  artifacts:\n    paths: [.env]\n"
+        "ordinary:\n  script: make\n  artifacts:\n    paths: [dist/]\n"
+    )
+    (tmp_path / ".gitlab-ci.yml").write_text(source, encoding="utf8")
+    report = scan_repo(str(tmp_path), load_rules_for_platform(Platform.GITLAB), Platform.GITLAB)[0]
+    findings = [f for f in report.findings if f.rule_id == "SEC9-GL-001"]
+    assert len(findings) == 3
+    assert [f.line for f in findings] == [3, 7, 11]
+    for finding, selected, others in zip(
+        findings,
+        ("signed/app.snap", "gl-container-scanning-report.json", ".env"),
+        (
+            (".env", "gl-container-scanning-report.json"),
+            (".env", "signed/app.snap"),
+            ("signed/app.snap", "gl-container-scanning-report.json"),
+        ),
+        strict=True,
+    ):
+        assert finding.review_needed
+        assert any(selected in note for note in finding.context_notes)
+        assert all(other not in " ".join(finding.context_notes) for other in others)
+        assert "actual file contents" in " ".join(finding.context_notes)
+        assert "signed" in finding.remediation
+        assert "security reports" in finding.remediation
+        assert "job-token retrieval" in finding.remediation
+        assert "job execution" in finding.description
