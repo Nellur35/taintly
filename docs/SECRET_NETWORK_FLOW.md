@@ -46,6 +46,11 @@ profile; they are not treated as clean scans for this path.
 query of a direct `curl` HTTP(S) URL. It requires an exact physical Jenkinsfile,
 one structurally owned `withCredentials` string or password binding, and an
 owned `sh` operand whose simple command passes the URL directly to `curl`.
+The supported profile also includes command-style `sh script: "..."`, a
+legacy `$class: 'UsernamePasswordMultiBinding'` map with an exactly bound
+password variable, and `curl -XPOST` or `curl --data` with a recognized
+operand before the direct URL. URLs embedded in request data or headers are
+not treated as destination operands.
 It distinguishes Groovy GString interpolation from shell expansion. An
 authentication header or `curl -u` alone is not this URL-query path. A prior
 shell command that may change the variable, an ambiguous binding owner, an

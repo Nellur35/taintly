@@ -19,6 +19,17 @@ from taintly.parsers.jenkinsfile import EventKind, walk_jenkinsfile
 from taintly.rules._secret_network_shell import _physical_source
 
 _CURL_FIRST_URL = re.compile(r"^curl\s+(?P<quote>\\?[\"']?)(?P<url>https?://\S+)")
+# A small additional profile: recognized curl options with their own operands
+# before the one direct URL operand. Do not search arbitrary later text for a
+# URL; an occurrence in --data or -H is not the request destination.
+_CURL_OPTION_URL = re.compile(
+    r"^curl\s+(?:"
+    r"-X(?:POST|GET|PUT|PATCH|DELETE)\s+|"
+    r"-X\s+(?:POST|GET|PUT|PATCH|DELETE)\s+|"
+    r"--data(?:-raw|-binary)?\s+(?:'[^'\n]*'|\"[^\"\n]*\"|[^\s'\";|&]+)\s+|"
+    r"-sS?\s+"
+    r")+(?P<quote>\\?[\"']?)(?P<url>https?://\S+)"
+)
 _QUERY_REFERENCE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})")
 _SIMPLE_PREFIX = frozenset({"set -x", "set +x", "set -e", "set -eu"})
 
@@ -85,7 +96,8 @@ class JenkinsCredentialQueryPattern:
             # same path cannot safely share one binding-to-shell owner.
             return [], {}, {}, "SEC6-JK-013 credential invocation identity is ambiguous"
 
-        # Only direct string and usernamePassword bindings are in the profile.
+        # Only direct string, usernamePassword and structurally attested
+        # UsernamePasswordMultiBinding map bindings are in the profile.
         # Path alone does not identify two sequential calls at the same owner.
         bindings: dict[tuple[object, ...], list[tuple[str, int]]] = {}
         for event in events:
@@ -94,6 +106,7 @@ class JenkinsCredentialQueryPattern:
             if event.path[-3:] not in {
                 ("withCredentials", "string", "variable"),
                 ("withCredentials", "usernamePassword", "passwordVariable"),
+                ("withCredentials", "UsernamePasswordMultiBinding", "passwordVariable"),
             }:
                 continue
             bindings.setdefault(event.path[:-2], []).append((event.value, event.line))
@@ -124,7 +137,7 @@ class JenkinsCredentialQueryPattern:
                 command = raw.strip()
                 if not command or command.startswith("#") or command in _SIMPLE_PREFIX:
                     continue
-                url_match = _CURL_FIRST_URL.match(command)
+                url_match = _CURL_FIRST_URL.match(command) or _CURL_OPTION_URL.match(command)
                 if url_match is None:
                     prefix_is_simple = False
                     continue

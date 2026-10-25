@@ -170,3 +170,41 @@ def test_header_credential_and_nonsecret_query_do_not_create_query_warning(
         source, source.splitlines(), str(path)
     )
     assert result == []
+
+
+def test_legacy_map_named_sh_and_curl_data_option_reach_query(tmp_path: Path) -> None:
+    source = (
+        "node { withCredentials([[$class: 'UsernamePasswordMultiBinding', "
+        "credentialsId: 'id', usernameVariable: 'USER', "
+        "passwordVariable: 'TOKEN']]) {\n"
+        "  def response = sh script: \"curl --data 'public' "
+        "https://example.test/releases?access_token=$TOKEN\", returnStdout: true\n"
+        "} }\n"
+    )
+    selected = _selected(_scan(tmp_path, source))
+    assert len(selected) == 1
+    assert selected[0].line == 2
+    assert "binding TOKEN" in " ".join(selected[0].context_notes)
+
+
+def test_curl_option_before_direct_query_reaches_query(tmp_path: Path) -> None:
+    source = _source('"curl -XPOST \\"https://example.test/send?access_token=$TOKEN\\""')
+    assert len(_selected(_scan(tmp_path, source))) == 1
+
+
+def test_url_in_data_operand_is_not_the_request_destination(tmp_path: Path) -> None:
+    source = _source(
+        "'''curl --data 'https://example.test/?access_token=$TOKEN' "
+        "https://example.test/public'''"
+    )
+    assert not _selected(_scan(tmp_path, source))
+
+
+def test_unrecognized_legacy_map_class_does_not_bind_password(tmp_path: Path) -> None:
+    source = (
+        "node { withCredentials([[$class: 'OtherBinding', "
+        "credentialsId: 'id', passwordVariable: 'TOKEN']]) {\n"
+        "  sh script: 'curl https://example.test/?access_token=$TOKEN'\n"
+        "} }\n"
+    )
+    assert not _selected(_scan(tmp_path, source))
