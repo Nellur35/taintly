@@ -43,6 +43,12 @@ class TestResult:
     known_gap: bool = False
 
 
+def _mutation_applicable(rule: Rule, source: str, mutant: str, operator: str) -> bool:
+    """Let a rule reject a mutation proved to change the input semantics."""
+    predicate = getattr(rule.pattern, "self_test_mutation_applicable", None)
+    return predicate(source, mutant, operator) if callable(predicate) else True
+
+
 def run_self_test(rules: list[Rule]) -> list[TestResult]:
     """Run all positive and negative test samples against their rules."""
     results = []
@@ -794,6 +800,8 @@ def run_mutation_tests(
             for op_name, op_fn in operators.items():
                 mutants = op_fn(sample)
                 for mutant in mutants:
+                    if not _mutation_applicable(rule, sample, mutant, op_name):
+                        continue
                     lines = mutant.splitlines()
                     matches = rule.pattern.check(mutant, lines)
                     passed, known_gap = _mark(
@@ -822,6 +830,8 @@ def run_mutation_tests(
             for op_name, op_fn in operators.items():
                 mutants = op_fn(sample)
                 for mutant in mutants:
+                    if not _mutation_applicable(rule, sample, mutant, op_name):
+                        continue
                     lines = mutant.splitlines()
                     matches = rule.pattern.check(mutant, lines)
                     passed, known_gap = _mark(

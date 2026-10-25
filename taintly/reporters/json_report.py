@@ -44,7 +44,7 @@ def format_json(report: AuditReport, score_report: ScoreReport | None = None) ->
         "inventory_count": inventory_count,
         "security_findings_count": len(security_findings),
         "engine_error_count": len(report.engine_errors()),
-        "coverage_status": "incomplete" if report.engine_errors() else "complete",
+        "coverage_status": report.semantic_coverage_status(),
         "distinct_risk_count": len(confirmed_clusters),
         "review_needed_count": len(review_clusters),
         "families": [cl.to_dict() for cl in clusters],

@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "oidc_metadata_review"
 
@@ -46,7 +45,7 @@ def _scan_fixture(source: Path, workspace: Path) -> dict:
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert result.stderr == ""
     report = json.loads(result.stdout)
-    assert report["coverage_status"] == "complete", report.get("errors")
+    assert report["coverage_status"] == "not_established", report.get("errors")
     assert report["engine_error_count"] == 0
     return report
 

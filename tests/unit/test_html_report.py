@@ -284,7 +284,7 @@ def test_html_separates_review_needed_from_confirmed():
 
 def test_html_renders_debt_profile_with_score_report():
     """When a ScoreReport is provided, the debt profile section must
-    render with one row per family carrying a Strong/Moderate/Weak
+    render with one row per family carrying a findings-based
     label."""
     from taintly.scorer import compute_score
     report = _multi_cluster_report()
@@ -292,7 +292,7 @@ def test_html_renders_debt_profile_with_score_report():
     html = format_html(report, score_report=score)
     assert "Security debt profile" in html
     # At least one of the qualitative labels must appear
-    assert any(label in html for label in ("label-Strong", "label-Weak", "label-Moderate"))
+    assert any(label in html for label in ("label-No-finding", "label-Weak", "label-Moderate"))
 
 
 def test_html_uses_native_details_no_js_required_for_cluster_expand():

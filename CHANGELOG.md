@@ -36,6 +36,11 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- GitLab high-risk artifact path review now uses job-owned YAML structure, so
+  equivalent block, flow and quoted-key declarations agree and script text
+  cannot impersonate an artifact declaration. Zero-finding families say
+  `No finding`; JSON/SARIF report `not_established` when no engine error is
+  observed, instead of implying complete semantic coverage.
 - Composer job attribution reuses an immutable interval index per invocation.
   Scan sessions reuse exact-content job segmentation, and corpus passes reuse
   unchanged workflow summaries while retaining separate filesystem reads and

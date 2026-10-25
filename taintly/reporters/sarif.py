@@ -224,7 +224,7 @@ def format_sarif(report: AuditReport) -> str:
                     "inventory_count": inventory_count,
                     "security_findings_count": len(_security_findings(report.findings)),
                     "engine_error_count": len(report.engine_errors()),
-                    "coverage_status": "incomplete" if report.engine_errors() else "complete",
+                    "coverage_status": report.semantic_coverage_status(),
                 },
             }
         ],
