@@ -27,6 +27,7 @@ from .models import (
     _CHUNK_COVERAGE_CEILING,
     _MAX_SAFE_TEXT_LEN,
     AuditReport,
+    EvidenceTrace,
     Finding,
     IncompletePatternMatches,
     Platform,
@@ -810,6 +811,9 @@ def scan_file(
                         context_notes=ctx_notes,
                         context_tags=ctx_tags,
                     )
+                    trace = getattr(match_context, "evidence_trace", None)
+                    if isinstance(trace, EvidenceTrace):
+                        finding._evidence_trace = trace
                     if rule.id in {"LOTP-JK-001", "LOTP-JK-003"}:
                         from .rules.jenkins.lotp import (
                             build_jenkins_lotp_profile,

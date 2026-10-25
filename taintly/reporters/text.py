@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 from taintly.families import cluster_findings
@@ -11,6 +12,7 @@ from taintly.models import AuditReport, Finding, Severity
 
 from ._encoding import arrow_char, check_char, sep_char, to_ascii
 from ._encoding import strip_terminal_controls as _safe
+from .evidence_ascii import format_evidence_trace
 
 if TYPE_CHECKING:
     from taintly.scorer import ScoreReport
@@ -126,6 +128,8 @@ def _review_details_key(f: Finding) -> str:
         details.pop(field)
     # Discovery confidence is currently absent from Finding.to_dict().
     details["discovery_confidence"] = f.discovery_confidence
+    if f._evidence_trace is not None:
+        details["evidence_trace"] = asdict(f._evidence_trace)
     return json.dumps(details, sort_keys=True, separators=(",", ":"))
 
 
@@ -563,6 +567,8 @@ def _format_review_details(f: Finding) -> list[str]:
         out.extend(_detail_lines("Threat: ", f.threat_narrative))
     for note in f.context_notes:
         out.extend(_detail_lines("Context: ", note))
+    if f._evidence_trace is not None:
+        out.extend(format_evidence_trace(f._evidence_trace, f.file))
     if f.context_tags:
         out.append(f"    Context tags: {_safe(', '.join(f.context_tags))}")
     if f.suppression_reason:

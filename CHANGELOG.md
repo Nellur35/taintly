@@ -11,6 +11,10 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 ## [Unreleased]
 
 ### Added
+- `SEC6-JK-013` reviews a source-bound Jenkins credential in a direct `curl`
+  URL query. Its text finding includes an ASCII path from the same structured
+  evidence, with runtime and endpoint uncertainties preserved. Mixed line
+  endings retain the original file SHA256.
 - `SEC6-GL-010`, `SEC6-JK-012` and `SEC6-CB-003`: source-bound review findings
   for a GitLab `CI_JOB_TOKEN` reference, direct Jenkins `withCredentials`
   string binding or CodeBuild Secrets Manager variable
