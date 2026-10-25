@@ -11,6 +11,10 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 ## [Unreleased]
 
 ### Added
+- `SEC6-CB-004` reviews direct CodeBuild Secrets Manager variables passed to
+  Docker build arguments. It preserves source and command evidence while
+  leaving runtime retrieval, overrides, Dockerfile use and image contents
+  unresolved.
 - `SEC6-GL-011` reviews direct GitLab `CI_JOB_TOKEN` form submission to a
   literal cleartext HTTP endpoint, with exact source ownership and runtime
   uncertainty. HTTPS form authentication is not classified as this transport

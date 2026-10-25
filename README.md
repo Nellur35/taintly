@@ -690,7 +690,7 @@ certificate.
 
 
 <!-- AUTOGEN:summary -->
-330 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+331 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 
@@ -703,7 +703,7 @@ certificate.
 | SEC-3 — Dependency Chain Abuse | 34 | 18 | 14 | 3 |
 | SEC-4 — Poisoned Pipeline Execution | 77 | 30 | 24 | 2 |
 | SEC-5 — Insufficient PBAC | 3 | 1 | 2 | 0 |
-| SEC-6 — Insufficient Credential Hygiene | 17 | 12 | 14 | 3 |
+| SEC-6 — Insufficient Credential Hygiene | 17 | 12 | 14 | 4 |
 | SEC-7 — Insecure System Configuration | 4 | 1 | 4 | 0 |
 | SEC-8 — Ungoverned 3rd Party Services | 6 | 3 | 5 | 0 |
 | SEC-9 — Improper Artifact Integrity | 7 | 5 | 4 | 2 |
