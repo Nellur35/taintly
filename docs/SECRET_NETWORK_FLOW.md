@@ -106,6 +106,20 @@ and a buildspec variable with the same name remain unresolved. A CodeBuild
 project or start-build request can override the buildspec variable or even the
 buildspec itself; these external settings are not visible from the file.
 
+`SEC6-CB-004` reviews a different consumer: a variable declared under
+`env.secrets-manager` used as a direct `docker build --build-arg` value in the
+same version 0.2 buildspec. The bounded profile accepts a one-line, direct
+Docker command, a POSIX shell, and a local `.` build context. It also accepts
+Docker's bare `--build-arg NAME` environment inheritance. A matching result
+establishes a configured source-to-build-argument relationship, not that the
+secret was retrieved, the build ran, the Dockerfile used the argument, or the
+image contains the value. Project/start-build overrides and prior command
+effects and exact shell-expanded argument values remain unknown. Unsupported
+command forms produce an incomplete analysis diagnostic rather than a clean
+answer. Docker recommends secret
+mounts for build secrets: [build variables](https://docs.docker.com/build/building/variables/)
+and [secret mounts](https://docs.docker.com/build/building/secrets/).
+
 GitLab source semantics: [job tokens](https://docs.gitlab.com/ci/jobs/ci_job_token/)
 and [script variables](https://docs.gitlab.com/ci/variables/job_scripts/).
 Jenkins source semantics: [Credentials Binding Plugin](https://www.jenkins.io/doc/pipeline/steps/credentials-binding/).
