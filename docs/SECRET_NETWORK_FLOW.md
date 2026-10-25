@@ -30,6 +30,20 @@ would require trusted execution and network records.
 
 ## GitLab CI
 
+`SEC6-GL-011` reviews one directly owned GitLab `script` command that passes a
+`CI_JOB_TOKEN` reference as a `curl --form`/`-F` field to a literal `http://`
+URL. Its source hash, job, script item and command line identify the configured
+path. GitLab documents token form submission for downstream pipelines, so the
+finding concerns **cleartext transport**, not the mere use of a form field or
+proof of exfiltration. A form submitted to `https://` is outside this finding.
+The bounded profile accepts one direct `curl` command, a small option set and
+simple shell expansion; aliases, multi-command items, explicit token overrides
+and unsupported option shapes remain unresolved. An echoed command or a
+single-quoted literal token reference is not treated as a transfer. The source
+does not establish that the job ran, the token's runtime value, the endpoint's
+trust, request delivery or interception. Review the route and use HTTPS; the
+`JOB-TOKEN` header is preferable where the endpoint supports it.
+
 `SEC6-GL-010` follows the predefined `CI_JOB_TOKEN` reference in one literal
 block-style `script` item owned by a single job. It supports assignments,
 `echo` file writes, a Base64 file transform, and a `curl` request body within
