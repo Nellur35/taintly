@@ -51,6 +51,9 @@ def format_score(report: ScoreReport, use_color: bool = True) -> str:
 
     review_status = "; review pending" if report.review_needed else ""
     lines.append(f"  Score: {b}{gc}{report.total_score}/100 ({report.grade}{review_status}){r}")
+    lines.append(
+        "  This score summarizes reported findings; no finding is not a safety or coverage verdict."
+    )
     # Threat-model disclosure.  The score is computed against a fixed
     # public-OSS threat model; the user's deployment may differ in ways
     # taintly can't observe.  Surfacing this adjacent to the score (not
@@ -114,7 +117,7 @@ def format_score(report: ScoreReport, use_color: bool = True) -> str:
     lines.append(f"{b}Breakdown by category:{r}")
     for cat in report.categories:
         if cat.finding_count == 0 and cat.points == cat.max_points:
-            note = "clean"
+            note = "no findings"
         else:
             parts = []
             if cat.critical_count:
@@ -123,7 +126,7 @@ def format_score(report: ScoreReport, use_color: bool = True) -> str:
                 parts.append(f"{cat.high_count} HIGH")
             if cat.medium_count:
                 parts.append(f"{cat.medium_count} MEDIUM")
-            note = ", ".join(parts) if parts else "clean"
+            note = ", ".join(parts) if parts else "no findings"
         bar = f"{cat.points:g}/{cat.max_points}"
         dash = em_dash_char()
         lines.append(f"  {cat.name:<30} {bar:>6}  {dash} {note}")

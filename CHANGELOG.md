@@ -45,6 +45,17 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- `SEC9-GL-001` now names the selected artifact paths and owning job in each
+  review finding. Its description and advice distinguish credential-like paths
+  from intended signed outputs and security reports, and state that GitLab
+  artifact access settings do not block job-token retrieval. Real-source
+  findings remain review candidates; contents, execution and audience remain
+  unverified.
+- GitLab high-risk artifact path review now uses job-owned YAML structure, so
+  equivalent block, flow and quoted-key declarations agree and script text
+  cannot impersonate an artifact declaration. Zero-finding families say
+  `No finding`; JSON/SARIF report `not_established` when no engine error is
+  observed, instead of implying complete semantic coverage.
 - The hash-pinned dev toolchain now selects an unaffected `filelock` release on
   Python 3.10 and a patched release on newer Python versions, preserving the
   dependency audit without changing Taintly's zero-dependency runtime.

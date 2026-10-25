@@ -50,7 +50,7 @@ def _check_sample(rule: Rule, sample: str, lines: list[str]):
 
 
 def _mutation_applicable(rule: Rule, source: str, mutant: str, operator: str) -> bool:
-    """Allow a rule to reject a proved semantic-changing authored mutant."""
+    """Let a rule reject a mutation proved to change the input semantics."""
     predicate = getattr(rule.pattern, "self_test_mutation_applicable", None)
     return predicate(source, mutant, operator) if callable(predicate) else True
 

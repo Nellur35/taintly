@@ -622,7 +622,7 @@ scores or machine-readable output, and does not prove a shared attack path.
 
 
 
-`--score` prints a 0–100 grade and a debt profile labelling each family Strong, Moderate, Weak, Needs review, or Not applicable. "Not applicable" is reserved for families whose rules had no candidate location to evaluate in this scan — distinct from "Strong" (rules ran, nothing was wrong).
+`--score` prints a 0–100 grade based on reported findings and a family profile labelled No finding, Moderate, Weak, or Needs review. **No finding** means only that no finding was emitted for that family; it does not certify complete analysis or prove the family is inapplicable. Candidate anchors cover only some rules and cannot establish a family-wide negative result.
 
 
 

@@ -174,7 +174,7 @@ section h3 { font-size: 14px; margin: 16px 0 8px 0; color: var(--muted); font-we
 .debt-meta { color: var(--muted); font-size: 12px; }
 .debt-label { font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 10px;
               border: 1px solid currentColor; }
-.label-Strong { color: var(--label-strong); }
+.label-No-finding { color: var(--muted); }
 .label-Moderate { color: var(--label-moderate); }
 .label-Weak { color: var(--label-weak); }
 .label-Needs.review, .label-Needs-review { color: var(--label-review); }
@@ -448,7 +448,13 @@ def _summary(
     if sev_bits:
         parts.append(f'<div class="summary-counts">{"  ".join(sev_bits)}</div>')
 
-    parts.append("</div></section>")
+    parts.append("</div>")
+    parts.append(
+        f"<p>Coverage: {_e(report.semantic_coverage_status())}. "
+        "The score summarizes reported findings; no finding is not proof that "
+        "every security question was assessed.</p>"
+    )
+    parts.append("</section>")
     return "".join(parts)
 
 
@@ -460,7 +466,7 @@ def _stat(value: object, label: str) -> str:
 
 
 def _debt_profile_section(score_report: ScoreReport | None) -> str:
-    """Per-family qualitative labels (Strong / Moderate / Weak / Needs review).
+    """Per-family findings labels (No finding / Moderate / Weak / Needs review).
 
     Replaces the implicit "everything is severity-coloured" view with a
     family-aligned scan-line so a reader can see at a glance which axes
@@ -477,7 +483,7 @@ def _debt_profile_section(score_report: ScoreReport | None) -> str:
                 f"expl:{_e(d.top_exploitability)}</div>"
             )
         # Map "Needs review" to a CSS-friendly class.
-        label_class = d.label.replace(" ", ".")
+        label_class = d.label.replace(" ", "-")
         rows.append(
             f'<div class="debt-row">'
             f'<div><div class="debt-name">{_e(d.title)}</div>{meta}</div>'
@@ -727,7 +733,7 @@ def _decision_tags(f: Finding) -> str:
 
 
 def _coverage_section(report: AuditReport) -> str:
-    """Keep incomplete scans visible above risk summaries and score cards."""
+    """Keep reported engine failures visible above risk summaries."""
     errors = report.engine_errors()
     if not errors:
         return ""

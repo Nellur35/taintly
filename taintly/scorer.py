@@ -237,10 +237,7 @@ class ScoreReport:
     # Distinct root-cause clusters (see taintly.families.cluster_findings)
     distinct_risks: int = 0
     review_needed: int = 0
-    # Security-debt profile — per-family qualitative labels (Strong /
-    # Moderate / Weak) modelled on the improvement report's dimensional
-    # view.  Complements the single letter grade by showing *where* the
-    # debt sits rather than just *how much* of it there is.
+    # Findings-based family labels. No finding is not a proof of safety.
     debt_profile: list[DebtDimension] = field(default_factory=list)
     # False when there was no CI/CD configuration to assess — a scan that
     # examined zero config files and is not a live-instance audit. The
@@ -270,7 +267,7 @@ class ScoreReport:
 class DebtDimension:
     """One row of the security-debt profile.
 
-    ``label`` is one of ``Strong``, ``Moderate``, ``Weak``, ``Needs review``.
+    ``label`` is one of ``No finding``, ``Moderate``, ``Weak``, ``Needs review``.
     The mapping is derived from the family's worst finding's exploitability
     and severity so the profile reflects real-world leverage, not raw
     rule-match volume.
@@ -529,17 +526,9 @@ def _compute_debt_profile(
 
     Mapping rationale — one label per family cluster:
 
-    * ``Strong``         — at least one rule's anchor matched on a
-                           scanned file but no finding emerged.  We
-                           checked and found nothing wrong.
-    * ``Not applicable`` — no rule in the family had a candidate
-                           location to evaluate (the threat surface
-                           isn't present in this repository at all).
-                           Only assigned when the family is covered by
-                           a ``ContextPattern`` rule and the engine
-                           has populated surface-tracking data — other
-                           pattern types fall back to ``Strong`` for
-                           zero-finding families.
+    * ``No finding``    — no finding was emitted for this family. Neither
+                           a candidate anchor nor its absence establishes
+                           complete evaluation of every rule in a family.
     * ``Needs review``   — only review-needed findings (e.g.
                            pull_request_target without exploitation
                            signal)
@@ -550,27 +539,20 @@ def _compute_debt_profile(
     """
     from taintly.families import iter_families  # local import avoids cycle
 
-    surface = families_with_surface or set()
-    coverage = families_with_ctx_coverage or set()
+    # Preserve historical API parameters for callers, but do not turn this
+    # subset of anchor telemetry into a family-level negative conclusion.
+    _ = families_with_surface, families_with_ctx_coverage
 
     by_family = {cl.family_id: cl for cl in clusters}
     rows: list[DebtDimension] = []
     for fam in iter_families():
         cluster = by_family.get(fam.id)
         if cluster is None:
-            # No findings for this family.  Distinguish "Strong" from
-            # "Not applicable" only when the family is ContextPattern-
-            # covered and the engine has reported surface data —
-            # otherwise preserve the prior "Strong" default.
-            if coverage and fam.id in coverage and fam.id not in surface:
-                label = "Not applicable"
-            else:
-                label = "Strong"
             rows.append(
                 DebtDimension(
                     family_id=fam.id,
                     title=fam.title,
-                    label=label,
+                    label="No finding",
                     finding_count=0,
                     top_exploitability="-",
                     top_severity="-",
