@@ -72,7 +72,7 @@ _FAMILIES: tuple[FindingFamily, ...] = (
             "The configured command alone does not establish that drift "
             "occurred or that a package was published."
         ),
-        members=frozenset({"LOTP-GL-006"}),
+        members=frozenset({"LOTP-GH-007", "LOTP-GL-006"}),
     ),
     FindingFamily(
         id="supply_chain_immutability",

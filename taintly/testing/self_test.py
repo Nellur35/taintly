@@ -105,6 +105,13 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
 #
 # Each value documents the failure flavour and follow-up pointer.
 _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
+    ("LOTP-GH-007", "whitespace_pad"): (
+        "The ': ' -> ':' variant changes '- run: npm install' and "
+        "'- run: npm publish' into plain sequence scalars, not GitHub run "
+        "mappings. The structural walker correctly finds no commands. "
+        "This is a non-equivalent mutation of a valid release workflow, "
+        "not evidence that the rule misses a supported workflow."
+    ),
     ("LOTP-JK-001", "quote_swap"): (
         "Conditional positive-only applicability: quote_swap changes the sole live "
         "Groovy GString PR-context reference into single-quoted literal data. The "
