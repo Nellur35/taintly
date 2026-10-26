@@ -2484,16 +2484,17 @@ RULES: list[Rule] = [
             "scrapes a PR title via ``gh api``, reads a file the "
             "PR author wrote, or captures any ``github.event.*`` "
             "value into ``$GITHUB_OUTPUT`` produces a job output "
-            "that carries attacker bytes.  Splicing that output "
-            "into a consumer job's ``run:`` body is shell "
-            "injection — the same threat shape as ``${{ "
+            "that carries attacker bytes. If this output can contain "
+            "shell-significant bytes, splicing it into a consumer job's "
+            "``run:`` body may permit shell injection — the same threat shape as ``${{ "
             "github.event.X }}`` direct interpolation, but the "
             "taint transits through the needs-graph rather than "
             "a same-job step output (see SEC4-GH-021 for the "
             "same-job form).  Review the upstream job's "
             "outputs-producing step; if any value can come from "
             "a fork PR / issue / comment / branch name, route "
-            "through ``env:`` and validate."
+            "through ``env:`` and validate. A matched reference alone "
+            "does not establish attacker control or execution."
         ),
         pattern=NeedsOutputShellInterpolationPattern(),
         remediation=(

@@ -17,7 +17,7 @@ Three GitHub-side same-condition pairs have been collapsed:
 |---|---|---|
 | `SEC8-GL-002` (HIGH) | identical condition to `SEC3-GL-002`, same severity | `SEC3-GL-002` |
 | `SEC6-GH-011` (MEDIUM) | identical condition to `SEC4-GH-012`, latter is HIGH | `SEC4-GH-012` |
-| `SEC8-GH-003` on branch refs | covered by `SEC3-GH-002` (CRITICAL); SEC8-GH-003 retains the tag-pin case | `SEC3-GH-002` for branches; `SEC8-GH-003` for tags |
+| `SEC8-GH-003` on branch refs | covered by `SEC3-GH-002` (HIGH); SEC8-GH-003 retains the tag-pin case | `SEC3-GH-002` for branches; `SEC8-GH-003` for tags |
 
 After these retires, the only remaining co-fires are *intentional layered
 findings* — different threat angles on the same line.
