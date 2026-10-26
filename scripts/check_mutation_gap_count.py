@@ -47,6 +47,8 @@ from taintly.testing.self_test import _KNOWN_MUTATION_GAPS  # noqa: E402
 # SEC4-GH shrank after retirement of SEC4-GH-026 and its gaps;
 # TAINT-GH grew by one documented structural-parser mutation for TAINT-GH-006.
 _PER_PREFIX_BASELINE: dict[str, int] = {
+    # LOTP-CB-002: whitespace_pad removes the required buildspec version mapping.
+    "LOTP-CB": 1,
     # LOTP-GH-007: the whitespace_pad zero-space run mapping is non-equivalent YAML.
     "LOTP-GH": 1,
     # Conditional LOTP-JK-001 plus LOTP-JK-003 quote-swap applicability entries.

@@ -105,6 +105,13 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
 #
 # Each value documents the failure flavour and follow-up pointer.
 _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
+    ("LOTP-CB-002", "whitespace_pad"): (
+        "The ': ' -> ':' mutation changes 'version: 0.2' into 'version:0.2', "
+        "removing the required version mapping. The structural walker then "
+        "has no buildspec version field, so this is not an equivalent "
+        "CodeBuild 0.2 source. An authored structural-reader test verifies "
+        "the changed parse."
+    ),
     ("LOTP-GH-007", "whitespace_pad"): (
         "The ': ' -> ':' variant changes '- run: npm install' and "
         "'- run: npm publish' into plain sequence scalars, not GitHub run "
