@@ -1,0 +1,13 @@
+{
+  "platform": "github",
+  "vulnerable": {
+    "must_fire": ["LOTP-GH-007"]
+  },
+  "fixed": {
+    "must_not_fire": ["LOTP-GH-007"]
+  },
+  "fix_invariants": {
+    "still_parses": true,
+    "jobs": ["publish"]
+  }
+}
