@@ -43,13 +43,13 @@ def _classify_command(text: str) -> tuple[str, str | None] | None:
     if any(token in {"-g", "--global", "--package-lock-only", "--dry-run"} for token in tokens[2:]):
         return None
     prefix = "."
-    for i, token in enumerate(tokens[2:], 2):
-        if token == "--prefix":
+    for i, arg in enumerate(tokens[2:], 2):
+        if arg == "--prefix":
             if i + 1 >= len(tokens):
                 return match.group(1), None
             prefix = tokens[i + 1]
-        elif token.startswith("--prefix="):
-            prefix = token.partition("=")[2]
-        elif token in {"--workspace", "-w"} or token.startswith("--workspace="):
+        elif arg.startswith("--prefix="):
+            prefix = arg.partition("=")[2]
+        elif arg in {"--workspace", "-w"} or arg.startswith("--workspace="):
             return match.group(1), None
     return match.group(1), _directory(prefix)
