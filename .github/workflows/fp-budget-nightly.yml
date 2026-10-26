@@ -2,15 +2,15 @@ name: FP budget (scheduled)
 
 # Public-repo false-positive budget gate.
 #
-# scripts/check_public_repo_fp_budget.py clones a handful of
-# representative public repos and asserts taintly's finding count on
-# each stays within a committed budget. It catches FP regressions that
-# pass the per-rule self-test but would explode on real-world workflows.
+# scripts/check_public_repo_fp_budget.py checks out immutable revisions of
+# representative public repos and compares findings with reviewed ceilings.
+# It flags growth on the same source bytes for human triage; the counts alone
+# cannot classify a finding as a true or false positive.
 #
 # Why this is a SCHEDULED job and not a PR gate:
 #   * It needs network — it git-clones external repositories. Clone
 #     flakiness must never block an unrelated PR.
-#   * The budgets only move when the rule pack changes, which is rare.
+#   * Source pins and ceilings move only after review.
 #
 # Why it is wired in at all: the script existed but nothing ran it, so
 # a real over-budget regression could (and did) sit unnoticed. A gate
@@ -41,6 +41,7 @@ concurrency:
 
 jobs:
   fp-budget:
+    if: github.repository == 'Nellur35/taintly'
     name: Public-repo FP budget
     runs-on: ubuntu-latest
     timeout-minutes: 15
