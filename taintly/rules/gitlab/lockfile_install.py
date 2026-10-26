@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from taintly.models import IncompletePatternMatches, Platform, Rule, Severity
 from taintly.npm_release_commands import (
     _CWD_CHANGE,
+    _NPM_INSTALL_ANY,
     _NPM_PUBLISH_ANY,
     _SHELL_FLOW,
     _SHELL_INDIRECTION,
@@ -76,7 +77,7 @@ class NonFrozenNpmPublishPattern:
                 len(path) in {2, 3}
                 and path[0] in {"before_script", "default"}
                 and "before_script" in path
-                and "npm install" in event.value
+                and _NPM_INSTALL_ANY.search(event.value)
             ):
                 global_install = True
             if len(path) < 2 or not isinstance(path[0], str):
@@ -107,7 +108,7 @@ class NonFrozenNpmPublishPattern:
                 source_rows.extend((phase, index, line, text) for line, text in rows)
             if not any(_NPM_PUBLISH_ANY.search(text) for _, _, _, text in source_rows):
                 if job in after_script_publish and any(
-                    "npm install" in text for _, _, _, text in source_rows
+                    _NPM_INSTALL_ANY.search(text) for _, _, _, text in source_rows
                 ):
                     incomplete = True
                 continue

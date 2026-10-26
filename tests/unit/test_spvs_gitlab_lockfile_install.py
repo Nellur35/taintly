@@ -81,6 +81,7 @@ def test_no_confident_path_for_other_command_or_owner(tmp_path: Path, workflow: 
         "      function maybe_install() {\n      npm install\n"
         "      }\n      npm publish\n",
         "before_script:\n  - npm install\npublish:\n  script:\n    - npm publish\n",
+        "before_script:\n  - npm\tinstall\npublish:\n  script:\n    - npm publish\n",
         "default:\n  before_script:\n    - npm install\npublish:\n  script:\n    - npm publish\n",
         ".template:\n  before_script:\n    - npm install\n"
         "publish:\n  extends: .template\n  script:\n    - npm publish\n",

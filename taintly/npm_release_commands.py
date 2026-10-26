@@ -7,6 +7,7 @@ import re
 import shlex
 
 _NPM_START = re.compile(r"^\s*npm\s+(install|publish)\b")
+_NPM_INSTALL_ANY = re.compile(r"\bnpm\s+install\b")
 _NPM_PUBLISH_ANY = re.compile(r"\bnpm\s+publish\b")
 _SHELL_CONTROL = re.compile(r"[;&|<>\x60]|\$\(")
 _SHELL_FLOW = re.compile(r"^\s*(?:if|then|else|elif|fi|case|esac|for|while|until|do|done)\b")
