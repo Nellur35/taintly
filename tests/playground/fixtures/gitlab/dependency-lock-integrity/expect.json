@@ -1,0 +1,13 @@
+{
+  "platform": "gitlab",
+  "vulnerable": {
+    "must_fire": ["LOTP-GL-006"]
+  },
+  "fixed": {
+    "must_not_fire": ["LOTP-GL-006"]
+  },
+  "fix_invariants": {
+    "still_parses": true,
+    "jobs": ["publish"]
+  }
+}
