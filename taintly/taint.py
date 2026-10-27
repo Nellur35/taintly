@@ -665,7 +665,7 @@ class _TaintedEnv:
     hops: list[TaintHop]
 
     def fact_key(self):
-        return (self.scope, self.name)
+        return (self.scope, self.name, self.source_expr, self.source_line)
 
     def fact_rank(self):
         # Keep the shortest proof; tie-break deterministically (total order).
@@ -674,32 +674,24 @@ class _TaintedEnv:
 
 @dataclass
 class _VisibleEnv:
-    """IDB: variable ``name`` carries attacker bytes in the environment
-    *as seen by* step ``idx`` of ``job``.
+    """IDB: one possible source for the effective value seen by a step.
 
-    ``cls`` encodes scope precedence so the store keeps the value the
-    runner would actually expand: ``0`` dynamic ``$GITHUB_ENV`` write
-    (most specific — newest write wins via ``-writer_idx``), ``1``
-    job-level ``env:``, ``2`` step-level ``env:``.  This mirrors the
-    old ``{**job_env, **dynamic_env, **step_env}`` layering, where a
-    step-level re-declaration is ignored if the name already resolved
-    at job or dynamic scope.
+    Scope and write precedence are resolved against EDB assignments in
+    ``rule_visible_env`` before these source alternatives are emitted.
     """
 
     job: str
     idx: int
     name: str
-    cls: int
-    writer_idx: int
     source_expr: str
     source_line: int
     hops: list[TaintHop]
 
     def fact_key(self):
-        return (self.job, self.idx, self.name)
+        return (self.job, self.idx, self.name, self.source_expr, self.source_line)
 
     def fact_rank(self):
-        return (self.cls, -self.writer_idx, len(self.hops), self.source_line, _hop_rank(self.hops))
+        return (len(self.hops), _hop_rank(self.hops))
 
 
 @dataclass
@@ -716,12 +708,12 @@ class _TaintedDynEnv:
     hops: list[TaintHop]
 
     def fact_key(self):
-        return (self.job, self.writer_idx, self.name)
+        return (self.job, self.writer_idx, self.name, self.seq, self.source_expr, self.source_line)
 
     def fact_rank(self):
-        # Last write in source order wins (matches dict-update order
-        # of the old ``dynamic_env`` running state).
-        return (-self.seq, len(self.hops), _hop_rank(self.hops))
+        # Write ordering is handled by rule_visible_env; rank proofs of
+        # this exact write/source only.
+        return (len(self.hops), _hop_rank(self.hops))
 
 
 @dataclass
@@ -1225,18 +1217,24 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
         key = job.job_id if job.job_id is not None else f"<seg@{job.seg_start}>"
         job_step_idxs[key] = [s.idx for s in job.steps]
 
+    def env_sources(db: Database, scope: tuple, name: str):
+        return (te for te in db.all(_R_TAINTED_ENV) if te.scope == scope and te.name == name)
+
+    def visible_sources(db: Database, job: str, idx: int, name: str):
+        return (
+            ve
+            for ve in db.all(_R_VISIBLE_ENV)
+            if ve.job == job and ve.idx == idx and ve.name == name
+        )
+
     def rule_tainted_env(db: Database):
         # Direct attacker context, multi-hop ${{ env.X }}, and
         # env-mediated cross-job ${{ needs.X.outputs.Y }} — the three
         # ways an ``env:`` assignment becomes tainted.
         for ea in db.all(_R_ENV_ASSIGN):
-            if db.has(_R_TAINTED_ENV, (ea.scope, ea.name)):
-                # Shortest-proof dedup still applies, but a resolved
-                # var never needs re-deriving from a longer chain.
-                pass
             # (a) direct.
-            src = _extract_tainted_source(ea.raw, is_reusable)
-            if src is not None:
+            sources = _extract_tainted_sources(ea.raw, is_reusable)
+            for src in sources:
                 yield (
                     _R_TAINTED_ENV,
                     _TaintedEnv(
@@ -1254,16 +1252,16 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                         ],
                     ),
                 )
+            if sources:
                 continue
             # (b) multi-hop ${{ env.OTHER }}.
             other = _extract_env_ref(ea.raw)
             if other is not None:
-                parent = None
                 if ea.scope[0] == "job":
-                    parent = db.get(_R_TAINTED_ENV, (ea.scope, other))
+                    parents = env_sources(db, ea.scope, other)
                 else:  # ("step", job, idx)
-                    parent = db.get(_R_VISIBLE_ENV, (ea.scope[1], ea.scope[2], other))
-                if parent is not None:
+                    parents = visible_sources(db, ea.scope[1], ea.scope[2], other)
+                for parent in parents:
                     yield (
                         _R_TAINTED_ENV,
                         _TaintedEnv(
@@ -1282,7 +1280,7 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                             ],
                         ),
                     )
-                    continue
+                continue
             # (c) A server-side step-output substitution in a step env.
             # GitHub materializes GITHUB_OUTPUT after its writer step.
             if ea.scope[0] == "step":
@@ -1338,51 +1336,55 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                     break
 
     def rule_visible_env(db: Database):
-        # Fan tainted_env / tainted_dyn_env onto the per-step
-        # ``visible_env`` relation, carrying scope precedence in ``cls``.
-        #
-        # A step that re-declares a variable in its own ``env:`` block
-        # SHADOWS the job-level and dynamic-write values for that name
-        # at that step — ``env:`` set directly on the step is what the
-        # runner exports.  So a step-local ``env: VAR: <clean literal>``
-        # over a job-tainted ``VAR`` un-taints ``VAR`` at that step's
-        # sinks (and a step-local tainted re-declaration is carried by
-        # the step-scope ``tainted_env`` branch below instead).  Not
-        # suppressing this is the clean-override false positive.
+        # Decide the effective binding from immutable assignments/writes,
+        # then project all of that binding's source alternatives. Source
+        # keys cannot themselves decide which assignment shadows another.
         step_redecl = {
             (ea.scope[1], ea.scope[2], ea.name)
             for ea in db.all(_R_ENV_ASSIGN)
             if ea.scope[0] == "step"
         }
+        latest_write: dict[tuple[str, int, str], _EnvWrite] = {}
+        for ew in db.all(_R_ENV_WRITE):
+            for idx in job_step_idxs.get(ew.job, []):
+                if idx <= ew.idx:
+                    continue
+                key = (ew.job, idx, ew.name)
+                prior = latest_write.get(key)
+                if prior is None or (ew.idx, ew.seq) > (prior.idx, prior.seq):
+                    latest_write[key] = ew
         for te in db.all(_R_TAINTED_ENV):
             if te.scope[0] == "job":
                 job = te.scope[1]
                 for idx in job_step_idxs.get(job, []):
-                    if (job, idx, te.name) in step_redecl:
-                        continue  # step's own env: governs this name
+                    key = (job, idx, te.name)
+                    if key in step_redecl or key in latest_write:
+                        continue
                     yield (
                         _R_VISIBLE_ENV,
-                        _VisibleEnv(
-                            job, idx, te.name, 1, -1, te.source_expr, te.source_line, te.hops
-                        ),
+                        _VisibleEnv(job, idx, te.name, te.source_expr, te.source_line, te.hops),
                     )
             else:  # step scope
                 _, job, idx = te.scope
                 yield (
                     _R_VISIBLE_ENV,
-                    _VisibleEnv(job, idx, te.name, 2, -1, te.source_expr, te.source_line, te.hops),
+                    _VisibleEnv(job, idx, te.name, te.source_expr, te.source_line, te.hops),
                 )
         for tde in db.all(_R_TAINTED_DYN_ENV):
             for idx in job_step_idxs.get(tde.job, []):
-                if idx > tde.writer_idx and (tde.job, idx, tde.name) not in step_redecl:
+                key = (tde.job, idx, tde.name)
+                owner = latest_write.get(key)
+                if (
+                    owner is not None
+                    and key not in step_redecl
+                    and (tde.writer_idx, tde.seq) == (owner.idx, owner.seq)
+                ):
                     yield (
                         _R_VISIBLE_ENV,
                         _VisibleEnv(
                             tde.job,
                             idx,
                             tde.name,
-                            0,
-                            tde.writer_idx,
                             tde.source_expr,
                             tde.source_line,
                             tde.hops,
@@ -1392,8 +1394,8 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
     def rule_tainted_dyn_env(db: Database):
         for ew in db.all(_R_ENV_WRITE):
             # (a) direct attacker context embedded in the echo body.
-            src = _extract_tainted_source(ew.value, is_reusable)
-            if src is not None:
+            sources = _extract_tainted_sources(ew.value, is_reusable)
+            for src in sources:
                 yield (
                     _R_TAINTED_DYN_ENV,
                     _TaintedDynEnv(
@@ -1413,6 +1415,7 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                         ],
                     ),
                 )
+            if sources:
                 continue
             # (b) indirect: shell ref to an already-tainted visible var.
             if ew.quoted_single:
@@ -1439,7 +1442,6 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                             ],
                         ),
                     )
-                    break
 
     def rule_tainted_file(db: Database):
         # A file written with attacker-controlled bytes.  Same value
@@ -1604,7 +1606,7 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                     continue
             em = _ENV_REF_RE.search(od.raw)
             if em is not None:
-                up = db.get(_R_TAINTED_ENV, (("job", od.job), em.group(1)))
+                up = next(env_sources(db, ("job", od.job), em.group(1)), None)
                 if up is None:
                     # Also consult $GITHUB_ENV writes in this job.
                     best = None
@@ -2065,8 +2067,11 @@ def _build_analysis(content: str, lines: list[str]) -> _Analysis:
             if site.kind == "if":
                 continue
             for ref in _ENV_REF_RE.finditer(site.value):
-                te = db.get(_R_TAINTED_ENV, (("job", job_key), ref.group(1)))
-                if te is not None:
+                for te in (
+                    item
+                    for item in db.all(_R_TAINTED_ENV)
+                    if item.scope == ("job", job_key) and item.name == ref.group(1)
+                ):
                     info = _TaintInfo(te.source_expr, te.source_line, te.hops)
                     out.append(
                         _make_path(
@@ -2156,6 +2161,35 @@ def _collect_all_env_assignments(
     return out
 
 
+def _expression_source_reachability(body: str) -> tuple[list[str] | None, set[str]]:
+    """Return supported reachable paths and provably dead source names.
+
+    A parse failure leaves lexical matches available, matching the
+    existing conservative expression profile.
+    """
+    if not structural_expr_enabled() or ("&&" not in body and "||" not in body):
+        return None, set()
+    try:
+        reachable = reachable_context_paths(body)
+        inventory = context_paths(body)
+        literals = [token.value for token in tokenize(body) if token.kind == "STRING"]
+        matchers = (_TAINTED_IN_EXPR_RE, _INPUT_REF_IN_EXPR_RE)
+        blocked = {
+            match.group(0).lower()
+            for path in inventory
+            for matcher in matchers
+            for match in matcher.finditer(path)
+        } - {
+            match.group(0).lower()
+            for path in (*reachable, *literals)
+            for matcher in matchers
+            for match in matcher.finditer(path)
+        }
+        return reachable, blocked
+    except ExprSyntaxError:
+        return None, set()
+
+
 def _extract_tainted_source(value: str, include_inputs: bool = False) -> str | None:
     """Return the dotted context name if any ``${{ ... }}`` substitution
     in ``value`` references an attacker-controlled context; otherwise
@@ -2191,30 +2225,7 @@ def _extract_tainted_source(value: str, include_inputs: bool = False) -> str | N
     structural = structural_expr_enabled()
     for expr in _GHA_EXPR_RE.finditer(value):
         body = expr.group(1)
-        reachable: list[str] | None = None
-        blocked: set[str] = set()
-        if structural and ("&&" in body or "||" in body):
-            try:
-                reachable = reachable_context_paths(body)
-                inventory = context_paths(body)
-                # Preserve the legacy lexical treatment of literal mentions.
-                # A literal and a dead real reference can spell the same path;
-                # path-set filtering alone must not erase that independent match.
-                literals = [token.value for token in tokenize(body) if token.kind == "STRING"]
-                matchers = (_TAINTED_IN_EXPR_RE, _INPUT_REF_IN_EXPR_RE)
-                blocked = {
-                    match.group(0).lower()
-                    for path in inventory
-                    for matcher in matchers
-                    for match in matcher.finditer(path)
-                } - {
-                    match.group(0).lower()
-                    for path in (*reachable, *literals)
-                    for matcher in matchers
-                    for match in matcher.finditer(path)
-                }
-            except ExprSyntaxError:
-                pass  # Incomplete structure cannot justify removing lexical evidence.
+        reachable, blocked = _expression_source_reachability(body)
         for m in _TAINTED_IN_EXPR_RE.finditer(body):
             if m.group(0).lower() not in blocked:
                 return m.group(0)
@@ -2242,6 +2253,43 @@ def _extract_tainted_source(value: str, include_inputs: bool = False) -> str | N
             except ExprSyntaxError:
                 pass
     return None
+
+
+def _extract_tainted_sources(value: str, include_inputs: bool) -> tuple[str, ...]:
+    """Retain all supported direct origins of an environment value.
+
+    Keep the legacy first witness first for consumers that still select
+    one proof. Logical dead-branch pruning uses the same contract as the
+    existing single-source extractor.
+    """
+    sources: dict[str, str] = {}
+    first = _extract_tainted_source(value, include_inputs)
+    if first is not None:
+        sources[first] = first
+    expressions = [expr.group(1) for expr in _GHA_EXPR_RE.finditer(value)]
+    reachable_by_body = [_expression_source_reachability(body) for body in expressions]
+    for body, (_, blocked) in zip(expressions, reachable_by_body, strict=True):
+        for match in _TAINTED_IN_EXPR_RE.finditer(body):
+            if match.group(0).lower() not in blocked:
+                sources.setdefault(match.group(0), match.group(0))
+        if include_inputs:
+            for match in _INPUT_REF_IN_EXPR_RE.finditer(body):
+                if match.group(0).lower() not in blocked:
+                    sources.setdefault(match.group(0), match.group(0))
+    if structural_expr_enabled():
+        for body, (reachable, _) in zip(expressions, reachable_by_body, strict=True):
+            try:
+                for path in reachable if reachable is not None else context_paths(body):
+                    matches = list(_TAINTED_IN_EXPR_RE.finditer(path))
+                    if include_inputs:
+                        matches.extend(_INPUT_REF_IN_EXPR_RE.finditer(path))
+                    for match in matches:
+                        source = match.group(0)
+                        if not any(source.casefold() == raw.casefold() for raw in sources):
+                            sources[source] = source
+            except ExprSyntaxError:
+                pass
+    return tuple(sources.values())
 
 
 def _extract_tainted_file_sources(value: str, include_inputs: bool) -> tuple[str, ...]:
