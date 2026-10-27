@@ -1594,3 +1594,170 @@ def test_every_taint_chain_is_wellformed():
         assert kinds.count("sink") == 1, f"exactly one terminal sink hop expected: {kinds}"
         assert kinds[0] != "sink", f"chain must start before the terminal sink: {kinds}"
         assert all(h.line > 0 for h in p.hops), f"every hop needs a 1-indexed line: {p.hops}"
+
+
+def test_file_exec_uses_origins_at_consumer_point():
+    """An earlier tainted write survives append or an uncertain overwrite,
+    but not a straight-line same-step overwrite before file execution."""
+    base = (
+        "on: pull_request_target\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - env:\n          T: ${{ github.event.pull_request.title }}\n"
+        '        run: |\n          echo "$T" > /tmp/payload\n'
+    )
+    cases = (
+        ("          source /tmp/payload\n", True),
+        ("          echo 'public' > /tmp/payload\n          source /tmp/payload\n", False),
+        ("          echo 'public' >> /tmp/payload\n          source /tmp/payload\n", True),
+        (
+            "          if [ -f marker ]; then echo 'public' > /tmp/payload; fi\n"
+            "          source /tmp/payload\n",
+            True,
+        ),
+        ("          echo 'public' > /tmp/other\n          source /tmp/payload\n", True),
+        ('          echo "$UNKNOWN" > /tmp/payload\n          source /tmp/payload\n', True),
+        (
+            '          echo "$(cat /tmp/payload)" > /tmp/payload\n          source /tmp/payload\n',
+            True,
+        ),
+        (
+            "          echo 'public' > /tmp/payload 2> /tmp/error\n          source /tmp/payload\n",
+            True,
+        ),
+        (
+            "          echo 'public' > /tmp/payload\n"
+            "          cp backup /tmp/payload\n"
+            "          source /tmp/payload\n",
+            True,
+        ),
+        (
+            "          echo 'public' > /tmp/payload\n"
+            "          cp backup /tmp/payload; source /tmp/payload\n",
+            True,
+        ),
+    )
+    for suffix, expected in cases:
+        source = base + suffix
+        hits = [p for p in analyze(source, source.splitlines()) if p.sink_kind == "file_exec"]
+        assert bool(hits) is expected, suffix
+
+    # The actual engine/rule boundary must make the same decision.
+    from taintly.engine import scan_file
+
+    rule = next(rule for rule in load_all_rules() if rule.id == "TAINT-GH-018")
+    clean_source = base + cases[1][0]
+    assert not [
+        f
+        for f in scan_file("workflow.yml", [rule], _content=clean_source)
+        if f.rule_id == "TAINT-GH-018"
+    ]
+    for suffix in (cases[5][0], cases[6][0]):
+        assert [
+            f
+            for f in scan_file("workflow.yml", [rule], _content=base + suffix)
+            if f.rule_id == "TAINT-GH-018"
+        ]
+
+
+def test_file_exec_writer_after_consumer_does_not_hide_earlier_origin():
+    source = (
+        "on: pull_request_target\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - env:\n          T: ${{ github.event.pull_request.title }}\n"
+        "        run: |\n"
+        '          echo "$T" > /tmp/payload\n'
+        "          source /tmp/payload\n"
+        '          echo "$T" > /tmp/payload\n'
+    )
+    hits = [p for p in analyze(source, source.splitlines()) if p.sink_kind == "file_exec"]
+    assert len(hits) == 1
+    assert hits[0].source_expr == "github.event.pull_request.title"
+
+
+def test_file_exec_preserves_multiple_sources_in_one_write():
+    source = (
+        "on: workflow_call\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: |\n"
+        '          echo "${{ inputs.foo }}:${{ github.event.pull_request.title }}" > /tmp/payload\n'
+        "          source /tmp/payload\n"
+    )
+    paths = [p for p in analyze(source, source.splitlines()) if p.sink_kind == "file_exec"]
+    assert {p.source_expr for p in paths} == {"inputs.foo", "github.event.pull_request.title"}
+    from taintly.engine import scan_file
+
+    rule = next(rule for rule in load_all_rules() if rule.id == "TAINT-GH-018")
+    assert [f for f in scan_file("workflow.yml", [rule], _content=source) if f.rule_id == rule.id]
+
+
+def test_file_exec_replays_state_separately_for_each_consumer():
+    source = (
+        "on: pull_request_target\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - env:\n          T: ${{ github.event.pull_request.title }}\n"
+        '        run: |\n          echo "$T" > /tmp/payload\n'
+        "          source /tmp/payload\n"
+        "          echo 'public' > /tmp/payload\n"
+        "          source /tmp/payload\n"
+    )
+    hits = [p for p in analyze(source, source.splitlines()) if p.sink_kind == "file_exec"]
+    # The first read sees the tainted write. The second stays unresolved:
+    # executing that earlier file may have modified it before the overwrite.
+    assert [p.sink_line for p in hits] == [10, 12]
+
+
+def test_file_exec_does_not_clear_origin_across_steps_or_unknown_shell():
+    source = (
+        "on: pull_request_target\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - env:\n          T: ${{ github.event.pull_request.title }}\n"
+        '        run: echo "$T" > /tmp/payload\n'
+        "      - run: |\n"
+        "          echo 'public' > /tmp/payload\n"
+        "          source /tmp/payload\n"
+    )
+    hits = [p for p in analyze(source, source.splitlines()) if p.sink_kind == "file_exec"]
+    assert len(hits) == 1
+    same_step = (
+        "on: pull_request_target\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - env:\n          T: ${{ github.event.pull_request.title }}\n"
+        '        run: |\n          echo "$T" > /tmp/payload\n'
+        "          echo 'public' > /tmp/payload\n"
+        "          source /tmp/payload\n"
+    )
+    custom_shell = same_step.replace("        run: |", "        shell: bash {0}\n        run: |")
+    assert [
+        p for p in analyze(custom_shell, custom_shell.splitlines()) if p.sink_kind == "file_exec"
+    ]
+    unknown_runner = same_step.replace("ubuntu-latest", "${{ matrix.runner }}")
+    assert [
+        p
+        for p in analyze(unknown_runner, unknown_runner.splitlines())
+        if p.sink_kind == "file_exec"
+    ]
+
+
+def test_file_exec_overwrite_requires_supported_effective_context():
+    base = (
+        "on: pull_request_target\n"
+        "jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - env:\n          T: ${{ github.event.pull_request.title }}\n"
+        '        run: |\n          echo "$T" > /tmp/payload\n'
+        "          echo 'public' > /tmp/payload\n"
+        "          source /tmp/payload\n"
+    )
+    variants = (
+        base.replace("jobs:\n", "defaults: {run: {shell: bash}}\njobs:\n"),
+        base.replace("jobs:\n", "defaults: {run: {working-directory: x}}\njobs:\n"),
+        base.replace("    runs-on:", "    defaults: {run: {shell: bash}}\n    runs-on:"),
+        base.replace("    runs-on:", "    defaults: {run: {working-directory: x}}\n    runs-on:"),
+        base.replace("        run: |", "        'shell': bash\n        run: |"),
+        base.replace("        run: |", "        'working-directory': x\n        run: |"),
+        base.replace("    runs-on:", "    container: alpine:latest\n    runs-on:"),
+        base.replace("ubuntu-latest", "ubuntu-custom"),
+        base.replace("jobs:\n", "env: {BASH_ENV: /tmp/custom}\njobs:\n"),
+    )
+    for source in variants:
+        paths = [p for p in analyze(source, source.splitlines()) if p.sink_kind == "file_exec"]
+        assert paths, source
