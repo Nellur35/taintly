@@ -10,6 +10,14 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 
 ## [Unreleased]
 
+### Performance and evidence
+- Reuse immutable Jenkins structural events in a bounded eight-entry cache
+  keyed by exact source and recovery options; retain diagnostic locations and
+  attach file ownership at each consumer.
+- Keep modeled local-to-sink alternatives in Jenkins multihop analysis and
+  choose a deterministic display witness by chain length and lexical order.
+  Preserve the existing scope/order analysis and finding classifications.
+
 ### Added
 - `SEC6-CB-004` reviews direct CodeBuild Secrets Manager variables passed to
   Docker build arguments. It preserves source and command evidence while

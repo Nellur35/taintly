@@ -185,6 +185,47 @@ def test_rule_snippet_renders_hop_chain():
     assert "[taint: params.FOO -> t -> sh]" in snippet
 
 
+def test_all_sink_alternatives_survive_display_selection():
+    code = ('def short = params.Z\n'
+            'def a = params.A\n'
+            'def long = "${a}/suffix"\n'
+            'sh "run ${long} ${short}"')
+    flows = _flows(code)
+    assert {flow.var for flow in flows} == {"long", "short"}
+    assert {flow.hops[0] for flow in flows} == {"params.A", "params.Z"}
+    hits = _fires(code)
+    assert len(hits) == 1
+    assert "params.Z -> short -> sh" in hits[0][1]  # shortest chain first
+    assert len(_flows(code)) == 2  # selecting a display witness does not mutate facts
+
+
+def test_equal_length_witnesses_use_lexical_hop_order():
+    code = 'def z = params.Z\ndef a = params.A\nsh "run ${z} ${a}"'
+    assert len(_flows(code)) == 2
+    assert "params.A -> a -> sh" in _fires(code)[0][1]
+
+
+def test_witness_is_stable_across_fresh_hash_seeded_processes():
+    import json
+    import os
+    import subprocess
+    import sys
+
+    code = 'def z = params.Z\ndef a = params.A\nsh "run ${z} ${a}"'
+    program = (
+        "import json; from taintly.rules.jenkins.taint import RULES; "
+        f"s={code!r}; "
+        "r=next(r for r in RULES if r.id=='TAINT-JK-003'); "
+        "print(json.dumps(r.pattern.check(s,s.splitlines())))"
+    )
+    outputs = []
+    for seed in (0, 1, 7, 42):
+        env = os.environ.copy()
+        env["PYTHONHASHSEED"] = str(seed)
+        outputs.append(json.loads(subprocess.check_output([sys.executable, "-c", program], env=env, text=True)))
+    assert all(output == outputs[0] for output in outputs)
+
+
 def test_rule_never_crashes_on_unmodelled_groovy():
     # A heavily scripted/closure-laden file must not raise; worst case []
     code = (

@@ -9,9 +9,22 @@ no optional extra and no native parser.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from functools import lru_cache
 
 from .events import Event
 from .island_walker import iter_island_leaves
+
+
+@lru_cache(maxsize=8)
+def _cached_island_events(content: str, recover: bool) -> tuple[Event, ...]:
+    """Bounded reuse of immutable events for one exact source/options pair.
+
+    Events contain source-relative locations, not file or invocation identity;
+    consumers attach ownership at their call sites. Diagnostic events retain
+    their original order and positions.
+    """
+    del recover  # Tolerant reader: recovery is unconditional.
+    return tuple(iter_island_leaves(content))
 
 
 def walk_jenkinsfile(content: str, *, recover: bool = True) -> Iterator[Event]:
@@ -27,5 +40,4 @@ def walk_jenkinsfile(content: str, *, recover: bool = True) -> Iterator[Event]:
         :class:`Event` instances.  See :class:`EventKind` for the
         documented stream contract.
     """
-    del recover  # tolerant reader: recovery is unconditional
-    yield from iter_island_leaves(content)
+    yield from _cached_island_events(content, recover)
