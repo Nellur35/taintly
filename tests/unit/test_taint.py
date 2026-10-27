@@ -499,16 +499,15 @@ def test_github_env_escaped_double_quotes_in_echo_body():
                 run: echo "$MSG"
         """
     )
-    # Exactly one finding — the chain should flow through the nested
-    # multi-hop + $GITHUB_ENV + multi-hop + sink.
-    assert len(paths) == 1, paths
-    p = paths[0]
-    assert p.kind == "github_env"
-    kinds = [h.kind for h in p.hops]
-    # env_static(PR_TITLE or AUTHOR) -> github_env(GREETING) ->
-    # env_indirect(MSG) -> sink(MSG).
-    assert "github_env" in kinds and "env_indirect" in kinds
-    assert kinds[-1] == "sink"
+    assert {p.source_expr for p in paths} == {
+        "github.event.pull_request.title",
+        "github.event.pull_request.user.login",
+    }
+    for p in paths:
+        assert p.kind == "github_env"
+        kinds = [h.kind for h in p.hops]
+        assert "github_env" in kinds and "env_indirect" in kinds
+        assert kinds[-1] == "sink"
 
 
 def test_github_env_multiple_writes_on_one_line():
@@ -1761,3 +1760,122 @@ def test_file_exec_overwrite_requires_supported_effective_context():
     for source in variants:
         paths = [p for p in analyze(source, source.splitlines()) if p.sink_kind == "file_exec"]
         assert paths, source
+
+
+def test_mixed_environment_sources_reach_distinct_rule_decisions():
+    from taintly.engine import scan_file
+
+    source = dedent(
+        """
+        on: workflow_call
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            env:
+              MIX: ${{ inputs.ref }}-${{ github.event.pull_request.title }}
+            steps:
+              - run: bash -c $MIX
+        """
+    ).lstrip("\n")
+    assert {p.source_expr for p in analyze(source, source.splitlines())} == {
+        "inputs.ref",
+        "github.event.pull_request.title",
+    }
+    rules = [
+        rule
+        for rule in load_all_rules()
+        if rule.id in {"TAINT-GH-001", "TAINT-GH-017"}
+    ]
+    assert {f.rule_id for f in scan_file("workflow.yml", rules, _content=source)} == {
+        "TAINT-GH-001",
+        "TAINT-GH-017",
+    }
+
+
+def test_mixed_environment_sources_reach_file_execution():
+    from taintly.engine import scan_file
+
+    source = dedent(
+        """
+        on: workflow_call
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            env:
+              MIX: ${{ inputs.ref }}-${{ github.event.pull_request.title }}
+            steps:
+              - run: |
+                  echo "$MIX" > setup.sh
+                  bash setup.sh
+        """
+    ).lstrip("\n")
+    assert {p.source_expr for p in analyze(source, source.splitlines()) if p.sink_kind == "file_exec"} == {
+        "inputs.ref",
+        "github.event.pull_request.title",
+    }
+    rule = next(rule for rule in load_all_rules() if rule.id == "TAINT-GH-018")
+    assert [f for f in scan_file("workflow.yml", [rule], _content=source) if f.rule_id == rule.id]
+
+
+def test_mixed_sources_obey_clean_and_latest_dynamic_override():
+    source = dedent(
+        """
+        on: workflow_call
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            env:
+              MIX: ${{ inputs.ref }}-${{ github.event.pull_request.title }}
+            steps:
+              - run: echo 'MIX=clean' >> "$GITHUB_ENV"
+              - run: echo "$MIX"
+              - env:
+                  MIX: literal
+                run: echo "$MIX"
+        """
+    ).lstrip("\n")
+    assert analyze(source, source.splitlines()) == []
+    replacement = dedent(
+        """
+        on: pull_request_target
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            env:
+              MIX: ${{ github.head_ref }}
+            steps:
+              - run: echo 'MIX=${{ github.event.pull_request.title }}' >> "$GITHUB_ENV"
+              - run: echo "$MIX"
+              - run: echo 'MIX=literal' >> "$GITHUB_ENV"
+              - run: echo "$MIX"
+        """
+    ).lstrip("\n")
+    assert [(p.source_expr, p.sink_line) for p in analyze(replacement, replacement.splitlines())] == [
+        ("github.event.pull_request.title", 9)
+    ]
+
+
+def test_mixed_sources_do_not_revive_provably_dead_expression_operand():
+    from taintly.engine import scan_file
+
+    source = dedent(
+        """
+        on: workflow_call
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            env:
+              MIX: ${{ inputs.ref }}-${{ false && github.event.pull_request.title }}
+            steps:
+              - run: bash -c $MIX
+        """
+    ).lstrip("\n")
+    assert {p.source_expr for p in analyze(source, source.splitlines())} == {"inputs.ref"}
+    rules = [
+        rule
+        for rule in load_all_rules()
+        if rule.id in {"TAINT-GH-001", "TAINT-GH-017"}
+    ]
+    assert {f.rule_id for f in scan_file("workflow.yml", rules, _content=source)} == {
+        "TAINT-GH-017"
+    }
