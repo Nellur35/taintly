@@ -63,6 +63,18 @@ class FindingFamily:
 
 _FAMILIES: tuple[FindingFamily, ...] = (
     FindingFamily(
+        id="dependency_lock_integrity",
+        title="Release dependency lockfile enforcement",
+        why=(
+            "A direct project npm install before publication does not fail "
+            "closed when the manifest and lockfile disagree. Review whether "
+            "the release job should use npm ci in that package directory. "
+            "The configured command alone does not establish that drift "
+            "occurred or that a package was published."
+        ),
+        members=frozenset({"LOTP-GH-007", "LOTP-GL-006", "LOTP-CB-002"}),
+    ),
+    FindingFamily(
         id="supply_chain_immutability",
         title="Mutable dependency references",
         why=(

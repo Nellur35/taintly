@@ -396,7 +396,7 @@ def resolve_multihop_flows(content: str, source_re: re.Pattern[str]) -> list[Mul
     tainted: dict[tuple[tuple[int, ...], str], list[str]] = {}
     bindings: set[tuple[tuple[int, ...], str]] = set()
     flows: list[MultiHopFlow] = []
-    seen: set[tuple[int, str]] = set()
+    seen: set[tuple[int, str, str]] = set()
 
     def binding_key(
         scope: tuple[int, ...], var: str, declared: bool
@@ -442,11 +442,13 @@ def resolve_multihop_flows(content: str, source_re: re.Pattern[str]) -> list[Mul
         if not sink.interpolated or source_re.search(sink.body):
             continue
         visible = visible_taint(sink.scope)
-        for ref in sink.refs:
+        # Keep all visible source alternatives. Display selection belongs to
+        # the rule consumer, not unordered set traversal in semantic analysis.
+        for ref in sorted(sink.refs):
             if ref in visible:
-                flow_key = (sink.line, sink.body)
+                flow_key = (sink.line, sink.body, ref)
                 if flow_key in seen:
-                    break
+                    continue
                 seen.add(flow_key)
                 flows.append(
                     MultiHopFlow(
@@ -457,7 +459,6 @@ def resolve_multihop_flows(content: str, source_re: re.Pattern[str]) -> list[Mul
                         hops=tuple(visible[ref] + [sink.call]),
                     )
                 )
-                break
     return flows
 
 

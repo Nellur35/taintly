@@ -1,0 +1,12 @@
+{
+  "platform": "codebuild",
+  "vulnerable": {
+    "must_fire": ["LOTP-CB-002"]
+  },
+  "fixed": {
+    "must_not_fire": ["LOTP-CB-002"]
+  },
+  "fix_invariants": {
+    "still_parses": true
+  }
+}

@@ -47,7 +47,7 @@ from .walker import walk as _walk
 # evict).  Events are treated as read-only by every consumer (parse output), so
 # replaying the same Event objects is safe — the no-rules-change / determinism /
 # mutation gates prove behaviour is preserved.
-_WALK_CACHE_MAXSIZE = 64
+_WALK_CACHE_MAXSIZE = 128
 _walk_cache: OrderedDict[tuple[object, ...], tuple[Event, ...]] = OrderedDict()
 
 
