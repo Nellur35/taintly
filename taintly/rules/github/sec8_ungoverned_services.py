@@ -12,7 +12,9 @@ and build artefacts within the job.
 
 import re
 
+from taintly.actions_lock import ActionsLockAwarePattern
 from taintly.models import Platform, RegexPattern, Rule, Severity
+from taintly.rules.github.image_refs import GithubImageReferencePattern
 
 
 class DependabotMissingCooldownPattern:
@@ -81,22 +83,11 @@ RULES: list[Rule] = [
         description=(
             "A job container or service container references a Docker image with the "
             "':latest' tag. ':latest' resolves to whatever the registry currently points "
-            "at — it changes silently on every push to the image repository. "
-            "If the upstream image is compromised or updated unexpectedly, the new image "
-            "executes inside your job with full access to all runner secrets and artefacts. "
-            "Pin to a specific digest to guarantee the exact image version."
+            "at, so a later run may use different image bytes without a workflow edit. "
+            "Actual execution, available secrets and registry control are not established "
+            "by this configured reference. Pin to a reviewed digest."
         ),
-        pattern=RegexPattern(
-            match=(
-                # Covers both forms:
-                #   container:                       container: ubuntu:latest
-                #     image: ubuntu:latest
-                # Also catches services.X.image: postgres:latest
-                r"^\s+(?:image|container):\s+['\"]?[a-zA-Z0-9][^@'\"\s]*:latest['\"]?"
-                r"\s*(#.*)?$"
-            ),
-            exclude=[r"^\s*#", r"@sha256:"],
-        ),
+        pattern=GithubImageReferencePattern("latest"),
         remediation=(
             "Pin container images to a SHA256 digest:\n"
             "  container:\n"
@@ -106,16 +97,14 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.docker.com/reference/cli/docker/image/pull/#pull-an-image-by-digest-immutable-identifier",
         test_positive=[
-            "    container:\n      image: ubuntu:latest",
-            "    container: node:latest",
-            "        image: postgres:latest",
-            '        image: "python:latest"',
+            "jobs:\n  test:\n    container:\n      image: ubuntu:latest",
+            "jobs:\n  test:\n    container: node:latest",
+            "jobs:\n  test:\n    services:\n      db:\n        image: postgres:latest",
         ],
         test_negative=[
-            "    container:\n      image: ubuntu@sha256:abc1234",
-            "      image: ubuntu:22.04",
-            "      image: postgres:14-alpine",
-            "      # image: ubuntu:latest",
+            "jobs:\n  test:\n    container: ubuntu@sha256:" + "a" * 64,
+            "jobs:\n  test:\n    container: ubuntu:22.04",
+            "jobs:\n  test:\n    steps:\n      - run: echo 'image: ubuntu:latest'",
         ],
         stride=["T"],
         threat_narrative=(
@@ -142,22 +131,7 @@ RULES: list[Rule] = [
             "effectively the same risk as ':latest' but less visible. "
             "The image version is uncontrolled and changes without any signal in the workflow."
         ),
-        pattern=RegexPattern(
-            match=(
-                # image: name_with_no_colon_or_digest — bare image name
-                # Must have at least one slash or be a well-known image name pattern
-                # Excludes names containing : (tagged) or @ (digest) or / (path, caught separately)
-                r"^\s+(?:image|container):\s+['\"]?"
-                r"[a-zA-Z0-9][a-zA-Z0-9._/-]+"  # image name (no colon, no @)
-                r"['\"]?\s*(#.*)?$"
-            ),
-            exclude=[
-                r"^\s*#",
-                r"@sha256:",  # digest-pinned — safe
-                r":(?!latest)[a-zA-Z0-9]",  # has a non-latest tag — specific version, acceptable
-                r"uses:",  # action references, not container images
-            ],
-        ),
+        pattern=GithubImageReferencePattern("untagged"),
         remediation=(
             "Always specify an explicit version tag and prefer digest pinning:\n"
             "  container:\n"
@@ -167,15 +141,15 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.docker.com/reference/cli/docker/image/pull/#pull-an-image-by-digest-immutable-identifier",
         test_positive=[
-            "    container:\n      image: ubuntu",
-            "      image: postgres",
-            "    container: node",
+            "jobs:\n  test:\n    container:\n      image: ubuntu",
+            "jobs:\n  test:\n    services:\n      db:\n        image: postgres",
+            "jobs:\n  test:\n    container: node",
         ],
         test_negative=[
-            "      image: ubuntu:22.04",
-            "      image: ubuntu:latest",
-            "      image: ubuntu@sha256:abc123",
-            "      # image: ubuntu",
+            "jobs:\n  test:\n    container: ubuntu:22.04",
+            "jobs:\n  test:\n    container: ubuntu:latest",
+            "jobs:\n  test:\n    container: ubuntu@sha256:" + "a" * 64,
+            "jobs:\n  test:\n    steps:\n      - run: echo 'image: ubuntu'",
         ],
         stride=["T"],
         threat_narrative=(
@@ -203,24 +177,20 @@ RULES: list[Rule] = [
             "available to your workflow. The risk is higher than unpinned actions because "
             "the called workflow can itself call further nested workflows."
         ),
-        pattern=RegexPattern(
-            match=(
-                # Matches: uses: org/repo/.github/workflows/file.yml@non-sha-ref
-                # The .github/workflows/ path distinguishes reusable workflows from actions.
-                r"uses:\s+[a-zA-Z0-9_-][a-zA-Z0-9_.-]*/[a-zA-Z0-9_.-]+"
-                r"/\.github/workflows/[^@\s]+@(?![a-f0-9]{40}\b)\S+"
-            ),
-            exclude=[
-                r"^\s*#",
-                # When a reusable workflow is pinned to a *branch*
-                # (main/master/develop/dev), SEC3-GH-002 already
-                # fires CRITICAL on the same line; letting
-                # SEC8-GH-003 also fire HIGH would be a 1:1 dup.
-                # SEC8-GH-003 keeps the tag-pin case (e.g.
-                # ``@v2.1.0``) which SEC3-GH-002 doesn't cover —
-                # that's where the rules diverge.
-                r"@(?:main|master|develop|dev)\s*(?:#.*)?$",
-            ],
+        pattern=ActionsLockAwarePattern(
+            RegexPattern(
+                match=(
+                    # Matches: uses: org/repo/.github/workflows/file.yml@non-sha-ref
+                    # The .github/workflows/ path distinguishes reusable workflows from actions.
+                    r"uses:\s+[a-zA-Z0-9_-][a-zA-Z0-9_.-]*/[a-zA-Z0-9_.-]+"
+                    r"/\.github/workflows/[^@\s]+@(?![a-f0-9]{40}\b)\S+"
+                ),
+                exclude=[
+                    r"^\s*#",
+                    # Branch refs belong to SEC3-GH-002, so this rule owns tags.
+                    r"@(?:main|master|develop|dev)\s*(?:#.*)?$",
+                ],
+            )
         ),
         remediation=(
             "Pin reusable workflow calls to a full commit SHA:\n"

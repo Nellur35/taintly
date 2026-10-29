@@ -5,6 +5,7 @@ These were entirely missing or undercovered in the initial implementation.
 """
 
 import re
+from dataclasses import dataclass
 
 from taintly.models import (
     ContextPattern,
@@ -242,14 +243,6 @@ class _ReevaluatedCiVariablePattern:
         return results
 
 
-_RESTRICTIVE_ARTIFACT_ACCESS_RE = re.compile(
-    r"^access\s*:\s*['\"]?(?:developer|maintainer|none)['\"]?(?:\s+#.*)?$",
-    re.IGNORECASE,
-)
-_PRIVATE_ARTIFACT_VISIBILITY_RE = re.compile(
-    r"^public\s*:\s*['\"]?(?:false|no|off|0)['\"]?(?:\s+#.*)?$",
-    re.IGNORECASE,
-)
 _HIGH_RISK_ARTIFACT_PATH_RE = re.compile(
     r"(?:"
     r"(?:^|[/\\])\.env(?:\.[^/\\]+)?(?:$|[/\\])|"
@@ -275,68 +268,118 @@ class HighRiskArtifactAccessPattern:
 
     The old SEC9-GL-001 matcher treated every ``artifacts:`` block as a
     possible data leak. This matcher first proves a stronger local fact: the
-    exact artifact block contains a literal path (or strongly named variable)
-    associated with secrets, private keys, signed pre-release packages, or
-    security findings. Indentation bounds keep evidence, access controls, and
-    inheritance inside that block. An inherited access policy is not treated
-    as restrictive unless its effective value can be proved locally.
+    exact job artifact mapping contains a literal path (or strongly named
+    variable) selected for review. Structural ownership keeps
+    script text, sibling jobs and YAML presentation from changing the answer.
+    An inherited access policy is not treated as restrictive unless its
+    effective value can be proved locally.
     """
 
+    def self_test_mutation_applicable(self, source: str, mutant: str, operator: str) -> bool:
+        # The mutation operator's zero-space variant turns ``paths: [x]``
+        # into ``paths:[x]`` (and ``script: make`` into ``script:make``).
+        # YAML then has a scalar, not the original mapping. Keep the valid
+        # spacing-added mutant in the gate; reject only that exact transform.
+        return not (
+            operator == "whitespace_pad" and ": " in source and mutant == source.replace(": ", ":")
+        )
+
     def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
-        results: list[tuple[int, str]] = []
-        for i, line in enumerate(lines):
-            stripped = line.lstrip(" \t")
-            if stripped.startswith("#") or not re.fullmatch(r"artifacts\s*:\s*(?:#.*)?", stripped):
-                continue
-            block_indent = len(line) - len(stripped)
-            block = self._block(lines, i + 1, block_indent)
-            if not block:
-                continue
-            child_indent = min(indent for _, _, indent in block)
-            direct_children = [text for _, text, indent in block if indent == child_indent]
-            if any(_RESTRICTIVE_ARTIFACT_ACCESS_RE.fullmatch(text) for text in direct_children):
-                continue
-            if any(_PRIVATE_ARTIFACT_VISIBILITY_RE.fullmatch(text) for text in direct_children):
-                continue
-            if self._has_sensitive_path(block, child_indent):
-                results.append((i + 1, stripped.strip()))
-        return results
+        matches, _notes = self._analyze(_content, lines)
+        return matches
 
-    @staticmethod
-    def _block(lines: list[str], start: int, parent_indent: int) -> list[tuple[int, str, int]]:
-        block: list[tuple[int, str, int]] = []
-        for i in range(start, len(lines)):
-            raw = lines[i]
-            text = raw.lstrip(" \t")
-            if not text or text.startswith("#"):
-                continue
-            indent = len(raw) - len(text)
-            if indent <= parent_indent:
-                break
-            block.append((i, text.strip(), indent))
-        return block
+    def context_notes_for_matches(
+        self, content: str, _filepath: str, matches: list[tuple[int, str]]
+    ) -> list["_ArtifactReviewNotes | None"]:
+        if not matches:
+            return []
+        _matches, notes = self._analyze(content, content.splitlines())
+        return [
+            _ArtifactReviewNotes((notes[match],)) if match in notes else None for match in matches
+        ]
 
-    @staticmethod
-    def _has_sensitive_path(block: list[tuple[int, str, int]], child_indent: int) -> bool:
-        for pos, (_, text, indent) in enumerate(block):
-            if indent != child_indent:
+    def _analyze(
+        self, _content: str, lines: list[str]
+    ) -> tuple[list[tuple[int, str]], dict[tuple[int, str], str]]:
+        # Safe lexical gate: every supported artifact mapping key contains
+        # these bytes, including quoted keys and flow-style mappings.
+        if "artifacts" not in _content:
+            return [], {}
+        events = tuple(
+            walk_workflow(".gitlab-ci.yml", content=_content, include_keys=True, recover=True)
+        )
+        artifact_keys: dict[str, tuple[int, str]] = {}
+        duplicate_owners: set[str] = set()
+        child_keys: set[tuple[str, str]] = set()
+        settings: dict[tuple[str, str], set[str]] = {}
+        risky: dict[str, list[str]] = {}
+        for event in events:
+            path = event.path
+            if len(path) < 2 or not isinstance(path[0], str) or path[1] != "artifacts":
                 continue
-            inline = re.fullmatch(r"paths\s*:\s*\[(.*)]\s*(?:#.*)?", text)
-            if inline:
-                return any(
-                    HighRiskArtifactAccessPattern._path_is_high_risk(item)
-                    for item in inline.group(1).split(",")
-                )
-            if not re.fullmatch(r"paths\s*:\s*(?:#.*)?", text):
+            owner = path[0]
+            if event.kind is EventKind.MAP_KEY and len(path) == 2:
+                if 0 < event.line <= len(lines):
+                    if owner in artifact_keys:
+                        duplicate_owners.add(owner)
+                    artifact_keys[owner] = (event.line, lines[event.line - 1].strip())
+            elif event.kind is EventKind.MAP_KEY and len(path) == 3:
+                child_key = (owner, str(path[2]))
+                if child_key in child_keys:
+                    duplicate_owners.add(owner)
+                child_keys.add(child_key)
+            elif event.kind is EventKind.LEAF_SCALAR and len(path) == 3:
+                value = (event.value or "").strip().strip("'\"").lower()
+                if path[2] in {"access", "public"}:
+                    settings.setdefault((owner, str(path[2])), set()).add(value)
+            elif (
+                event.kind is EventKind.LEAF_SCALAR
+                and len(path) == 4
+                and path[2] == "paths"
+                and type(path[3]) is int
+                and self._path_is_high_risk(event.value or "")
+            ):
+                risky.setdefault(owner, []).append((event.value or "").strip())
+        ambiguous = {
+            owner for (owner, _key), values in settings.items() if len(values) > 1
+        } | duplicate_owners
+        restricted = {
+            owner
+            for owner in artifact_keys
+            if settings.get((owner, "access"), set()) & {"developer", "maintainer", "none"}
+            or settings.get((owner, "public"), set()) & {"false", "no", "off", "0"}
+        }
+        results = [
+            artifact_keys[owner]
+            for owner in artifact_keys
+            if owner in risky and owner not in restricted and owner not in ambiguous
+        ]
+        notes: dict[tuple[int, str], str] = {}
+        for owner, match in artifact_keys.items():
+            if match not in results:
                 continue
-            paths_indent = indent
-            for _, candidate, candidate_indent in block[pos + 1 :]:
-                if candidate_indent <= paths_indent:
-                    break
-                item = re.fullmatch(r"-\s*(.+)", candidate)
-                if item and HighRiskArtifactAccessPattern._path_is_high_risk(item.group(1)):
-                    return True
-        return False
+            selectors = risky[owner]
+            shown = ", ".join(repr(value[:100]) for value in selectors[:4])
+            remainder = f" (+{len(selectors) - 4} more)" if len(selectors) > 4 else ""
+            notes[match] = (
+                f"Job {owner[:100]!r} selects artifact path(s) {shown}{remainder}. "
+                "These names are review signals; actual file contents, upload, and "
+                "effective audience are not established by this source."
+            )
+        if not artifact_keys:
+            # Incidental artifact-looking text in another language is not
+            # a GitLab job artifact. Actual malformed CI files retain the
+            # engine's file-level structural diagnostic.
+            return [], {}
+        if ambiguous or any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
+            return (
+                IncompletePatternMatches(
+                    results,
+                    reason="SEC9-GL-001 GitLab artifact structure is ambiguous or incomplete",
+                ),
+                notes,
+            )
+        return results, notes
 
     @staticmethod
     def _path_is_high_risk(value: str) -> bool:
@@ -344,6 +387,11 @@ class HighRiskArtifactAccessPattern:
         # characters do not change the security meaning of the path.
         scalar = value.split(" #", 1)[0].strip().strip("'\"")
         return bool(scalar and _HIGH_RISK_ARTIFACT_PATH_RE.search(scalar))
+
+
+@dataclass(frozen=True)
+class _ArtifactReviewNotes:
+    notes: tuple[str, ...]
 
 
 class GitlabIdentityGatePattern:
@@ -975,36 +1023,35 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC9-GL-001",
-        title="High-risk artifact path lacks an access restriction",
+        title="Review artifact path and intended access",
         severity=Severity.MEDIUM,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-9",
         # 2026-09-23 precision audit: the earlier matcher fired on every
         # artifacts block and proved neither sensitive content nor effective
-        # public visibility. Require a strong secret-bearing path signal while
+        # public visibility. Require a specific path-name review signal while
         # retaining review-needed because project/pipeline visibility remains
         # external context.
         review_needed=True,
         confidence="low",
         description=(
-            "A job uploads a path whose name strongly indicates credentials, private keys, "
-            "environment secrets, kubeconfig or Terraform state, signed pre-release packages, "
-            "or security scan results, without setting "
-            "a restrictive `artifacts:access:` value or `artifacts:public: false`. In a "
-            "public project whose pipelines are public, `access: all` is the default and "
-            "the artifact can be downloaded by non-members. Project and pipeline visibility "
-            "are not proven by CI YAML, so this finding requires review."
+            "A GitLab job selects an artifact path with a credential-like name, a signed "
+            "release-output name, or a security-report name without a local access restriction. "
+            "The name is a review signal, not evidence of secret contents or an unauthorized "
+            "download. In public pipelines, GitLab's default `access: all` can permit "
+            "non-member UI/API downloads. Actual file contents, job execution, project and "
+            "pipeline visibility, and intended audience need review."
         ),
         pattern=HighRiskArtifactAccessPattern(),
         remediation=(
-            "Keep secret material out of job artifacts. If the artifact is intentional, "
-            "set an explicit restrictive access level (`developer`, `maintainer`, or "
-            "`none`; `maintainer` requires GitLab 18.4+):\n"
-            "\n"
-            "artifacts:\n"
-            "  access: developer   # was: implicit `all`\n"
-            "  paths:\n"
-            "    - dist/"
+            "Check the selected paths and who should receive them. If a credential-like "
+            "path contains sensitive material, keep it out of artifacts. For intended signed "
+            "build outputs or security reports, review the audience and retention; restrict "
+            "UI/API access when that audience is narrower (for example, "
+            "`artifacts: {access: developer}`). GitLab 18.4+ also supports `maintainer`. "
+            "This access setting does not block job-token retrieval through the runner API "
+            "or forwarding to downstream pipelines; review those routes and project CI/CD "
+            "visibility separately."
         ),
         reference="https://docs.gitlab.com/ci/yaml/#artifactsaccess",
         test_positive=[

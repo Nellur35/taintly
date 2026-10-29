@@ -63,7 +63,7 @@ def test_scan_repo_discovers_content_shaped_buildspec_names(tmp_path: Path) -> N
     assert {Path(path) for path in discovered} == set(paths)
     assert report.platform == "codebuild"
     assert report.files_scanned == 5
-    assert report.rules_loaded == 9
+    assert report.rules_loaded == 12
 
 
 def test_explicit_custom_buildspec_is_scanned_by_engine_and_cli(tmp_path: Path) -> None:
@@ -146,7 +146,7 @@ def test_explicit_codebuild_zero_file_report_is_stable_in_engine_and_cli(tmp_pat
 
     assert report.platform == "codebuild"
     assert report.files_scanned == 0
-    assert report.rules_loaded == 9
+    assert report.rules_loaded == 12
     assert result.returncode == 0, result.stderr
     assert payload["platform"] == "codebuild"
     assert payload["files_scanned"] == 0

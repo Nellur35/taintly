@@ -43,6 +43,18 @@ class TestResult:
     known_gap: bool = False
 
 
+def _check_sample(rule: Rule, sample: str, lines: list[str]):
+    """Let source-bound rules materialize a sample before checking it."""
+    source_bound = getattr(rule.pattern, "self_test_check", None)
+    return source_bound(sample) if callable(source_bound) else rule.pattern.check(sample, lines)
+
+
+def _mutation_applicable(rule: Rule, source: str, mutant: str, operator: str) -> bool:
+    """Let a rule reject a mutation proved to change the input semantics."""
+    predicate = getattr(rule.pattern, "self_test_mutation_applicable", None)
+    return predicate(source, mutant, operator) if callable(predicate) else True
+
+
 def run_self_test(rules: list[Rule]) -> list[TestResult]:
     """Run all positive and negative test samples against their rules."""
     results = []
@@ -51,7 +63,7 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
         # Positive samples — must trigger
         for sample in rule.test_positive:
             lines = sample.splitlines()
-            matches = rule.pattern.check(sample, lines)
+            matches = _check_sample(rule, sample, lines)
             passed = len(matches) > 0
             results.append(
                 TestResult(
@@ -67,7 +79,7 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
         # Negative samples — must NOT trigger
         for sample in rule.test_negative:
             lines = sample.splitlines()
-            matches = rule.pattern.check(sample, lines)
+            matches = _check_sample(rule, sample, lines)
             passed = len(matches) == 0
             results.append(
                 TestResult(
@@ -93,6 +105,20 @@ def run_self_test(rules: list[Rule]) -> list[TestResult]:
 #
 # Each value documents the failure flavour and follow-up pointer.
 _KNOWN_MUTATION_GAPS: dict[tuple[str, str], str] = {
+    ("LOTP-CB-002", "whitespace_pad"): (
+        "The ': ' -> ':' mutation changes 'version: 0.2' into 'version:0.2', "
+        "removing the required version mapping. The structural walker then "
+        "has no buildspec version field, so this is not an equivalent "
+        "CodeBuild 0.2 source. An authored structural-reader test verifies "
+        "the changed parse."
+    ),
+    ("LOTP-GH-007", "whitespace_pad"): (
+        "The ': ' -> ':' variant changes '- run: npm install' and "
+        "'- run: npm publish' into plain sequence scalars, not GitHub run "
+        "mappings. The structural walker correctly finds no commands. "
+        "This is a non-equivalent mutation of a valid release workflow, "
+        "not evidence that the rule misses a supported workflow."
+    ),
     ("LOTP-JK-001", "quote_swap"): (
         "Conditional positive-only applicability: quote_swap changes the sole live "
         "Groovy GString PR-context reference into single-quoted literal data. The "
@@ -794,8 +820,10 @@ def run_mutation_tests(
             for op_name, op_fn in operators.items():
                 mutants = op_fn(sample)
                 for mutant in mutants:
+                    if not _mutation_applicable(rule, sample, mutant, op_name):
+                        continue
                     lines = mutant.splitlines()
-                    matches = rule.pattern.check(mutant, lines)
+                    matches = _check_sample(rule, mutant, lines)
                     passed, known_gap = _mark(
                         len(matches) > 0,
                         rule.id,
@@ -822,8 +850,10 @@ def run_mutation_tests(
             for op_name, op_fn in operators.items():
                 mutants = op_fn(sample)
                 for mutant in mutants:
+                    if not _mutation_applicable(rule, sample, mutant, op_name):
+                        continue
                     lines = mutant.splitlines()
-                    matches = rule.pattern.check(mutant, lines)
+                    matches = _check_sample(rule, mutant, lines)
                     passed, known_gap = _mark(
                         len(matches) == 0,
                         rule.id,

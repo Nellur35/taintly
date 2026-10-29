@@ -10,7 +10,40 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 
 ## [Unreleased]
 
+### Performance and evidence
+- Reuse immutable Jenkins structural events in a bounded eight-entry cache
+  keyed by exact source and recovery options; retain diagnostic locations and
+  attach file ownership at each consumer.
+- Keep modeled local-to-sink alternatives in Jenkins multihop analysis and
+  choose a deterministic display witness by chain length and lexical order.
+  Preserve the existing scope/order analysis and finding classifications.
+
 ### Added
+- `SEC6-CB-004` reviews direct CodeBuild Secrets Manager variables passed to
+  Docker build arguments. It preserves source and command evidence while
+  leaving runtime retrieval, overrides, Dockerfile use and image contents
+  unresolved.
+- `SEC6-GL-011` reviews direct GitLab `CI_JOB_TOKEN` form submission to a
+  literal cleartext HTTP endpoint, with exact source ownership and runtime
+  uncertainty. HTTPS form authentication is not classified as this transport
+  risk.
+- Extend the source-bound Jenkins URL-query profile to command-style
+  `sh script:` calls, class-qualified legacy username/password bindings, and
+  a small set of `curl` options before the direct URL operand. The reader
+  preserves binding ownership; unsupported command shapes remain unresolved.
+- `SEC6-JK-013` reviews a source-bound Jenkins credential in a direct `curl`
+  URL query. Its text finding includes an ASCII path from the same structured
+  evidence, with runtime and endpoint uncertainties preserved. Mixed line
+  endings retain the original file SHA256.
+- `SEC6-GL-010`, `SEC6-JK-012` and `SEC6-CB-003`: source-bound review findings
+  for a GitLab `CI_JOB_TOKEN` reference, direct Jenkins `withCredentials`
+  string binding or CodeBuild Secrets Manager variable
+  reaching a `curl` request body through supported shell operations. Unknown
+  runner context, credential availability and delivery remain explicit.
+- `SEC6-GH-019`: bounded GitHub Actions Bash analysis traces directly configured
+  secrets through assignments, file writes, and Base64 into a `curl` request body.
+  Findings are review level and retain source, owner, and hop evidence; execution,
+  destination trust, secret availability, and delivery remain unknown.
 - Runtime package data explicitly includes the grandfather baseline and existing data/fixture assets,
   keeping checkout and installed-package confidence fallback inputs aligned.
 - Local workflow/action input tracing now follows declared job outputs through
@@ -36,6 +69,33 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
   (`.pre-commit-hooks.yaml`), and a pip-installable package with a `taintly` console entry point.
 
 ### Changed
+- `SEC3-GL-005` now checks structurally owned GitLab service images as well as
+  job images. Scalar and `name:` service forms are covered; dynamic whole-image
+  references remain unresolved, and `SEC8-GL-003` is superseded for the same
+  declaration in repository reports.
+- GitHub image rules `SEC3-GH-007`, `SEC8-GH-001` and `SEC8-GH-002` now use
+  the owning job container or service image node. Matrix values and script text
+  no longer masquerade as direct consumers, while scalar `container:` values
+  are checked. Dynamic image expressions remain incomplete rather than safe.
+- `SEC3-GL-005` now inspects structurally owned GitLab job/default/global image
+  declarations, including variable-backed tags, instead of matching only
+  literal `image:` lines. It keeps script text out of the finding and marks
+  whole-variable or unresolvable image references as incomplete. Findings
+  describe configured digest binding, not the image pulled at runtime.
+- `SEC9-GL-001` now names the selected artifact paths and owning job in each
+  review finding. Its description and advice distinguish credential-like paths
+  from intended signed outputs and security reports, and state that GitLab
+  artifact access settings do not block job-token retrieval. Real-source
+  findings remain review candidates; contents, execution and audience remain
+  unverified.
+- GitLab high-risk artifact path review now uses job-owned YAML structure, so
+  equivalent block, flow and quoted-key declarations agree and script text
+  cannot impersonate an artifact declaration. Zero-finding families say
+  `No finding`; JSON/SARIF report `not_established` when no engine error is
+  observed, instead of implying complete semantic coverage.
+- The hash-pinned dev toolchain now selects an unaffected `filelock` release on
+  Python 3.10 and a patched release on newer Python versions, preserving the
+  dependency audit without changing Taintly's zero-dependency runtime.
 - Composer job attribution reuses an immutable interval index per invocation.
   Scan sessions reuse exact-content job segmentation, and corpus passes reuse
   unchanged workflow summaries while retaining separate filesystem reads and

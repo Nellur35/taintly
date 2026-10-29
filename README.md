@@ -14,6 +14,8 @@ Security scanner for CI/CD pipelines. Reads GitHub Actions, GitLab CI, Jenkins, 
 
 - Multi-stage taint analysis with provenance — traces tracked values through environment variables, `$GITHUB_ENV`, step outputs and job outputs, with source locations and propagation paths.
 
+- [Secret-to-request-body review](docs/SECRET_NETWORK_FLOW.md) — traces supported GitHub Actions secrets, GitLab job-token references, Jenkins credential bindings and CodeBuild Secrets Manager variables through bounded shell operations into a `curl` body. Each platform has its own source and execution limits.
+
 - Cross-artifact and cross-workflow input-flow analysis across local composite `action.yml` and reusable-workflow calls. Findings describe configured local source-to-sink candidates; execution, checkout correspondence, token authority and secrets remain review questions.
 
 - Attack-path composition — combines compatible source, execution and privilege evidence in the relevant jobs and steps. Composite findings retain review requirements where runtime prerequisites are unverified.
@@ -618,9 +620,15 @@ descriptions, multi-line fixes and references remain visible. Use `--verbose` to
 repeat the details for every occurrence. This grouping does not change findings,
 scores or machine-readable output, and does not prove a shared attack path.
 
+`SEC6-JK-013` text findings also show a short ASCII evidence path from the
+credential binding through its owning `sh` command to the `curl` URL query.
+The path comes from the rule's structured witness. It does not establish that
+the request ran or that the endpoint was unintended, and it does not change
+severity, coverage or machine-readable conclusions.
 
 
-`--score` prints a 0–100 grade and a debt profile labelling each family Strong, Moderate, Weak, Needs review, or Not applicable. "Not applicable" is reserved for families whose rules had no candidate location to evaluate in this scan — distinct from "Strong" (rules ran, nothing was wrong).
+
+`--score` prints a 0–100 grade based on reported findings and a family profile labelled No finding, Moderate, Weak, or Needs review. **No finding** means only that no finding was emitted for that family; it does not certify complete analysis or prove the family is inapplicable. Candidate anchors cover only some rules and cannot establish a family-wide negative result.
 
 
 
@@ -631,6 +639,15 @@ Taintly analyzes configuration; it does not execute your workflows or prove
 that an attack succeeded. Follow the cited source-to-sink path and read the
 confidence, `review_needed`, context notes and remediation together. Missing
 runtime information remains a review question.
+
+For GitHub Actions, a direct `uses:` reference to a mutable tag or branch is
+treated as commit-bound only when the on-disk `.github/workflows/actions.lock`
+lists that exact reference for that exact workflow and records a full commit
+identifier and repository identity. This supports the documented v0.0.2 and
+v0.0.3 direct-reference formats. Missing, malformed, unsupported or mismatched
+lockfiles leave the original finding in place. A lockfile binding does not prove
+that the action is safe, ran successfully, or that a called reusable workflow's
+own dependencies are pinned. See [GitHub's workflow lockfile documentation](https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles).
 
 For Jenkins, `LOTP-JK-001` and `LOTP-JK-003` report build or install commands
 in a Jenkinsfile that references PR metadata. That combination requires review:
@@ -673,7 +690,7 @@ certificate.
 
 
 <!-- AUTOGEN:summary -->
-324 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+334 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 
@@ -683,10 +700,10 @@ certificate.
 |----------|--------|--------|---------|-----------|
 | SEC-1 — Insufficient Flow Control | 6 | 3 | 2 | 0 |
 | SEC-2 — Inadequate IAM | 7 | 4 | 3 | 0 |
-| SEC-3 — Dependency Chain Abuse | 34 | 18 | 14 | 3 |
+| SEC-3 — Dependency Chain Abuse | 35 | 19 | 14 | 4 |
 | SEC-4 — Poisoned Pipeline Execution | 77 | 30 | 24 | 2 |
 | SEC-5 — Insufficient PBAC | 3 | 1 | 2 | 0 |
-| SEC-6 — Insufficient Credential Hygiene | 16 | 10 | 12 | 2 |
+| SEC-6 — Insufficient Credential Hygiene | 17 | 12 | 14 | 4 |
 | SEC-7 — Insecure System Configuration | 4 | 1 | 4 | 0 |
 | SEC-8 — Ungoverned 3rd Party Services | 6 | 3 | 5 | 0 |
 | SEC-9 — Improper Artifact Integrity | 7 | 5 | 4 | 2 |

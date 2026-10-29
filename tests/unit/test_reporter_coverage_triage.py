@@ -91,12 +91,13 @@ def test_sarif_counts_match_json_but_preserve_error_notification_channel():
     assert {r["ruleId"] for r in run["results"]} == {"SEC6-GH-015", "SEC3-GH-006", "ENGINE-ERR"}
 
 
-def test_complete_empty_reports_stay_clean():
+def test_empty_report_does_not_claim_semantic_completeness():
     report = report_with()
     data = json.loads(format_json(report))
-    assert data["coverage_status"] == "complete"
+    assert data["coverage_status"] == "not_established"
     assert data["engine_error_count"] == data["security_findings_count"] == 0
     assert "No findings." in format_text(report, use_color=False)
+    assert "semantic completeness is not proven" in format_text(report, use_color=False)
     assert "Scan incomplete" not in format_html(report)
 
 
@@ -132,7 +133,7 @@ def test_complete_and_mixed_partitions(ids, security, inventory, errors, confirm
     assert data["engine_error_count"] == errors
     assert data["distinct_risk_count"] == confirmed
     assert data["review_needed_count"] == review
-    assert data["coverage_status"] == ("incomplete" if errors else "complete")
+    assert data["coverage_status"] == ("incomplete" if errors else "not_established")
     assert len(data["findings"]) == security + inventory + errors
     html = format_html(report)
     assert ("Scan incomplete" in html) == bool(errors)

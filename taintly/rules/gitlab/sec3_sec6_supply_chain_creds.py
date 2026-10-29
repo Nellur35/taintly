@@ -4,11 +4,13 @@ import re
 
 from taintly.models import (
     ContextPattern,
+    IncompletePatternMatches,
     Platform,
     RegexPattern,
     Rule,
     Severity,
 )
+from taintly.parsers.structural import EventKind, walk_workflow
 from taintly.platform import gitlab_archived_check
 
 # ---------------------------------------------------------------------------
@@ -22,6 +24,95 @@ from taintly.platform import gitlab_archived_check
 _INCLUDE_PROJECT_RE = re.compile(
     r"\bproject:\s*['\"]?([A-Za-z0-9][\w.-]*(?:/[A-Za-z0-9][\w.-]*)+)['\"]?"
 )
+
+
+_IMAGE_VARIABLE_RE = re.compile(r"(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\})\Z")
+_IMAGE_DIGEST_RE = re.compile(r"@sha256:[0-9a-fA-F]{64}\Z")
+_NON_IMAGE_OWNERS = frozenset(
+    {"variables", "stages", "include", "cache", "workflow", "services", "pages"}
+)
+
+
+class GitlabUnpinnedImagePattern:
+    """Inspect owned GitLab job and service image scalars.
+
+    This checks the configured reference. A variable supplying the whole image
+    or a nonliteral digest cannot be resolved from this scalar alone.
+    """
+
+    def self_test_mutation_applicable(self, source: str, mutant: str, operator: str) -> bool:
+        # Removing the space after YAML mapping keys changes them into plain
+        # scalars; the mutated text is not a semantically equivalent image job.
+        return not (
+            operator == "whitespace_pad" and ": " in source and mutant == source.replace(": ", ":")
+        )
+
+    def check_with_filepath(
+        self, content: str, lines: list[str], filepath: str
+    ) -> list[tuple[int, str]]:
+        # scan_file's broad rule-pack gate also sends Jenkinsfiles here.
+        # Product scans select rules by platform; the single-file contract
+        # deliberately accepts generic .yml fixture names as GitLab YAML.
+        if not filepath.lower().endswith((".yml", ".yaml")):
+            return []
+        return self.check(content, lines)
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        if "image" not in content and "services" not in content:
+            return []
+        matches: list[tuple[int, str]] = []
+        unresolved = False
+        for event in walk_workflow(
+            ".gitlab-ci.yml", content=content, include_keys=True, recover=True
+        ):
+            if event.kind in {EventKind.ERROR, EventKind.CUTOFF}:
+                unresolved = True
+                continue
+            if event.kind is not EventKind.LEAF_SCALAR or event.value is None:
+                continue
+            path = event.path
+            is_image = (
+                path == ("image",)
+                or path == ("image", "name")
+                or (len(path) == 2 and path[1] == "image")
+                or (len(path) == 3 and path[1:] == ("image", "name"))
+            )
+            service_tail = path[1:] if path and path[0] == "services" else path[2:]
+            is_service = (
+                (path and path[0] == "services") or (len(path) > 1 and path[1] == "services")
+            ) and (
+                (len(service_tail) == 1 and isinstance(service_tail[0], int))
+                or (
+                    len(service_tail) == 2
+                    and isinstance(service_tail[0], int)
+                    and service_tail[1] == "name"
+                )
+            )
+            if not (is_image or is_service):
+                continue
+            if not isinstance(path[0], str) or (
+                path[0] in _NON_IMAGE_OWNERS and not (is_service and path[0] == "services")
+            ):
+                continue
+            reference = event.value.strip()
+            if not reference or _IMAGE_VARIABLE_RE.fullmatch(reference):
+                unresolved = True
+                continue
+            if _IMAGE_DIGEST_RE.search(reference):
+                continue
+            if "@" in reference:
+                # An expression or unsupported digest syntax is not evidence
+                # that the effective image is either pinned or unpinned.
+                unresolved = True
+                continue
+            if 0 < event.line <= len(lines):
+                matches.append((event.line, lines[event.line - 1].strip()))
+        if unresolved:
+            return IncompletePatternMatches(
+                matches,
+                reason="SEC3-GL-005: image reference or GitLab YAML could not be resolved",
+            )
+        return matches
 
 
 class ArchivedIncludeProjectPattern:
@@ -472,32 +563,39 @@ RULES: list[Rule] = [
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-3",
         description=(
-            "Docker image referenced by tag instead of SHA256 digest. "
-            "Image tags are mutable and can be overwritten on the registry."
+            "A GitLab job image or service declaration lacks a literal SHA256 digest. "
+            "The configured reference may change; variable values and the image actually "
+            "pulled at runtime are not established by this finding."
         ),
-        pattern=RegexPattern(
-            match=r"^\s*image:\s*['\"]?[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+['\"]?(\s*(#.*)?)?\s*$",
-            exclude=[r"^\s*#", r"@sha256:"],
+        pattern=GitlabUnpinnedImagePattern(),
+        remediation=(
+            "Bind the intended job or service image to a reviewed SHA256 digest in its GitLab "
+            "declaration. If variables can override the reference, verify their allowed "
+            "values and the effective pipeline configuration."
         ),
-        remediation="Pin to digest: image: alpine@sha256:abcdef...",
         reference="https://docs.docker.com/reference/cli/docker/image/pull/#pull-an-image-by-digest-immutable-identifier",
         test_positive=[
-            "  image: alpine:3.18",
-            "  image: node:20-slim",
-            "  image: 'registry.example.com/app:latest'",
+            "build:\n  script: echo ok\n  image: alpine:3.18",
+            "build:\n  script: echo ok\n  image: node:20-slim",
+            "build:\n  script: echo ok\n  image: 'registry.example.com/app:latest'",
+            "build:\n  image: registry.example.com/app:$IMAGE_TAG",
+            "build:\n  services:\n    - name: postgres:17",
+            "build:\n  services: [postgres:17]",
         ],
         test_negative=[
-            "  image: alpine@sha256:abcdef1234567890",
-            "  # image: alpine:3.18",
+            "build:\n  image: alpine@sha256:" + "a" * 64,
+            "build:\n  script: |\n    echo 'image: alpine:3.18'",
+            "build:\n  services:\n    - name: postgres@sha256:" + "a" * 64,
         ],
         stride=["T"],
         threat_narrative=(
-            "Docker image tags are mutable: a registry push under the same tag silently "
-            "replaces the execution environment for your jobs, giving the image publisher "
-            "arbitrary code execution with access to all CI/CD variables and runner-mounted "
-            "secrets. Pinning to a SHA256 digest makes the image reference immutable."
+            "Docker image tags can be repointed, so a future job may execute different image "
+            "code without a workflow diff. If that job has secrets or runner mounts available, "
+            "the changed code could access them. Actual job execution, registry control and "
+            "effective credential exposure are not established by this source."
         ),
         confidence="high",
+        supersedes=["SEC8-GL-003"],
     ),
     # =========================================================================
     # SEC3-GL-004: pip --extra-index-url without --index-url — dependency

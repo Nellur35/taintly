@@ -609,6 +609,7 @@ class _FileWrite:
     line: int
     seq: int
     path: str
+    redirect: str
     value: str
     quoted_single: bool
 
@@ -664,7 +665,7 @@ class _TaintedEnv:
     hops: list[TaintHop]
 
     def fact_key(self):
-        return (self.scope, self.name)
+        return (self.scope, self.name, self.source_expr, self.source_line)
 
     def fact_rank(self):
         # Keep the shortest proof; tie-break deterministically (total order).
@@ -673,32 +674,24 @@ class _TaintedEnv:
 
 @dataclass
 class _VisibleEnv:
-    """IDB: variable ``name`` carries attacker bytes in the environment
-    *as seen by* step ``idx`` of ``job``.
+    """IDB: one possible source for the effective value seen by a step.
 
-    ``cls`` encodes scope precedence so the store keeps the value the
-    runner would actually expand: ``0`` dynamic ``$GITHUB_ENV`` write
-    (most specific — newest write wins via ``-writer_idx``), ``1``
-    job-level ``env:``, ``2`` step-level ``env:``.  This mirrors the
-    old ``{**job_env, **dynamic_env, **step_env}`` layering, where a
-    step-level re-declaration is ignored if the name already resolved
-    at job or dynamic scope.
+    Scope and write precedence are resolved against EDB assignments in
+    ``rule_visible_env`` before these source alternatives are emitted.
     """
 
     job: str
     idx: int
     name: str
-    cls: int
-    writer_idx: int
     source_expr: str
     source_line: int
     hops: list[TaintHop]
 
     def fact_key(self):
-        return (self.job, self.idx, self.name)
+        return (self.job, self.idx, self.name, self.source_expr, self.source_line)
 
     def fact_rank(self):
-        return (self.cls, -self.writer_idx, len(self.hops), self.source_line, _hop_rank(self.hops))
+        return (len(self.hops), _hop_rank(self.hops))
 
 
 @dataclass
@@ -715,12 +708,12 @@ class _TaintedDynEnv:
     hops: list[TaintHop]
 
     def fact_key(self):
-        return (self.job, self.writer_idx, self.name)
+        return (self.job, self.writer_idx, self.name, self.seq, self.source_expr, self.source_line)
 
     def fact_rank(self):
-        # Last write in source order wins (matches dict-update order
-        # of the old ``dynamic_env`` running state).
-        return (-self.seq, len(self.hops), _hop_rank(self.hops))
+        # Write ordering is handled by rule_visible_env; rank proofs of
+        # this exact write/source only.
+        return (len(self.hops), _hop_rank(self.hops))
 
 
 @dataclass
@@ -786,7 +779,17 @@ class _TaintedFile:
     hops: list[TaintHop]
 
     def fact_key(self):
-        return (self.job, self.path)
+        # A path can have several origins at different program points.  Do
+        # not let witness ranking erase an earlier write needed by a reader.
+        return (
+            self.job,
+            self.path,
+            self.writer_idx,
+            self.writer_line,
+            self.seq,
+            self.source_expr,
+            self.source_line,
+        )
 
     def fact_rank(self):
         return (-self.seq, len(self.hops), _hop_rank(self.hops))
@@ -851,7 +854,7 @@ def _echo_body_name_value(m):
 
 
 def _iter_file_writes(text: str):
-    """Yield ``(path, value, quoted_single)`` for each
+    """Yield ``(path, redirect, value, quoted_single)`` for each
     ``echo <body> >>? <path>`` write in ``text`` to an *ordinary* file
     — the ``$GITHUB_ENV`` / ``$GITHUB_OUTPUT`` redirect targets are
     skipped here because they have their own dedicated detectors."""
@@ -869,7 +872,7 @@ def _iter_file_writes(text: str):
         else:
             value = bare or ""
             quoted_single = False
-        yield (path, value, quoted_single)
+        yield (path, m.group("redirect"), value, quoted_single)
 
 
 # A reusable workflow declares ``on: workflow_call`` (scalar, list, or
@@ -945,10 +948,10 @@ def _build_facts(lines: list[str]) -> tuple[Database, list[_Job]]:
                             _OutputWrite(job_key, idx, step_id, name, value, lineno, qs, _seq),
                         )
                         _seq += 1
-                for fpath, value, qs in _iter_file_writes(text):
+                for fpath, redirect, value, qs in _iter_file_writes(text):
                     db.add(
                         _R_FILE_WRITE,
-                        _FileWrite(job_key, idx, lineno, _seq, fpath, value, qs),
+                        _FileWrite(job_key, idx, lineno, _seq, fpath, redirect, value, qs),
                     )
                     _seq += 1
 
@@ -1167,10 +1170,10 @@ def _build_facts_structural(content: str, lines: list[str]) -> tuple[Database, l
                     _OutputWrite(job, idx, sid, name, value, src_line, qs, _seq),
                 )
                 _seq += 1
-        for fpath, value, qs in _iter_file_writes(text):
+        for fpath, redirect, value, qs in _iter_file_writes(text):
             db.add(
                 _R_FILE_WRITE,
-                _FileWrite(job, idx, src_line, _seq, fpath, value, qs),
+                _FileWrite(job, idx, src_line, _seq, fpath, redirect, value, qs),
             )
             _seq += 1
 
@@ -1214,18 +1217,24 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
         key = job.job_id if job.job_id is not None else f"<seg@{job.seg_start}>"
         job_step_idxs[key] = [s.idx for s in job.steps]
 
+    def env_sources(db: Database, scope: tuple, name: str):
+        return (te for te in db.all(_R_TAINTED_ENV) if te.scope == scope and te.name == name)
+
+    def visible_sources(db: Database, job: str, idx: int, name: str):
+        return (
+            ve
+            for ve in db.all(_R_VISIBLE_ENV)
+            if ve.job == job and ve.idx == idx and ve.name == name
+        )
+
     def rule_tainted_env(db: Database):
         # Direct attacker context, multi-hop ${{ env.X }}, and
         # env-mediated cross-job ${{ needs.X.outputs.Y }} — the three
         # ways an ``env:`` assignment becomes tainted.
         for ea in db.all(_R_ENV_ASSIGN):
-            if db.has(_R_TAINTED_ENV, (ea.scope, ea.name)):
-                # Shortest-proof dedup still applies, but a resolved
-                # var never needs re-deriving from a longer chain.
-                pass
             # (a) direct.
-            src = _extract_tainted_source(ea.raw, is_reusable)
-            if src is not None:
+            sources = _extract_tainted_sources(ea.raw, is_reusable)
+            for src in sources:
                 yield (
                     _R_TAINTED_ENV,
                     _TaintedEnv(
@@ -1243,16 +1252,16 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                         ],
                     ),
                 )
+            if sources:
                 continue
             # (b) multi-hop ${{ env.OTHER }}.
             other = _extract_env_ref(ea.raw)
             if other is not None:
-                parent = None
                 if ea.scope[0] == "job":
-                    parent = db.get(_R_TAINTED_ENV, (ea.scope, other))
+                    parents = env_sources(db, ea.scope, other)
                 else:  # ("step", job, idx)
-                    parent = db.get(_R_VISIBLE_ENV, (ea.scope[1], ea.scope[2], other))
-                if parent is not None:
+                    parents = visible_sources(db, ea.scope[1], ea.scope[2], other)
+                for parent in parents:
                     yield (
                         _R_TAINTED_ENV,
                         _TaintedEnv(
@@ -1271,7 +1280,7 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                             ],
                         ),
                     )
-                    continue
+                continue
             # (c) A server-side step-output substitution in a step env.
             # GitHub materializes GITHUB_OUTPUT after its writer step.
             if ea.scope[0] == "step":
@@ -1327,51 +1336,55 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                     break
 
     def rule_visible_env(db: Database):
-        # Fan tainted_env / tainted_dyn_env onto the per-step
-        # ``visible_env`` relation, carrying scope precedence in ``cls``.
-        #
-        # A step that re-declares a variable in its own ``env:`` block
-        # SHADOWS the job-level and dynamic-write values for that name
-        # at that step — ``env:`` set directly on the step is what the
-        # runner exports.  So a step-local ``env: VAR: <clean literal>``
-        # over a job-tainted ``VAR`` un-taints ``VAR`` at that step's
-        # sinks (and a step-local tainted re-declaration is carried by
-        # the step-scope ``tainted_env`` branch below instead).  Not
-        # suppressing this is the clean-override false positive.
+        # Decide the effective binding from immutable assignments/writes,
+        # then project all of that binding's source alternatives. Source
+        # keys cannot themselves decide which assignment shadows another.
         step_redecl = {
             (ea.scope[1], ea.scope[2], ea.name)
             for ea in db.all(_R_ENV_ASSIGN)
             if ea.scope[0] == "step"
         }
+        latest_write: dict[tuple[str, int, str], _EnvWrite] = {}
+        for ew in db.all(_R_ENV_WRITE):
+            for idx in job_step_idxs.get(ew.job, []):
+                if idx <= ew.idx:
+                    continue
+                key = (ew.job, idx, ew.name)
+                prior = latest_write.get(key)
+                if prior is None or (ew.idx, ew.seq) > (prior.idx, prior.seq):
+                    latest_write[key] = ew
         for te in db.all(_R_TAINTED_ENV):
             if te.scope[0] == "job":
                 job = te.scope[1]
                 for idx in job_step_idxs.get(job, []):
-                    if (job, idx, te.name) in step_redecl:
-                        continue  # step's own env: governs this name
+                    key = (job, idx, te.name)
+                    if key in step_redecl or key in latest_write:
+                        continue
                     yield (
                         _R_VISIBLE_ENV,
-                        _VisibleEnv(
-                            job, idx, te.name, 1, -1, te.source_expr, te.source_line, te.hops
-                        ),
+                        _VisibleEnv(job, idx, te.name, te.source_expr, te.source_line, te.hops),
                     )
             else:  # step scope
                 _, job, idx = te.scope
                 yield (
                     _R_VISIBLE_ENV,
-                    _VisibleEnv(job, idx, te.name, 2, -1, te.source_expr, te.source_line, te.hops),
+                    _VisibleEnv(job, idx, te.name, te.source_expr, te.source_line, te.hops),
                 )
         for tde in db.all(_R_TAINTED_DYN_ENV):
             for idx in job_step_idxs.get(tde.job, []):
-                if idx > tde.writer_idx and (tde.job, idx, tde.name) not in step_redecl:
+                key = (tde.job, idx, tde.name)
+                owner = latest_write.get(key)
+                if (
+                    owner is not None
+                    and key not in step_redecl
+                    and (tde.writer_idx, tde.seq) == (owner.idx, owner.seq)
+                ):
                     yield (
                         _R_VISIBLE_ENV,
                         _VisibleEnv(
                             tde.job,
                             idx,
                             tde.name,
-                            0,
-                            tde.writer_idx,
                             tde.source_expr,
                             tde.source_line,
                             tde.hops,
@@ -1381,8 +1394,8 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
     def rule_tainted_dyn_env(db: Database):
         for ew in db.all(_R_ENV_WRITE):
             # (a) direct attacker context embedded in the echo body.
-            src = _extract_tainted_source(ew.value, is_reusable)
-            if src is not None:
+            sources = _extract_tainted_sources(ew.value, is_reusable)
+            for src in sources:
                 yield (
                     _R_TAINTED_DYN_ENV,
                     _TaintedDynEnv(
@@ -1402,6 +1415,7 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                         ],
                     ),
                 )
+            if sources:
                 continue
             # (b) indirect: shell ref to an already-tainted visible var.
             if ew.quoted_single:
@@ -1428,7 +1442,6 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                             ],
                         ),
                     )
-                    break
 
     def rule_tainted_file(db: Database):
         # A file written with attacker-controlled bytes.  Same value
@@ -1436,8 +1449,7 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
         # in the echo body, or a shell ref to an already-tainted
         # visible env var of the writing step.
         for fw in db.all(_R_FILE_WRITE):
-            src = _extract_tainted_source(fw.value, is_reusable)
-            if src is not None:
+            for src in _extract_tainted_file_sources(fw.value, is_reusable):
                 yield (
                     _R_TAINTED_FILE,
                     _TaintedFile(
@@ -1458,7 +1470,6 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                         ],
                     ),
                 )
-                continue
             if fw.quoted_single:
                 continue
             for ve in db.all(_R_VISIBLE_ENV):
@@ -1484,7 +1495,6 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                             ],
                         ),
                     )
-                    break
 
     def rule_tainted_output(db: Database):
         for ow in db.all(_R_OUTPUT_WRITE):
@@ -1596,7 +1606,7 @@ def _github_rules(jobs: list[_Job], is_reusable: bool = False):
                     continue
             em = _ENV_REF_RE.search(od.raw)
             if em is not None:
-                up = db.get(_R_TAINTED_ENV, (("job", od.job), em.group(1)))
+                up = next(env_sources(db, ("job", od.job), em.group(1)), None)
                 if up is None:
                     # Also consult $GITHUB_ENV writes in this job.
                     best = None
@@ -1764,6 +1774,83 @@ def _analysis(content: str, lines: list[str]) -> _Analysis:
     return result
 
 
+_LITERAL_FILE_PATH_RE = re.compile(r"(?:/[A-Za-z0-9._/-]+|(?:\./)?[A-Za-z0-9._/-]+)\Z")
+_INDEPENDENT_ECHO_LITERAL_RE = re.compile(r"[A-Za-z0-9._/-]+\Z")
+_SUPPORTED_UBUNTU_RUNNERS = frozenset({"ubuntu-latest", "ubuntu-22.04", "ubuntu-24.04"})
+
+
+def _supported_file_exec_context(events: tuple, job: str, step_idx: int, content: str) -> bool:
+    """Allow clearing only for a known default hosted Ubuntu execution context."""
+    if "BASH_ENV" in content or any(
+        ev.kind in (EventKind.CUTOFF, EventKind.ERROR) for ev in events
+    ):
+        return False
+    runners = []
+    for ev in events:
+        path = ev.path
+        if ev.kind is EventKind.MAP_KEY:
+            if path in (
+                ("defaults", "run", "shell"),
+                ("defaults", "run", "working-directory"),
+                ("jobs", job, "defaults", "run", "shell"),
+                ("jobs", job, "defaults", "run", "working-directory"),
+                ("jobs", job, "steps", step_idx, "shell"),
+                ("jobs", job, "steps", step_idx, "working-directory"),
+            ) or path[:3] == ("jobs", job, "container"):
+                return False
+        if ev.kind is EventKind.LEAF_SCALAR and path == ("jobs", job, "runs-on"):
+            runners.append(ev.value)
+    return len(runners) == 1 and runners[0] in _SUPPORTED_UBUNTU_RUNNERS
+
+
+def _definite_same_step_overwrite(
+    fw: _FileWrite,
+    supported_context: bool,
+    step: _Step,
+    run_lines: list[_RunLine],
+    sink_line: int,
+    sink_text: str,
+) -> bool:
+    """Prove a narrow straight-line overwrite before a later consumer.
+
+    GitHub's default Ubuntu shell runs with ``-e``: if a standalone echo
+    redirect fails, a later command in the same script does not run.  This
+    proof deliberately excludes custom shells, changed directories, shell
+    control flow, and uncertain path aliases.  It must never be used to
+    dismiss a path in another step or job.
+    """
+    if fw.redirect != ">" or fw.idx != step.idx:
+        return False
+    if not _LITERAL_FILE_PATH_RE.fullmatch(fw.path) or ".." in fw.path.split("/"):
+        return False
+    # A source not recognized by the taint rules is still unknown, not
+    # clean.  Only a shell-independent literal can replace prior origins.
+    # In particular, $(cat path) is evaluated before echo writes and can
+    # copy the previous file contents into its replacement.
+    if not _INDEPENDENT_ECHO_LITERAL_RE.fullmatch(fw.value):
+        return False
+    if not supported_context:
+        return False
+    if not re.fullmatch(
+        r"\s*(?:source|bash|sh|zsh|\.)\s+" + re.escape(fw.path) + r"\s*", sink_text
+    ):
+        return False
+    commands_before_sink = [rl.text.strip() for rl in run_lines if rl.line < sink_line]
+    if not commands_before_sink:
+        return False
+    for command in commands_before_sink:
+        if not command or command.startswith("#"):
+            continue
+        if (
+            not _ECHO_TO_FILE_RE.fullmatch(command)
+            or any(c in command for c in ";|&`\\")
+            or "$(" in command
+            or "${{" in command
+        ):
+            return False
+    return True
+
+
 def _analyze_uncached(content: str, lines: list[str]) -> list[TaintPath]:
     """Compatibility projection without using or populating the shared cache."""
     return _build_analysis(content, lines).paths
@@ -1803,8 +1890,21 @@ def _build_analysis(content: str, lines: list[str]) -> _Analysis:
     else:
         db, jobs = _build_facts(lines)
     out: list[TaintPath] = []
+    context_events: tuple | None = None
     for job in jobs:
         job_key = job.job_id if job.job_id is not None else f"<seg@{job.seg_start}>"
+        file_writes: dict[str, list[_FileWrite]] = {}
+        for fw in db.all(_R_FILE_WRITE):
+            if fw.job == job_key:
+                file_writes.setdefault(fw.path, []).append(fw)
+        for writes in file_writes.values():
+            writes.sort(key=lambda fw: (fw.idx, fw.line, fw.seq))
+        tainted_writes: dict[tuple[str, int, int, int], list[_TaintedFile]] = {}
+        for tf in db.all(_R_TAINTED_FILE):
+            if tf.job == job_key:
+                tainted_writes.setdefault(
+                    (tf.path, tf.writer_idx, tf.writer_line, tf.seq), []
+                ).append(tf)
         for step in job.steps:
             run_lines = [
                 rl for rl in db.all(_R_RUN_LINE) if rl.job == job_key and rl.idx == step.idx
@@ -1881,21 +1981,51 @@ def _build_analysis(content: str, lines: list[str]) -> _Analysis:
                                 xinfo, ref.group(1), ref.group(2), rl.line, snippet
                             )
                         )
-                # File-execution sinks: ``source`` / ``.`` / ``bash`` /
-                # ``sh`` of a path that an earlier line wrote attacker
-                # bytes into.  Files persist for the whole job, so the
-                # write only has to come before the exec in program
-                # order.
+                # File-execution sinks: evaluate the possible origins at
+                # this point, rather than selecting one path-wide taint
+                # witness.  Only a proved same-step, straight-line
+                # overwrite can remove an earlier possible origin.
                 for em in _FILE_EXEC_RE.finditer(line):
-                    tf = db.get(_R_TAINTED_FILE, (job_key, em.group("file")))
-                    if tf is not None and (step.idx, rl.line) > (
-                        tf.writer_idx,
-                        tf.writer_line,
-                    ):
-                        finfo = _TaintInfo(tf.source_expr, tf.source_line, tf.hops)
-                        out.append(
-                            _make_path(finfo, tf.path, rl.line, snippet, sink_kind="file_exec")
-                        )
+                    path = em.group("file")
+                    possible: list[_TaintedFile] = []
+                    for fw in file_writes.get(path, ()):
+                        if (fw.idx, fw.line) >= (step.idx, rl.line):
+                            break
+                        if possible and fw.redirect == ">":
+                            if context_events is None:
+                                context_events = tuple(
+                                    walk_workflow(
+                                        "workflow.yml", content=content, include_keys=True
+                                    )
+                                )
+                            supported_context = _supported_file_exec_context(
+                                context_events, job_key, step.idx, content
+                            )
+                            if all(origin.writer_idx == step.idx for origin in possible) and (
+                                _definite_same_step_overwrite(
+                                    fw, supported_context, step, run_lines, rl.line, line
+                                )
+                            ):
+                                possible.clear()
+                        possible.extend(tainted_writes.get((fw.path, fw.idx, fw.line, fw.seq), ()))
+                    if possible:
+                        # Preserve source alternatives through the rule's
+                        # source-class filter. A display witness must not
+                        # hide another surviving attacker origin.
+                        witnesses: dict[tuple[str, int], _TaintedFile] = {}
+                        for origin in possible:
+                            key = (origin.source_expr, origin.source_line)
+                            prior = witnesses.get(key)
+                            if prior is None or origin.seq > prior.seq:
+                                witnesses[key] = origin
+                        for tf in sorted(
+                            witnesses.values(),
+                            key=lambda item: (item.source_expr, item.source_line),
+                        ):
+                            finfo = _TaintInfo(tf.source_expr, tf.source_line, tf.hops)
+                            out.append(
+                                _make_path(finfo, path, rl.line, snippet, sink_kind="file_exec")
+                            )
 
         # Non-run: sink sites (runs-on:, container.image:,
         # services.*.image:, if:).  A cross-job ``${{ needs.X.outputs.Y }}``
@@ -1937,8 +2067,11 @@ def _build_analysis(content: str, lines: list[str]) -> _Analysis:
             if site.kind == "if":
                 continue
             for ref in _ENV_REF_RE.finditer(site.value):
-                te = db.get(_R_TAINTED_ENV, (("job", job_key), ref.group(1)))
-                if te is not None:
+                for te in (
+                    item
+                    for item in db.all(_R_TAINTED_ENV)
+                    if item.scope == ("job", job_key) and item.name == ref.group(1)
+                ):
                     info = _TaintInfo(te.source_expr, te.source_line, te.hops)
                     out.append(
                         _make_path(
@@ -2028,6 +2161,35 @@ def _collect_all_env_assignments(
     return out
 
 
+def _expression_source_reachability(body: str) -> tuple[list[str] | None, set[str]]:
+    """Return supported reachable paths and provably dead source names.
+
+    A parse failure leaves lexical matches available, matching the
+    existing conservative expression profile.
+    """
+    if not structural_expr_enabled() or ("&&" not in body and "||" not in body):
+        return None, set()
+    try:
+        reachable = reachable_context_paths(body)
+        inventory = context_paths(body)
+        literals = [token.value for token in tokenize(body) if token.kind == "STRING"]
+        matchers = (_TAINTED_IN_EXPR_RE, _INPUT_REF_IN_EXPR_RE)
+        blocked = {
+            match.group(0).lower()
+            for path in inventory
+            for matcher in matchers
+            for match in matcher.finditer(path)
+        } - {
+            match.group(0).lower()
+            for path in (*reachable, *literals)
+            for matcher in matchers
+            for match in matcher.finditer(path)
+        }
+        return reachable, blocked
+    except ExprSyntaxError:
+        return None, set()
+
+
 def _extract_tainted_source(value: str, include_inputs: bool = False) -> str | None:
     """Return the dotted context name if any ``${{ ... }}`` substitution
     in ``value`` references an attacker-controlled context; otherwise
@@ -2063,30 +2225,7 @@ def _extract_tainted_source(value: str, include_inputs: bool = False) -> str | N
     structural = structural_expr_enabled()
     for expr in _GHA_EXPR_RE.finditer(value):
         body = expr.group(1)
-        reachable: list[str] | None = None
-        blocked: set[str] = set()
-        if structural and ("&&" in body or "||" in body):
-            try:
-                reachable = reachable_context_paths(body)
-                inventory = context_paths(body)
-                # Preserve the legacy lexical treatment of literal mentions.
-                # A literal and a dead real reference can spell the same path;
-                # path-set filtering alone must not erase that independent match.
-                literals = [token.value for token in tokenize(body) if token.kind == "STRING"]
-                matchers = (_TAINTED_IN_EXPR_RE, _INPUT_REF_IN_EXPR_RE)
-                blocked = {
-                    match.group(0).lower()
-                    for path in inventory
-                    for matcher in matchers
-                    for match in matcher.finditer(path)
-                } - {
-                    match.group(0).lower()
-                    for path in (*reachable, *literals)
-                    for matcher in matchers
-                    for match in matcher.finditer(path)
-                }
-            except ExprSyntaxError:
-                pass  # Incomplete structure cannot justify removing lexical evidence.
+        reachable, blocked = _expression_source_reachability(body)
         for m in _TAINTED_IN_EXPR_RE.finditer(body):
             if m.group(0).lower() not in blocked:
                 return m.group(0)
@@ -2114,6 +2253,62 @@ def _extract_tainted_source(value: str, include_inputs: bool = False) -> str | N
             except ExprSyntaxError:
                 pass
     return None
+
+
+def _extract_tainted_sources(value: str, include_inputs: bool) -> tuple[str, ...]:
+    """Retain all supported direct origins of an environment value.
+
+    Keep the legacy first witness first for consumers that still select
+    one proof. Logical dead-branch pruning uses the same contract as the
+    existing single-source extractor.
+    """
+    sources: dict[str, str] = {}
+    first = _extract_tainted_source(value, include_inputs)
+    if first is not None:
+        sources[first] = first
+    expressions = [expr.group(1) for expr in _GHA_EXPR_RE.finditer(value)]
+    reachable_by_body = [_expression_source_reachability(body) for body in expressions]
+    for body, (_, blocked) in zip(expressions, reachable_by_body, strict=True):
+        for match in _TAINTED_IN_EXPR_RE.finditer(body):
+            if match.group(0).lower() not in blocked:
+                sources.setdefault(match.group(0), match.group(0))
+        if include_inputs:
+            for match in _INPUT_REF_IN_EXPR_RE.finditer(body):
+                if match.group(0).lower() not in blocked:
+                    sources.setdefault(match.group(0), match.group(0))
+    if structural_expr_enabled():
+        for body, (reachable, _) in zip(expressions, reachable_by_body, strict=True):
+            try:
+                for path in reachable if reachable is not None else context_paths(body):
+                    matches = list(_TAINTED_IN_EXPR_RE.finditer(path))
+                    if include_inputs:
+                        matches.extend(_INPUT_REF_IN_EXPR_RE.finditer(path))
+                    for match in matches:
+                        source = match.group(0)
+                        if not any(source.casefold() == raw.casefold() for raw in sources):
+                            sources[source] = source
+            except ExprSyntaxError:
+                pass
+    return tuple(sources.values())
+
+
+def _extract_tainted_file_sources(value: str, include_inputs: bool) -> tuple[str, ...]:
+    """Retain every supported direct source in a file write, not one witness."""
+    sources: set[str] = set()
+    for expr in _GHA_EXPR_RE.finditer(value):
+        body = expr.group(1)
+        sources.update(m.group(0) for m in _TAINTED_IN_EXPR_RE.finditer(body))
+        if include_inputs:
+            sources.update(m.group(0) for m in _INPUT_REF_IN_EXPR_RE.finditer(body))
+        if structural_expr_enabled():
+            try:
+                for path in context_paths(body):
+                    sources.update(m.group(0) for m in _TAINTED_IN_EXPR_RE.finditer(path))
+                    if include_inputs:
+                        sources.update(m.group(0) for m in _INPUT_REF_IN_EXPR_RE.finditer(path))
+            except ExprSyntaxError:
+                pass
+    return tuple(sorted(sources))
 
 
 def _extract_env_ref(value: str) -> str | None:
@@ -2788,7 +2983,7 @@ _ECHO_TO_FILE_RE = re.compile(
       | (?P<bare>[^\s"'>|&;]+)
     )
     \s*
-    >>?\s*
+    (?P<redirect>>>?)\s*
     [\"']?(?P<file>[^\s"'>|&;]+)[\"']?
     """,
     re.VERBOSE,

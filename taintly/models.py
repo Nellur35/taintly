@@ -1370,10 +1370,9 @@ class ContextPattern:
         Distinct from :meth:`check`'s output: ``check`` only returns
         lines that pass the requires/requires_absent gates and the
         per-line excludes.  ``count_anchor_matches`` ignores those —
-        it answers the question "did this rule have a candidate
-        location to evaluate?" — used by the scorer to distinguish
-        "Strong" (rule had candidates, none became findings) from
-        "Not applicable" (rule had no surface to evaluate).
+        it records whether this rule's anchor matched a line. This
+        legacy telemetry cannot establish family-wide applicability or
+        semantic completeness.
         """
         # Per-line anchor matching mirrors ``_check_file_scoped`` /
         # ``_check_job_scoped`` so the counting agrees with the
@@ -1788,6 +1787,27 @@ class CheckoutBuildWitness:
     interpreter: str | None = None
 
 
+@dataclass(frozen=True)
+class EvidenceStep:
+    """One source-bound point in an ordered, configured evidence path."""
+
+    label: str
+    file: str
+    line: int
+    relation_to_next: str = ""
+
+
+@dataclass(frozen=True)
+class EvidenceTrace:
+    """Scan-local path for explanation, never a new security conclusion."""
+
+    basis: str
+    context: str
+    steps: tuple[EvidenceStep, ...]
+    unknowns: tuple[str, ...]
+    runtime_status: str
+
+
 @dataclass
 class Finding:
     """A single finding from scanning a file or platform setting."""
@@ -1868,6 +1888,8 @@ class Finding:
     """Internal static path from this scan; never reconstructed from prose/tags."""
     _shell_use: ShellUseEvidence | None = field(default=None, repr=False, compare=False)
     """Internal source-bound shell-role witness, excluded from serialized reports."""
+    _evidence_trace: EvidenceTrace | None = field(default=None, repr=False, compare=False)
+    """Rule-produced ordered evidence for text only; absent from JSON/SARIF conclusions."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1919,19 +1941,11 @@ class AuditReport:
     rules_loaded: int = 0
     findings: list[Finding] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict[str, Any])
-    # Families where at least one ``ContextPattern`` rule's anchor
-    # found a candidate location during the scan (regardless of
-    # whether the candidate became a finding).  Populated by the
-    # engine; consumed by the scorer to label families with zero
-    # findings as "Strong" (surface evaluated, nothing wrong) versus
-    # "Not applicable" (no surface to evaluate).  Empty by default
-    # so reports built outside the engine retain prior behaviour.
+    # Legacy candidate telemetry for ContextPattern rules only. An anchor
+    # is not proof that a security question was completely analyzed.
     families_with_surface: set[str] = field(default_factory=set)
-    # Families that have at least one ContextPattern-pattern rule
-    # registered for this platform.  Pairs with
-    # ``families_with_surface``: a family that's covered but had no
-    # anchor match maps to "Not applicable"; a family with no
-    # ContextPattern coverage keeps the existing "Strong" default.
+    # Legacy subset of families with a ContextPattern rule. It cannot
+    # establish whole-family applicability or a negative verdict.
     families_with_ctx_coverage: set[str] = field(default_factory=set)
     # Rule IDs excluded from the scan via ``.taintly.yml``'s
     # ``exclude-rules:`` list.  Surfaced in the summary so reviewers
@@ -1994,3 +2008,11 @@ class AuditReport:
         about findings.
         """
         return [f for f in self.findings if f.rule_id == "ENGINE-ERR"]
+
+    def semantic_coverage_status(self) -> str:
+        """Report only what scan diagnostics establish about coverage.
+
+        No ENGINE-ERR proves only that no engine error was reported. It does
+        not prove every rule reached every relevant semantic path.
+        """
+        return "incomplete" if self.engine_errors() else "not_established"

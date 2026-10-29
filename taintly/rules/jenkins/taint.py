@@ -221,17 +221,19 @@ class _JenkinsfileMultiHopPattern:
             flows = resolve_multihop_flows(content, _TAINT_JK_003_SOURCE_RE)
         except Exception:  # nosec B110 - a scan must never crash on an unmodelled Groovy shape
             return []
+        # Stable display witness; the resolver retains semantic alternatives.
+        flows.sort(key=lambda f: (f.sink_line, f.sink_body, len(f.hops), f.hops, f.var))
         for flow in flows:
             if not (0 < flow.sink_line <= len(lines)):
                 continue
             call_line = lines[flow.sink_line - 1].strip()
             chain = " -> ".join(flow.hops)
             snippet = f"{call_line}    [taint: {chain}]"
-            key = (flow.sink_line, snippet)
+            key = (flow.sink_line, flow.sink_body)
             if key in seen:
                 continue
             seen.add(key)
-            results.append(key)
+            results.append((flow.sink_line, snippet))
         return results
 
 
