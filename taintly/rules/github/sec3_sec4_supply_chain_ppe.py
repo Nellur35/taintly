@@ -1149,7 +1149,7 @@ def _is_unpinned_uses_value(value: str, _value_kind: str, _path: tuple[object, .
     org = head.split("/", 1)[0].lower() if "/" in head else ""
     if org in _FIRST_PARTY_ACTION_ORGS:
         return False
-    # Branch refs are SEC3-GH-002's CRITICAL scope; don't double-
+    # Branch refs are SEC3-GH-002's scope; don't double-
     # report at HIGH here.
     ref_token = ref.split()[0].split("#")[0]
     if ref_token in _BRANCH_REF_NAMES:
@@ -1534,14 +1534,15 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="SEC3-GH-002",
-        title="Action pinned to branch reference",
-        severity=Severity.CRITICAL,
+        title="Action uses mutable branch reference",
+        severity=Severity.HIGH,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-3",
         description=(
             "Action referenced by branch name (e.g., @main, @master). Branch references "
             "change with every commit — any push to the branch changes what your workflow runs. "
-            "This is the most dangerous form of unpinned reference."
+            "This permits the action implementation to change without a workflow edit. "
+            "The effective impact depends on the permissions, secrets, and trust of the consuming job."
         ),
         pattern=ActionsLockAwarePattern(
             RegexPattern(
@@ -1566,7 +1567,8 @@ RULES: list[Rule] = [
             "Branch references change with every commit, meaning any contributor to the action's "
             "repository can silently modify what your workflow runs by pushing a single commit. "
             "An attacker who gains temporary write access — via a compromised maintainer account — "
-            "can substitute malicious code that runs with your workflow's full permissions and secrets."
+            "can substitute malicious code that runs with the permissions and secrets "
+            "available to the consuming job."
         ),
         confidence="high",
     ),

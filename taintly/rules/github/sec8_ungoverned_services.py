@@ -201,7 +201,7 @@ RULES: list[Rule] = [
         ),
         reference="https://docs.github.com/en/actions/sharing-automations/reusing-workflows",
         test_positive=[
-            # Branch pins are handled by SEC3-GH-002 (CRITICAL);
+            # Branch refs are handled by SEC3-GH-002 (HIGH);
             # SEC8-GH-003 owns the tag-pin case (HIGH).
             "      uses: org/shared-workflows/.github/workflows/deploy.yml@v2",
             "      uses: my-org/pipelines/.github/workflows/release.yml@v1.2.3",

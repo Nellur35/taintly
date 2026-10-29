@@ -578,9 +578,9 @@ def test_sec3_gh_002_and_sec8_gh_003_no_double_fire_on_branch_pin(
     gh_rules, tmp_path
 ):
     """Dedup case: ``uses: org/repo/.github/workflows/x.yml@main``
-    used to fire BOTH SEC3-GH-002 (CRITICAL) AND SEC8-GH-003 (HIGH)
+    used to fire BOTH SEC3-GH-002 (HIGH) AND SEC8-GH-003 (HIGH)
     on the exact same line. SEC8-GH-003 now excludes branch refs
-    (SEC3-GH-002 owns those CRITICAL); SEC8-GH-003 keeps the
+    (SEC3-GH-002 owns those branch findings); SEC8-GH-003 keeps the
     tag-pin case."""
     p = tmp_path / "branch_pinned_reusable.yml"
     p.write_text(

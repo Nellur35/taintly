@@ -491,9 +491,9 @@ def _sec1_publish_without_gate(
 ) -> bool:
     """Predicate for SEC1-GH-002 — see the rule description for the
     four-part threat model.  Anchored on a step's ``run:`` or ``uses:``
-    leaf; fires when that step is a publish sink in a workflow that
+    leaf; fires when that step is a release or publish sink in a workflow that
     broadly grants id-token: write across multiple jobs and leaves the
-    publishing job behind no environment gate."""
+    job behind no declared environment."""
     loc = ctx.step_index(path)
     if loc is None:
         return False
@@ -2956,28 +2956,32 @@ RULES: list[Rule] = [
         incidents=["Ultralytics (Dec 2024)"],
     ),
     # =========================================================================
-    # SEC1-GH-002: trusted-publishing job has no environment approval gate.
+    # SEC1-GH-002: release/publish job has no declared environment.
     # Capability-based companion to SEC1-GH-001 (which keys on job NAME).
     # =========================================================================
     Rule(
         id="SEC1-GH-002",
-        title="Trusted-publishing job has no environment approval gate",
+        title="Release or publish job has no declared environment",
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-1",
         review_needed=True,
         confidence="medium",
         description=(
-            "A job runs a real publish sink — a registry publish command "
+            "A job runs a release or publish command — a registry publish command "
             "(``npm``/``uv``/``cargo publish``, ``twine upload``, "
             "``docker push``, ``gh release``) or a trusted-publishing "
             "action such as ``pypa/gh-action-pypi-publish`` — inside a "
             "workflow that grants ``id-token: write`` at the TOP LEVEL, "
-            "so every job in the file (not just the publisher) can mint "
-            "an OIDC token, and the publishing job declares no "
-            "``environment:``.  Without an environment there is no "
-            "approval gate: any trigger that reaches the job ships the "
-            "artifact with no human in the loop.\n"
+            "which can grant OIDC minting to multiple jobs unless they override "
+            "that permission, and this job declares no ``environment:``. "
+            "The source does not establish whether another approval process "
+            "exists or whether a public release is intended. "
+            "For example, ``gh release create --draft`` leaves a draft "
+            "unpublished, while ``gh release upload`` changes assets on an "
+            "existing release without itself publishing a draft. "
+            "This finding asks for review of the job's authority and release "
+            "controls; it does not prove publication.\n"
             "\n"
             "This is the capability-based companion to SEC1-GH-001, "
             "which keys on the job NAME.  It catches publish jobs named "
@@ -2991,19 +2995,18 @@ RULES: list[Rule] = [
             predicate=_sec1_publish_without_gate,
         ),
         remediation=(
-            "Add an ``environment:`` with protection rules to the "
-            "publishing job so a reviewer must approve before it runs:\n"
+            "If this job changes a protected release, scope ``id-token: write`` "
+            "to the job that needs it. If human approval is required, add an "
+            "``environment:`` and configure required reviewers for it:\n"
             "    jobs:\n"
             "      publish:\n"
             "        environment: release\n"
             "        steps: ...\n"
-            "Then configure required reviewers under Settings > "
-            "Environments.  For PyPI/registry trusted publishing this is "
-            "the documented hardening — scope the OIDC mint to a gated "
-            "environment so a compromised step elsewhere in the workflow "
-            "cannot publish.  If the broad grant is unnecessary, move "
-            "``id-token: write`` out of the top-level ``permissions:`` "
-            "and onto only the publishing job."
+            "For PyPI/registry trusted publishing, verify the environment "
+            "protection settings "
+            "and whether this command creates a draft, changes release assets, "
+            "or publishes. An environment declaration alone does not prove "
+            "that required reviewers are configured."
         ),
         reference=(
             "https://docs.github.com/en/actions/deployment/"
