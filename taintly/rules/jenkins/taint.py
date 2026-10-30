@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import re
 
-from taintly.models import ContextPattern, Platform, Rule, Severity
+from taintly.models import ContextPattern, IncompletePatternMatches, Platform, Rule, Severity
 
 # TAINT-JK-001 reads shell-sink bodies structurally via the island reader
 # (same consumer SEC9/SEC4-JK use). sec_jenkins does not import this module, so
@@ -204,23 +204,27 @@ class _JenkinsfileMultiHopPattern:
     with TAINT-JK-001 on the same body — TAINT-JK-001's single-hop behaviour
     is untouched.
 
-    Failure-soft: the resolver consumes the zero-dependency ``groovy_lex``
-    tokenizer (no optional extra), so this works on every install.  Any
-    walker exception is swallowed to ``[]`` (a scan must never crash on an
-    unexpected Groovy shape), matching ``_JenkinsfileShellLeafPattern``.
+    The resolver consumes the zero-dependency ``groovy_lex`` tokenizer.
+    Resolver or import failure marks this question incomplete. Other rules
+    continue scanning and their established findings remain available.
     """
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         try:
             from taintly.parsers.jenkinsfile.multihop import resolve_multihop_flows
         except ImportError:  # pragma: no cover - module ships in-tree
-            return []
+            return IncompletePatternMatches(
+                [], reason="Jenkins multi-hop resolver dependency is unavailable"
+            )
         results: list[tuple[int, str]] = []
         seen: set[tuple[int, str]] = set()
         try:
             flows = resolve_multihop_flows(content, _TAINT_JK_003_SOURCE_RE)
         except Exception:  # nosec B110 - a scan must never crash on an unmodelled Groovy shape
-            return []
+            return IncompletePatternMatches(
+                [],
+                reason="Jenkins multi-hop resolver failed; this source-to-sink question is incomplete",
+            )
         # Stable display witness; the resolver retains semantic alternatives.
         flows.sort(key=lambda f: (f.sink_line, f.sink_body, len(f.hops), f.hops, f.var))
         for flow in flows:
