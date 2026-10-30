@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 
 def mutate_whitespace_pad(sample: str) -> list[str]:
-    """Add/remove whitespace around colons and equals."""
+    """Probe spacing without proved loss of an admitted structural premise."""
     mutations = []
     mutations.append(sample.replace(": ", ":  "))
     mutations.append(sample.replace(": ", ":"))
@@ -23,6 +23,7 @@ def mutate_whitespace_pad(sample: str) -> list[str]:
         if m != sample
         and not _invalidates_actions_guard(sample, m, allow_guard_loss=True)
         and not _invalidates_supported_uses_mapping(sample, m)
+        and not _invalidates_supported_condition_mapping(sample, m)
     ]
 
 
@@ -242,6 +243,55 @@ def _invalidates_supported_uses_mapping(original: str, mutated: str) -> bool:
     if after is None:
         return False
     return bool(before.keys() - after.keys())
+
+
+def _supported_condition_mappings(source: str) -> set[tuple[object, ...]] | None:
+    """Literal condition keys in complete, unambiguous supported source shapes.
+
+    This is a mutation premise, not condition evaluation or a safety verdict.
+    Admit GitLab rules[*].if and standalone sequence-condition fragments. Other
+    providers' guards keep their existing expression-aware validity profile.
+    """
+    from taintly.parsers.structural import EventKind, walk_workflow
+
+    events = tuple(
+        walk_workflow(
+            ".gitlab-ci.yml", content=source, include_keys=True, include_merge_origins=True
+        )
+    )
+    keys: set[tuple[object, ...]] = set()
+    for event in events:
+        if event.kind in {EventKind.ERROR, EventKind.CUTOFF} or event.merge_origins:
+            return None
+        if event.kind is EventKind.MAP_KEY:
+            if event.path in keys:
+                return None
+            keys.add(event.path)
+    result: set[tuple[object, ...]] = set()
+    for event in events:
+        p = event.path
+        supported = (len(p) == 2 and isinstance(p[0], int) and p[1] == "if") or (
+            len(p) in {3, 4} and p[-3] == "rules" and isinstance(p[-2], int) and p[-1] == "if"
+        )
+        if (
+            supported
+            and event.kind is EventKind.LEAF_SCALAR
+            and p in keys
+            and (event.value or "").strip()
+            and "\n" not in (event.value or "")
+            and event.block_lines is None
+        ):
+            result.add(p)
+    return result
+
+
+def _invalidates_supported_condition_mapping(original: str, mutated: str) -> bool:
+    """Reject only a condition key's proved disappearance, not parser failure."""
+    before = _supported_condition_mappings(original)
+    if not before:
+        return False
+    after = _supported_condition_mappings(mutated)
+    return after is not None and bool(before - after)
 
 
 def mutate_comment_inject(sample: str) -> list[str]:
