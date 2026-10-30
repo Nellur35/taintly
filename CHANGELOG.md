@@ -10,6 +10,11 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 
 ## [Unreleased]
 
+### Fixed
+- Report Jenkins multi-hop analyzer failures as incomplete analysis instead
+  of an ordinary empty result. Preserve independent findings and keep the
+  failure visible when findings are filtered by severity.
+
 ### Performance and evidence
 - Reuse immutable Jenkins structural events in a bounded eight-entry cache
   keyed by exact source and recovery options; retain diagnostic locations and
