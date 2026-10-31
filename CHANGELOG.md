@@ -11,6 +11,22 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 ## [Unreleased]
 
 ### Fixed
+
+- GitLab variable checks apply their existing YAML-looking exclusions only to
+  source-owned fields. Spaced/quoted condition keys and literal legacy variable
+  conditions retain their provider context; script text resembling YAML remains
+  reviewable. Unknown alias contents do not change a different literal field's
+  role. This does not establish runtime execution or general downstream safety.
+- GitLab quote fixes require a unique plain command span and refuse duplicate,
+  inherited, mixed or multiline editing contexts without the required evidence.
+  Dynamic command identity, dispatch and known interpreter inputs are not
+  presented as repaired by adding quotes; ordinary literal-tool argument
+  grouping remains available without a downstream safety guarantee.
+- Whitespace mutation probes retain supported condition mappings. Variants
+  proved to lose those keys are excluded from formatting-equivalence checks;
+  existing unrelated and uncertain probes remain available.
+
+### Fixed
 - Report Jenkins multi-hop analyzer failures as incomplete analysis instead
   of an ordinary empty result. Preserve independent findings and keep the
   failure visible when findings are filtered by severity.
