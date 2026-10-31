@@ -14,6 +14,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from .parsers.structural import Event
     from .shell_use import ShellUseEvidence
 
 # Structural ``${{ }}`` expression parser — used to OPTIONALLY normalise an
@@ -447,10 +448,14 @@ class RegexPattern:
     gitlab_if_block_aware: bool = False
     github_with_env_block_aware: bool = False
     groovy_comment_aware: bool = False
+    # Source ownership gates this rule's original exclusions; it does not prove safety.
+    # Eligibility does not establish coverage or a receiving program's safety.
+    gitlab_mapping_exclude: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         self._compiled = re.compile(self.match)
         self._excludes = [re.compile(e) for e in self.exclude]
+        self._mapping_excludes = [re.compile(e) for e in self.gitlab_mapping_exclude]
 
     # CONTRACT: returns (line_num, snippet) where snippet is
     # ``lines[line_num-1].strip()`` — the line whose contents matched
@@ -458,8 +463,12 @@ class RegexPattern:
     # form of this contract.
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         skip = _quoted_heredoc_body_lines(lines) if self.heredoc_aware else set()
+        mapping_lines = (
+            _gitlab_mapping_value_lines(content, lines) if self._mapping_excludes else set()
+        )
         if self.gitlab_if_block_aware:
-            skip = skip | _gitlab_rules_if_body_lines(lines)
+            skip |= _gitlab_rules_if_body_lines(lines, content=content, include_openers=True)
+            skip |= _gitlab_legacy_condition_lines(content, lines)
         if self.github_with_env_block_aware:
             skip = skip | _github_with_env_body_lines(lines)
         scan_lines = (
@@ -468,6 +477,8 @@ class RegexPattern:
         results = []
         for i, line in enumerate(scan_lines):
             if i in skip:
+                continue
+            if i in mapping_lines and any(_safe_search(ex, line) for ex in self._mapping_excludes):
                 continue
             if any(_safe_search(ex, line) for ex in self._excludes):
                 continue
@@ -601,12 +612,199 @@ def _quoted_heredoc_body_lines(lines: list[str]) -> set[int]:
 # the colon so we can detect block-scalar indicators (`|`, `>`, with
 # optional `+`/`-` chomping) vs an inline expression vs an empty
 # value.
-_GITLAB_IF_KEY = re.compile(r"^(?P<key_prefix>\s*(?:-\s+)?)if:(?P<value>.*)$")
+_GITLAB_IF_KEY = re.compile(
+    r"^(?P<key_prefix>[ \t]*(?:-[ \t]+)?)(?:if|'if'|\"if\")[ \t]*:(?P<value>.*)$"
+)
 
 
-def _gitlab_rules_if_body_lines(lines: list[str]) -> set[int]:
+def _gitlab_local_alias_errors(
+    events: tuple[Event, ...], lines: list[str]
+) -> dict[Event, tuple[object, ...] | None]:
+    """Recognized local alias errors and independently source-bound slots.
+
+    A bare alias does not damage the walker's stack. Mapping-value errors in
+    the old reader omit their key, however: recover it only from one literal
+    key on the same row and the exact intervening source. Unknown slots retain
+    their reported enclosing scope as an uncertainty bound, not an exact owner.
+    No alias value, expansion, branch choice or execution is inferred.
+    """
+    from .parsers.structural import EventKind
+
+    keys_by_line: dict[int, list[Event]] = {}
+    for event in events:
+        if event.kind is EventKind.MAP_KEY:
+            keys_by_line.setdefault(event.line, []).append(event)
+    result: dict[Event, tuple[object, ...] | None] = {}
+    for e in events:
+        if (
+            e.kind is not EventKind.ERROR
+            or not (e.message or "").startswith(("bare alias not expanded: ", "unresolved alias: "))
+            or not 0 < e.line <= len(lines)
+            or e.column < 1
+            or not re.match(r"\*[A-Za-z0-9_-]+", lines[e.line - 1][e.column - 1 :])
+        ):
+            continue
+        keys = [
+            k
+            for k in keys_by_line.get(e.line, ())
+            if k.column < e.column
+            and k.path[:-1] == e.path
+            and isinstance(k.value, str)
+            and re.fullmatch(
+                r"(?:"
+                + re.escape(k.value)
+                + r"|'"
+                + re.escape(k.value)
+                + r"'|\""
+                + re.escape(k.value)
+                + r"\")[ \t]*:[ \t]*",
+                lines[e.line - 1][k.column - 1 : e.column - 1],
+            )
+        ]
+        if len(keys) == 1:
+            result[e] = keys[0].path
+        elif (
+            e.path
+            and isinstance(e.path[-1], int)
+            and re.fullmatch(r"[ \t]*-[ \t]+", lines[e.line - 1][: e.column - 1])
+        ):
+            result[e] = e.path
+        else:
+            result[e] = None
+    return result
+
+
+def _gitlab_alias_blocks_field(
+    aliases: dict[Event, tuple[object, ...] | None], path: tuple[object, ...], line: int
+) -> bool:
+    for error, slot in aliases.items():
+        bound = error.path if slot is None else slot
+        if error.line <= line and path[: len(bound)] == bound:
+            return True
+    return False
+
+
+def _gitlab_mapping_value_lines(content: str, lines: list[str]) -> set[int]:
+    """Literal source-row ownership eligible for configured mapping exclusions.
+
+    A colon inside a command scalar is not a YAML field. This helper does not
+    exclude any value itself or assign a general consumer role: the rule's
+    existing lexical policy must independently match the owned physical row.
+    Unknown roles and completed coverage cannot be inferred from eligibility.
+    """
+    from .parsers.structural import EventKind, walk_workflow
+
+    events = tuple(
+        walk_workflow(
+            ".gitlab-ci.yml",
+            content=content,
+            recover=True,
+            include_keys=True,
+            include_merge_origins=True,
+        )
+    )
+    aliases = _gitlab_local_alias_errors(events, lines)
+    stop = min(
+        (
+            e.line
+            for e in events
+            if e.kind in {EventKind.ERROR, EventKind.CUTOFF} and e not in aliases
+        ),
+        default=len(lines) + 1,
+    )
+    keys: dict[tuple[object, ...], list[int]] = {}
+    owners: dict[int, set[tuple[object, ...]]] = {}
+    for e in events:
+        if e.kind is EventKind.MAP_KEY:
+            keys.setdefault(e.path, []).append(e.line)
+        if e.kind in {EventKind.MAP_KEY, EventKind.LEAF_SCALAR}:
+            owners.setdefault(e.line, set()).add(e.path)
+    return {
+        e.line - 1
+        for e in events
+        if e.kind is EventKind.LEAF_SCALAR
+        and 0 < e.line < stop
+        and e.path
+        and isinstance(e.path[-1], str)
+        and not any(p in {"script", "before_script", "after_script"} for p in e.path)
+        and not e.merge_origins
+        and e.block_lines is None
+        and "\n" not in (e.value or "")
+        and not _gitlab_alias_blocks_field(aliases, e.path, e.line)
+        and keys.get(e.path) == [e.line]
+        and owners.get(e.line) == {e.path}
+        and all(
+            len(keys.get(e.path[:d], [])) == 1
+            for d in range(1, len(e.path) + 1)
+            if not isinstance(e.path[d - 1], int)
+        )
+    }
+
+
+def _gitlab_legacy_condition_lines(content: str, lines: list[str]) -> set[int]:
+    """Literal, sole-owned legacy job variable expressions, not shell input.
+
+    An unrelated bare-alias error preserves the walker's structural stack;
+    alias-dependent slots, other errors and cutoffs remain exclusion bounds.
+    Mixed physical rows and unsupported scalar spans retain ordinary review.
+    """
+    from .parsers.structural import EventKind, walk_workflow
+
+    events = tuple(
+        walk_workflow(
+            ".gitlab-ci.yml",
+            content=content,
+            recover=True,
+            include_keys=True,
+            include_merge_origins=True,
+        )
+    )
+    aliases = _gitlab_local_alias_errors(events, lines)
+    stop = min(
+        (
+            e.line
+            for e in events
+            if e.kind in {EventKind.ERROR, EventKind.CUTOFF} and e not in aliases
+        ),
+        default=len(lines) + 1,
+    )
+    owners: dict[int, set[tuple[object, ...]]] = {}
+    keys: dict[tuple[object, ...], int] = {}
+    for e in events:
+        if e.kind is EventKind.MAP_KEY:
+            keys[e.path] = keys.get(e.path, 0) + 1
+        if e.kind in {EventKind.MAP_KEY, EventKind.LEAF_SCALAR}:
+            for n in [e.line, *(n for n, _ in e.block_lines or ())]:
+                owners.setdefault(n, set()).add(e.path)
+    skip = set()
+    for e in events:
+        p = e.path
+        if (
+            e.kind is not EventKind.LEAF_SCALAR
+            or not 0 < e.line < stop
+            or len(p) != 4
+            or not isinstance(p[0], str)
+            or p[1] not in {"only", "except"}
+            or p[2] != "variables"
+            or not isinstance(p[3], int)
+            or e.merge_origins
+            or e.block_lines is not None
+            or "\n" in (e.value or "")
+            or owners.get(e.line) != {p}
+            or any(keys.get(p[:d], 0) != 1 for d in range(1, 4))
+            or _gitlab_alias_blocks_field(aliases, p, e.line)
+        ):
+            continue
+        if re.fullmatch(r"[ \t]*-[ \t]+", lines[e.line - 1][: e.column - 1]):
+            skip.add(e.line - 1)
+    return skip
+
+
+def _gitlab_rules_if_body_lines(
+    lines: list[str], *, content: str | None = None, include_openers: bool = False
+) -> set[int]:
     """Return 0-based indices of continuation lines belonging to a
-    multi-line GitLab ``rules.*.if:`` value.
+    source-owned GitLab ``rules[*].if`` value.
 
     GitLab's ``rules:if:`` is a small boolean expression DSL evaluated
     by the GitLab CI engine — NOT a shell — so its continuation lines
@@ -620,22 +818,92 @@ def _gitlab_rules_if_body_lines(lines: list[str]) -> set[int]:
     A continuation line belongs to the value when it is more deeply
     indented than the ``if:`` key line; the run stops at the first
     non-blank line indented at or below the key.  The opener line
-    itself is NOT masked — the rules' existing same-line
-    ``^\\s*-?\\s*if:`` exclude already covers it.
+    itself is included only when ``include_openers`` is set. Exact structural
+    ownership prevents script text resembling ``if:`` from masking shell lines.
+    A mixed flow line is not excluded wholesale. Other errors/cutoffs and
+    earlier alias-dependent slots bound exclusion. An unrelated literal alias
+    error does not erase positively owned conditions in another job.
 
     Comment-only and blank lines mid-block do not terminate the run
     (they're whitespace, not structural siblings) and ARE included in
     the mask so a comment inside a multi-line ``if:`` value is not
     matched on its own.
     """
+    from taintly.parsers.structural import EventKind, walk_workflow
+
+    if content is None:
+        content = "\n".join(line.rstrip("\r\n") for line in lines)
+    events = tuple(
+        walk_workflow(
+            ".gitlab-ci.yml",
+            content=content,
+            recover=True,
+            include_keys=True,
+            include_merge_origins=True,
+        )
+    )
+    aliases = _gitlab_local_alias_errors(events, lines)
+    stop = min(
+        (
+            max(0, event.line - 1)
+            for event in events
+            if event.kind in {EventKind.ERROR, EventKind.CUTOFF} and event not in aliases
+        ),
+        default=len(lines),
+    )
+
+    def is_condition(path: tuple[object, ...]) -> bool:
+        return (
+            len(path) in {3, 4}
+            and path[-3] == "rules"
+            and isinstance(path[-2], int)
+            and path[-1] == "if"
+        )
+
+    keys: dict[tuple[object, ...], int] = {}
+    for event in events:
+        if event.kind is EventKind.MAP_KEY:
+            keys[event.path] = keys.get(event.path, 0) + 1
+    owners = {
+        event.line - 1: event.column
+        for event in events
+        if event.kind is EventKind.MAP_KEY
+        and is_condition(event.path)
+        and not event.merge_origins
+        and not _gitlab_alias_blocks_field(aliases, event.path, event.line)
+        and all(
+            keys.get(event.path[:d], 0) == 1
+            for d in range(1, len(event.path) + 1)
+            if not isinstance(event.path[d - 1], int)
+        )
+    }
+    for event in events:
+        if (
+            event.kind is EventKind.LEAF_SCALAR
+            and is_condition(event.path)
+            and event.value_kind == "quoted"
+            and "\n" in (event.value or "")
+        ):
+            # Recovery may omit fields after a multiline quoted flow scalar.
+            # Its start is not proof that the closing physical line is DSL-only.
+            owners.pop(event.line - 1, None)
+    other_lines: set[int] = set()
+    for event in events:
+        if event.kind in {EventKind.MAP_KEY, EventKind.LEAF_SCALAR} and not is_condition(
+            event.path
+        ):
+            other_lines.add(event.line - 1)
+            other_lines.update(line - 1 for line, _ in event.block_lines or ())
     skip: set[int] = set()
     n = len(lines)
     i = 0
-    while i < n:
+    while i < min(n, stop):
         m = _GITLAB_IF_KEY.match(lines[i])
-        if not m:
+        if not m or i in other_lines or owners.get(i) != len(m.group("key_prefix")) + 1:
             i += 1
             continue
+        if include_openers:
+            skip.add(i)
         # ALWAYS check for deeper-indented continuation lines, regardless
         # of whether the value is a block-scalar (``|`` / ``>``), empty,
         # or inline.  The original implementation gated continuation
@@ -660,7 +928,9 @@ def _gitlab_rules_if_body_lines(lines: list[str]) -> set[int]:
         # lines (and intervening blanks/comments) until we hit a
         # non-blank line at the same or shallower indent.
         j = i + 1
-        while j < n:
+        while j < min(n, stop):
+            if j in other_lines:
+                break  # A flow closing line can also contain a real script field.
             cont = lines[j]
             stripped = cont.lstrip(" \t")
             if not stripped:

