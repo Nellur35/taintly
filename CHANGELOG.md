@@ -12,6 +12,13 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 
 ### Fixed
 
+- The composite Action uses an existing pinned Python setup action and scanner
+  revision instead of unavailable references. Wrapper and scanner pins remain
+  independent. Arguments retain quoted values without shell evaluation or glob
+  expansion, and comma/newline-separated rule exclusions are passed separately.
+- The Action preserves scanner failures and fails when a requested SARIF report
+  cannot be written or is not SARIF JSON. An incomplete scan is not converted
+  into success by a second report-generation command.
 - GitLab variable checks apply their existing YAML-looking exclusions only to
   source-owned fields. Spaced/quoted condition keys and literal legacy variable
   conditions retain their provider context; script text resembling YAML remains
