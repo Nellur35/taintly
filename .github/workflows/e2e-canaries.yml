@@ -74,3 +74,75 @@ jobs:
         env:
           PYTHONUTF8: "1"
         run: python scripts/check_canary_detections.py
+
+
+  action-delivery:
+    name: Composite Action delivery (manual acceptance)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            pypi.org:443
+            files.pythonhosted.org:443
+            github.com:443
+            codeload.github.com:443
+            api.github.com:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Run the pinned composite Action on an existing fixed fixture
+        id: action
+        uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292
+        with:
+          path: tests/playground/fixtures/github/sec4-gh-001-ppe-target-checkout/fixed
+          version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
+          platform: github
+          fail-on: HIGH
+          upload-sarif: true
+          sarif-file: taintly-action-acceptance.sarif
+          extra-args: --no-config
+
+      - name: Verify installed identity, output transport and report delivery
+        working-directory: ${{ runner.temp }}
+        env:
+          TAINTLY_ACTION_EXIT: ${{ steps.action.outputs.exit-code }}
+          TAINTLY_ACTION_REPORT: ${{ github.workspace }}/taintly-action-acceptance.sarif
+        run: |
+          python - <<'PY'
+          import hashlib
+          import importlib.metadata
+          import json
+          import os
+          from pathlib import Path
+
+          assert os.environ['TAINTLY_ACTION_EXIT'] == '0'
+          distribution = importlib.metadata.distribution('taintly')
+          direct = json.loads(distribution.read_text('direct_url.json'))
+          assert direct['vcs_info']['commit_id'] == '83708e9e25bfe6d3d87d1bfb9d901d6226acd182'
+          workspace = Path(os.environ['GITHUB_WORKSPACE'])
+          source = workspace / 'tests/playground/fixtures/github/sec4-gh-001-ppe-target-checkout/fixed/.github/workflows/ci.yml'
+          assert hashlib.sha256(source.read_bytes()).hexdigest() == 'f322339ef6fbd7503d0db050ed707303c756cd8450e9423e09533199efe3b8ca'
+          report = json.loads(Path(os.environ['TAINTLY_ACTION_REPORT']).read_text())
+          assert report['version'] == '2.1.0' and isinstance(report['runs'], list)
+          results = [result for run in report['runs'] for result in run.get('results', [])]
+          assert not any(result['ruleId'] == 'ENGINE-ERR' for result in results)
+          def owns_source(result):
+              for location in result.get('locations', []):
+                  uri = Path(location['physicalLocation']['artifactLocation']['uri'])
+                  resolved = uri if uri.is_absolute() else workspace / uri
+                  if resolved.resolve() == source.resolve():
+                      return True
+              return False
+          assert any(result['ruleId'] == 'SEC4-GH-005B' and owns_source(result) for result in results)
+          print('Pinned scanner, expected source, Action output and local SARIF delivery verified.')
+          PY
