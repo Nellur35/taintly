@@ -60,7 +60,8 @@ def main() -> int:
         executable = Path(sysconfig.get_path("scripts")) / (
             "taintly.exe" if os.name == "nt" else "taintly"
         )
-        console = subprocess.run(
+        # Absolute interpreter-owned executable; caller argv is data, no shell.
+        console = subprocess.run(  # nosec B603
             [str(executable), *args, "--format", env.get("CICD_AUDIT_FORMAT", "text")],
             check=False,
         ).returncode
@@ -68,7 +69,8 @@ def main() -> int:
         if env.get("CICD_AUDIT_UPLOAD_SARIF", "false") == "true":
             report = Path(env.get("CICD_AUDIT_SARIF_FILE", "taintly.sarif"))
             with report.open("w", encoding="utf-8") as output:
-                sarif = subprocess.run(
+                # Same installed executable and argv-only boundary as above.
+                sarif = subprocess.run(  # nosec B603
                     [str(executable), *args, "--format", "sarif"],
                     stdout=output,
                     check=False,
