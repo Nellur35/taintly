@@ -48,10 +48,12 @@ Pure stdlib, zero deps — clone and run:
 ```bash
 git clone https://github.com/Nellur35/taintly.git
 cd taintly
+git checkout --detach 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
 python -m taintly /path/to/your/repo
 ```
 
-No build step, no install step, no PyPI dependency.
+No build step, no install step, no PyPI dependency. This pins the scanner source
+to the reviewed commit used below; no release tag is assumed.
 
 ## Usage
 
@@ -70,7 +72,7 @@ Common flags:
 | `--platform-audit` | API-based posture check (with `--github-repo` or `--gitlab-project`) |
 | `--baseline [FILE]` / `--diff [FILE]` | Save a baseline, then later report only new findings |
 | `--transitive` | Walk into composite actions and check sub-actions |
-| `--guide [RULE_ID]` | Step-by-step remediation guide |
+| `--guide [RULE_ID]` | List available detailed guides, or open one; other rules include remediation in findings |
 | `--token-stdin` | Read API token from stdin |
 | `--check-imposter-commits` | Verify pinned action SHAs are reachable in their upstream repo's ref history (opt-in, network) |
 | `--respect-zizmor-ignores` | Honor zizmor's inline suppression markers (opt-in) |
@@ -130,19 +132,21 @@ python -m taintly /path/to/repo --platform codebuild
 
 ## CI integration
 
-**GitHub Actions**
+**GitHub Actions** — after checking out the target repository:
 
 ```yaml
-- uses: Nellur35/taintly@cbb735134fe2a966cc4eab6772b55dd350eedaad  # reviewed commit
+- uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
   with:
-    version: cbb735134fe2a966cc4eab6772b55dd350eedaad
+    version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
     fail-on: HIGH
 ```
 
-Pin both the Action's `uses:` reference and its `version` input. The Action
-installs the scanner from `version`; pinning only the wrapper leaves that
-installation on its default floating ref. Update both after reviewing a newer
-commit.
+The `uses:` SHA selects the Action wrapper; `version` independently selects the
+installed scanner source. Both examples use immutable commits. Review each
+component before updating its pin; they need not share a commit. The Action
+sets up Python and installs from GitHub, which needs network access during
+setup. Its local configuration scan is offline unless network options are
+explicitly enabled.
 
 **GitLab CI** — taintly is hosted on GitHub, so run it as a normal job (there is no GitLab CI *component*):
 
@@ -151,7 +155,7 @@ taintly:
   image: python:3.12-slim
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends git ca-certificates
-    - python -m pip install "git+https://github.com/Nellur35/taintly@cbb735134fe2a966cc4eab6772b55dd350eedaad"
+    - python -m pip install "git+https://github.com/Nellur35/taintly@83708e9e25bfe6d3d87d1bfb9d901d6226acd182"
   script:
     - python -m taintly . --fail-on HIGH
 ```
@@ -166,9 +170,9 @@ as described above.
 After checking out the target repository:
 
 ```yaml
-- uses: Nellur35/taintly@cbb735134fe2a966cc4eab6772b55dd350eedaad  # reviewed commit
+- uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
   with:
-    version: cbb735134fe2a966cc4eab6772b55dd350eedaad
+    version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
     fail-on: HIGH
     upload-sarif: true
     sarif-file: taintly.sarif
@@ -198,6 +202,10 @@ Choose a gate according to whether the codebase already has findings.
 | `11` | Reported coverage error, unless a severity exit (`1` or `2`) takes precedence — at least one `ENGINE-ERR` finding present (file unreadable, ReDoS cap hit, rule crashed) |
 | `12` | `--self-test --mutate` detected a surviving mutation |
 
+Below-threshold review findings can remain when the exit code is `0`. Creating
+a baseline also returns `0` when the file is written; it records accepted
+findings rather than fixing them.
+
 CI gates should distinguish `0` from non-zero. A non-zero result can mean
 findings, a scanner error, or both. Inspect JSON `errors`
 as well as the exit code: a HIGH/CRITICAL finding and a coverage error can
@@ -220,9 +228,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
-      - uses: Nellur35/taintly@cbb735134fe2a966cc4eab6772b55dd350eedaad  # reviewed commit
+      - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
         with:
-          version: cbb735134fe2a966cc4eab6772b55dd350eedaad
+          version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
           fail-on: HIGH
 ```
 
@@ -253,9 +261,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
-      - uses: Nellur35/taintly@cbb735134fe2a966cc4eab6772b55dd350eedaad  # reviewed commit
+      - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
         with:
-          version: cbb735134fe2a966cc4eab6772b55dd350eedaad
+          version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
           extra-args: --diff .taintly-baseline.json --fail-on HIGH
 ```
 
@@ -285,7 +293,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install a reviewed scanner revision
-        run: python -m pip install "git+https://github.com/Nellur35/taintly@cbb735134fe2a966cc4eab6772b55dd350eedaad"
+        run: python -m pip install "git+https://github.com/Nellur35/taintly@83708e9e25bfe6d3d87d1bfb9d901d6226acd182"
       - name: Static scan and pinned-reference checks
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -350,7 +358,7 @@ Each finding carries three signals:
 
 | Signal | Meaning |
 |---|---|
-| Severity | How serious the policy violation is |
+| Severity | Potential impact of the supported risk pattern; not proof of exploitation or a policy violation |
 | Confidence | How strongly the supported detector evidence establishes the reported pattern |
 | Exploitability | Static estimate of leverage suggested by workflow context; runtime authority may be unknown |
 
