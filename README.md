@@ -48,7 +48,7 @@ Pure stdlib, zero deps — clone and run:
 ```bash
 git clone https://github.com/Nellur35/taintly.git
 cd taintly
-git checkout --detach 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
+git checkout --detach 7f1e5daa305073a7ef7c372647a1fba054ff1a6f
 python -m taintly /path/to/your/repo
 ```
 
@@ -137,7 +137,7 @@ python -m taintly /path/to/repo --platform codebuild
 ```yaml
 - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
   with:
-    version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
+    version: 7f1e5daa305073a7ef7c372647a1fba054ff1a6f
     fail-on: HIGH
 ```
 
@@ -155,7 +155,7 @@ taintly:
   image: python:3.12-slim
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends git ca-certificates
-    - python -m pip install "git+https://github.com/Nellur35/taintly@83708e9e25bfe6d3d87d1bfb9d901d6226acd182"
+    - python -m pip install "git+https://github.com/Nellur35/taintly@7f1e5daa305073a7ef7c372647a1fba054ff1a6f"
   script:
     - python -m taintly . --fail-on HIGH
 ```
@@ -172,7 +172,7 @@ After checking out the target repository:
 ```yaml
 - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
   with:
-    version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
+    version: 7f1e5daa305073a7ef7c372647a1fba054ff1a6f
     fail-on: HIGH
     upload-sarif: true
     sarif-file: taintly.sarif
@@ -231,7 +231,7 @@ jobs:
           persist-credentials: false
       - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
         with:
-          version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
+          version: 7f1e5daa305073a7ef7c372647a1fba054ff1a6f
           fail-on: HIGH
 ```
 
@@ -268,7 +268,7 @@ jobs:
           persist-credentials: false
       - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
         with:
-          version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
+          version: 7f1e5daa305073a7ef7c372647a1fba054ff1a6f
           extra-args: --diff .taintly-baseline.json --fail-on HIGH
 ```
 
@@ -298,7 +298,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install a reviewed scanner revision
-        run: python -m pip install "git+https://github.com/Nellur35/taintly@83708e9e25bfe6d3d87d1bfb9d901d6226acd182"
+        run: python -m pip install "git+https://github.com/Nellur35/taintly@7f1e5daa305073a7ef7c372647a1fba054ff1a6f"
       - name: Static scan and pinned-reference checks
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

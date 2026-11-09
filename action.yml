@@ -22,11 +22,11 @@ inputs:
 
   version:
     description: "Scanner git ref to install. Defaults to the verified immutable commit
-      83708e9e25bfe6d3d87d1bfb9d901d6226acd182. The scanner ref is independent
+      7f1e5daa305073a7ef7c372647a1fba054ff1a6f. The scanner ref is independent
       of the Action wrapper ref. Use an existing full commit SHA for repeatable
       source selection; no floating release tag is assumed."
     required: false
-    default: "83708e9e25bfe6d3d87d1bfb9d901d6226acd182"
+    default: "7f1e5daa305073a7ef7c372647a1fba054ff1a6f"
 
   python-version:
     description: "Python version used to run the scanner. Requires 3.10+; defaults to 3.12."
