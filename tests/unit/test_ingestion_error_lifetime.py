@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 from taintly.ingestion import github_api as gh, gitlab_api as gl
+from taintly.source_inventory import SourceInventory
 
 
 @pytest.fixture(autouse=True)
@@ -69,7 +70,9 @@ def test_gitlab_available_sibling_survives_closed_failure(monkeypatch, status):
     error = urllib.error.HTTPError("https://gitlab.com/source", status, "inert", {}, bad)
     monkeypatch.setattr(gl, "open_gitlab", Mock(side_effect=[good, error]))
     result = gl.fetch_group_pipelines("demo", "INERT")
-    assert result == [("demo/good/.gitlab-ci.yml", "job:\n  script: echo hello\n")]
+    assert result.items == (("demo/good/.gitlab-ci.yml", "job:\n  script: echo hello\n"),)
+    assert not result.complete and len(result.issues) == 1
+    assert result.issues[0].source == "demo/missing/.gitlab-ci.yml"
     assert good.closed and bad.closed
 
 
@@ -81,7 +84,9 @@ def test_github_available_sibling_survives_closed_failure(monkeypatch, status):
     error = urllib.error.HTTPError("https://api.github.com/source", status, "inert", {}, bad)
     monkeypatch.setattr(gh.urllib.request, "urlopen", Mock(side_effect=[directory, good, error]))
     result = gh.fetch_workflow_files("demo/repo", "INERT")
-    assert result == [("demo/repo/.github/workflows/good.yml", "on: push\n")]
+    assert result.items == (("demo/repo/.github/workflows/good.yml", "on: push\n"),)
+    assert not result.complete and len(result.issues) == 1
+    assert result.issues[0].source.endswith("/missing.yml")
     assert directory.closed and good.closed and bad.closed
 
 
@@ -92,7 +97,7 @@ def test_absent_source_policy_remains_absent_and_closed(monkeypatch, provider):
     if provider == "github":
         monkeypatch.setattr(gh.urllib.request, "urlopen", Mock(side_effect=error))
         result = gh.fetch_workflow_files("demo/repo", "INERT")
-        assert result == []
+        assert result == SourceInventory()
     else:
         monkeypatch.setattr(gl, "open_gitlab", Mock(side_effect=error))
         assert gl.fetch_gitlab_ci(1, "INERT") is None

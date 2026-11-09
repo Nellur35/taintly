@@ -10,6 +10,7 @@ import pytest
 import taintly.__main__ as cli
 import taintly.batch as batch
 from taintly.models import Platform, RegexPattern, Rule, Severity
+from taintly.source_inventory import SourceInventory
 
 
 def _rule(platform: Platform) -> Rule:
@@ -49,7 +50,7 @@ jobs:
         monkeypatch.setattr(
             api,
             "fetch_org_workflows",
-            lambda _org, _token: [("repo/.github/workflows/ci.yml", content)],
+            lambda _org, _token: SourceInventory((("repo/.github/workflows/ci.yml", content),)),
         )
         monkeypatch.setattr(api, "list_org_repos", lambda _org, _token: [])
         monkeypatch.setattr(checks, "run_all_checks", lambda _repo, _client: [])
@@ -67,7 +68,7 @@ jobs:
         monkeypatch.setattr(
             api,
             "fetch_group_pipelines",
-            lambda _group, _token: [("project/.gitlab-ci.yml", content)],
+            lambda _group, _token: SourceInventory((("project/.gitlab-ci.yml", content),)),
         )
         monkeypatch.setattr(api, "list_group_projects", lambda _group, _token: [])
         monkeypatch.setattr(checks, "run_all_checks", lambda _project, _client: [])

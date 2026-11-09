@@ -15,6 +15,17 @@ from collections.abc import Iterator
 from typing import Any
 
 from taintly._gitlab_transport import GitLabTransportError, open_gitlab, validate_gitlab_base
+from taintly.source_inventory import SourceInventory, SourceIssue
+
+
+class GitLabSourceIncomplete(GitLabTransportError):
+    """Stop credentialed acquisition while retaining already acquired sources."""
+
+    def __init__(self, inventory: SourceInventory[tuple[str, str]]) -> None:
+        super().__init__(
+            "GitLab source acquisition stopped after unsafe redirect or recipient refusal"
+        )
+        self.inventory = inventory
 
 
 def _gitlab_base() -> str:
@@ -96,33 +107,41 @@ def fetch_gitlab_ci(project_id: int | str, token: str) -> str | None:
         # returns base64-in-a-dict which just costs us an extra decode
         # step. `.raw` gives us the YAML bytes directly.
         raw = _get_raw(f"/projects/{encoded}/repository/files/.gitlab-ci.yml/raw?ref=HEAD", token)
-        return raw.decode("utf-8", errors="replace")
+        return raw.decode("utf-8")
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
         raise
 
 
-def fetch_group_pipelines(group: str, token: str) -> list[tuple[str, str]]:
+def fetch_group_pipelines(group: str, token: str) -> SourceInventory[tuple[str, str]]:
     """Fetch all .gitlab-ci.yml files from a group.
 
-    Returns list of (virtual_path, content) tuples.
+    Return files and gaps; recipient refusal stops all further acquisition.
     """
     all_files = []
+    issues = []
     projects = list_group_projects(group, token)
     for project in projects:
         pid = project["id"]
         name = project.get("path_with_namespace", str(pid))
         try:
             content = fetch_gitlab_ci(pid, token)
-            if content:
+            if content is not None:
                 all_files.append((f"{name}/.gitlab-ci.yml", content))
         except GitLabTransportError:
-            # Refused credential transport is not an absent source. The
-            # aggregate CLI must fail before claiming a successful scan.
-            raise
+            issues.append(
+                SourceIssue(
+                    f"{name}/.gitlab-ci.yml",
+                    "Credential transport refused a recipient; this pipeline and the remaining group sources were not acquired.",
+                )
+            )
+            raise GitLabSourceIncomplete(SourceInventory(tuple(all_files), tuple(issues))) from None
         except Exception:
-            # Best-effort across group projects — one inaccessible
-            # project must not abort the whole scan.
-            continue  # nosec B112
-    return all_files
+            issues.append(
+                SourceIssue(
+                    f"{name}/.gitlab-ci.yml",
+                    "Pipeline source could not be fetched or decoded; this project's security questions were not analyzed.",
+                )
+            )
+    return SourceInventory(tuple(all_files), tuple(issues))

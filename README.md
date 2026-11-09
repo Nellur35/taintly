@@ -495,8 +495,16 @@ If group posture checks are refused after source analysis, the report retains
 earlier findings and an explicit coverage error: exit `11`, or `1`/`2` when an
 existing security finding takes precedence. The refusal cannot become a clean scan.
 This confines transport and does not establish that your organization authorized
-the configured instance to receive the credential. Other unavailable sources
-retain the existing provider-specific analysis limitations.
+the configured instance to receive the credential.
+
+Organization/group source scans retain available files and report known fetch
+or decoding failures with their source identities. Such gaps remain incomplete
+(`11`, unless a security failure takes precedence); a successfully empty
+enumeration remains distinct. If GitLab refuses a recipient after acquiring
+sources, those sources remain reportable and further acquisition/posture
+requests stop. An early refusal with no acquired source still exits `3`.
+No scan establishes access to hidden repositories or full semantic coverage;
+endpoint-specific not-found behavior and local include limitations still apply.
 
 ## Documentation
 
