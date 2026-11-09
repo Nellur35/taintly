@@ -203,8 +203,9 @@ Choose a gate according to whether the codebase already has findings.
 | `12` | `--self-test --mutate` detected a surviving mutation |
 
 Below-threshold review findings can remain when the exit code is `0`. Creating
-a baseline also returns `0` when the file is written; it records accepted
-findings rather than fixing them.
+a baseline accepts existing security findings rather than fixing them. It returns
+`0` when creation succeeds without a reported coverage error; incomplete analysis
+still returns `11`, even when the snapshot was written.
 
 CI gates should distinguish `0` from non-zero. A non-zero result can mean
 findings, a scanner error, or both. Inspect JSON `errors`
@@ -247,6 +248,10 @@ python -m taintly . --baseline .taintly-baseline.json
 git add .taintly-baseline.json
 git commit -m "Add taintly baseline"
 ```
+
+Create the baseline and run `--diff` as separate operations. Baseline status is
+written to stderr so requested JSON, SARIF and CSV remain machine-readable.
+Recorded analysis errors cannot be accepted away by the baseline or config ignores.
 
 **Per-PR workflow:**
 
@@ -481,6 +486,17 @@ settings; they do not imply a CodeBuild project/IAM posture audit.
 ## Network behaviour
 
 Local scans make no network calls. `--fix` calls `git ls-remote` to resolve action tags to commit SHAs. `--platform-audit`, `--github-org`, `--gitlab-group`, `--transitive`, and `--check-imposter-commits` call the GitHub or GitLab API and need a token.
+
+GitLab group-source ingestion and project/group posture requests require an
+unambiguous HTTPS `GITLAB_URL` (default `https://gitlab.com`). HTTPS self-hosted
+prefixes are supported. In these routes, credentialed redirects stay on that
+origin, including its port. A refused recipient before analysis exits `3`.
+If group posture checks are refused after source analysis, the report retains
+earlier findings and an explicit coverage error: exit `11`, or `1`/`2` when an
+existing security finding takes precedence. The refusal cannot become a clean scan.
+This confines transport and does not establish that your organization authorized
+the configured instance to receive the credential. Other unavailable sources
+retain the existing provider-specific analysis limitations.
 
 ## Documentation
 

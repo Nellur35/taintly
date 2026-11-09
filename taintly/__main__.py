@@ -10,6 +10,7 @@ import sys
 from gettext import gettext
 from typing import Any
 
+from ._gitlab_transport import GitLabTransportError
 from .baseline import (
     BASELINE_FILENAME,
     BaselineError,
@@ -36,8 +37,14 @@ from .deployment_context import (
     apply_context_notes_to_findings,
     load_deployment_context,
 )
-from .engine import coalesce_input_script_findings, detect_platform, scan_file, scan_repo
-from .models import Platform, Severity, _defer_context_regex_compilation
+from .engine import (
+    coalesce_input_script_findings,
+    detect_platform,
+    scan_file,
+    scan_repo,
+    validate_scan_seconds,
+)
+from .models import Finding, Platform, Severity, _defer_context_regex_compilation
 from .reporters._encoding import ensure_utf8_stdout
 from .reporters.json_report import format_json
 from .reporters.sarif import format_sarif, format_sarif_reports
@@ -48,6 +55,14 @@ from .rules.registry import load_all_rules, load_rules_for_platform
 # Map AuditReport.platform string to the Platform enum the scorer
 # uses for bonus gating. Keeps the call sites readable.
 _PLATFORM_LOOKUP: dict[str, Platform] = {platform.value: platform for platform in Platform}
+
+
+def _scan_seconds(value: str) -> float:
+    """Use the same checked budget for CLI and programmatic scanning."""
+    try:
+        return validate_scan_seconds(float(value))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 class _VersionAction(argparse.Action):
@@ -171,10 +186,11 @@ def main():
     )
     parser.add_argument(
         "--max-scan-seconds",
-        type=float,
+        type=_scan_seconds,
         default=None,
         help=(
-            "Per-file rule-loop wall-clock budget in seconds (default 30). On "
+            "Finite nonnegative per-file rule-loop budget in seconds (default 30; "
+            "zero skips the loop). Checked between rules; not a process deadline. On "
             "exceed, remaining rules are skipped and an ENGINE-ERR notice is "
             "emitted. Raise for large generated / monorepo CI files."
         ),
@@ -411,7 +427,8 @@ def main():
         dest="fail_on",
         help="Exit 1 if any finding is at this severity or above (independent of --min-severity)",
     )
-    parser.add_argument(
+    baseline_mode = parser.add_mutually_exclusive_group()
+    baseline_mode.add_argument(
         "--baseline",
         nargs="?",
         const=BASELINE_FILENAME,
@@ -419,10 +436,11 @@ def main():
         help=(
             f"Write current findings as a baseline to FILE "
             f"(default: {BASELINE_FILENAME}). "
-            "Commit the baseline file to suppress these findings in future --diff scans."
+            "Commit the baseline file to suppress these findings in future --diff scans. "
+            "Security findings are accepted for this snapshot; incomplete analysis still exits 11."
         ),
     )
-    parser.add_argument(
+    baseline_mode.add_argument(
         "--diff",
         nargs="?",
         const=BASELINE_FILENAME,
@@ -940,9 +958,14 @@ def main():
                 file=sys.stderr,
             )
 
-            gl_client = GitLabClient(token)
-            findings = gl_run(args.gitlab_project, gl_client)
-            token.clear()
+            try:
+                gl_client = GitLabClient(token)
+                findings = gl_run(args.gitlab_project, gl_client)
+            except GitLabTransportError as exc:
+                print(f"Error: {exc}; GitLab posture analysis was not completed.", file=sys.stderr)
+                sys.exit(3)
+            finally:
+                token.clear()
 
             report = AuditReport(repo_path=f"gitlab:{args.gitlab_project}", platform="gitlab")
 
@@ -1096,25 +1119,46 @@ def main():
         from .platform.token import TokenManager
 
         print("Running platform posture checks ...", file=sys.stderr)
+        gl_tm: TokenManager | None = None
         try:
             projects = list_group_projects(args.gitlab_group, gitlab_token)
-            tm = TokenManager(value=gitlab_token, source="GITLAB_TOKEN")
+            gl_tm = TokenManager(value=gitlab_token, source="GITLAB_TOKEN")
             from .platform.gitlab_client import GitLabClient
 
-            gl_client = GitLabClient(tm)
+            gl_client = GitLabClient(gl_tm)
             for proj in projects:
                 proj_id = str(proj.get("id", ""))
                 try:
                     for finding in gl_run_all_checks(proj_id, gl_client):
                         report.add(finding)
+                except GitLabTransportError:
+                    raise
                 except Exception:
                     continue  # nosec B112
 
             # Group-level checks
             for finding in run_group_checks(args.gitlab_group, gl_client):
                 report.add(finding)
+        except GitLabTransportError as exc:
+            # Source analysis may already have established useful findings.
+            report.add(
+                Finding(
+                    rule_id="ENGINE-ERR",
+                    severity=Severity.LOW,
+                    title=f"GitLab group posture incomplete: {exc}",
+                    description=(
+                        "Credential transport refused a recipient, so the affected "
+                        "posture questions were not completed. Existing source "
+                        "findings remain reportable."
+                    ),
+                    file=f"gitlab-group:{args.gitlab_group}",
+                )
+            )
         except Exception as e:
             print(f"Warning: platform checks failed: {e}", file=sys.stderr)
+        finally:
+            if gl_tm is not None:
+                gl_tm.clear()
 
         report.findings = apply_config_ignores(report.findings, audit_config.ignores, args.path)
         report.filter_severity(effective_min_sev)
@@ -1275,18 +1319,6 @@ def main():
         report.summarize()
         all_findings.extend(report.findings)
 
-    # --baseline: write fingerprints and exit
-    if args.baseline:
-        baseline_path = args.baseline
-        bl = save_baseline(
-            all_findings, args.path, baseline_path, _resolve_current_refs(all_findings)
-        )
-        print(format_baseline_summary(bl, baseline_path))
-        # Still output the full report so the user can review what was baselined
-        for report in reports:
-            _output_report(report, args)
-        sys.exit(0)
-
     # --transitive: analyse composite action sub-dependencies via GitHub API
     if args.transitive:
         transitive_token = os.environ.get("GITHUB_TOKEN")
@@ -1323,6 +1355,15 @@ def main():
             )
         else:
             print("Transitive analysis: no issues found.", file=sys.stderr)
+
+    # Save observations after requested analysis, then use the same report
+    # dispatch as ordinary scanning, including aggregate machine formats.
+    if args.baseline:
+        baseline_path = args.baseline
+        bl = save_baseline(
+            all_findings, args.path, baseline_path, _resolve_current_refs(all_findings)
+        )
+        print(format_baseline_summary(bl, baseline_path), file=sys.stderr)
 
     # --diff: suppress known findings, show only new ones
     total_suppressed = 0
@@ -1429,6 +1470,10 @@ def main():
 
     if score_report is not None and args.format == "text":
         print(format_score(score_report, use_color=not args.no_color))
+
+    if args.baseline:
+        # Accepting existing security debt does not waive incomplete analysis.
+        sys.exit(11 if any(f.rule_id == "ENGINE-ERR" for f in all_findings) else 0)
 
     # Exit code: built-in CRITICAL=2/HIGH=1 logic + optional fail-on
     # threshold + coverage-warning branch (exit 11) so a scan that

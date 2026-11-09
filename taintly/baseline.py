@@ -237,6 +237,10 @@ def apply_diff(findings: list[Any], baseline: Baseline, repo_path: str) -> tuple
     new = []
     suppressed = 0
     for f in findings:
+        if getattr(f, "rule_id", None) == "ENGINE-ERR":
+            # A snapshot accepts security debt, not missing analysis.
+            new.append(f)
+            continue
         fp = fingerprint(f, repo_path)
         if fp in baseline.fingerprints:
             suppressed += 1

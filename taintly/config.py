@@ -498,6 +498,8 @@ def apply_config_ignores(
 
 def _finding_is_ignored(finding, entries: list[IgnoreEntry], repo_abs: str) -> bool:
     """Return True if any ignore entry matches this finding."""
+    if finding.rule_id == "ENGINE-ERR":
+        return False
     try:
         rel = os.path.relpath(finding.file, repo_abs)
         rel_norm = os.path.normpath(rel)

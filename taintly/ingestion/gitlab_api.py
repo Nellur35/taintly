@@ -14,9 +14,11 @@ import urllib.request
 from collections.abc import Iterator
 from typing import Any
 
+from taintly._gitlab_transport import GitLabTransportError, open_gitlab, validate_gitlab_base
+
 
 def _gitlab_base() -> str:
-    return os.environ.get("GITLAB_URL", "https://gitlab.com").rstrip("/")
+    return validate_gitlab_base(os.environ.get("GITLAB_URL", "https://gitlab.com"))
 
 
 def _get(path: str, token: str) -> dict[str, Any] | list[Any]:
@@ -29,11 +31,17 @@ def _get(path: str, token: str) -> dict[str, Any] | list[Any]:
             "Accept": "application/json",
         },
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310 — URL is always https:// (enforced by _gitlab_base)
-        body = json.loads(resp.read())
-        if not isinstance(body, dict | list):
-            raise TypeError(f"GitLab API returned non-object at {path!r}: {type(body).__name__}")
-        return body
+    try:
+        with open_gitlab(req, base_url=base, timeout=30) as resp:
+            body = json.loads(resp.read())
+            if not isinstance(body, dict | list):
+                raise TypeError(
+                    f"GitLab API returned non-object at {path!r}: {type(body).__name__}"
+                )
+            return body
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise
 
 
 def _get_raw(path: str, token: str) -> bytes:
@@ -50,10 +58,14 @@ def _get_raw(path: str, token: str) -> bytes:
             "Accept": "text/plain",
         },
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310 — URL is always https:// (enforced by _gitlab_base)
-        data = resp.read()
-        assert isinstance(data, bytes)  # nosec B101
-        return data
+    try:
+        with open_gitlab(req, base_url=base, timeout=30) as resp:
+            data = resp.read()
+            assert isinstance(data, bytes)  # nosec B101
+            return data
+    except urllib.error.HTTPError as error:
+        error.close()
+        raise
 
 
 def _paginate(path: str, token: str) -> Iterator[dict[str, Any]]:
@@ -105,6 +117,10 @@ def fetch_group_pipelines(group: str, token: str) -> list[tuple[str, str]]:
             content = fetch_gitlab_ci(pid, token)
             if content:
                 all_files.append((f"{name}/.gitlab-ci.yml", content))
+        except GitLabTransportError:
+            # Refused credential transport is not an absent source. The
+            # aggregate CLI must fail before claiming a successful scan.
+            raise
         except Exception:
             # Best-effort across group projects — one inaccessible
             # project must not abort the whole scan.

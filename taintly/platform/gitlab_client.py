@@ -19,6 +19,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from taintly._gitlab_transport import open_gitlab, validate_gitlab_base
+
 from .token import TokenManager
 
 
@@ -49,7 +51,7 @@ class GitLabClient:
         timeout: int = 30,
     ) -> None:
         self._token = token
-        self._base_url = base_url or _base_url()
+        self._base_url = validate_gitlab_base(base_url if base_url is not None else _base_url())
         self._timeout = timeout
 
     # ---------------------------------------------------------------------
@@ -72,19 +74,22 @@ class GitLabClient:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:  # nosec B310 — https via _base_url
+            with open_gitlab(req, base_url=self._base_url, timeout=self._timeout) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
-            if e.code == 404:
-                return None
-            body = ""
             try:
-                body = e.read().decode("utf-8", errors="replace")
-            except Exception:
-                # Informational body only; raising APIError with the
-                # status code is sufficient when the body is unreadable.
-                pass  # nosec B110
-            raise APIError(endpoint, e.code, body) from None
+                if e.code == 404:
+                    return None
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    # Status still establishes failure when the optional
+                    # response body is unreadable.
+                    pass  # nosec B110
+                raise APIError(endpoint, e.code, body) from None
+            finally:
+                e.close()
 
     # ---------------------------------------------------------------------
     # Typed accessors for platform checks
