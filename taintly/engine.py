@@ -478,11 +478,16 @@ def scan_file(
     jenkinsctx: JenkinsContext | None = None,
     max_scan_seconds: float | None = None,
     respect_inline_suppressions: bool = True,
+    *,
+    local_repository_available: bool = True,
 ) -> list[Finding]:
     """Scan a single file against a list of rules.
 
     If _content is provided, use it directly instead of reading from disk.
     filepath is still used for Finding.file attribution.
+    Set local_repository_available=False for sources acquired without an
+    owned local checkout. Patterns that require local repository evidence
+    report incomplete coverage for these sources.
     Set respect_inline_suppressions=False to disregard user-authored inline
     waivers. This does not change semantic guards or caller-applied filters.
     """
@@ -641,6 +646,19 @@ def scan_file(
             if time.monotonic() >= deadline:
                 unevaluated = len(rules) - idx
                 break
+            if not local_repository_available and getattr(
+                rule.pattern, "requires_local_repository", False
+            ):
+                _append_incomplete_pattern_diagnostic(
+                    findings,
+                    rule.id,
+                    filepath,
+                    [
+                        "Repository file evidence is unavailable for this source. "
+                        "Scan a local checkout to evaluate this rule."
+                    ],
+                )
+                continue
             incomplete_reasons: list[str] = []
 
             try:

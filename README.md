@@ -506,6 +506,11 @@ requests stop. An early refusal with no acquired source still exits `3`.
 No scan establishes access to hidden repositories or full semantic coverage;
 endpoint-specific not-found behavior and local include limitations still apply.
 
+GitHub organization scans acquire workflow files. The agent instruction file
+inventory and content rules (`AI-GH-036` and `AI-GH-039`) report incomplete
+coverage when repository file evidence is unavailable. A local checkout of the
+repository supplies that evidence for those rules.
+
 ## Documentation
 
 - [Scoring and review status](docs/SCORING.md)
