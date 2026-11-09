@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import glob
+import math
 import os
 import re
 import time
@@ -456,6 +457,18 @@ _ANCHOR_EXPANSION_LINE_TOLERANCE = 30
 _FILE_SCAN_WALLCLOCK_BUDGET_S = 30.0
 
 
+def validate_scan_seconds(seconds: float | None) -> float:
+    """Resolve a finite, nonnegative cooperative rule-loop budget.
+
+    Zero means no rule-loop time. This does not interrupt individual calls
+    or establish a deadline for source acquisition or the whole process.
+    """
+    budget = _FILE_SCAN_WALLCLOCK_BUDGET_S if seconds is None else seconds
+    if not math.isfinite(budget) or budget < 0:
+        raise ValueError("scan seconds must be finite and nonnegative (zero is allowed)")
+    return budget
+
+
 def scan_file(
     filepath: str,
     rules: list[Rule],
@@ -473,6 +486,7 @@ def scan_file(
     Set respect_inline_suppressions=False to disregard user-authored inline
     waivers. This does not change semantic guards or caller-applied filters.
     """
+    budget = validate_scan_seconds(max_scan_seconds)
     findings = []
     if _content is not None:
         content = _content
@@ -619,7 +633,6 @@ def scan_file(
     # caller-graph / repo-root resolution — see TAINT-GH-007).
     from taintly.workflow_aware_pattern import set_pattern_filepath_context
 
-    budget = max_scan_seconds if max_scan_seconds is not None else _FILE_SCAN_WALLCLOCK_BUDGET_S
     deadline = time.monotonic() + budget
     unevaluated = 0
     _reset_chunked_search_coverage()
@@ -2228,6 +2241,7 @@ def scan_repo(
     """
     import sys as _sys
 
+    validate_scan_seconds(max_scan_seconds)
     repo_path, explicit_files = _normalize_input_path(repo_path)
     # Explicit paths bypass discovery, so enforce the real-path boundary
     # before platform classification can inspect file content.

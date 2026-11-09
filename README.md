@@ -48,7 +48,7 @@ Pure stdlib, zero deps — clone and run:
 ```bash
 git clone https://github.com/Nellur35/taintly.git
 cd taintly
-git checkout --detach 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
+git checkout --detach 7f1e5daa305073a7ef7c372647a1fba054ff1a6f
 python -m taintly /path/to/your/repo
 ```
 
@@ -137,7 +137,7 @@ python -m taintly /path/to/repo --platform codebuild
 ```yaml
 - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
   with:
-    version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
+    version: 7f1e5daa305073a7ef7c372647a1fba054ff1a6f
     fail-on: HIGH
 ```
 
@@ -155,7 +155,7 @@ taintly:
   image: python:3.12-slim
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends git ca-certificates
-    - python -m pip install "git+https://github.com/Nellur35/taintly@83708e9e25bfe6d3d87d1bfb9d901d6226acd182"
+    - python -m pip install "git+https://github.com/Nellur35/taintly@7f1e5daa305073a7ef7c372647a1fba054ff1a6f"
   script:
     - python -m taintly . --fail-on HIGH
 ```
@@ -172,7 +172,7 @@ After checking out the target repository:
 ```yaml
 - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
   with:
-    version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
+    version: 7f1e5daa305073a7ef7c372647a1fba054ff1a6f
     fail-on: HIGH
     upload-sarif: true
     sarif-file: taintly.sarif
@@ -203,8 +203,9 @@ Choose a gate according to whether the codebase already has findings.
 | `12` | `--self-test --mutate` detected a surviving mutation |
 
 Below-threshold review findings can remain when the exit code is `0`. Creating
-a baseline also returns `0` when the file is written; it records accepted
-findings rather than fixing them.
+a baseline accepts existing security findings rather than fixing them. It returns
+`0` when creation succeeds without a reported coverage error; incomplete analysis
+still returns `11`, even when the snapshot was written.
 
 CI gates should distinguish `0` from non-zero. A non-zero result can mean
 findings, a scanner error, or both. Inspect JSON `errors`
@@ -230,7 +231,7 @@ jobs:
           persist-credentials: false
       - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
         with:
-          version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
+          version: 7f1e5daa305073a7ef7c372647a1fba054ff1a6f
           fail-on: HIGH
 ```
 
@@ -248,6 +249,10 @@ git add .taintly-baseline.json
 git commit -m "Add taintly baseline"
 ```
 
+Create the baseline and run `--diff` as separate operations. Baseline status is
+written to stderr so requested JSON, SARIF and CSV remain machine-readable.
+Recorded analysis errors cannot be accepted away by the baseline or config ignores.
+
 **Per-PR workflow:**
 
 ```yaml
@@ -263,7 +268,7 @@ jobs:
           persist-credentials: false
       - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
         with:
-          version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
+          version: 7f1e5daa305073a7ef7c372647a1fba054ff1a6f
           extra-args: --diff .taintly-baseline.json --fail-on HIGH
 ```
 
@@ -293,7 +298,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install a reviewed scanner revision
-        run: python -m pip install "git+https://github.com/Nellur35/taintly@83708e9e25bfe6d3d87d1bfb9d901d6226acd182"
+        run: python -m pip install "git+https://github.com/Nellur35/taintly@7f1e5daa305073a7ef7c372647a1fba054ff1a6f"
       - name: Static scan and pinned-reference checks
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -481,6 +486,17 @@ settings; they do not imply a CodeBuild project/IAM posture audit.
 ## Network behaviour
 
 Local scans make no network calls. `--fix` calls `git ls-remote` to resolve action tags to commit SHAs. `--platform-audit`, `--github-org`, `--gitlab-group`, `--transitive`, and `--check-imposter-commits` call the GitHub or GitLab API and need a token.
+
+GitLab group-source ingestion and project/group posture requests require an
+unambiguous HTTPS `GITLAB_URL` (default `https://gitlab.com`). HTTPS self-hosted
+prefixes are supported. In these routes, credentialed redirects stay on that
+origin, including its port. A refused recipient before analysis exits `3`.
+If group posture checks are refused after source analysis, the report retains
+earlier findings and an explicit coverage error: exit `11`, or `1`/`2` when an
+existing security finding takes precedence. The refusal cannot become a clean scan.
+This confines transport and does not establish that your organization authorized
+the configured instance to receive the credential. Other unavailable sources
+retain the existing provider-specific analysis limitations.
 
 ## Documentation
 

@@ -26,11 +26,18 @@ def _get(path: str, token: str) -> dict[str, Any] | list[Any]:
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310 — URL is always https://api.github.com
-        body = json.loads(resp.read())
-        if not isinstance(body, dict | list):
-            raise TypeError(f"GitHub API returned non-object at {path!r}: {type(body).__name__}")
-        return body
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310 — URL is always https://api.github.com
+            body = json.loads(resp.read())
+            if not isinstance(body, dict | list):
+                raise TypeError(
+                    f"GitHub API returned non-object at {path!r}: {type(body).__name__}"
+                )
+            return body
+    except urllib.error.HTTPError as error:
+        # The private helper returns decoded data, not an open error body.
+        error.close()
+        raise
 
 
 def _paginate(path: str, token: str) -> Iterator[dict[str, Any]]:

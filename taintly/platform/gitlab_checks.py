@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from taintly._gitlab_transport import GitLabTransportError
 from taintly.families import classify_rule, default_confidence, default_review_needed
 from taintly.models import Finding, Severity
 
@@ -573,6 +574,30 @@ def check_group_variables_protected(group: str, client: GitLabClient) -> list[Fi
 # ---------------------------------------------------------------------------
 
 
+class GitLabPostureIncomplete(GitLabTransportError):
+    """A refused request stopped a run after supported findings were established."""
+
+    def __init__(self, project: str, failed_check: str, findings: tuple[Finding, ...]) -> None:
+        self.project = project
+        self.failed_check = failed_check
+        self.findings = findings
+        super().__init__(f"GitLab posture recipient refused during {failed_check}")
+
+    def diagnostic(self) -> Finding:
+        return Finding(
+            rule_id="ENGINE-ERR",
+            severity=Severity.LOW,
+            title=f"GitLab posture incomplete during {self.failed_check}: recipient refused",
+            description=(
+                "Credential transport refused a recipient. This check and the remaining "
+                "posture checks were not completed; previously established findings "
+                "remain reportable."
+            ),
+            file=f"gitlab:{self.project}",
+            origin="platform",
+        )
+
+
 ALL_CHECKS = {
     "PLAT-GL-001": check_default_branch_protected,
     "PLAT-GL-002": check_mr_requires_approval,
@@ -619,7 +644,8 @@ def run_all_checks(
     """Run every platform check against ``project``.
 
     API errors on individual checks are captured as PLAT-GL-ERR findings
-    so a single 401/403/500 does not abort the scan.
+    so a single 401/403/500 does not abort the scan. Recipient refusals stop
+    further requests; an established prefix is carried by GitLabPostureIncomplete.
     """
     results: list[Finding] = []
     selected = checks or list(ALL_CHECKS.keys())
@@ -629,6 +655,10 @@ def run_all_checks(
             continue
         try:
             results.extend(fn(project, client))
+        except GitLabTransportError:
+            if results:
+                raise GitLabPostureIncomplete(project, rule_id, tuple(results)) from None
+            raise
         except APIError as e:
             results.append(
                 _finding(
