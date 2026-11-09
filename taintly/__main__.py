@@ -1029,6 +1029,7 @@ def main():
                 _content=content,
                 max_scan_seconds=args.max_scan_seconds,
                 respect_inline_suppressions=not args.no_inline_suppressions,
+                local_repository_available=False,
             ):
                 report.add(finding)
 
@@ -1128,6 +1129,7 @@ def main():
                 _content=content,
                 max_scan_seconds=args.max_scan_seconds,
                 respect_inline_suppressions=not args.no_inline_suppressions,
+                local_repository_available=False,
             ):
                 report.add(finding)
 

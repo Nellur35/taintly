@@ -222,6 +222,8 @@ class _AgentInstructionFilePattern:
     how many YAML files exist).
     """
 
+    requires_local_repository = True
+
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         # Locate the workflow's ``on:`` key.  Every GitHub workflow
         # has one; using its line number gives the finding a stable
@@ -936,6 +938,8 @@ class _AgentInstructionFileContentPattern:
     * **Self-test mode** — fixture-marker fallback when the contextvar
       is unset.
     """
+
+    requires_local_repository = True
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         on_line = _AgentInstructionFilePattern._find_on_line(content)

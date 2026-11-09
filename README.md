@@ -48,7 +48,7 @@ Pure stdlib, zero deps — clone and run:
 ```bash
 git clone https://github.com/Nellur35/taintly.git
 cd taintly
-git checkout --detach 9eab94af8786096542b1d3cc9a59a1d3caaf0d84
+git checkout --detach 1643d5122309b7bb1e58b26adbb3d965351ba930
 python -m taintly /path/to/your/repo
 ```
 
@@ -137,7 +137,7 @@ python -m taintly /path/to/repo --platform codebuild
 ```yaml
 - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
   with:
-    version: 9eab94af8786096542b1d3cc9a59a1d3caaf0d84
+    version: 1643d5122309b7bb1e58b26adbb3d965351ba930
     fail-on: HIGH
 ```
 
@@ -155,7 +155,7 @@ taintly:
   image: python:3.12-slim
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends git ca-certificates
-    - python -m pip install "git+https://github.com/Nellur35/taintly@9eab94af8786096542b1d3cc9a59a1d3caaf0d84"
+    - python -m pip install "git+https://github.com/Nellur35/taintly@1643d5122309b7bb1e58b26adbb3d965351ba930"
   script:
     - python -m taintly . --fail-on HIGH
 ```
@@ -172,7 +172,7 @@ After checking out the target repository:
 ```yaml
 - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
   with:
-    version: 9eab94af8786096542b1d3cc9a59a1d3caaf0d84
+    version: 1643d5122309b7bb1e58b26adbb3d965351ba930
     fail-on: HIGH
     upload-sarif: true
     sarif-file: taintly.sarif
@@ -231,7 +231,7 @@ jobs:
           persist-credentials: false
       - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
         with:
-          version: 9eab94af8786096542b1d3cc9a59a1d3caaf0d84
+          version: 1643d5122309b7bb1e58b26adbb3d965351ba930
           fail-on: HIGH
 ```
 
@@ -268,7 +268,7 @@ jobs:
           persist-credentials: false
       - uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292  # reviewed commit
         with:
-          version: 9eab94af8786096542b1d3cc9a59a1d3caaf0d84
+          version: 1643d5122309b7bb1e58b26adbb3d965351ba930
           extra-args: --diff .taintly-baseline.json --fail-on HIGH
 ```
 
@@ -298,7 +298,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install a reviewed scanner revision
-        run: python -m pip install "git+https://github.com/Nellur35/taintly@9eab94af8786096542b1d3cc9a59a1d3caaf0d84"
+        run: python -m pip install "git+https://github.com/Nellur35/taintly@1643d5122309b7bb1e58b26adbb3d965351ba930"
       - name: Static scan and pinned-reference checks
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -505,6 +505,11 @@ sources, those sources remain reportable and further acquisition/posture
 requests stop. An early refusal with no acquired source still exits `3`.
 No scan establishes access to hidden repositories or full semantic coverage;
 endpoint-specific not-found behavior and local include limitations still apply.
+
+GitHub organization scans acquire workflow files. The agent instruction file
+inventory and content rules (`AI-GH-036` and `AI-GH-039`) report incomplete
+coverage when repository file evidence is unavailable. A local checkout of the
+repository supplies that evidence for those rules.
 
 ## Documentation
 
