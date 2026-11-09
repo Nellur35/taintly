@@ -938,6 +938,7 @@ def main():
             report = AuditReport(repo_path=f"github:{args.github_repo}", platform="github")
 
         else:  # --gitlab-project
+            from .platform.gitlab_checks import GitLabPostureIncomplete
             from .platform.gitlab_checks import run_all_checks as gl_run
             from .platform.gitlab_client import GitLabClient
 
@@ -961,6 +962,8 @@ def main():
             try:
                 gl_client = GitLabClient(token)
                 findings = gl_run(args.gitlab_project, gl_client)
+            except GitLabPostureIncomplete as exc:
+                findings = [*exc.findings, exc.diagnostic()]
             except GitLabTransportError as exc:
                 print(f"Error: {exc}; GitLab posture analysis was not completed.", file=sys.stderr)
                 sys.exit(3)
@@ -1114,8 +1117,8 @@ def main():
                 report.add(finding)
 
         # --- Platform posture checks across all projects in the group ---
+        from .platform.gitlab_checks import GitLabPostureIncomplete, run_group_checks
         from .platform.gitlab_checks import run_all_checks as gl_run_all_checks
-        from .platform.gitlab_checks import run_group_checks
         from .platform.token import TokenManager
 
         print("Running platform posture checks ...", file=sys.stderr)
@@ -1141,19 +1144,24 @@ def main():
                 report.add(finding)
         except GitLabTransportError as exc:
             # Source analysis may already have established useful findings.
-            report.add(
-                Finding(
-                    rule_id="ENGINE-ERR",
-                    severity=Severity.LOW,
-                    title=f"GitLab group posture incomplete: {exc}",
-                    description=(
-                        "Credential transport refused a recipient, so the affected "
-                        "posture questions were not completed. Existing source "
-                        "findings remain reportable."
-                    ),
-                    file=f"gitlab-group:{args.gitlab_group}",
+            if isinstance(exc, GitLabPostureIncomplete):
+                for finding in exc.findings:
+                    report.add(finding)
+                report.add(exc.diagnostic())
+            else:
+                report.add(
+                    Finding(
+                        rule_id="ENGINE-ERR",
+                        severity=Severity.LOW,
+                        title=f"GitLab group posture incomplete: {exc}",
+                        description=(
+                            "Credential transport refused a recipient, so the affected "
+                            "posture questions were not completed. Existing source "
+                            "findings remain reportable."
+                        ),
+                        file=f"gitlab-group:{args.gitlab_group}",
+                    )
                 )
-            )
         except Exception as e:
             print(f"Warning: platform checks failed: {e}", file=sys.stderr)
         finally:

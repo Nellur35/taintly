@@ -243,3 +243,43 @@ def test_refused_group_posture_keeps_previously_analyzed_source_findings(monkeyp
     assert "unsafe redirect" in document["errors"][0]["title"]
     assert "INERT_PRIVATE_TEST" not in output.out + output.err
     assert len(calls) == 1 and handles[0].closed
+
+
+@pytest.mark.parametrize("mode", ["project", "group"])
+@pytest.mark.parametrize("minimum", ["INFO", "CRITICAL"])
+def test_refusal_keeps_completed_posture_checks_and_stops_remaining_requests(monkeypatch, capsys, mode, minimum):
+    import json
+
+    from taintly import __main__ as cli
+
+    monkeypatch.setenv("GITLAB_URL", "https://gitlab.example.invalid")
+    monkeypatch.setenv("GITLAB_TOKEN", "INERT_PRIVATE_TEST")
+    arguments = ["--platform-audit", "--gitlab-project", "demo/repo"]
+    if mode == "group":
+        monkeypatch.setattr(gitlab_api, "fetch_group_pipelines", lambda *_: [])
+        monkeypatch.setattr(gitlab_api, "list_group_projects", lambda *_: [{"id": "demo/repo"}, {"id": "unvisited/repo"}])
+        arguments = ["--gitlab-group", "demo"]
+    calls, handles = install_transport(monkeypatch, [
+        (200, None, b'{"default_branch":"main"}'),
+        (404, None, b"not protected"),
+        (200, None, b'[{"approvals_required":0}]'),
+        (302, "https://other.example.invalid/variables", b"refused"),
+    ])
+    active = list(TokenManager._active)
+    monkeypatch.setattr(sys, "argv", ["taintly", *arguments, "--format", "json", "--no-config", "--min-severity", minimum])
+    with pytest.raises(SystemExit) as raised:
+        cli.main()
+    assert raised.value.code == 2
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    expected = {"PLAT-GL-001", "PLAT-GL-002"} if minimum == "INFO" else {"PLAT-GL-001"}
+    actual = {f["rule_id"] for f in report["findings"] if f["rule_id"] != "ENGINE-ERR"}
+    assert actual == expected
+    assert all(f["file"] == "gitlab:demo/repo" for f in report["findings"])
+    [error] = report["errors"]
+    assert error["file"] == "gitlab:demo/repo"
+    assert "PLAT-GL-003" in error["title"]
+    assert "INERT_PRIVATE_TEST" not in captured.out + captured.err
+    assert len(calls) == 4 and all(handle.closed for handle in handles)
+    assert not any("unvisited" in request.full_url for request in calls)
+    assert TokenManager._active == active
