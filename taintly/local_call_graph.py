@@ -26,7 +26,7 @@ from .taint import (
     analyze_job_outputs,
 )
 from .taint import analyze as analyze_taint
-from .workflow_corpus import CorpusEvidence, WorkflowCorpus
+from .workflow_corpus import CorpusAnalysisGap, CorpusEvidence, WorkflowCorpus
 
 _MAX_FILES = 512
 _MAX_FRAMES = 4096
@@ -798,7 +798,34 @@ def _resolve(root: str, ref: str, kind: str) -> str | None:
     return None
 
 
-def find_local_flows(corpus: WorkflowCorpus) -> list[LocalFlow]:
+def _checkout_overlaps_action(doc: _Document, owner: tuple[object, ...], ref: str) -> Event | None:
+    """Detect an adjacent checkout whose repository is not bound to the scan."""
+    if doc.kind != "workflow" or len(owner) != 4 or not isinstance(owner[3], int):
+        return None
+    checkout = owner[:3] + (owner[3] - 1,)
+    uses = doc.leaves.get(checkout + ("uses",))
+    if uses is None or not re.fullmatch(
+        r"actions/checkout@(?:v[2-7](?:\.\d+){0,2}|[a-f0-9]{40})", uses.value or "", re.I
+    ):
+        return None
+    repository = doc.value(checkout + ("with", "repository")) or ""
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository):
+        return None
+    if doc.value(checkout + ("if",)) or doc.value(checkout + ("continue-on-error",)) not in {
+        None,
+        "false",
+    }:
+        return None
+    path = (doc.value(checkout + ("with", "path")) or "").removeprefix("./").rstrip("/")
+    action = ref[2:].rstrip("/")
+    if path in {"", "."} or action == path or action.startswith(path + "/"):
+        return uses
+    return None
+
+
+def find_local_flows(
+    corpus: WorkflowCorpus, *, action_source_gaps: set[CorpusAnalysisGap] | None = None
+) -> list[LocalFlow]:
     """Follow actual local invocations with isolated input bindings and traces."""
     root = corpus.repo_path
     if not root:
@@ -980,6 +1007,22 @@ def find_local_flows(corpus: WorkflowCorpus) -> list[LocalFlow]:
         for owner, call, kind, args in doc.calls():
             allowed, guards = doc.guard(owner, event)
             if not allowed:
+                continue
+            if (
+                kind == "action"
+                and (checkout := _checkout_overlaps_action(doc, owner, call.value or ""))
+                is not None
+            ):
+                if action_source_gaps is not None:
+                    action_source_gaps.add(
+                        CorpusAnalysisGap(
+                            doc.file,
+                            call.line,
+                            f"Checkout at line {checkout.line} selects an explicit repository "
+                            "in the action's workspace; its identity and revision are not "
+                            "bound to the scanned action definition.",
+                        )
+                    )
                 continue
             target = _resolve(root, call.value or "", kind)
             if target is None:

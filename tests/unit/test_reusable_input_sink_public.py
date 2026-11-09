@@ -140,3 +140,61 @@ def test_local_reusable_workflow_structured_input_is_not_a_sink(tmp_path) -> Non
     rule = get_rule_by_id("TAINT-GH-006")
     assert rule is not None
     assert scan_file(str(caller), [rule]) == []
+
+@pytest.mark.parametrize("rule_id", ["TAINT-GH-006", "SEC4-GH-008"])
+def test_remote_workflow_label_cannot_supply_local_callee(tmp_path, monkeypatch, rule_id):
+    monkeypatch.chdir(tmp_path)
+    workflows = tmp_path / "example" / "project" / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    caller = workflows / "caller.yml"
+    content = (
+        "on: workflow_call\njobs:\n"
+        "  relay:\n    uses: ./.github/workflows/callee.yml\n"
+        "    with:\n      payload: ${{ inputs.message }}\n"
+        "  direct:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - run: echo '${{ inputs.message }}'\n"
+    )
+    caller.write_text(content, encoding="utf-8")
+    callee = workflows / "callee.yml"
+    rule = get_rule_by_id(rule_id)
+    assert rule is not None
+    label = caller.relative_to(tmp_path).as_posix()
+
+    def scan_remote():
+        return scan_file(label, [rule], _content=content, local_repository_available=False)
+
+    missing = scan_remote()
+    callee.write_text(
+        "on: workflow_call\njobs:\n  execute:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: echo '${{ inputs.payload }}'\n",
+        encoding="utf-8",
+    )
+    collision = scan_remote()
+    assert [(f.rule_id, f.line, f.description) for f in collision] == [
+        (f.rule_id, f.line, f.description) for f in missing
+    ]
+    assert [f.line for f in collision if f.rule_id == rule_id] == [10]
+    diagnostic, = [f for f in collision if f.rule_id == "ENGINE-ERR"]
+    assert rule_id in diagnostic.title
+    assert "Source-bound repository files are unavailable" in diagnostic.description
+    assert diagnostic.file == label
+
+    # The surrounding remote context must not affect subsequent local scans.
+    local = scan_file(str(caller), [rule])
+    assert [(f.rule_id, f.line) for f in local] == [(rule_id, 10), (rule_id, 6)]
+
+
+def test_remote_explicit_repository_call_never_resolves_local_callee():
+    rule = get_rule_by_id("TAINT-GH-006")
+    assert rule is not None
+    content = (
+        "on: workflow_call\njobs:\n"
+        "  relay:\n    uses: example/project/.github/workflows/callee.yml@main\n"
+        "    with:\n      payload: ${{ inputs.message }}\n"
+    )
+    assert not scan_file(
+        "example/project/.github/workflows/caller.yml",
+        [rule],
+        _content=content,
+        local_repository_available=False,
+    )

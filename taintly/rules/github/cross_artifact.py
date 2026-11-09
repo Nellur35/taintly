@@ -13,7 +13,7 @@ import os
 from taintly.cross_artifact_facts import find_cross_artifact_taint
 from taintly.local_call_graph import flow_evidence
 from taintly.models import Platform, Rule, Severity
-from taintly.workflow_corpus import CorpusFindings, CorpusPattern, WorkflowCorpus
+from taintly.workflow_corpus import CorpusAnalysisGap, CorpusFindings, CorpusPattern, WorkflowCorpus
 
 RULES: list[Rule] = []
 
@@ -29,7 +29,8 @@ def _label(path: str) -> str:
 
 def _xf_gh_006_callback(corpus: WorkflowCorpus) -> CorpusFindings:
     findings: CorpusFindings = []
-    for flow in find_cross_artifact_taint(corpus):
+    action_source_gaps: set[CorpusAnalysisGap] = set()
+    for flow in find_cross_artifact_taint(corpus, action_source_gaps=action_source_gaps):
         chain = " -> ".join(f"{_label(c)}:{ln}" for c, ln, _ in flow.hop_chain)
         action = _label(flow.callee)
         snippet = (
@@ -38,6 +39,8 @@ def _xf_gh_006_callback(corpus: WorkflowCorpus) -> CorpusFindings:
             f"{action}:{flow.sink_line}: {flow.sink_snippet}"
         )
         findings.append(flow_evidence(flow, snippet))
+    gaps = sorted(action_source_gaps, key=lambda gap: (gap.file, gap.line, gap.reason))
+    findings.extend(gaps)
     return findings
 
 

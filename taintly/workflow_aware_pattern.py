@@ -40,6 +40,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .models import IncompletePatternMatches
 from .parsers.structural import Event, EventKind, walk_workflow
 
 # ---------------------------------------------------------------------------
@@ -60,8 +61,15 @@ _current_filepath: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+_local_repository_available: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "taintly_pattern_local_repository_available", default=True
+)
+
+
 @contextmanager
-def set_pattern_filepath_context(filepath: str | None):
+def set_pattern_filepath_context(
+    filepath: str | None, *, local_repository_available: bool | None = None
+):
     """Bind ``filepath`` for the duration of this with-block so any
     ``WorkflowAwarePattern`` predicate dispatched inside the block
     can read it via :attr:`PredicateContext.filepath`.
@@ -72,9 +80,16 @@ def set_pattern_filepath_context(filepath: str | None):
     is ``None`` — predicates that need filepath must defend that.
     """
     token = _current_filepath.set(filepath)
+    repository_token = (
+        _local_repository_available.set(local_repository_available)
+        if local_repository_available is not None
+        else None
+    )
     try:
         yield
     finally:
+        if repository_token is not None:
+            _local_repository_available.reset(repository_token)
         _current_filepath.reset(token)
 
 
@@ -102,6 +117,9 @@ class PredicateContext:
     file pass.  ``None`` when the pattern is invoked outside an
     engine scan (self-test samples, unit tests).  Predicates that
     rely on this MUST defend the ``None`` case."""
+
+    local_repository_available: bool = True
+    _missing_repository_evidence: bool = field(default=False, init=False, repr=False)
 
     _by_path_cache: dict[tuple[object, ...], Event] = field(
         default_factory=dict, init=False, repr=False
@@ -233,6 +251,9 @@ class PredicateContext:
         predicate that calls this in a hot loop only walks the
         filesystem once.
         """
+        if not self.local_repository_available:
+            self._missing_repository_evidence = True
+            return None
         if self._repo_root_cache is not _UNSET:
             return self._repo_root_cache  # type: ignore[return-value]
         if not self.filepath:
@@ -297,6 +318,9 @@ class PredicateContext:
         per-leaf predicate doesn't re-walk the directory on every
         leaf.
         """
+        if not self.local_repository_available:
+            self._missing_repository_evidence = True
+            return ()
         if self._caller_graph_cache is not None:
             return self._caller_graph_cache
         if not self.filepath:
@@ -577,6 +601,7 @@ class WorkflowAwarePattern:
         ctx = PredicateContext(
             leaves=tuple(all_leaves),
             filepath=_current_filepath.get(),
+            local_repository_available=_local_repository_available.get(),
         )
 
         # Pass 2: per-glob query against the same content.  Walking
@@ -642,6 +667,14 @@ class WorkflowAwarePattern:
             )
             if cutoff_marker not in seen:
                 results.append(cutoff_marker)
+        if ctx._missing_repository_evidence:
+            return IncompletePatternMatches(
+                results,
+                reason=(
+                    "Source-bound repository files are unavailable for cross-workflow analysis. "
+                    "Scan the corresponding repository checkout to evaluate this relationship."
+                ),
+            )
         return results
 
     def _render_snippet(

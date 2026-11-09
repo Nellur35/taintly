@@ -159,3 +159,49 @@ def test_github_org_requires_owned_agent_file_evidence(
         assert error["file"] == virtual_path
         assert "Repository file evidence is unavailable" in error["description"]
     assert result.value.code == (1 if workflow_issue else 11)
+
+def test_github_org_reports_unavailable_reusable_callee(tmp_path, monkeypatch, capsys):
+    import taintly.platform.github_checks as checks
+
+    source = (
+        "on: workflow_call\njobs:\n  relay:\n"
+        "    uses: ./.github/workflows/callee.yml\n"
+        "    with:\n      payload: ${{ inputs.message }}\n"
+    )
+    virtual_path = "known/repo/.github/workflows/caller.yml"
+    monkeypatch.chdir(tmp_path)
+    callee = (tmp_path / virtual_path).with_name("callee.yml")
+    callee.parent.mkdir(parents=True)
+    callee.write_text(
+        "on: workflow_call\njobs:\n  execute:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - run: echo '${{ inputs.payload }}'\n",
+        encoding="utf-8",
+    )
+    rule_id = "TAINT-GH-006"
+    rules = [r for r in load_rules_for_platform(Platform.GITHUB) if r.id == rule_id]
+    assert len(rules) == 1
+    monkeypatch.setenv("GITHUB_TOKEN", "INERT")
+    monkeypatch.setattr(cli, "load_rules_for_platform", lambda platform: rules)
+    monkeypatch.setattr(gh, "list_org_repos", lambda *args: ["known/repo"])
+    monkeypatch.setattr(
+        gh, "fetch_org_workflows", lambda *args: SourceInventory(((virtual_path, source),))
+    )
+    monkeypatch.setattr(checks, "run_all_checks", lambda *args: [])
+    monkeypatch.setattr(checks, "run_account_checks", lambda *args: [])
+    monkeypatch.setattr(sys, "argv", [
+        "taintly", "--github-org", "known", "--no-config",
+        "--format", "json", "--min-severity", "HIGH",
+    ])
+
+    with pytest.raises(SystemExit) as result:
+        cli.main()
+    report = json.loads(capsys.readouterr().out)
+    assert result.value.code == 11
+    assert report["files_scanned"] == 1
+    assert not [f for f in report["findings"] if f["rule_id"] == rule_id]
+    owned = [error for error in report["errors"] if rule_id in error["title"]]
+    assert len(owned) == 1, report["errors"]
+    error = owned[0]
+    assert error["file"] == virtual_path
+    assert rule_id in error["title"]
+    assert "Source-bound repository files are unavailable" in error["description"]

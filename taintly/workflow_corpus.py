@@ -1417,7 +1417,18 @@ class CorpusEvidence:
     calibration_reason: str = ""
 
 
-CorpusFindings = list[tuple[str, int, str] | tuple[str, int, str, str] | CorpusEvidence]
+@dataclass(frozen=True)
+class CorpusAnalysisGap:
+    """An unresolved relationship alongside any established corpus findings."""
+
+    file: str
+    line: int
+    reason: str
+
+
+CorpusFindings = list[
+    tuple[str, int, str] | tuple[str, int, str, str] | CorpusEvidence | CorpusAnalysisGap
+]
 
 
 @dataclass
