@@ -1018,9 +1018,11 @@ def main():
         platform_rules = [r for r in all_rules if r.platform == Platform.GITHUB]
 
         report = AuditReport(repo_path=f"github-org:{args.github_org}", platform="github")
-        report.files_scanned = len(workflow_files)
+        report.files_scanned = len(workflow_files.items)
+        for issue in workflow_files.issues:
+            report.add(issue.finding())
 
-        for virtual_path, content in workflow_files:
+        for virtual_path, content in workflow_files.items:
             for finding in scan_file(
                 virtual_path,
                 platform_rules,
@@ -1091,12 +1093,23 @@ def main():
             )
             sys.exit(3)
 
-        from .ingestion.gitlab_api import fetch_group_pipelines, list_group_projects
+        from .ingestion.gitlab_api import (
+            GitLabSourceIncomplete,
+            fetch_group_pipelines,
+            list_group_projects,
+        )
         from .models import AuditReport
 
+        source_refusal: GitLabSourceIncomplete | None = None
         print(f"Fetching pipelines from group: {args.gitlab_group} ...", file=sys.stderr)
         try:
             pipeline_files = fetch_group_pipelines(args.gitlab_group, gitlab_token)
+        except GitLabSourceIncomplete as exc:
+            if not exc.inventory.items:
+                print(f"Error fetching group pipelines: {exc}", file=sys.stderr)
+                sys.exit(3)
+            pipeline_files = exc.inventory
+            source_refusal = exc
         except Exception as e:
             print(f"Error fetching group pipelines: {e}", file=sys.stderr)
             sys.exit(3)
@@ -1104,9 +1117,11 @@ def main():
         platform_rules = [r for r in all_rules if r.platform == Platform.GITLAB]
 
         report = AuditReport(repo_path=f"gitlab-group:{args.gitlab_group}", platform="gitlab")
-        report.files_scanned = len(pipeline_files)
+        report.files_scanned = len(pipeline_files.items)
+        for issue in pipeline_files.issues:
+            report.add(issue.finding())
 
-        for virtual_path, content in pipeline_files:
+        for virtual_path, content in pipeline_files.items:
             for finding in scan_file(
                 virtual_path,
                 platform_rules,
@@ -1116,57 +1131,58 @@ def main():
             ):
                 report.add(finding)
 
-        # --- Platform posture checks across all projects in the group ---
-        from .platform.gitlab_checks import GitLabPostureIncomplete, run_group_checks
-        from .platform.gitlab_checks import run_all_checks as gl_run_all_checks
-        from .platform.token import TokenManager
+        if source_refusal is None:
+            # --- Platform posture checks across all projects in the group ---
+            from .platform.gitlab_checks import GitLabPostureIncomplete, run_group_checks
+            from .platform.gitlab_checks import run_all_checks as gl_run_all_checks
+            from .platform.token import TokenManager
 
-        print("Running platform posture checks ...", file=sys.stderr)
-        gl_tm: TokenManager | None = None
-        try:
-            projects = list_group_projects(args.gitlab_group, gitlab_token)
-            gl_tm = TokenManager(value=gitlab_token, source="GITLAB_TOKEN")
-            from .platform.gitlab_client import GitLabClient
+            print("Running platform posture checks ...", file=sys.stderr)
+            gl_tm: TokenManager | None = None
+            try:
+                projects = list_group_projects(args.gitlab_group, gitlab_token)
+                gl_tm = TokenManager(value=gitlab_token, source="GITLAB_TOKEN")
+                from .platform.gitlab_client import GitLabClient
 
-            gl_client = GitLabClient(gl_tm)
-            for proj in projects:
-                proj_id = str(proj.get("id", ""))
-                try:
-                    for finding in gl_run_all_checks(proj_id, gl_client):
-                        report.add(finding)
-                except GitLabTransportError:
-                    raise
-                except Exception:
-                    continue  # nosec B112
+                gl_client = GitLabClient(gl_tm)
+                for proj in projects:
+                    proj_id = str(proj.get("id", ""))
+                    try:
+                        for finding in gl_run_all_checks(proj_id, gl_client):
+                            report.add(finding)
+                    except GitLabTransportError:
+                        raise
+                    except Exception:
+                        continue  # nosec B112
 
-            # Group-level checks
-            for finding in run_group_checks(args.gitlab_group, gl_client):
-                report.add(finding)
-        except GitLabTransportError as exc:
-            # Source analysis may already have established useful findings.
-            if isinstance(exc, GitLabPostureIncomplete):
-                for finding in exc.findings:
+                # Group-level checks
+                for finding in run_group_checks(args.gitlab_group, gl_client):
                     report.add(finding)
-                report.add(exc.diagnostic())
-            else:
-                report.add(
-                    Finding(
-                        rule_id="ENGINE-ERR",
-                        severity=Severity.LOW,
-                        title=f"GitLab group posture incomplete: {exc}",
-                        description=(
-                            "Credential transport refused a recipient, so the affected "
-                            "posture questions were not completed. Existing source "
-                            "findings remain reportable."
-                        ),
-                        file=f"gitlab-group:{args.gitlab_group}",
+            except GitLabTransportError as exc:
+                # Source analysis may already have established useful findings.
+                if isinstance(exc, GitLabPostureIncomplete):
+                    for finding in exc.findings:
+                        report.add(finding)
+                    report.add(exc.diagnostic())
+                else:
+                    report.add(
+                        Finding(
+                            rule_id="ENGINE-ERR",
+                            severity=Severity.LOW,
+                            title=f"GitLab group posture incomplete: {exc}",
+                            description=(
+                                "Credential transport refused a recipient, so the affected "
+                                "posture questions were not completed. Existing source "
+                                "findings remain reportable."
+                            ),
+                            file=f"gitlab-group:{args.gitlab_group}",
+                        )
                     )
-                )
-        except Exception as e:
-            print(f"Warning: platform checks failed: {e}", file=sys.stderr)
-        finally:
-            if gl_tm is not None:
-                gl_tm.clear()
+            except Exception as e:
+                print(f"Warning: platform checks failed: {e}", file=sys.stderr)
+            finally:
+                if gl_tm is not None:
+                    gl_tm.clear()
 
         report.findings = apply_config_ignores(report.findings, audit_config.ignores, args.path)
         report.filter_severity(effective_min_sev)

@@ -14,6 +14,7 @@ from taintly import _gitlab_transport as transport
 from taintly.ingestion import gitlab_api
 from taintly.platform.gitlab_client import APIError, GitLabClient
 from taintly.platform.token import TokenManager
+from taintly.source_inventory import SourceInventory
 
 
 @pytest.fixture(autouse=True)
@@ -129,8 +130,41 @@ def test_redirect_refusal_aborts_group_acquisition_without_success(monkeypatch):
         (200, None, b"job:\n  script: echo inert\n"),
         (302, "https://other.example.invalid/source", b"redirect"),
     ])
-    with pytest.raises(transport.GitLabTransportError, match="unsafe redirect"):
+    with pytest.raises(gitlab_api.GitLabSourceIncomplete, match="unsafe redirect") as raised:
         gitlab_api.fetch_group_pipelines("demo", "INERT")
+    assert raised.value.inventory.items == (("demo/available/.gitlab-ci.yml", "job:\n  script: echo inert\n"),)
+    assert raised.value.inventory.issues[0].source == "demo/missing/.gitlab-ci.yml"
+    assert len(calls) == 3 and all(handle.closed for handle in handles)
+
+
+def test_late_source_refusal_keeps_findings_and_stops_all_later_requests(monkeypatch, capsys):
+    import json
+    from taintly import __main__ as cli
+    from taintly.engine import scan_file
+    from taintly.models import Platform
+    from taintly.rules.registry import load_rules_for_platform
+
+    source = "job:\n  script: curl https://example.invalid/tool.sh | bash\n"
+    path = "demo/available/.gitlab-ci.yml"
+    expected = [f.to_dict() for f in scan_file(path, load_rules_for_platform(Platform.GITLAB), _content=source)]
+    assert expected, "Control must actually establish security findings"
+    monkeypatch.setenv("GITLAB_TOKEN", "INERT")
+    calls, handles = install_transport(monkeypatch, [
+        (200, None, b'[{"id":1,"path_with_namespace":"demo/available"},{"id":2,"path_with_namespace":"demo/missing"},{"id":3}]'),
+        (200, None, source.encode()),
+        (302, "https://other.example.invalid/source", b"redirect"),
+    ])
+    monkeypatch.setattr(sys, "argv", ["taintly", "--gitlab-group", "demo", "--format", "json", "--no-config"])
+    with pytest.raises(SystemExit) as raised:
+        cli.main()
+    output = capsys.readouterr()
+    report = json.loads(output.out)
+    ordinary = [f for f in report["findings"] if f["rule_id"] != "ENGINE-ERR"]
+    assert ordinary == expected
+    assert raised.value.code != 0 and report["files_scanned"] == 1
+    [error] = report["errors"]
+    assert error["file"] == "demo/missing/.gitlab-ci.yml"
+    assert "remaining group sources" in error["description"]
     assert len(calls) == 3 and all(handle.closed for handle in handles)
 
 
@@ -193,7 +227,7 @@ def test_refused_recipient_reaches_actual_non_successful_cli(monkeypatch, capsys
         responses.insert(0, (200, None, b'[{"id":1,"path_with_namespace":"demo/repo"}]'))
         arguments = ["--gitlab-group", "demo"]
     elif mode == "group-posture":
-        monkeypatch.setattr(gitlab_api, "fetch_group_pipelines", lambda *_: [])
+        monkeypatch.setattr(gitlab_api, "fetch_group_pipelines", lambda *_: SourceInventory())
         monkeypatch.setattr(gitlab_api, "list_group_projects", lambda *_: [{"id": 1}])
         arguments = ["--gitlab-group", "demo"]
     calls, handles = install_transport(monkeypatch, responses)
@@ -224,7 +258,7 @@ def test_refused_group_posture_keeps_previously_analyzed_source_findings(monkeyp
     monkeypatch.setenv("GITLAB_TOKEN", "INERT_PRIVATE_TEST")
     monkeypatch.setattr(
         gitlab_api, "fetch_group_pipelines",
-        lambda *_: [("demo/repo/.gitlab-ci.yml", source)],
+        lambda *_: SourceInventory((("demo/repo/.gitlab-ci.yml", source),)),
     )
     monkeypatch.setattr(gitlab_api, "list_group_projects", lambda *_: [{"id": 1}])
     calls, handles = install_transport(
@@ -256,7 +290,7 @@ def test_refusal_keeps_completed_posture_checks_and_stops_remaining_requests(mon
     monkeypatch.setenv("GITLAB_TOKEN", "INERT_PRIVATE_TEST")
     arguments = ["--platform-audit", "--gitlab-project", "demo/repo"]
     if mode == "group":
-        monkeypatch.setattr(gitlab_api, "fetch_group_pipelines", lambda *_: [])
+        monkeypatch.setattr(gitlab_api, "fetch_group_pipelines", lambda *_: SourceInventory())
         monkeypatch.setattr(gitlab_api, "list_group_projects", lambda *_: [{"id": "demo/repo"}, {"id": "unvisited/repo"}])
         arguments = ["--gitlab-group", "demo"]
     calls, handles = install_transport(monkeypatch, [

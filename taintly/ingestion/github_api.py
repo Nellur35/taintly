@@ -6,11 +6,14 @@ Uses only stdlib urllib — no third-party dependencies.
 
 from __future__ import annotations
 
+import base64
 import json
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from typing import Any
+
+from taintly.source_inventory import SourceInventory, SourceIssue
 
 _BASE = "https://api.github.com"
 
@@ -86,23 +89,50 @@ def list_org_repos(org: str, token: str) -> list[str]:
     ]
 
 
-def fetch_workflow_files(repo_full_name: str, token: str) -> list[tuple[str, str]]:
+def _decode_workflow_file(file_data: dict[str, Any]) -> str:
+    if file_data.get("encoding", "base64") != "base64":
+        raise ValueError("unsupported workflow encoding")
+    encoded = file_data["content"]
+    if not isinstance(encoded, str):
+        raise TypeError("workflow content is not base64 text")
+    # GitHub wraps base64 lines; malformed bytes must not become an empty
+    # or replacement-decoded workflow.
+    return base64.b64decode("".join(encoded.split()), validate=True).decode("utf-8")
+
+
+def fetch_workflow_files(repo_full_name: str, token: str) -> SourceInventory[tuple[str, str]]:
     """Fetch all workflow file contents from a repo.
 
-    Returns list of (filename, content) tuples.
+    Return available files and source-bound acquisition gaps.
     """
     results = []
+    issues = []
     try:
         items = _get(f"/repos/{repo_full_name}/contents/.github/workflows", token)
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            return []
+            return SourceInventory()
         raise
 
     if not isinstance(items, list):
-        return []
+        return SourceInventory(
+            issues=(
+                SourceIssue(
+                    f"{repo_full_name}/.github/workflows",
+                    "Workflow listing was not a directory response; enumeration is incomplete.",
+                ),
+            )
+        )
 
     for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            issues.append(
+                SourceIssue(
+                    f"{repo_full_name}/.github/workflows",
+                    "Workflow listing contained an invalid entry; enumeration is incomplete.",
+                )
+            )
+            continue
         if item.get("type") != "file":
             continue
         name = item["name"]
@@ -115,30 +145,38 @@ def fetch_workflow_files(repo_full_name: str, token: str) -> list[tuple[str, str
             # `.yml`/`.yaml` above, so the dict branch is the contract
             # here — assert it so the subscript is safe.
             assert isinstance(file_data, dict), "single-file GET must return dict"  # nosec B101
-            import base64
-
-            content = base64.b64decode(file_data["content"]).decode("utf-8", errors="replace")
+            content = _decode_workflow_file(file_data)
             results.append((f"{repo_full_name}/.github/workflows/{name}", content))
         except Exception:
-            # Best-effort across many repos — one broken workflow must
-            # never abort the whole org scan. Skip and keep going.
-            continue  # nosec B112
+            # Preserve siblings and the failed subject, not raw exception data.
+            issues.append(
+                SourceIssue(
+                    f"{repo_full_name}/.github/workflows/{name}",
+                    "Listed workflow could not be fetched or decoded; its security questions were not analyzed.",
+                )
+            )
 
-    return results
+    return SourceInventory(tuple(results), tuple(issues))
 
 
-def fetch_org_workflows(org: str, token: str) -> list[tuple[str, str]]:
+def fetch_org_workflows(org: str, token: str) -> SourceInventory[tuple[str, str]]:
     """Fetch all workflow files from all repos in an org.
 
-    Returns list of (virtual_path, content) tuples.
+    Return files and gaps. Top-level enumeration failure still raises.
     """
-    all_files = []
+    all_files: list[tuple[str, str]] = []
+    issues: list[SourceIssue] = []
     repos = list_org_repos(org, token)
     for repo in repos:
         try:
             files = fetch_workflow_files(repo, token)
-            all_files.extend(files)
+            all_files.extend(files.items)
+            issues.extend(files.issues)
         except Exception:
-            # Best-effort across many repos — keep scanning siblings.
-            continue  # nosec B112
-    return all_files
+            issues.append(
+                SourceIssue(
+                    f"{repo}/.github/workflows",
+                    "Workflow sources could not be enumerated; this repository was not fully analyzed.",
+                )
+            )
+    return SourceInventory(tuple(all_files), tuple(issues))
