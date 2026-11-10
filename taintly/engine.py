@@ -7,7 +7,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import cast
@@ -470,6 +470,16 @@ def validate_scan_seconds(seconds: float | None) -> float:
     return budget
 
 
+def _file_read_error(filepath: str, error: Exception) -> Finding:
+    return Finding(
+        rule_id="ENGINE-ERR",
+        severity=Severity.LOW,
+        title=f"Could not read file: {error}",
+        description=str(error),
+        file=filepath,
+    )
+
+
 def scan_file(
     filepath: str,
     rules: list[Rule],
@@ -503,16 +513,7 @@ def scan_file(
                 content = f.read()
             lines = content.splitlines()
         except Exception as e:
-            findings.append(
-                Finding(
-                    rule_id="ENGINE-ERR",
-                    severity=Severity.LOW,  # LOW so it survives --min-severity LOW filters
-                    title=f"Could not read file: {e}",
-                    description=str(e),
-                    file=filepath,
-                )
-            )
-            return findings
+            return [_file_read_error(filepath, e)]
 
     # Build a lightweight per-file context once, then use it to derive a
     # context-aware exploitability tier for each finding.  The analyzer is
@@ -2399,19 +2400,34 @@ def scan_repo(
         # callers that take ``JenkinsContext | None`` see the same
         # truthy-but-empty marker they did before.
         jenkinsctx = JenkinsContext() if plat == Platform.JENKINS else None
+        capture_workflows = plat == Platform.GITHUB and any(
+            isinstance(rule.pattern, CorpusPattern) for rule in platform_rules
+        )
+        workflow_dir = os.path.join(repo_path, ".github", "workflows")
+        workflow_contents: dict[str, str] = {}
+        workflow_reads: set[str] = set()
         for fpath in files:
             file_rules = _rules_for_file(fpath, platform_rules)
-            # Read the file ONCE; both the scan and the surface-evaluation pass
-            # below share the content (each previously opened the file
-            # separately — a redundant read per scanned file). On a read
-            # failure ``_content`` stays None: scan_file re-reads and emits the
-            # ENGINE-ERR finding (preserving the prior error behaviour) and the
-            # surface pass is skipped.
+            # Share the read across the scan and surface evaluation. For
+            # captured workflows, a failed read cannot acquire a different
+            # generation via a retry in either analysis pass.
+            workflow_source = (
+                capture_workflows
+                and os.path.dirname(fpath) == workflow_dir
+                and fpath.endswith((".yml", ".yaml"))
+            )
+            if workflow_source:
+                workflow_reads.add(fpath)
             try:
                 with open(fpath, encoding="utf-8", errors="replace") as _f:
                     _content = _f.read()
-            except OSError:
+            except OSError as exc:
+                if workflow_source:
+                    all_findings.append(_file_read_error(fpath, exc))
+                    continue
                 _content = None
+            if workflow_source and _content is not None:
+                workflow_contents[fpath] = _content
             all_findings.extend(
                 scan_file(
                     fpath,
@@ -2445,22 +2461,26 @@ def scan_repo(
         # GitHub-only (the rule is GH-platform).
         if plat == Platform.GITHUB:
             all_findings = enrich_pse_findings(all_findings, repo_path)
-            # B2 cross-file pass: build the WorkflowCorpus once per
-            # platform-scan and run any rule whose pattern is a
-            # CorpusPattern.  Per-file rules (RegexPattern /
-            # ContextPattern / …) are unaffected because their
-            # CorpusPattern siblings stub `check()` to return [].
-            # The ordinary and composer passes retain separate corpus walks,
-            # while exact filepath/content summaries are reused only inside
-            # this scan invocation. Each fresh corpus gets a pristine copy so
-            # mutable callbacks cannot change the cached summary for the next
-            # pass.
+            # Scoped scans still need sibling workflows as context. Capture each
+            # of those once, without promoting it to a per-file scan target.
+            if capture_workflows and explicit_files:
+                for path in discover_files(repo_path, Platform.GITHUB):
+                    if os.path.dirname(path) != workflow_dir or path in workflow_reads:
+                        continue
+                    try:
+                        with open(path, encoding="utf-8", errors="replace") as source:
+                            workflow_contents[path] = source.read()
+                    except OSError as exc:
+                        all_findings.append(_file_read_error(path, exc))
+            # Both passes consume the same captured workflows. Each gets a
+            # fresh corpus because callbacks can mutate its summaries.
             summary_cache: dict[str, tuple[str, WorkflowSummary]] = {}
             all_findings.extend(
                 _run_corpus_rules(
                     repo_path,
                     platform_rules,
                     _summary_cache=summary_cache,
+                    _contents=workflow_contents,
                 )
             )
             # B3 composer pass: re-invoke corpus rules whose
@@ -2475,6 +2495,7 @@ def scan_repo(
                     prior_findings=list(all_findings),
                     composer_only=True,
                     _summary_cache=summary_cache,
+                    _contents=workflow_contents,
                 )
             )
             # A0: a composite must not silently outrank the per-file guard
@@ -2512,6 +2533,7 @@ def _run_corpus_rules(
     prior_findings: list[Finding] | None = None,
     composer_only: bool = False,
     _summary_cache: dict[str, tuple[str, WorkflowSummary]] | None = None,
+    _contents: Mapping[str, str] | None = None,
 ) -> list[Finding]:
     """Build a WorkflowCorpus and run every CorpusPattern rule against it.
 
@@ -2541,10 +2563,10 @@ def _run_corpus_rules(
     if not corpus_rules:
         return []
 
-    if _summary_cache is None:
+    if _contents is None and _summary_cache is None:
         corpus = build_corpus(repo_path)
     else:
-        corpus = build_corpus(repo_path, _summary_cache=_summary_cache)
+        corpus = build_corpus(repo_path, _summary_cache=_summary_cache, _contents=_contents)
     if prior_findings is not None:
         # Smuggled onto the corpus object for composer rules to read.
         corpus._prior_findings = prior_findings  # type: ignore[attr-defined]

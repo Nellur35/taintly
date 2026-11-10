@@ -144,6 +144,8 @@ def test_corpus_state_and_prior_findings_are_fresh_for_each_scan(monkeypatch, tm
 def test_corpus_reuse_does_not_hide_per_file_read_errors(monkeypatch, tmp_path: Path):
     workflow = _workflow(tmp_path)
     real_open = builtins.open
+    attempted = []
+    observed = []
 
     def unreadable_workflow(file, *args, **kwargs):
         try:
@@ -151,19 +153,23 @@ def test_corpus_reuse_does_not_hide_per_file_read_errors(monkeypatch, tmp_path: 
         except (TypeError, OSError):
             resolved = None
         if resolved == workflow.resolve():
-            raise PermissionError("synthetic read denial")
+            attempted.append(file)
+            if len(attempted) == 1:
+                raise PermissionError("synthetic first-read denial")
         return real_open(file, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "open", unreadable_workflow)
-    rules = [_rule("CORPUS", CorpusPattern(callback=lambda _corpus: []))]
+    rules = [_rule("CORPUS", CorpusPattern(callback=lambda corpus: observed.extend(corpus.all()) or []))]
 
     reports = engine.scan_repo(str(tmp_path), rules, Platform.GITHUB)
 
     assert reports[0].files_scanned == 1
+    assert len(attempted) == 1
+    assert not observed
     assert any(finding.rule_id == "ENGINE-ERR" for finding in reports[0].findings)
 
 
-def test_composer_build_observes_workflow_changes_between_passes(monkeypatch, tmp_path: Path):
+def test_composer_build_keeps_workflow_sources_from_the_current_scan(monkeypatch, tmp_path: Path):
     workflow = _workflow(tmp_path)
     removed = workflow.parent / "remove.yml"
     removed.write_text("name: removed\non: push\njobs: {}\n", encoding="utf-8")
@@ -218,5 +224,40 @@ def test_composer_build_observes_workflow_changes_between_passes(monkeypatch, tm
 
     engine.scan_repo(str(tmp_path), rules, Platform.GITHUB)
 
-    assert composer_observations == [{"updated", "new"}]
+    assert composer_observations == [{"demo", "removed", "blocked"}]
     assert len(builds) == 2
+
+
+def test_per_file_evidence_and_composer_permissions_use_same_source(monkeypatch, tmp_path: Path):
+    workflow = _workflow(tmp_path)
+    real_scan_file = engine.scan_file
+
+    def replace_after_scan(filepath, *args, **kwargs):
+        findings = real_scan_file(filepath, *args, **kwargs)
+        if Path(filepath) == workflow:
+            workflow.write_text(
+                "name: changed\non: push\npermissions: write-all\njobs: {}\n",
+                encoding="utf-8",
+            )
+        return findings
+
+    def composer(corpus):
+        permissions = corpus.all()[0].workflow_permissions
+        if (
+            any(f.rule_id == "BASE" for f in corpus._prior_findings)
+            and permissions is not None
+            and permissions.is_write_all
+        ):
+            return [(str(workflow), 1, "mixed-source composite")]
+        return []
+
+    monkeypatch.setattr(engine, "scan_file", replace_after_scan)
+    rules = [
+        _rule("BASE", RegexPattern(match=r"name: demo")),
+        _rule("COMPOSER", CorpusPattern(callback=composer), composition_tags=["chain-composition"]),
+    ]
+
+    first = engine.scan_repo(str(tmp_path), rules, Platform.GITHUB)[0]
+    second = engine.scan_repo(str(tmp_path), rules, Platform.GITHUB)[0]
+    assert {f.rule_id for f in first.findings} == {"BASE"}
+    assert not second.findings
