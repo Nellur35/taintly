@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
@@ -393,9 +393,13 @@ def build_corpus(
     repo_path: str,
     *,
     _summary_cache: dict[str, tuple[str, WorkflowSummary]] | None = None,
+    _contents: Mapping[str, str] | None = None,
 ) -> WorkflowCorpus:
     """Walk ``repo_path/.github/workflows/`` and build a
     :class:`WorkflowCorpus`.
+
+    When supplied, captured workflow contents replace directory discovery
+    and reads for this invocation.
 
     Files that fail to read are skipped silently — the per-file scan
     will already have emitted an ENGINE-ERR finding for them.  Files
@@ -405,22 +409,27 @@ def build_corpus(
     """
     corpus = WorkflowCorpus(repo_path=repo_path)
     wf_dir = os.path.join(repo_path, ".github", "workflows")
-    if not os.path.isdir(wf_dir):
-        _prune_summary_cache(_summary_cache, wf_dir, set())
-        return corpus
+    if _contents is not None:
+        paths = sorted(_contents)
+    elif os.path.isdir(wf_dir):
+        paths = [
+            os.path.join(wf_dir, name)
+            for name in sorted(os.listdir(wf_dir))
+            if name.endswith((".yml", ".yaml"))
+        ]
+    else:
+        paths = []
 
     summarized_paths: set[str] = set()
-    for fname in sorted(os.listdir(wf_dir)):
-        if not (fname.endswith(".yml") or fname.endswith(".yaml")):
-            continue
-        fpath = os.path.join(wf_dir, fname)
-        try:
-            with open(fpath, encoding="utf-8", errors="replace") as f:
-                content = f.read()
-        except OSError:
-            if _summary_cache is not None:
-                _summary_cache.pop(fpath, None)
-            continue
+    for fpath in paths:
+        if _contents is not None:
+            content = _contents[fpath]
+        else:
+            try:
+                with open(fpath, encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except OSError:
+                continue
         summarized_paths.add(fpath)
         cached = _summary_cache.get(fpath) if _summary_cache is not None else None
         if cached is not None and cached[0] == content:
