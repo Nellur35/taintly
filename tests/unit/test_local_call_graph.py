@@ -621,3 +621,55 @@ runs:
     )
 
     assert _flows(tmp_path) == []
+
+@pytest.mark.parametrize("checkout_path, blocked", [("", True), ("tools", True), ("elsewhere", False)])
+def test_local_action_does_not_borrow_sink_from_unbound_checkout(
+    tmp_path, checkout_path, blocked
+):
+    action_source = """name: review
+inputs:
+  payload: {required: true}
+runs:
+  using: composite
+  steps:
+    - run: echo '${{ inputs.payload }}'
+      shell: bash
+"""
+    step = """      - uses: ./tools/check
+        with:
+          payload: ${{ github.event.issue.title }}
+"""
+    workflow = """on: issues
+jobs:
+  foreign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: other/tools
+"""
+    if checkout_path:
+        workflow += f"          path: {checkout_path}\n"
+    foreign_line = len(workflow.splitlines()) + 1
+    workflow += step + """  same_source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+"""
+    local_line = len(workflow.splitlines()) + 1
+    workflow += step
+    _repo(tmp_path, {
+        ".github/workflows/ci.yml": workflow,
+        "tools/check/action.yml": action_source,
+    })
+    findings = _engine_findings(tmp_path)
+    observed = {f.line for f in findings if f.rule_id == "XF-GH-006"}
+    assert observed == ({local_line} if blocked else {foreign_line, local_line})
+    gaps = [f for f in findings if f.rule_id == "ENGINE-ERR" and "XF-GH-006" in f.title]
+    if blocked:
+        gap, = gaps
+        assert f"Line {foreign_line}:" in gap.description
+        assert "identity and revision" in gap.description
+        assert gap.file.endswith("ci.yml")
+    else:
+        assert not gaps

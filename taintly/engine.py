@@ -55,6 +55,7 @@ from .workflow_context import (
 )
 from .workflow_context import analyze as analyze_workflow
 from .workflow_corpus import (
+    CorpusAnalysisGap,
     CorpusEvidence,
     CorpusPattern,
     WorkflowSummary,
@@ -641,7 +642,12 @@ def scan_file(
     deadline = time.monotonic() + budget
     unevaluated = 0
     _reset_chunked_search_coverage()
-    with scan_session(), set_pattern_filepath_context(filepath):
+    with (
+        scan_session(),
+        set_pattern_filepath_context(
+            filepath, local_repository_available=local_repository_available
+        ),
+    ):
         for idx, rule in enumerate(rules):
             if time.monotonic() >= deadline:
                 unevaluated = len(rules) - idx
@@ -2569,6 +2575,11 @@ def _run_corpus_rules(
                 )
                 continue
             for hit in hits:
+                if isinstance(hit, CorpusAnalysisGap):
+                    _append_incomplete_pattern_diagnostic(
+                        findings, rule.id, hit.file, [f"Line {hit.line}: {hit.reason}"]
+                    )
+                    continue
                 # A corpus callback may emit a 4-tuple to override the
                 # static rule title per-finding (e.g. XF-GH-004 names the
                 # specific pwn-request event that fired). mypy narrows the
