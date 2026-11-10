@@ -100,12 +100,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run the pinned composite Action on an existing fixed fixture
+      - name: Run the composite Action with its default scanner on a fixed fixture
         id: action
-        uses: Nellur35/taintly@6d38e45d5596c0ff7ede9aade7fed30e6516d292
+        uses: ./
         with:
           path: tests/playground/fixtures/github/sec4-gh-001-ppe-target-checkout/fixed
-          version: 83708e9e25bfe6d3d87d1bfb9d901d6226acd182
           platform: github
           fail-on: HIGH
           upload-sarif: true
@@ -128,7 +127,7 @@ jobs:
           assert os.environ['TAINTLY_ACTION_EXIT'] == '0'
           distribution = importlib.metadata.distribution('taintly')
           direct = json.loads(distribution.read_text('direct_url.json'))
-          assert direct['vcs_info']['commit_id'] == '83708e9e25bfe6d3d87d1bfb9d901d6226acd182'
+          assert direct['vcs_info']['commit_id'] == 'dc0fdb3582220ef828e58938cb686ee330c41eb4'
           workspace = Path(os.environ['GITHUB_WORKSPACE'])
           source = workspace / 'tests/playground/fixtures/github/sec4-gh-001-ppe-target-checkout/fixed/.github/workflows/ci.yml'
           assert hashlib.sha256(source.read_bytes()).hexdigest() == 'f322339ef6fbd7503d0db050ed707303c756cd8450e9423e09533199efe3b8ca'
