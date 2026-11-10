@@ -109,3 +109,41 @@ def test_requested_transitive_result_reaches_snapshot_and_incomplete_exit(tmp_pa
     assert code == 11
     assert fingerprint(extra[0], str(tmp_path)) in json.loads(target.read_text())["fingerprints"]
     assert len(json.loads(output.out)["errors"]) == 1
+
+def test_baseline_write_failure_keeps_original_bytes(tmp_path, monkeypatch, capsys):
+    from taintly.baseline import save_baseline
+
+    target = tmp_path / "snapshot.json"
+    save_baseline([], str(tmp_path), str(target))
+    original = target.read_bytes()
+
+    def fail_after_write(payload, stream, **kwargs):
+        stream.write('{"partial":')
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr("taintly.baseline.json.dump", fail_after_write)
+    _, code, output = _call(tmp_path, monkeypatch, capsys, _reports(tmp_path, 1, False))
+    assert code == 3
+    assert "unable to write baseline" in output.err
+    assert "injected write failure" in output.err
+    assert target.read_bytes() == original
+    assert not list(tmp_path.glob(".taintly-*.tmp"))
+
+
+def test_baseline_save_preserves_an_edit_seen_during_staging(tmp_path, monkeypatch):
+    from taintly.baseline import save_baseline
+
+    target = tmp_path / "snapshot.json"
+    save_baseline([], str(tmp_path), str(target))
+    edited = target.read_bytes() + b" "
+    original_dump = json.dump
+
+    def dump_then_edit(payload, stream, **kwargs):
+        original_dump(payload, stream, **kwargs)
+        target.write_bytes(edited)
+
+    monkeypatch.setattr("taintly.baseline.json.dump", dump_then_edit)
+    with pytest.raises(OSError, match="destination changed"):
+        save_baseline([], str(tmp_path), str(target))
+    assert target.read_bytes() == edited
+    assert not list(tmp_path.glob(".taintly-*.tmp"))

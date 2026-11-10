@@ -27,7 +27,10 @@ import hashlib
 import json
 import os
 import re
+import stat
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 BASELINE_FILENAME = ".taintly-baseline.json"
@@ -87,6 +90,56 @@ class Baseline:
 # ---------------------------------------------------------------------------
 
 
+def _baseline_destination(path: Path) -> tuple[int, int, int, int, int, int] | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("Baseline destination must be a regular file")
+    return (
+        info.st_mode,
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _write_baseline(output_path: str, payload: dict[str, Any]) -> None:
+    target = Path(os.path.abspath(output_path))
+    expected = _baseline_destination(target)
+    staged: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=".taintly-",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            staged = Path(stream.name)
+            json.dump(payload, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        if _baseline_destination(target) != expected:
+            raise OSError("Baseline destination changed during write")
+        if expected is not None:
+            os.chmod(staged, stat.S_IMODE(expected[0]))
+        os.replace(staged, target)
+    finally:
+        if staged is not None:
+            try:
+                staged.unlink(missing_ok=True)
+            except PermissionError:
+                # A staged copy of a read-only Windows file may require this.
+                os.chmod(staged, stat.S_IRUSR | stat.S_IWUSR)
+                staged.unlink(missing_ok=True)
+
+
 def save_baseline(
     findings: list[Any],
     repo_path: str,
@@ -127,9 +180,7 @@ def save_baseline(
         "resolved_refs": dict(sorted(resolved_refs.items())),
     }
 
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-        f.write("\n")
+    _write_baseline(output_path, payload)
 
     return Baseline(
         version=BASELINE_VERSION,
