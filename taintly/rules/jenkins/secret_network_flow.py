@@ -135,7 +135,7 @@ class JenkinsSecretNetworkPattern:
                 continue
             rows = tuple((shell_line + index, raw) for index, raw in enumerate(body.splitlines()))
             source = {variable: _Flow(frozenset({f"withCredentials:{variable}"}), ())}
-            flows, stopped = analyze_shell_rows(rows, source)
+            flows, stopped = analyze_shell_rows(rows, source, allow_printf=True)
             incomplete |= stopped
             for line, command, flow in flows:
                 item = (line, command)
