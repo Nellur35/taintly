@@ -1386,9 +1386,12 @@ def main():
     # dispatch as ordinary scanning, including aggregate machine formats.
     if args.baseline:
         baseline_path = args.baseline
-        bl = save_baseline(
-            all_findings, args.path, baseline_path, _resolve_current_refs(all_findings)
-        )
+        resolved_refs = _resolve_current_refs(all_findings)
+        try:
+            bl = save_baseline(all_findings, args.path, baseline_path, resolved_refs)
+        except OSError as exc:
+            print(f"Error: unable to write baseline {baseline_path}: {exc}", file=sys.stderr)
+            sys.exit(3)
         print(format_baseline_summary(bl, baseline_path), file=sys.stderr)
 
     # --diff: suppress known findings, show only new ones
