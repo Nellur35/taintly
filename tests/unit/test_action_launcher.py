@@ -91,7 +91,11 @@ def test_requested_report_and_console_failure_statuses_are_preserved(monkeypatch
     assert Path(calls[0][0]).is_absolute()
     assert calls[0][-2:] == ["--format", "text"]
     assert calls[1][-2:] == ["--format", "sarif"]
-    assert json.loads((tmp_path / "report with spaces.sarif").read_text())["version"] == "2.1.0"
+    report = tmp_path / "report with spaces.sarif"
+    if sarif == 3:
+        assert not report.exists()
+    else:
+        assert json.loads(report.read_text())["version"] == "2.1.0"
 
 
 @pytest.mark.parametrize("code", [0, 1, 2, 3, 11])
@@ -170,3 +174,33 @@ def test_actual_install_shell_treats_version_as_one_data_argument(tmp_path):
     assert capture.read_bytes().decode().split("\0")[:-1] == [
         "-m", "pip", "install", "git+https://github.com/Nellur35/taintly@" + version
     ]
+
+
+@pytest.mark.parametrize("failure", ["invalid-output", "subprocess-io", "fatal-exit", "replace"])
+def test_failed_sarif_publication_preserves_existing_report(monkeypatch, tmp_path, failure):
+    output = configure(monkeypatch, tmp_path, sarif=True)
+    report = tmp_path / "report with spaces.sarif"
+    original = b'{"version":"2.1.0","runs":[]}'
+    report.write_bytes(original)
+
+    def run(*args, **kwargs):
+        if "stdout" not in kwargs:
+            return SimpleNamespace(returncode=0)
+        if failure == "invalid-output":
+            kwargs["stdout"].write("{")
+        elif failure == "subprocess-io":
+            kwargs["stdout"].write("{")
+            raise OSError("injected scanner I/O failure")
+        else:
+            kwargs["stdout"].write('{"version":"2.1.0","runs":[{}]}')
+        return SimpleNamespace(returncode=3 if failure == "fatal-exit" else 0)
+
+    if failure == "replace":
+        def fail_replace(*args):
+            raise OSError("injected replacement failure")
+        monkeypatch.setattr(os, "replace", fail_replace)
+    monkeypatch.setattr(_action.subprocess, "run", run)
+    assert _action.main() == 3
+    assert output.read_text() == "exit-code=3\n"
+    assert report.read_bytes() == original
+    assert not list(tmp_path.glob(".taintly-*.tmp"))

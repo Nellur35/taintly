@@ -11,6 +11,24 @@ import sysconfig
 from collections.abc import Mapping
 from pathlib import Path
 
+if __package__:
+    from ._file_commit import staged_text
+else:
+    # action.yml executes this pinned launcher by filename. Load only its
+    # adjacent stdlib helper, without importing a workspace-owned taintly package.
+    import importlib.util
+
+    helper_name = "_taintly_action_file_commit"
+    helper_spec = importlib.util.spec_from_file_location(
+        helper_name, Path(__file__).with_name("_file_commit.py")
+    )
+    if helper_spec is None or helper_spec.loader is None:
+        raise ImportError("Action file-commit helper is unavailable")
+    helper = importlib.util.module_from_spec(helper_spec)
+    sys.modules[helper_name] = helper
+    helper_spec.loader.exec_module(helper)
+    staged_text = helper.staged_text
+
 
 def _arguments(env: Mapping[str, str]) -> list[str]:
     args = [env.get("CICD_AUDIT_PATH", "."), "--no-color"]
@@ -50,6 +68,13 @@ def _valid_sarif(path: Path) -> bool:
     )
 
 
+def _require_sarif(path: Path, status: int) -> None:
+    if status not in {0, 1, 2, 11}:
+        raise ValueError(f"SARIF generation failed (exit {status}).")
+    if not _valid_sarif(path):
+        raise ValueError("Requested report is not SARIF 2.1.0 JSON with a runs list.")
+
+
 def main() -> int:
     env = os.environ
     rc = 3
@@ -68,21 +93,21 @@ def main() -> int:
         rc = console
         if env.get("CICD_AUDIT_UPLOAD_SARIF", "false") == "true":
             report = Path(env.get("CICD_AUDIT_SARIF_FILE", "taintly.sarif"))
-            with report.open("w", encoding="utf-8") as output:
+            with staged_text(report) as (output, temporary_report):
                 # Same installed executable and argv-only boundary as above.
                 sarif = subprocess.run(  # nosec B603
                     [str(executable), *args, "--format", "sarif"],
                     stdout=output,
                     check=False,
                 ).returncode
-            if sarif in {0, 1, 2} and not _valid_sarif(report):
-                _error("Requested report is not SARIF 2.1.0 JSON with a runs list.")
-                sarif = 3
-            elif sarif not in {0, 1, 2}:
-                _error(f"SARIF generation failed or was incomplete (exit {sarif}).")
-            if console in {0, 1, 2}:
-                # Either scan can observe findings or incomplete analysis.
-                rc = max(console, sarif) if sarif in {0, 1, 2} else sarif
+                if console in {0, 1, 2}:
+                    # Keep the scanner's failure or incomplete status even when
+                    # it could not also produce a valid partial report.
+                    rc = max(console, sarif) if sarif in {0, 1, 2} else sarif
+                output.flush()
+                _require_sarif(temporary_report, sarif)
+            if sarif == 11:
+                _error("SARIF generation was incomplete (exit 11).")
     except (OSError, ValueError) as exc:
         _error(f"Could not run the Action or write its report: {exc}")
         if rc in {0, 1, 2}:
