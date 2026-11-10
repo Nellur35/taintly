@@ -886,7 +886,7 @@ def main():
             )
 
         print(format_fix_results(all_results, dry_run=dry_run))
-        sys.exit(0)
+        sys.exit(3 if any(result.error for result in all_results) else 0)
 
     # Platform posture audit mode — API-based, requires a token
     if args.platform_audit:
