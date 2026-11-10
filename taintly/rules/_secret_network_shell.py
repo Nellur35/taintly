@@ -13,6 +13,12 @@ _FILE = r"(?:/[A-Za-z0-9_.-]+)+|[A-Za-z0-9_.-]+"
 _SECRET = re.compile(r"\$\{\{\s*secrets\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}\Z")
 _VARIABLE = re.compile(rf"\$(?:({_NAME})|\{{({_NAME})\}})")
 _ECHO = re.compile(rf"echo\s+(\"[^\"`]*\"|'[^']*'|[^;&|<>`]+?)\s*(>>?)\s*({_FILE})\s*\Z")
+# One string conversion with one operand. Formats that can reinterpret the
+# value, additional arguments and compound commands are outside this profile.
+_PRINTF_FILE_WRITE = re.compile(
+    rf"printf\s+(?:'%s'|\"%s\")\s+(\"[^\"`\\]*\"|'[^'\\]*'|[A-Za-z0-9_.-]+)"
+    rf"\s*(>>?)\s*({_FILE})\s*\Z"
+)
 _BASE64 = re.compile(rf"base64\s+(?:-w0\s+)?({_FILE})\s*>\s*({_FILE})\s*\Z")
 _ASSIGN = re.compile(rf"({_NAME})=(\"[^\"`]*\"|'[^']*'|[^\s;&|<>`]+)\s*\Z")
 _SIMPLE_FILE = re.compile(rf"{_FILE}\Z")
@@ -143,7 +149,10 @@ def _physical_source(filepath: str, content: str) -> str | None:
 
 
 def analyze_shell_rows(
-    rows: tuple[tuple[int, str], ...], initial: dict[str, _Flow]
+    rows: tuple[tuple[int, str], ...],
+    initial: dict[str, _Flow],
+    *,
+    allow_printf: bool = False,
 ) -> tuple[list[tuple[int, str, _Flow]], bool]:
     """Trace a small straight-line shell program; unknown effects stop the path."""
     values = dict(initial)
@@ -160,14 +169,19 @@ def analyze_shell_rows(
                 return findings, remaining_body
             values[match.group(1)] = flow
             continue
-        if match := _ECHO.fullmatch(command):
-            flow = _expanded(match.group(1), values, line, "file-write")
+        write = _ECHO.fullmatch(command)
+        write_kind = "file-write"
+        if write is None and allow_printf:
+            write = _PRINTF_FILE_WRITE.fullmatch(command)
+            write_kind = "printf-file-write"
+        if write is not None:
+            flow = _expanded(write.group(1), values, line, write_kind)
             if flow is None:
                 return findings, remaining_body
-            name = match.group(3)
+            name = write.group(3)
             files[name] = (
                 flow
-                if match.group(2) == ">" or name not in files
+                if write.group(2) == ">" or name not in files
                 else _joined([files[name], flow], line, "file-append")
             )
             continue
