@@ -190,6 +190,12 @@ the file; the separate upload step publishes it to GitHub code scanning.
 
 Choose a gate according to whether the codebase already has findings.
 
+Pass `--require-files` to a local scan when CI expects at least one pipeline
+configuration file. If the selected path and platform yield zero files,
+taintly emits a coverage diagnostic and exits with code `11`. With
+`--baseline`, this also prevents writing an empty baseline. In the
+composite Action, pass the flag via `extra-args`.
+
 ### Exit codes
 
 | Code | Meaning |
