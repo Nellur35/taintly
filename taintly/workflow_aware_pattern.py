@@ -26,9 +26,8 @@ Phase contract is the same as ``StructuralPattern``:
     declares.  All leaves are collected into the predicate context
     on the first pass; the second pass iterates query-matched leaves
     and runs the predicate.
-  * CUTOFF events emit the same ``STRUCTURAL-CUTOFF:`` sentinel as
-    ``StructuralPattern`` so the engine's coverage-warning path
-    reports degraded structural reads consistently.
+  * A cutoff leaves pattern results incomplete and preserves any matches
+    found before the cutoff.
 """
 
 from __future__ import annotations
@@ -620,8 +619,7 @@ class WorkflowAwarePattern:
                 recover=True,
             ):
                 if ev.kind == EventKind.CUTOFF:
-                    # Already accounted for by pass 1's marker; skip
-                    # to avoid emitting twice.
+                    # Pass 1 recorded the cutoff.
                     break
                 if ev.kind != EventKind.LEAF_SCALAR:
                     continue
@@ -658,23 +656,16 @@ class WorkflowAwarePattern:
                     seen.add(key)
                     results.append((ev.line, snippet))
 
+        incomplete_reasons = []
         if cutoff_seen and any_leaf_seen:
-            cutoff_marker = (
-                cutoff_line or 1,
-                f"STRUCTURAL-CUTOFF: structural reader stopped at "
-                f"line {cutoff_line} (unsupported YAML construct); "
-                "rule cannot evaluate this file fully",
-            )
-            if cutoff_marker not in seen:
-                results.append(cutoff_marker)
+            incomplete_reasons.append(f"Structural YAML analysis stopped at line {cutoff_line}.")
         if ctx._missing_repository_evidence:
-            return IncompletePatternMatches(
-                results,
-                reason=(
-                    "Source-bound repository files are unavailable for cross-workflow analysis. "
-                    "Scan the corresponding repository checkout to evaluate this relationship."
-                ),
+            incomplete_reasons.append(
+                "Source-bound repository files are unavailable for cross-workflow analysis. "
+                "Scan the corresponding repository checkout to evaluate this relationship."
             )
+        if incomplete_reasons:
+            return IncompletePatternMatches(results, reason=" ".join(incomplete_reasons))
         return results
 
     def _render_snippet(

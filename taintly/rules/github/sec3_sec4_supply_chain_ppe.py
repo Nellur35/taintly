@@ -731,13 +731,10 @@ class _PrivilegedPRCheckoutPattern:
                 results.append((line, snippet))
 
         if cutoff_line:
-            cutoff_marker = (
-                cutoff_line,
-                f"STRUCTURAL-CUTOFF: structural reader stopped at "
-                f"line {cutoff_line} (unsupported YAML construct); "
-                "rule cannot evaluate this file fully",
+            return IncompletePatternMatches(
+                results,
+                reason=f"Structural YAML analysis stopped at line {cutoff_line}.",
             )
-            results.append(cutoff_marker)
         return results
 
 

@@ -606,8 +606,11 @@ def test_sec4_gh_001_preserves_cutoff_before_parsed_root_trigger(all_rules):
 
     matches = pattern.check(content, content.splitlines())
 
-    assert len(matches) == 1
-    assert matches[0][1].startswith("STRUCTURAL-CUTOFF:")
+    from taintly.models import IncompletePatternMatches
+
+    assert isinstance(matches, IncompletePatternMatches)
+    assert matches == []
+    assert "stopped at line 1" in matches.reason
 
 
 # =============================================================================

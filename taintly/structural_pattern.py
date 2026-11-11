@@ -12,11 +12,8 @@ Contract:
   * Each call walks the file with a fixed path glob and applies a
     Python predicate to every leaf scalar at that path.  Truthy
     predicate result emits a finding at the leaf's line.
-  * If the walker emits a ``CUTOFF`` event before the query
-    completes, ``check`` emits a sentinel ``ENGINE-ERR``-shaped
-    finding marking degraded structural coverage.  The engine's
-    standard exit-11 path picks this up — same mechanism the
-    existing ``ENGINE-ERR`` LOW finding uses.
+  * A cutoff returns incomplete pattern results alongside any real matches
+    found before it. The engine reports the incomplete scan separately.
 """
 
 from __future__ import annotations
@@ -24,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from .models import IncompletePatternMatches
 from .parsers.structural import EventKind, walk_workflow
 
 
@@ -150,14 +148,10 @@ class StructuralPattern:
                     results.append((ev.line, snippet))
 
         if cutoff_seen and any_leaf_seen:
-            cutoff_marker = (
-                cutoff_line or 1,
-                f"STRUCTURAL-CUTOFF: structural reader stopped at "
-                f"line {cutoff_line} (unsupported YAML construct); "
-                "rule cannot evaluate this file fully",
+            return IncompletePatternMatches(
+                results,
+                reason=f"Structural YAML analysis stopped at line {cutoff_line}.",
             )
-            if cutoff_marker not in seen:
-                results.append(cutoff_marker)
         return results
 
     def _render_snippet(

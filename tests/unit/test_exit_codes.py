@@ -9,6 +9,7 @@ is what's asserted, not a Python-level intermediate.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,42 @@ def test_clean_scan_exits_zero(tmp_path: Path):
     """Empty repo with no workflows → exit 0."""
     code = _run([str(tmp_path)])
     assert code == 0, f"expected 0 (clean scan), got {code}"
+
+
+@pytest.mark.parametrize("permissions, expected_exit", [("{}", 11), ("write-all", 1)])
+def test_deep_yaml_flow_preserves_json_report(tmp_path: Path, permissions: str, expected_exit: int):
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "deep.yml").write_text(
+        f"name: deep\non: push\npermissions: {permissions}\n"
+        "jobs: {}\nextra: " + "[" * 1200 + "0" + "]" * 1200 + "\n",
+        encoding="utf-8",
+    )
+    (workflows / "normal.yml").write_text("name: normal\non: push\njobs: {}\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "taintly", str(tmp_path), "--format", "json", "--no-config"],
+        cwd=ROOT,
+        capture_output=True,
+        timeout=30,
+    )
+
+    assert result.returncode == expected_exit, result.stderr.decode(errors="replace")
+    report = json.loads(result.stdout)
+    assert report["files_scanned"] == 2
+    assert report["coverage_status"] == "incomplete"
+    assert any(
+        finding["rule_id"] == "ENGINE-ERR"
+        and finding["line"] == 5
+        and Path(finding["file"]).name == "deep.yml"
+        for finding in report["findings"]
+    )
+    high_findings = {
+        finding["rule_id"]
+        for finding in report["findings"]
+        if finding["severity"] in {"HIGH", "CRITICAL"}
+    }
+    assert high_findings == ({"SEC2-GH-001"} if permissions == "write-all" else set())
 
 
 def test_invalid_argument_exits_two(tmp_path: Path):

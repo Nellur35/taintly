@@ -40,6 +40,8 @@ from enum import Enum
 from .tokenizer import Token, TokenizerError, TokenKind, tokenize
 
 MAX_ANCHOR_WORK = 100_000
+# Bound recursive flow containers well below Python's recursion limit.
+_MAX_FLOW_DEPTH = 128
 
 
 class EventKind(Enum):
@@ -853,6 +855,7 @@ class _Walker:
         start: int,
         *,
         pre_key: object | None = None,
+        depth: int = 1,
     ) -> Iterator[Event]:
         """Consume one flow sequence or mapping starting at
         ``tokens[start]`` (FLOW_OPEN_SEQ or FLOW_OPEN_MAP).
@@ -946,7 +949,11 @@ class _Walker:
                 else:
                     inner_pre_key = flow_pending_key
                     flow_pending_key = None
-                yield from self._consume_flow(tokens, i, pre_key=inner_pre_key)
+                if depth >= _MAX_FLOW_DEPTH:
+                    raise TokenizerError(
+                        t.line, f"YAML flow nesting exceeds {_MAX_FLOW_DEPTH} levels"
+                    )
+                yield from self._consume_flow(tokens, i, pre_key=inner_pre_key, depth=depth + 1)
                 i = self._flow_end_idx
                 continue
             if t.kind in (TokenKind.SCALAR_PLAIN, TokenKind.SCALAR_QUOTED):
