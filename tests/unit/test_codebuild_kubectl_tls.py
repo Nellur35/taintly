@@ -22,6 +22,14 @@ def test_literal_tls_request_belongs_to_the_phase_command(value):
     assert _check(text) == [(5, text.splitlines()[4].strip())]
 
 
+def test_a_fully_quoted_wildcard_stays_in_one_value_operand():
+    text = _buildspec(
+        'kubectl config set-cluster prod --server="https://example.invalid/*" '
+        "--insecure-skip-tls-verify=true"
+    )
+    assert _check(text) == [(5, text.splitlines()[4].strip())]
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -46,6 +54,7 @@ def test_no_true_request_for_false_help_or_data(command):
         "--insecure-skip-tls-verify=true --certificate-authority=ca.pem",
         "--insecure-skip-tls-verify=true --server=$URL",
         '--insecure-skip-tls-verify=true --server="$URL"*',
+        '--insecure-skip-tls-verify=true --server="prefix"*"suffix"',
         "--insecure-skip-tls-verify=true && echo done",
     ],
 )

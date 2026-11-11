@@ -108,9 +108,7 @@ def _request(command: str) -> tuple[str | None, bool]:
                 raw_value = raw[index]
             if expanded and not _QUOTED_VAR.fullmatch(raw_value):
                 return None, True
-            quoted = (
-                len(raw_value) >= 2 and raw_value[0] in {"'", '"'} and raw_value[-1] == raw_value[0]
-            )
+            quoted = re.fullmatch(r"""(?:"[^"]*"|'[^']*')""", raw_value) is not None
             if not value or (not quoted and any(char in value for char in "*?[]{}~")):
                 return None, True
             ca |= option == "--certificate-authority"
