@@ -45,6 +45,20 @@ def test_nested_path_for_step_uses():
     assert ("jobs", "build", "steps", 1, "run") in paths
 
 
+def test_flow_depth_cutoff_preserves_resolved_leaves():
+    prefix = "name: ci\nextra: "
+    at_limit = prefix + "[" * 128 + "value" + "]" * 128 + "\n"
+    too_deep = prefix + "[" * 129 + "value" + "]" * 129 + "\nafter: ignored\n"
+
+    assert [event.value for event in _leaves(at_limit)] == ["ci", "value"]
+    events = list(walk(too_deep))
+    assert [event.kind for event in events] == [EventKind.LEAF_SCALAR, EventKind.CUTOFF]
+    assert events[-1].line == 2
+    assert "flow nesting exceeds" in events[-1].message
+    with pytest.raises(TokenizerError, match="flow nesting exceeds"):
+        list(walk(too_deep, recover=False))
+
+
 def test_leaf_value_and_value_kind():
     src = (
         "jobs:\n"

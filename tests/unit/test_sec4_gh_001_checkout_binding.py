@@ -327,6 +327,6 @@ jobs:
 """,
     )
 
-    findings = _sec4_gh_001(tmp_path)
-    assert len(findings) == 1
-    assert findings[0].snippet.startswith("STRUCTURAL-CUTOFF:")
+    report = scan_repo(str(tmp_path), load_all_rules(), Platform.GITHUB)[0]
+    assert not any(f.rule_id == "SEC4-GH-001" for f in report.findings)
+    assert any("Rule SEC4-GH-001 returned incomplete" in f.title for f in report.engine_errors())
