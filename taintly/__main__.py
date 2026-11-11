@@ -427,6 +427,11 @@ def main():
         dest="fail_on",
         help="Exit 1 if any finding is at this severity or above (independent of --min-severity)",
     )
+    parser.add_argument(
+        "--require-files",
+        action="store_true",
+        help="In a local scan, exit 11 and report incomplete coverage if no CI files are found",
+    )
     baseline_mode = parser.add_mutually_exclusive_group()
     baseline_mode.add_argument(
         "--baseline",
@@ -562,6 +567,21 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.require_files and any(
+        (
+            args.self_test,
+            args.integration_test,
+            args.guide,
+            args.fix,
+            args.fix_dry_run,
+            args.platform_audit,
+            args.github_org,
+            args.gitlab_group,
+            args.jenkins_url,
+        )
+    ):
+        parser.error("--require-files is only supported for local scans")
 
     if args.score or args.format == "html":
         from .scorer import compute_score
@@ -1323,6 +1343,18 @@ def main():
         respect_inline_suppressions=not args.no_inline_suppressions,
     )
 
+    missing_scan_files = args.require_files and not any(report.files_scanned for report in reports)
+    if missing_scan_files:
+        reports[0].add(
+            Finding(
+                rule_id="ENGINE-ERR",
+                severity=Severity.LOW,
+                title="No CI configuration files found (--require-files)",
+                description="Check the scan path and platform selection before relying on this report.",
+                file=reports[0].repo_path,
+            )
+        )
+
     # Surface config-driven exclusions on every report so the summary
     # reporter can disclose them.  CLI-only exclusions are operator
     # choices and not surfaced; config exclusions are
@@ -1384,7 +1416,7 @@ def main():
 
     # Save observations after requested analysis, then use the same report
     # dispatch as ordinary scanning, including aggregate machine formats.
-    if args.baseline:
+    if args.baseline and not missing_scan_files:
         baseline_path = args.baseline
         resolved_refs = _resolve_current_refs(all_findings)
         try:

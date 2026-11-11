@@ -36,6 +36,36 @@ def test_clean_scan_exits_zero(tmp_path: Path):
     assert code == 0, f"expected 0 (clean scan), got {code}"
 
 
+@pytest.mark.parametrize("write_baseline", [False, True])
+def test_require_files_discloses_empty_scan(tmp_path: Path, write_baseline: bool):
+    baseline = tmp_path / "baseline.json"
+    args = ["--require-files", "--format", "json", "--no-config", str(tmp_path)]
+    if write_baseline:
+        baseline.write_bytes(b"existing baseline")
+        args.extend(["--baseline", str(baseline)])
+    result = subprocess.run(
+        [sys.executable, "-m", "taintly", *args],
+        cwd=ROOT,
+        capture_output=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 11, result.stderr.decode(errors="replace")
+    report = json.loads(result.stdout)
+    assert report["files_scanned"] == 0
+    assert report["coverage_status"] == "incomplete"
+    assert any("No CI configuration files found" in f["title"] for f in report["findings"])
+    if write_baseline:
+        assert baseline.read_bytes() == b"existing baseline"
+
+
+def test_require_files_allows_scan_with_workflow(tmp_path: Path):
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text("on: push\npermissions: {}\njobs: {}\n", encoding="utf-8")
+    assert _run([str(tmp_path), "--require-files", "--no-config"]) == 0
+
+
 @pytest.mark.parametrize("permissions, expected_exit", [("{}", 11), ("write-all", 1)])
 def test_deep_yaml_flow_preserves_json_report(tmp_path: Path, permissions: str, expected_exit: int):
     workflows = tmp_path / ".github" / "workflows"
