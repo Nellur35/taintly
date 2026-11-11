@@ -24,6 +24,7 @@ from taintly.models import (
     Severity,
 )
 from taintly.parsers.jenkinsfile.groovy_lex import Token, TokKind, tokenize
+from taintly.rules.jenkins.http_tls import HttpRequestTLSOptionPattern
 
 
 class _GitCheckoutHttpPattern:
@@ -3172,29 +3173,21 @@ RULES: list[Rule] = [
     # has its own knob, ``ignoreSslErrors: true``, which the shell-anchored
     # rule never sees.  Plain HTTP endpoints in ``httpRequest`` are separate
     # from Git checkouts; SEC8-JK-003 requires Git syntax around its URL.
-    # ``ignoreSslErrors`` is httpRequest-specific → near-zero FP.
     # =========================================================================
     Rule(
         id="SEC6-JK-009",
         finding_family="insecure_transport",
-        title="HTTP Request step disables TLS certificate verification (ignoreSslErrors)",
+        title="HTTP Request step requests TLS certificate verification bypass (ignoreSslErrors)",
         severity=Severity.HIGH,
         platform=Platform.JENKINS,
         owasp_cicd="CICD-SEC-6",
         description=(
-            "A Jenkins ``httpRequest`` step (HTTP Request plugin) sets "
-            "``ignoreSslErrors: true``, disabling TLS certificate verification "
-            "for that request. This is the plugin-step analogue of ``curl -k`` "
-            "(SEC6-JK-004, which only inspects shell bodies). An attacker on the "
-            "network path can present a forged certificate and intercept the "
-            "request — reading any credential or token sent in headers and "
-            "substituting a malicious response body (forged artifact, false API "
-            "result) that the pipeline then trusts."
+            "A direct Jenkins ``httpRequest`` call sets its named "
+            "``ignoreSslErrors`` option to the literal Boolean ``true``. "
+            "The standard HTTP Request plugin can then accept an invalid "
+            "certificate on an HTTPS request."
         ),
-        pattern=RegexPattern(
-            match=r"ignoreSslErrors\s*:\s*[Tt]rue\b",
-            exclude=[r"^\s*//", r"^\s*\*"],
-        ),
+        pattern=HttpRequestTLSOptionPattern(),
         remediation=(
             "Fix the certificate trust instead of ignoring errors:\n\n"
             "// BAD\n"
@@ -3212,14 +3205,15 @@ RULES: list[Rule] = [
             "httpRequest url: 'https://internal/api'",
             "httpRequest url: 'https://x/y', ignoreSslErrors: false",
             "// httpRequest url: 'https://x', ignoreSslErrors: true",
+            "echo 'httpRequest(ignoreSslErrors: true)'",
+            "otherCall(ignoreSslErrors: true)",
         ],
         stride=["I", "T"],
         threat_narrative=(
-            "Ignoring SSL errors removes the guarantee that the responding host "
-            "is authentic. A MITM serves a forged certificate, reads any "
-            "Authorization header or token the step sends, and returns attacker "
-            "content the pipeline then executes or deploys — credentials in "
-            "transit are effectively public."
+            "An attacker on the network path could present an invalid certificate "
+            "to intercept an affected HTTPS request or modify its response. "
+            "The source establishes the requested option. The effective plugin, "
+            "endpoint, execution and any credential exposure depend on runtime."
         ),
         confidence="high",
     ),
