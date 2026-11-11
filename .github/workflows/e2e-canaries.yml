@@ -127,7 +127,7 @@ jobs:
           assert os.environ['TAINTLY_ACTION_EXIT'] == '0'
           distribution = importlib.metadata.distribution('taintly')
           direct = json.loads(distribution.read_text('direct_url.json'))
-          assert direct['vcs_info']['commit_id'] == '5d92f851347e25bf1d26cbb2b1834fdc0b87ea8e'
+          assert direct['vcs_info']['commit_id'] == 'e6fc80aa2973c21566361e2940a6b4615f9e993f'
           workspace = Path(os.environ['GITHUB_WORKSPACE'])
           source = workspace / 'tests/playground/fixtures/github/sec4-gh-001-ppe-target-checkout/fixed/.github/workflows/ci.yml'
           assert hashlib.sha256(source.read_bytes()).hexdigest() == 'f322339ef6fbd7503d0db050ed707303c756cd8450e9423e09533199efe3b8ca'
@@ -144,4 +144,103 @@ jobs:
               return False
           assert any(result['ruleId'] == 'SEC4-GH-005B' and owns_source(result) for result in results)
           print('Pinned scanner, expected source, Action output and local SARIF delivery verified.')
+          PY
+
+  jenkins-delivery:
+    name: Jenkins Action delivery (${{ matrix.case }})
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: direct
+            exit: "1"
+          - case: printed
+            exit: "0"
+          - case: dynamic
+            exit: "11"
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            pypi.org:443
+            files.pythonhosted.org:443
+            github.com:443
+            codeload.github.com:443
+            api.github.com:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Write a Jenkinsfile for static scanning
+        env:
+          PROBE_CASE: ${{ matrix.case }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          commands = {
+              "direct": "httpRequest(url: 'https://example.invalid', ignoreSslErrors: true)",
+              "printed": "echo 'httpRequest(ignoreSslErrors: true)'",
+              "dynamic": "httpRequest(url: 'https://example.invalid', ignoreSslErrors: params.BYPASS)",
+          }
+          root = Path(os.environ["RUNNER_TEMP"]) / "jenkins-probe"
+          root.mkdir()
+          (root / "Jenkinsfile").write_text(commands[os.environ["PROBE_CASE"]] + "\n")
+          PY
+      - name: Scan with the Action default
+        id: probe
+        uses: ./
+        # The probe deliberately exercises two expected failures. The next
+        # step requires the exact exit, step outcome and report for each case.
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/jenkins-probe
+          platform: jenkins
+          fail-on: HIGH
+          upload-sarif: true
+          sarif-file: ${{ runner.temp }}/jenkins-probe.sarif
+          extra-args: --no-config
+      - name: Verify installed scanner, Action outcome and SARIF finding
+        working-directory: ${{ runner.temp }}
+        env:
+          PROBE_EXIT: ${{ steps.probe.outputs.exit-code }}
+          PROBE_OUTCOME: ${{ steps.probe.outcome }}
+          EXPECTED_EXIT: ${{ matrix.exit }}
+        run: |
+          python - <<'PY'
+          import importlib.metadata
+          import json
+          import os
+          from pathlib import Path
+
+          exit_code = os.environ["EXPECTED_EXIT"]
+          assert os.environ["PROBE_EXIT"] == exit_code
+          assert os.environ["PROBE_OUTCOME"] == ("success" if exit_code == "0" else "failure")
+          direct = json.loads(importlib.metadata.distribution("taintly").read_text("direct_url.json"))
+          assert direct["vcs_info"]["commit_id"] == "e6fc80aa2973c21566361e2940a6b4615f9e993f"
+          report = json.loads(Path("jenkins-probe.sarif").read_text())
+          assert report["version"] == "2.1.0" and isinstance(report["runs"], list)
+          results = [result for run in report["runs"] for result in run.get("results", [])]
+          findings = [result for result in results if result["ruleId"] == "SEC6-JK-009"]
+          diagnostics = [
+              notification
+              for run in report["runs"]
+              for invocation in run.get("invocations", [])
+              for notification in invocation.get("toolExecutionNotifications", [])
+              if notification["descriptor"]["id"] == "ENGINE-ERR"
+              and "SEC6-JK-009" in notification["message"]["text"]
+          ]
+          assert len(findings) == (1 if exit_code == "1" else 0)
+          assert len(diagnostics) == (1 if exit_code == "11" else 0)
+          if findings:
+              location = findings[0]["locations"][0]["physicalLocation"]
+              assert findings[0]["level"] == "error" and location["region"]["startLine"] == 1
+              assert Path(location["artifactLocation"]["uri"]).name == "Jenkinsfile"
+          print(f"Installed scanner, expected exit {exit_code}, and SARIF verified.")
           PY
