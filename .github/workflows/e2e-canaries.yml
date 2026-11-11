@@ -127,7 +127,7 @@ jobs:
           assert os.environ['TAINTLY_ACTION_EXIT'] == '0'
           distribution = importlib.metadata.distribution('taintly')
           direct = json.loads(distribution.read_text('direct_url.json'))
-          assert direct['vcs_info']['commit_id'] == 'dc0fdb3582220ef828e58938cb686ee330c41eb4'
+          assert direct['vcs_info']['commit_id'] == '5d92f851347e25bf1d26cbb2b1834fdc0b87ea8e'
           workspace = Path(os.environ['GITHUB_WORKSPACE'])
           source = workspace / 'tests/playground/fixtures/github/sec4-gh-001-ppe-target-checkout/fixed/.github/workflows/ci.yml'
           assert hashlib.sha256(source.read_bytes()).hexdigest() == 'f322339ef6fbd7503d0db050ed707303c756cd8450e9423e09533199efe3b8ca'
