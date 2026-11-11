@@ -194,7 +194,8 @@ Pass `--require-files` to a local scan when CI expects at least one pipeline
 configuration file. If the selected path and platform yield zero files,
 taintly emits a coverage diagnostic and exits with code `11`. With
 `--baseline`, this also prevents writing an empty baseline. In the
-composite Action, pass the flag via `extra-args`.
+composite Action, choose a scanner version that includes this flag and pass it
+via `extra-args`.
 
 ### Exit codes
 
