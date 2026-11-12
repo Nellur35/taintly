@@ -127,7 +127,7 @@ jobs:
           assert os.environ['TAINTLY_ACTION_EXIT'] == '0'
           distribution = importlib.metadata.distribution('taintly')
           direct = json.loads(distribution.read_text('direct_url.json'))
-          assert direct['vcs_info']['commit_id'] == '317fb9af18d5b0eea7e4343ecf73aa500d892456'
+          assert direct['vcs_info']['commit_id'] == '51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52'
           workspace = Path(os.environ['GITHUB_WORKSPACE'])
           source = workspace / 'tests/playground/fixtures/github/sec4-gh-001-ppe-target-checkout/fixed/.github/workflows/ci.yml'
           assert hashlib.sha256(source.read_bytes()).hexdigest() == 'f322339ef6fbd7503d0db050ed707303c756cd8450e9423e09533199efe3b8ca'
@@ -147,7 +147,7 @@ jobs:
           PY
 
   tls-delivery:
-    name: TLS Action delivery (${{ matrix.platform }}, ${{ matrix.case }})
+    name: Pipeline Action delivery (${{ matrix.platform }}, ${{ matrix.case }})
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -173,6 +173,9 @@ jobs:
           - platform: gitlab
             case: dynamic
             exit: "11"
+          - platform: gitlab
+            case: mr-publication
+            exit: "1"
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -207,6 +210,20 @@ jobs:
                   "dynamic": "httpRequest(url: 'https://example.invalid', ignoreSslErrors: params.BYPASS)",
               }
               (root / "Jenkinsfile").write_text(commands[case] + "\n")
+          elif case == "mr-publication":
+              (root / ".gitlab-ci.yml").write_text(
+                  'workflow:\n'
+                  '  rules:\n'
+                  '    - if: $CI_PIPELINE_SOURCE == "merge_request_event"\n'
+                  'publish:\n'
+                  '  rules:\n'
+                  '    - if: $CI_PIPELINE_SOURCE == "merge_request_event"\n'
+                  '  id_tokens:\n'
+                  '    SIGNING_TOKEN:\n'
+                  '      aud: sigstore\n'
+                  '  script:\n'
+                  '    - docker push registry.example.invalid/preview:probe\n'
+              )
           else:
               commands = {
                   "direct": "curl -k https://example.invalid",
@@ -249,13 +266,17 @@ jobs:
           assert os.environ["PROBE_EXIT"] == exit_code
           assert os.environ["PROBE_OUTCOME"] == ("success" if exit_code == "0" else "failure")
           direct = json.loads(importlib.metadata.distribution("taintly").read_text("direct_url.json"))
-          assert direct["vcs_info"]["commit_id"] == "317fb9af18d5b0eea7e4343ecf73aa500d892456"
+          assert direct["vcs_info"]["commit_id"] == "51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52"
           report = json.loads(Path("tls-probe.sarif").read_text())
           assert report["version"] == "2.1.0" and isinstance(report["runs"], list)
           results = [result for run in report["runs"] for result in run.get("results", [])]
           platform, case = os.environ["PROBE_PLATFORM"], os.environ["PROBE_CASE"]
           rule_id = {"jenkins": "SEC6-JK-009", "gitlab": "SEC6-GL-012"}[platform]
-          expected_finding = case == "direct" or (platform == "gitlab" and case == "dynamic")
+          if case == "mr-publication":
+              rule_id = "CHAIN-GL-101"
+          expected_finding = case in {"direct", "mr-publication"} or (
+              platform == "gitlab" and case == "dynamic"
+          )
           findings = [result for result in results if result["ruleId"] == rule_id]
           diagnostics = [
               notification
@@ -273,10 +294,15 @@ jobs:
                   "jenkins": ("Jenkinsfile", 1, "error"),
                   "gitlab": (".gitlab-ci.yml", 3, "warning"),
               }[platform]
+              if case == "mr-publication":
+                  expected_line, level = 11, "error"
               assert findings[0]["level"] == level
               assert location["region"]["startLine"] == expected_line
               assert Path(location["artifactLocation"]["uri"]).name == expected_name
               if platform == "gitlab":
                   assert findings[0]["properties"]["review_needed"] is True
+              if case == "mr-publication":
+                  notes = " ".join(findings[0]["properties"]["context_notes"])
+                  assert "SIGNING_TOKEN" in notes and "write grants are unverified" in notes
           print(f"Installed scanner, expected exit {exit_code}, and SARIF verified.")
           PY
