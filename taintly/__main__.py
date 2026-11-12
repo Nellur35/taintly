@@ -428,6 +428,11 @@ def main():
         help="Exit 1 if any finding is at this severity or above (independent of --min-severity)",
     )
     parser.add_argument(
+        "--review-advisory",
+        action="store_true",
+        help="Keep review-needed findings in reports but exclude them from the exit severity gate",
+    )
+    parser.add_argument(
         "--require-files",
         action="store_true",
         help="In a local scan, exit 11 and report incomplete coverage if no CI files are found",
@@ -1012,7 +1017,7 @@ def main():
         _output_report(report, args, score_report=score_report)
         if score_report is not None and args.format == "text":
             print(format_score(score_report, use_color=not args.no_color))
-        _exit_for_severity(report, effective_fail_on)
+        _exit_for_severity(report, effective_fail_on, review_advisory=args.review_advisory)
         return
 
     # GitHub org scan mode
@@ -1101,7 +1106,7 @@ def main():
         _output_report(report, args, score_report=score_report)
         if score_report is not None and args.format == "text":
             print(format_score(score_report, use_color=not args.no_color))
-        _exit_for_severity(report, effective_fail_on)
+        _exit_for_severity(report, effective_fail_on, review_advisory=args.review_advisory)
         return
 
     # GitLab group scan mode
@@ -1225,7 +1230,7 @@ def main():
         _output_report(report, args, score_report=score_report)
         if score_report is not None and args.format == "text":
             print(format_score(score_report, use_color=not args.no_color))
-        _exit_for_severity(report, effective_fail_on)
+        _exit_for_severity(report, effective_fail_on, review_advisory=args.review_advisory)
         return
 
     # Jenkins instance posture audit
@@ -1269,7 +1274,7 @@ def main():
         _output_report(report, args, score_report=score_report)
         if score_report is not None and args.format == "text":
             print(format_score(score_report, use_color=not args.no_color))
-        _exit_for_severity(report, effective_fail_on)
+        _exit_for_severity(report, effective_fail_on, review_advisory=args.review_advisory)
         return
 
     # ------------------------------------------------------------------
@@ -1536,31 +1541,7 @@ def main():
         # Accepting existing security debt does not waive incomplete analysis.
         sys.exit(11 if any(f.rule_id == "ENGINE-ERR" for f in all_findings) else 0)
 
-    # Exit code: built-in CRITICAL=2/HIGH=1 logic + optional fail-on
-    # threshold + coverage-warning branch (exit 11) so a scan that
-    # completed but degraded coverage is distinguishable from a
-    # genuinely clean run.  ENGINE-ERR is excluded from the worst-
-    # severity calculation so its LOW severity doesn't masquerade as
-    # a real LOW finding.  CRITICAL wins regardless of fail_on so a
-    # CI gate can distinguish CRITICAL from HIGH at the exit-code
-    # layer; see _exit_for_severity for the same ordering and the
-    # full rationale.
-    real = [f for f in all_findings if f.rule_id != "ENGINE-ERR"]
-    worst = Severity.INFO
-    for f in real:
-        if f.severity > worst:
-            worst = f.severity
-    has_coverage_warning = any(f.rule_id == "ENGINE-ERR" for f in all_findings)
-
-    if worst == Severity.CRITICAL:
-        sys.exit(2)
-    if effective_fail_on and worst >= effective_fail_on:
-        sys.exit(1)
-    if worst == Severity.HIGH:
-        sys.exit(1)
-    if has_coverage_warning:
-        sys.exit(11)
-    sys.exit(0)
+    _exit_for_findings(all_findings, effective_fail_on, review_advisory=args.review_advisory)
 
 
 def _print_engine_errors_to_stderr(report) -> None:
@@ -1611,48 +1592,27 @@ def _output_report(report, args, score_report=None):
         print(format_html(report, score_report=score_report))
 
 
-def _exit_for_severity(report, fail_on: Severity | None = None):
-    """Exit with an appropriate code based on the worst finding in the report.
+def _exit_for_severity(report, fail_on: Severity | None = None, *, review_advisory: bool = False):
+    _exit_for_findings(report.findings, fail_on, review_advisory=review_advisory)
 
-    Exit codes:
-      * 0  — clean scan, no findings or only INFO-grade
-      * 1  — HIGH finding, or fail-on threshold reached
-      * 2  — CRITICAL finding (always — takes precedence over fail-on)
-      * 11 — scanned cleanly BUT one or more files exceeded the
-             scanner cap and file-scope rule coverage was degraded
-             (ENGINE-ERR findings present). Distinct from 0 so CI can
-             distinguish "scanned and found nothing" from "scanned
-             with reduced coverage" — the field-test report flagged
-             this as a missing signal on monolithic GitLab CI configs.
-             Real-finding exit codes (1/2) take precedence: if
-             findings AND coverage warnings both exist, the finding
-             code wins.
 
-    Severity-distinguishing precedence: CRITICAL always returns 2,
-    even when ``--fail-on CRITICAL`` is set or ``audit_config.fail_on``
-    is HIGH (or lower).  Before this ordering, a fail-on threshold
-    reached by a CRITICAL finding collapsed to exit 1 — losing the
-    CRITICAL-vs-HIGH distinction CI gates need to page on.
-    """
-    # Exclude ENGINE-ERR (severity LOW) from the "worst finding" logic
-    # so a coverage warning alone doesn't masquerade as a LOW finding.
-    real = [f for f in report.findings if f.rule_id != "ENGINE-ERR"]
-    worst = Severity.INFO
-    for f in real:
-        if f.severity > worst:
-            worst = f.severity
-    has_coverage_warning = any(f.rule_id == "ENGINE-ERR" for f in report.findings)
-    # CRITICAL wins regardless of fail_on — preserves the
-    # CRITICAL-vs-HIGH distinction at the exit-code layer.
+def _exit_for_findings(
+    findings: list[Finding], fail_on: Severity | None, *, review_advisory: bool
+) -> None:
+    """Apply the exit gate separately from reporting and coverage."""
+    blocking = [
+        finding.severity
+        for finding in findings
+        if finding.rule_id != "ENGINE-ERR" and not (review_advisory and finding.review_needed)
+    ]
+    worst = max(blocking, default=Severity.INFO)
     if worst == Severity.CRITICAL:
         sys.exit(2)
-    # fail_on threshold reached at a sub-CRITICAL severity.
-    if fail_on and worst >= fail_on:
+    if worst == Severity.HIGH or (
+        fail_on and worst >= fail_on and (blocking or not review_advisory)
+    ):
         sys.exit(1)
-    # Default behaviour: HIGH always exits 1.
-    if worst == Severity.HIGH:
-        sys.exit(1)
-    if has_coverage_warning:
+    if any(finding.rule_id == "ENGINE-ERR" for finding in findings):
         sys.exit(11)
     sys.exit(0)
 

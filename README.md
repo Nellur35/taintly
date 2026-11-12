@@ -397,9 +397,14 @@ severity, coverage or machine-readable conclusions.
 
 The numeric score deducts for confirmed clusters. Review-needed clusters remain
 visible but do not deduct points, so `100` can coexist with pending reviews.
-The severity-based CI gate is separate: a review-needed HIGH/CRITICAL finding
-can still fail it. Notes from `.taintly-context.yml` add triage information and
-do not rescore findings. See [scoring](docs/SCORING.md) and
+The severity-based CI gate includes review-needed findings by default. To keep
+those findings visible while treating them as advisory for the exit code,
+pass `--review-advisory`. In the GitHub Action, pass it through `extra-args`
+with a scanner version that supports the option.
+Findings without the review-needed marker still use the normal severity
+threshold. Incomplete coverage still returns 11 when no finding blocks.
+Notes from `.taintly-context.yml` add triage information and do not rescore
+findings. See [scoring](docs/SCORING.md) and
 [deployment context](docs/CONTEXT.md).
 
 JSON `coverage_status` is `incomplete` when an engine diagnostic is present,
