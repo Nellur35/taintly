@@ -127,7 +127,7 @@ jobs:
           assert os.environ['TAINTLY_ACTION_EXIT'] == '0'
           distribution = importlib.metadata.distribution('taintly')
           direct = json.loads(distribution.read_text('direct_url.json'))
-          assert direct['vcs_info']['commit_id'] == '51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52'
+          assert direct['vcs_info']['commit_id'] == '1b93648956b1abf303e8e4abb69900bf241cd10f'
           workspace = Path(os.environ['GITHUB_WORKSPACE'])
           source = workspace / 'tests/playground/fixtures/github/sec4-gh-001-ppe-target-checkout/fixed/.github/workflows/ci.yml'
           assert hashlib.sha256(source.read_bytes()).hexdigest() == 'f322339ef6fbd7503d0db050ed707303c756cd8450e9423e09533199efe3b8ca'
@@ -176,6 +176,17 @@ jobs:
           - platform: gitlab
             case: mr-publication
             exit: "1"
+          - platform: github
+            case: review-strict
+            exit: "2"
+          - platform: github
+            case: review-advisory
+            exit: "0"
+            extra: --review-advisory
+          - platform: github
+            case: confirmed-advisory
+            exit: "2"
+            extra: --review-advisory
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -210,6 +221,22 @@ jobs:
                   "dynamic": "httpRequest(url: 'https://example.invalid', ignoreSslErrors: params.BYPASS)",
               }
               (root / "Jenkinsfile").write_text(commands[case] + "\n")
+          elif platform == "github":
+              workflows = root / ".github" / "workflows"
+              workflows.mkdir(parents=True)
+              grant = "write" if case == "confirmed-advisory" else "read"
+              (workflows / "probe.yml").write_text(
+                  "on: pull_request_target\n"
+                  f"permissions: {{contents: {grant}}}\n"
+                  "jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+                  "    if: github.actor != 'dependabot[bot]'\n"
+                  "    steps:\n"
+                  "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683\n"
+                  "        with:\n"
+                  "          ref: $" + "{{ github.event.pull_request.head.sha }}\n"
+                  "      - run: bash ./build.sh\n",
+                  encoding="utf-8",
+              )
           elif case == "mr-publication":
               (root / ".gitlab-ci.yml").write_text(
                   'workflow:\n'
@@ -246,7 +273,7 @@ jobs:
           fail-on: HIGH
           upload-sarif: true
           sarif-file: ${{ runner.temp }}/tls-probe.sarif
-          extra-args: --no-config
+          extra-args: --no-config ${{ matrix.extra }}
       - name: Verify installed scanner, Action outcome and SARIF finding
         working-directory: ${{ runner.temp }}
         env:
@@ -266,11 +293,28 @@ jobs:
           assert os.environ["PROBE_EXIT"] == exit_code
           assert os.environ["PROBE_OUTCOME"] == ("success" if exit_code == "0" else "failure")
           direct = json.loads(importlib.metadata.distribution("taintly").read_text("direct_url.json"))
-          assert direct["vcs_info"]["commit_id"] == "51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52"
+          assert direct["vcs_info"]["commit_id"] == "1b93648956b1abf303e8e4abb69900bf241cd10f"
           report = json.loads(Path("tls-probe.sarif").read_text())
           assert report["version"] == "2.1.0" and isinstance(report["runs"], list)
           results = [result for run in report["runs"] for result in run.get("results", [])]
           platform, case = os.environ["PROBE_PLATFORM"], os.environ["PROBE_CASE"]
+          if platform == "github":
+              findings = [item for item in results if item["ruleId"] == "SEC4-GH-001"]
+              assert len(findings) == 1
+              finding = findings[0]
+              assert finding["level"] == "error" and finding["properties"]["review_needed"] is True
+              location = finding["locations"][0]["physicalLocation"]
+              assert Path(location["artifactLocation"]["uri"]).name == "probe.yml"
+              assert location["region"]["startLine"] == 10
+              confirmed = case == "confirmed-advisory"
+              assert finding["properties"]["exploitability"] == ("high" if confirmed else "medium")
+              blockers = [item for item in results if item["ruleId"] == "PSE-GH-006"]
+              assert len(blockers) == int(confirmed)
+              if blockers:
+                  assert blockers[0]["level"] == "error"
+                  assert not blockers[0]["properties"].get("review_needed", False)
+              print("Installed scanner, GitHub exit gate and SARIF evidence verified.")
+              raise SystemExit(0)
           rule_id = {"jenkins": "SEC6-JK-009", "gitlab": "SEC6-GL-012"}[platform]
           if case == "mr-publication":
               rule_id = "CHAIN-GL-101"

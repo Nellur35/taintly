@@ -48,7 +48,7 @@ Pure stdlib, zero deps — clone and run:
 ```bash
 git clone https://github.com/Nellur35/taintly.git
 cd taintly
-git checkout --detach 51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52
+git checkout --detach 1b93648956b1abf303e8e4abb69900bf241cd10f
 python -m taintly /path/to/your/repo
 ```
 
@@ -135,9 +135,9 @@ python -m taintly /path/to/repo --platform codebuild
 **GitHub Actions** — after checking out the target repository:
 
 ```yaml
-- uses: Nellur35/taintly@51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52  # reviewed commit
+- uses: Nellur35/taintly@1b93648956b1abf303e8e4abb69900bf241cd10f  # reviewed commit
   with:
-    version: 51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52
+    version: 1b93648956b1abf303e8e4abb69900bf241cd10f
     fail-on: HIGH
 ```
 
@@ -155,7 +155,7 @@ taintly:
   image: python:3.12-slim
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends git ca-certificates
-    - python -m pip install "git+https://github.com/Nellur35/taintly@51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52"
+    - python -m pip install "git+https://github.com/Nellur35/taintly@1b93648956b1abf303e8e4abb69900bf241cd10f"
   script:
     - python -m taintly . --fail-on HIGH
 ```
@@ -170,9 +170,9 @@ as described above.
 After checking out the target repository:
 
 ```yaml
-- uses: Nellur35/taintly@51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52  # reviewed commit
+- uses: Nellur35/taintly@1b93648956b1abf303e8e4abb69900bf241cd10f  # reviewed commit
   with:
-    version: 51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52
+    version: 1b93648956b1abf303e8e4abb69900bf241cd10f
     fail-on: HIGH
     upload-sarif: true
     sarif-file: taintly.sarif
@@ -209,8 +209,10 @@ via `extra-args`.
 | `11` | Reported coverage error, unless a severity exit (`1` or `2`) takes precedence — at least one `ENGINE-ERR` finding present (file unreadable, ReDoS cap hit, rule crashed) |
 | `12` | `--self-test --mutate` detected a surviving mutation |
 
-Below-threshold review findings can remain when the exit code is `0`. Creating
-a baseline accepts existing security findings rather than fixing them. It returns
+The table describes the default severity gate. With `--review-advisory`, the
+gate considers findings without the review-needed marker. Review findings stay
+in the report and coverage errors still apply. Creating a baseline accepts
+existing security findings rather than fixing them. It returns
 `0` when creation succeeds without a reported coverage error; incomplete analysis
 still returns `11`, even when the snapshot was written.
 
@@ -236,9 +238,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
-      - uses: Nellur35/taintly@51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52  # reviewed commit
+      - uses: Nellur35/taintly@1b93648956b1abf303e8e4abb69900bf241cd10f  # reviewed commit
         with:
-          version: 51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52
+          version: 1b93648956b1abf303e8e4abb69900bf241cd10f
           fail-on: HIGH
 ```
 
@@ -273,9 +275,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
-      - uses: Nellur35/taintly@51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52  # reviewed commit
+      - uses: Nellur35/taintly@1b93648956b1abf303e8e4abb69900bf241cd10f  # reviewed commit
         with:
-          version: 51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52
+          version: 1b93648956b1abf303e8e4abb69900bf241cd10f
           extra-args: --diff .taintly-baseline.json --fail-on HIGH
 ```
 
@@ -305,7 +307,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install a reviewed scanner revision
-        run: python -m pip install "git+https://github.com/Nellur35/taintly@51b6d8a922ca97eb6fd6db0e4fc8612d93a36d52"
+        run: python -m pip install "git+https://github.com/Nellur35/taintly@1b93648956b1abf303e8e4abb69900bf241cd10f"
       - name: Static scan and pinned-reference checks
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
