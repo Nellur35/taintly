@@ -50,8 +50,9 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from .models import _MAX_SAFE_TEXT_LEN
 from .parsers.structural import EventKind, walk_workflow
@@ -947,6 +948,19 @@ def _extract_job_definitions(
 
 
 GitLabCorpusFindings = list[tuple[str, int, str]]
+
+
+class GitLabCorpusMatches(list[tuple[str, int, str]]):
+    """Findings with evidence qualified for the exact source match."""
+
+    def __init__(
+        self,
+        matches: GitLabCorpusFindings,
+        *,
+        notes: Mapping[tuple[str, int, str], tuple[str, ...]],
+    ) -> None:
+        super().__init__(matches)
+        self.notes = MappingProxyType({key: tuple(value) for key, value in notes.items()})
 
 
 @dataclass

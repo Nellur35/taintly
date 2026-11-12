@@ -9,11 +9,7 @@ and asserts all conjuncts before emitting.
 
 Rules in this module:
 
-  * CHAIN-GL-101 — SEC4-GL-005 shape (MR-pipeline runs deploy/publish)
-                   + fork-reachable trigger + id_tokens declared
-                   (write-token via OIDC).  Severity CRITICAL.
-                   GitLab analogue of GH's pwn-request → write-token
-                   chain.
+  * CHAIN-GL-101 — source-owned review of MR publication and job credentials.
   * CHAIN-GL-102 — mutable project include with enabled or unknown
                    root MR configuration. Severity HIGH, review needed:
                    external include execution and privileges are unresolved.
@@ -23,24 +19,7 @@ Rules in this module:
                    inject shell metacharacters that execute in a job
                    holding the OIDC write-token.
 
-Audit-before-port discipline (per [feedback_audit_before_porting]):
-the GL rule pack was greped for existing rules that already catch the
-three-conjunct shape end-to-end.  None do — SEC4-GL-005 fires on the
-MR-deploy command in isolation (no id_tokens cross-check); SEC3-GL-002
-fires on any unpinned project include regardless of trigger; TAINT-GL-001
-fires on the variable-laundering shape without regard to id_tokens
-exposure.  The composite ESCALATES the severity to reflect that all
-three preconditions are present at once, which is the actual exploit
-shape an attacker needs.
-
-Design note: the CHAIN-GL callbacks RE-DETECT each conjunct's shape
-from the corpus (no shared composer Datalog DB), mirroring the XF-GH
-pattern style.  The redetection regexes are intentionally lighter
-than the single-rule patterns — they look for the THREAT SHAPE that
-the single rule asserts, not the exact false-positive guards.  The
-single rules carry the per-finding precision; the composite rules
-only need to know "this kind of condition is present somewhere in
-the corpus" to gate the escalation.
+Each rule uses its own evidence profile and describes its analysis limits.
 """
 
 from __future__ import annotations
@@ -51,7 +30,6 @@ from collections.abc import Sequence
 from taintly.gitlab_workflow_corpus import (
     GitLabCorpusFindings,
     GitLabCorpusPattern,
-    GitLabJobSummary,
     GitLabWorkflowCorpus,
     GitLabWorkflowSummary,
 )
@@ -60,41 +38,11 @@ from taintly.parsers.structural import Event, EventKind, walk_workflow
 from taintly.parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
 from taintly.workflow_corpus import TriggerFamily
 
+from .mr_publish import compose_mr_publication
+
 # ---------------------------------------------------------------------------
 # Conjunct redetection helpers
 # ---------------------------------------------------------------------------
-
-# SEC4-GL-005's pattern shape: a deploy/publish command run in an MR
-# pipeline.  We re-detect by looking for the same command set the
-# single rule uses, with a coarser "anywhere in the file" join (the
-# single rule scopes to the same job; the composite is content with
-# a same-file co-occurrence because the rule fires once the file is
-# already known to be MR-pipeline-reachable via its triggers field).
-_DEPLOY_PUBLISH_CMD_RE = re.compile(
-    r"\b(docker\s+push|kubectl\s+apply|helm\s+upgrade|npm\s+publish"
-    r"|pip\s+upload|twine\s+upload|cargo\s+publish|gem\s+push|mvn\s+deploy)\b",
-)
-
-
-def _has_deploy_or_publish_command(lines: list[str], start_line: int) -> tuple[bool, int]:
-    """Return ``(present, line_1based)``.  Line is the first match line
-    or 0 when not present.
-    """
-    for idx, line in enumerate(lines, start=start_line):
-        if _DEPLOY_PUBLISH_CMD_RE.search(line):
-            # Skip comment lines.
-            if line.lstrip().startswith("#"):
-                continue
-            return True, idx
-    return False, 0
-
-
-def _job_lines(summary: GitLabWorkflowSummary, job: GitLabJobSummary) -> list[str]:
-    """Return one job's source lines without its top-level siblings."""
-    start = job.line - 1
-    end = job.end_line - 1
-    return summary.lines[start:end]
-
 
 # TAINT-GL-001's conjunct shape: a "tainted CI variable into project
 # variable into script" laundering pattern.  We re-detect a lightweight
@@ -152,49 +100,6 @@ def _has_taint_variable_laundering(summary: GitLabWorkflowSummary) -> tuple[bool
             if re.search(r"(?<!['\"])\$[A-Z_][A-Z0-9_]*(?!['\"])", line):
                 return True, laundering_line
     return False, 0
-
-
-# ---------------------------------------------------------------------------
-# CHAIN-GL-101 — MR-deploy + fork-reachable + id_tokens (OIDC write-token)
-# ---------------------------------------------------------------------------
-
-
-def _compose_chain_gl_101(corpus: GitLabWorkflowCorpus) -> GitLabCorpusFindings:
-    """Detect the SEC4-GL-005 + fork-reachable + id_tokens chain.
-
-    Threat shape: an MR-pipeline-reachable job runs a deploy/publish
-    command (SEC4-GL-005 alone) AND the same file declares OIDC
-    ``id_tokens:`` (so the runner holds a cloud-provider write-token
-    AT THE TIME OF EXECUTION).  This is the GL analogue of the
-    canonical GH pwn-request → AWS-deploy chain: the attacker forks,
-    opens an MR, the fork's code runs with the project's id_tokens
-    OIDC scope, and the deploy command executes against production
-    cloud infrastructure.
-
-    Per-conjunct precision is carried by SEC4-GL-005 (single-rule);
-    the composite escalates to CRITICAL when all three preconditions
-    co-occur in the same resolved-corpus file.
-    """
-    findings: GitLabCorpusFindings = []
-    for w in corpus.all():
-        for job in w.job_definitions:
-            if TriggerFamily.FORK_REACHABLE not in job.triggers:
-                continue
-            if job.protected_branch_only or job.bot_gate_pattern:
-                continue
-            if not job.id_tokens_declared:
-                continue
-            has_deploy, deploy_line = _has_deploy_or_publish_command(_job_lines(w, job), job.line)
-            if not has_deploy:
-                continue
-            snippet = (
-                "CHAIN-GL-101: MR-pipeline-reachable job runs a deploy or publish command "
-                "(SEC4-GL-005 shape) while that job declares id_tokens (OIDC cloud write-token). "
-                "A fork author opening an MR triggers the deploy command against production "
-                "cloud infrastructure with the job's OIDC scope."
-            )
-            findings.append((w.filepath, deploy_line, snippet))
-    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -535,60 +440,37 @@ def _gl103_mr_activation(
 RULES: list[Rule] = [
     Rule(
         id="CHAIN-GL-101",
-        title=(
-            "CHAIN: MR-pipeline deploy/publish + fork-reachable + id_tokens "
-            "(OIDC write-token under attacker control)"
-        ),
-        severity=Severity.CRITICAL,
+        title="Review: GitLab merge-request publication with job credential context",
+        severity=Severity.HIGH,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A GitLab CI file declares OIDC ``id_tokens:`` (granting cloud-provider "
-            "write-tokens to the runner) AND contains a deploy or publish command in "
-            "a job reachable from a merge-request pipeline (SEC4-GL-005's threat shape) "
-            "AND does not gate execution to protected branches or to a trusted-bot "
-            "identity.  Composition: a fork author opening an MR triggers a pipeline "
-            "that runs the fork's code with the project's OIDC cloud scope — the "
-            "deploy command executes against production cloud infrastructure under the "
-            "attacker's control.  The single-rule SEC4-GL-005 catches the MR-deploy "
-            "shape in isolation; this CHAIN rule escalates to CRITICAL when the OIDC "
-            "id_tokens precondition is ALSO present, because the cloud write-token "
-            "raises the blast radius from 'project CI/CD variables exposed' to "
-            "'production cloud account compromised'."
+            "One source-owned GitLab job has a possible local merge-request selection and "
+            "configures a publication operation alongside an ID-token declaration or a "
+            "supported GitLab registry authentication and build sequence. The evidence "
+            "distinguishes a declared token from its use and privileges."
         ),
-        pattern=GitLabCorpusPattern(callback=_compose_chain_gl_101),
+        pattern=GitLabCorpusPattern(callback=compose_mr_publication),
         remediation=(
-            "Apply ANY of:\n"
-            "  1. Gate the deploy job by protected-branch only:\n"
-            "       rules:\n"
-            "         - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'\n"
-            "         - when: never\n"
-            "  2. Remove id_tokens from MR-pipeline-reachable jobs (limit OIDC\n"
-            "     scope to the post-merge protected-branch deploy).\n"
-            "  3. Mark cloud-provider secrets as Protected in Settings >\n"
-            "     CI/CD > Variables so they're not exposed on MR pipelines\n"
-            "     from forks (which always run on unprotected refs).\n"
-            "Run `taintly --guide CHAIN-GL-101` for the full checklist."
+            "Verify the effective job and whether an authorized user can run this fork MR "
+            "in the parent project. Check the registry's repository and tag rules, or the "
+            "OIDC relying party's audience, subject and permissions, as applicable. Move "
+            "privileged publication to reviewed, protected refs where MR publication is "
+            "unnecessary. Where preview publication is required, isolate its credentials "
+            "and destinations from release publication."
         ),
-        reference=(
-            "https://docs.gitlab.com/ci/cloud_services/; "
-            "https://docs.gitlab.com/ci/pipelines/merge_request_pipelines/"
-        ),
+        reference="https://docs.gitlab.com/ci/pipelines/merge_request_pipelines/",
         test_positive=[],
         test_negative=[],
         stride=["E", "T", "I"],
         threat_narrative=(
-            "An attacker forks the project and opens an MR with a poisoned build "
-            "step.  The MR pipeline runs on the fork's code with the project's OIDC "
-            "id_tokens scope; the SEC4-GL-005-flagged deploy command (docker push / "
-            "kubectl apply / helm upgrade / npm publish) executes against the "
-            "project's production cloud account.  The attacker has direct write "
-            "access to the cloud — push backdoored container images, rewrite "
-            "Kubernetes deployments, replace published packages — using the "
-            "project's OIDC identity, not their own."
+            "An MR can change code consumed by a publication job. A fork pipeline normally "
+            "uses the fork's resources. A separately authorized parent-project pipeline can "
+            "run fork configuration in the parent's context. What a credential can publish "
+            "depends on the effective run and receiving service policy."
         ),
-        confidence="high",
-        review_needed=False,
+        confidence="medium",
+        review_needed=True,
         finding_family="privileged_pr_trigger",
     ),
     Rule(

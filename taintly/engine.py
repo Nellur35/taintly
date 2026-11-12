@@ -2666,7 +2666,11 @@ def _run_gitlab_corpus_rules(repo_path: str, rules: list[Rule]) -> list[Finding]
     corpus build is then skipped entirely so non-cross-file GL scans
     don't pay the walk cost.
     """
-    from .gitlab_workflow_corpus import GitLabCorpusPattern, build_gitlab_corpus
+    from .gitlab_workflow_corpus import (
+        GitLabCorpusMatches,
+        GitLabCorpusPattern,
+        build_gitlab_corpus,
+    )
 
     corpus_rules = [r for r in rules if isinstance(r.pattern, GitLabCorpusPattern)]
     if not corpus_rules:
@@ -2691,6 +2695,7 @@ def _run_gitlab_corpus_rules(repo_path: str, rules: list[Rule]) -> list[Finding]
                     )
                 )
                 continue
+            notes = hits.notes if isinstance(hits, GitLabCorpusMatches) else {}
             for filepath, line_num, snippet in hits:
                 family = rule.finding_family or classify_rule(rule.id, rule.owasp_cicd)
                 confidence = rule.confidence or default_confidence(rule.id)
@@ -2716,6 +2721,7 @@ def _run_gitlab_corpus_rules(repo_path: str, rules: list[Rule]) -> list[Finding]
                         confidence=confidence,
                         exploitability="medium",
                         review_needed=review_needed,
+                        context_notes=list(notes.get((filepath, line_num, snippet), ())),
                     )
                 )
     return findings
