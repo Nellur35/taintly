@@ -189,6 +189,146 @@ def test_self_test_clean_exits_zero():
     assert code == 0, f"expected 0 (clean self-test), got {code}"
 
 
+_REVIEW_WORKFLOW = (
+    "on: pull_request_target\n{permissions}\n"
+    "jobs:\n  build:\n    runs-on: ubuntu-latest\n{job_fields}"
+    "    steps:\n"
+    "      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683\n"
+    "        with:\n          ref: ${{{{ github.event.pull_request.head.sha }}}}\n"
+    "      - run: bash ./build.sh\n"
+)
+
+
+def _scan_json(workflows: Path, source: str, *flags: str):
+    workflows.mkdir(parents=True, exist_ok=True)
+    (workflows / "review.yml").write_text(source, encoding="utf-8")
+    run = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "taintly",
+            str(workflows.parent.parent),
+            "--format",
+            "json",
+            "--no-config",
+            *flags,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        timeout=30,
+    )
+    return run.returncode, json.loads(run.stdout)
+
+
+@pytest.mark.parametrize(
+    ("permissions", "expected"),
+    [
+        ("permissions: {contents: read}", 0),
+        ("permissions: {contents: write}", 2),
+    ],
+)
+def test_review_advisory_preserves_report_and_confirmed_gate(tmp_path, permissions, expected):
+    workflows = tmp_path / ".github" / "workflows"
+    source = _REVIEW_WORKFLOW.format(permissions=permissions, job_fields="")
+    default_exit, strict = _scan_json(workflows, source, "--fail-on", "HIGH")
+    advisory_exit, advisory = _scan_json(
+        workflows, source, "--fail-on", "HIGH", "--review-advisory"
+    )
+    assert default_exit == 2
+    assert advisory_exit == expected
+    assert strict["findings"] == advisory["findings"]
+    assert strict["errors"] == advisory["errors"]
+    assert any(f["severity"] == "CRITICAL" and f["review_needed"] for f in advisory["findings"])
+    assert any(
+        f["severity"] == "CRITICAL" and not f["review_needed"] for f in advisory["findings"]
+    ) == (expected == 2)
+
+
+def test_review_advisory_does_not_clear_incomplete_coverage(tmp_path):
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "partial.yml").write_text(
+        "on: push\npermissions: !!str write-all\njobs: {}\n", encoding="utf-8"
+    )
+    source = _REVIEW_WORKFLOW.format(permissions="permissions: {contents: read}", job_fields="")
+    code, report = _scan_json(workflows, source, "--review-advisory")
+    assert code == 11
+    assert report["coverage_status"] == "incomplete"
+    assert any(f["severity"] == "CRITICAL" and f["review_needed"] for f in report["findings"])
+
+
+@pytest.mark.parametrize("job_scoped", [False, True])
+def test_permission_presentation_preserves_decision(tmp_path, job_scoped):
+    workflows = tmp_path / ".github" / "workflows"
+    mapping = "permissions:\n  contents: write\n"
+    inline = '"permissions": {"contents": "write"}\n'
+    results = []
+    for permissions in (mapping, inline):
+        fields = (
+            "".join("    " + line for line in permissions.splitlines(keepends=True))
+            if job_scoped
+            else ""
+        )
+        code, report = _scan_json(
+            workflows,
+            _REVIEW_WORKFLOW.format(
+                permissions="" if job_scoped else permissions.rstrip(), job_fields=fields
+            ),
+        )
+        critical = {
+            f["rule_id"]: f["exploitability"]
+            for f in report["findings"]
+            if f["severity"] == "CRITICAL"
+        }
+        assert critical["SEC4-GH-001"] == "high"
+        results.append((code, critical))
+    assert results[0] == results[1]
+
+
+def test_excluding_dependabot_does_not_calibrate_fork_path(tmp_path):
+    workflows = tmp_path / ".github" / "workflows"
+    findings = []
+    for guard in ("", "    if: github.actor != 'dependabot[bot]'\n"):
+        code, report = _scan_json(
+            workflows,
+            _REVIEW_WORKFLOW.format(permissions="permissions: {contents: write}", job_fields=guard),
+        )
+        assert code == 2
+        finding = next(f for f in report["findings"] if f["rule_id"] == "SEC4-GH-001")
+        findings.append((finding["exploitability"], finding["calibration_reason"]))
+    assert findings == [("high", ""), ("high", "")]
+
+
+@pytest.mark.parametrize(
+    ("declaration", "expected_exit", "expected_ids"),
+    [
+        ("permissions:\n  contents: write\n", 1, ["SEC2-GH-005"]),
+        ('"permissions": {"contents": "write"}\n', 1, ["SEC2-GH-005"]),
+        ("permissions: {contents: read}\n", 0, []),
+        ("", 1, ["SEC2-GH-002"]),
+    ],
+)
+def test_workflow_write_scope_rule_reads_actual_mapping(
+    tmp_path, declaration, expected_exit, expected_ids
+):
+    source = (
+        f"on: push\n{declaration}jobs:\n"
+        "  first:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n    steps:\n"
+        "      - run: |\n          cat <<'EOF'\n          permissions:\n"
+        "            contents: write\n          EOF\n"
+        "  second:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n"
+        "    steps:\n      - run: echo done\n"
+    )
+    code, report = _scan_json(
+        tmp_path / ".github" / "workflows",
+        source,
+        "--fail-on",
+        "LOW",
+    )
+    assert code == expected_exit
+    assert [finding["rule_id"] for finding in report["findings"]] == expected_ids
+
+
 def test_self_test_with_unknown_rule_exits_three():
     """--self-test --rule <nonexistent> → exit 3 (configuration error)."""
     code = _run(["--self-test", "--rule", "DOES-NOT-EXIST-001"])

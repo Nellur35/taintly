@@ -9,8 +9,9 @@ from taintly.models import (
     Rule,
     Severity,
 )
-from taintly.parsers.structural import EventKind, walk_workflow
+from taintly.parsers.structural import EventKind, triggers, walk_workflow
 from taintly.structural_pattern import StructuralPattern
+from taintly.workflow_corpus import _read_permission_blocks
 
 
 class _NoExplicitPermissionsPattern(AbsencePattern):
@@ -61,6 +62,8 @@ class _NoExplicitPermissionsPattern(AbsencePattern):
             return []
         matches = super().check(content, lines)
         if not matches:
+            return []
+        if ("permissions",) in _read_permission_blocks(content):
             return []
         if self._all_jobs_have_explicit_permissions(content):
             return []
@@ -158,108 +161,48 @@ class _OverbroadWorkflowPermissionsPattern:
         don't double-report.
     """
 
-    # Block-extractor regexes.  The two alternatives in the body are
-    # mutually exclusive — content lines require ``\S`` after the
-    # indent, blank lines require only whitespace before the newline
-    # — so the regex engine has no backtracking ambiguity on adversarial
-    # whitespace-heavy input.  Same ReDoS-avoidance shape as SEC2-GH-002's
-    # _NoExplicitPermissionsPattern.
-    _PERMS_BLOCK_RE = re.compile(
-        r"(?ms)^permissions:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
-    )
-    _PERMS_WRITE_LINE_RE = re.compile(r"^[ \t]+([\w-]+):\s*['\"]?write['\"]?\s*(#.*)?$")
-    _WRITE_ALL_RE = re.compile(
-        r"^permissions:\s*['\"]?write-all['\"]?(\s*(#.*)?)?\s*$", re.MULTILINE
-    )
-    _JOBS_BLOCK_RE = re.compile(
-        r"(?ms)^jobs:[ \t]*(?:#[^\n]*)?\n((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
-    )
-    _ON_INLINE_RE = re.compile(r"^[\"']?on[\"']?[ \t]*:[ \t]*(\S?[^\n]*)$", re.MULTILINE)
-    _ON_BLOCK_RE = re.compile(
-        r"(?ms)^[\"']?on[\"']?[ \t]*:[ \t]*(?:#[^\n]*)?\n"
-        r"((?:[ \t]+\S[^\n]*\n|[ \t]*\n)+?)(?=^\S|\Z)"
-    )
+    # Retain the existing advisory recovery for compact, malformed block
+    # declarations. It does not produce a permission fact for other rules.
+    _BLOCK_HEADER = re.compile(r"^permissions:[ \t]*(?:#.*)?$")
+    _COMPACT_GRANT = re.compile(r"^[ \t]+[a-z][a-z-]*:write\s*(?:#.*)?$")
 
     def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
-        if not content.endswith("\n"):
-            content = content + "\n"
-        if self._WRITE_ALL_RE.search(content):
+        declarations = _read_permission_blocks(content)
+        if ("permissions",) not in declarations:
             return []
-        if self._is_workflow_call_only(content):
+        block = declarations[("permissions",)]
+        if block is not None and "write" not in block.grants.values():
             return []
-        if self._count_jobs(content) < 2:
+        if triggers(content) == {"workflow_call"}:
             return []
-        m = self._PERMS_BLOCK_RE.search(content)
-        if not m:
+        events = walk_workflow(
+            "workflow.yml", content=content, include_keys=True, include_merge_origins=True
+        )
+        jobs = set()
+        compact_grant_line = None
+        for event in events:
+            if event.kind is EventKind.MAP_KEY and len(event.path) == 2 and event.path[0] == "jobs":
+                jobs.add(event.path[1])
+            elif (
+                event.kind is EventKind.LEAF_SCALAR
+                and event.path == ("permissions",)
+                and event.value_kind == "plain"
+                and event.line < len(lines)
+                and self._BLOCK_HEADER.fullmatch(lines[event.line - 1])
+                and self._COMPACT_GRANT.fullmatch(lines[event.line])
+            ):
+                compact_grant_line = event.line + 1
+        if len(jobs) < 2:
             return []
-        body_start_line = content[: m.start()].count("\n") + 2
-        body = m.group(1)
-        results: list[tuple[int, str]] = []
-        for j, body_line in enumerate(body.splitlines()):
-            wm = self._PERMS_WRITE_LINE_RE.match(body_line)
-            if not wm:
-                continue
-            line_no = body_start_line + j
-            if 1 <= line_no <= len(lines):
-                results.append((line_no, lines[line_no - 1].strip()))
-        return results
-
-    def _is_workflow_call_only(self, content: str) -> bool:
-        m = self._ON_INLINE_RE.search(content)
-        if m:
-            value = m.group(1).split("#", 1)[0].strip()
-            if value:
-                if value.startswith("["):
-                    triggers = re.findall(r"[a-z_]+", value)
-                    return triggers == ["workflow_call"]
-                return value == "workflow_call"
-        m = self._ON_BLOCK_RE.search(content)
-        if not m:
-            return False
-        body = m.group(1)
-        meaningful = []
-        for line in body.splitlines():
-            stripped = line.lstrip(" \t")
-            if not stripped or stripped.startswith("#"):
-                continue
-            indent = len(line) - len(stripped)
-            meaningful.append((indent, stripped))
-        if not meaningful:
-            return False
-        min_indent = min(ind for ind, _ in meaningful)
-        triggers = []
-        for indent, stripped in meaningful:
-            if indent != min_indent:
-                continue
-            km = re.match(r"[\"']?([\w-]+)[\"']?\s*:", stripped)
-            if km:
-                triggers.append(km.group(1))
-        return triggers == ["workflow_call"]
-
-    def _count_jobs(self, content: str) -> int:
-        m = self._JOBS_BLOCK_RE.search(content)
-        if not m:
-            return 0
-        body = m.group(1)
-        indents = []
-        for line in body.splitlines():
-            stripped = line.lstrip(" \t")
-            if not stripped or stripped.startswith("#"):
-                continue
-            indents.append(len(line) - len(stripped))
-        if not indents:
-            return 0
-        min_indent = min(indents)
-        count = 0
-        for line in body.splitlines():
-            stripped = line.lstrip(" \t")
-            if not stripped or stripped.startswith("#"):
-                continue
-            if (len(line) - len(stripped)) != min_indent:
-                continue
-            if re.match(r"[\"']?[\w.-]+[\"']?\s*:\s*(#.*)?$", stripped):
-                count += 1
-        return count
+        if block is None:
+            if compact_grant_line is not None:
+                return [(compact_grant_line, lines[compact_grant_line - 1].strip())]
+            return []
+        # Multiple scopes on one flow line share one source location.
+        locations = dict.fromkeys(
+            block.grant_lines[scope] for scope, grant in block.grants.items() if grant == "write"
+        )
+        return [(line, lines[line - 1].strip()) for line in locations]
 
 
 class _LongLivedCloudCredentialsPattern:

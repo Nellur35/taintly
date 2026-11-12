@@ -340,10 +340,11 @@ def test_detects_id_token_write_oidc_signal():
     assert ctx.has_write_permissions is True
 
 
-def test_detects_id_token_write_no_space_form():
-    """The `id-token:write` (no space) YAML form must also match."""
+def test_plain_scalar_without_mapping_separator_is_not_a_grant():
+    """A YAML plain scalar with no separation after the colon is not a map entry."""
     ctx = analyze("permissions:\n  id-token:write\n")
-    assert ctx.has_id_token_write is True
+    assert ctx.has_id_token_write is False
+    assert ctx.has_explicit_permissions is False
 
 
 def test_no_id_token_write_when_other_write_only():

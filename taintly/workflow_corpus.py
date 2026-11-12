@@ -22,7 +22,7 @@ in :mod:`taintly.rules.github` and consume the corpus via the new
 :class:`CorpusPattern` shape (see :mod:`taintly.models`).
 
 Design constraints:
-  * Pure-Python regex extraction — no PyYAML dep (zero-dep design).
+  * Pure-Python extraction — no PyYAML dependency.
   * Idempotent: extractors return value objects, no side-effects.
   * Per-job indexing via ``_split_into_job_segments`` (the same
     helper :class:`ContextPattern` uses for ``scope="job"``) so the
@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -259,11 +260,8 @@ class PermissionBlock:
         empty form (``permissions: {}``) leaves this empty.
     :attr line: 1-based line of the ``permissions:`` key.
 
-    When neither ``is_write_all``, ``is_read_all``, nor ``grants`` is
-    set, the workflow has no explicit permissions block — the
-    GITHUB_TOKEN inherits the repo-default (read-write or read,
-    depending on the org policy).  The corpus does NOT synthesise the
-    repo default; that's the consumer's responsibility.
+    An empty block represents an explicit empty grant map. An absent or
+    unresolved declaration cannot supply a permission proof.
     """
 
     scope_what: str
@@ -271,6 +269,7 @@ class PermissionBlock:
     is_read_all: bool
     grants: dict[str, str]
     line: int
+    grant_lines: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -491,6 +490,7 @@ def _summarize_workflow(filepath: str, content: str) -> WorkflowSummary:
             and isinstance(event.path[3], int)
         ):
             workflow_run_parents.append(event.value.strip())
+    permissions = _read_permission_blocks(content)
     return WorkflowSummary(
         filepath=filepath,
         content=content,
@@ -501,8 +501,10 @@ def _summarize_workflow(filepath: str, content: str) -> WorkflowSummary:
         concurrency_groups=tuple(_extract_concurrency_refs(lines)),
         environments=tuple(_extract_environment_refs(lines)),
         reusable_uses=tuple(_extract_reusable_refs(lines)),
-        workflow_permissions=_extract_workflow_permissions(lines),
-        job_permissions=tuple(_extract_job_permissions(lines)),
+        workflow_permissions=permissions.get(("permissions",)),
+        job_permissions=tuple(
+            block for path, block in permissions.items() if len(path) == 3 and block is not None
+        ),
         workflow_name=workflow_name,
         workflow_run_parents=tuple(workflow_run_parents),
     )
@@ -1258,141 +1260,101 @@ def _is_under_steps_block(lines: list[str], i: int) -> bool:
     return False
 
 
-_PERMISSIONS_KEY_RE = re.compile(r"^(?P<indent>\s*)permissions\s*:\s*(?P<rest>.*)$")
-_GRANT_LINE_RE = re.compile(
-    r"^\s*(?P<key>[a-zA-Z0-9_-]+)\s*:\s*(?P<value>none|read|write)\s*(?:#.*)?$"
+_EMPTY_PERMISSION_MAP = re.compile(
+    r"(?:permissions|'permissions'|\"permissions\")\s*:\s*\{[ \t]*\}(?=\s*(?:[#,}]|$))"
 )
 
 
-def _extract_workflow_permissions(lines: list[str]) -> PermissionBlock | None:
-    """Return the workflow-level ``permissions:`` block, or ``None`` if
-    the workflow has no top-level permissions key.
+def _read_permission_blocks(content: str) -> dict[tuple[object, ...], PermissionBlock | None]:
+    """Read exact workflow/job declarations. A present None is unresolved."""
+    from .parsers.structural import Event, EventKind, walk_workflow
 
-    Top-level means indent 0; any deeper occurrence is a job-level
-    permission and is handled by :func:`_extract_job_permissions`.
+    if "permissions" not in content:
+        return {}
+    keys: Counter[tuple[object, ...]] = Counter()
+    branches: dict[tuple[object, ...], list[Event]] = defaultdict(list)
+    errors: list[tuple[object, ...]] = []
+    for event in walk_workflow(
+        "workflow.yml", content=content, include_keys=True, include_merge_origins=True
+    ):
+        path = event.path
+        if event.kind is EventKind.MAP_KEY:
+            keys[path] += 1
+        if event.kind in {EventKind.ERROR, EventKind.CUTOFF} or event.merge_origins:
+            errors.append(path)
+        if path[:1] == ("permissions",):
+            branches[("permissions",)].append(event)
+        elif (
+            len(path) >= 3
+            and path[0] == "jobs"
+            and isinstance(path[1], str)
+            and path[2] == "permissions"
+        ):
+            branches[path[:3]].append(event)
 
-    Three valid YAML shapes:
-      1. ``permissions: write-all`` (the ``permissions: read-all`` /
-         ``permissions: {}`` shorthands also)
-      2. ``permissions:\\n  contents: write\\n  id-token: write``
-      3. ``permissions: {}`` — empty mapping
-
-    On shape (1) ``write-all`` / ``read-all`` set the corresponding
-    flag and leave grants empty; on shape (3) all flags are False
-    and grants are empty (intentional: an empty mapping means "deny
-    everything by default" per GitHub Actions semantics).
-    """
-    for i, line in enumerate(lines):
-        m = _PERMISSIONS_KEY_RE.match(line)
-        if not m or len(m.group("indent")) != 0:
+    lines = content.splitlines()
+    result: dict[tuple[object, ...], PermissionBlock | None] = {}
+    for path, branch in branches.items():
+        result[path] = None
+        if any(keys[path[:n]] != 1 for n in range(1, len(path) + 1)) or any(
+            path[: len(error)] == error or error[: len(path)] == path for error in errors
+        ):
             continue
-        return _parse_permission_block(lines, i, scope_what="workflow")
-    return None
-
-
-def _extract_job_permissions(lines: list[str]) -> list[PermissionBlock]:
-    """Return one :class:`PermissionBlock` per job-level
-    ``permissions:`` block.
-
-    Job-level means indent > 0 AND the immediately enclosing key chain
-    is ``jobs.<name>.permissions``.  We approximate that by tracking
-    the most recent job key (an entry under ``jobs:`` whose own indent
-    is the deepest first-level under ``jobs:``) and crediting any
-    ``permissions:`` we see at one indent level deeper.
-    """
-    out: list[PermissionBlock] = []
-    in_jobs_block = False
-    job_indent: int | None = None
-    current_job: str | None = None
-    for i, line in enumerate(lines):
-        stripped = line.lstrip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        indent = len(line) - len(stripped)
-        if re.match(r"^jobs\s*:\s*(?:#.*)?$", line):
-            in_jobs_block = True
-            continue
-        if in_jobs_block:
-            if indent == 0:
-                in_jobs_block = False
-                continue
-            # Auto-detect job indent from the first non-comment line
-            # under ``jobs:``.
-            if job_indent is None:
-                job_indent = indent
-            if indent == job_indent and ":" in stripped:
-                current_job = stripped.split(":", 1)[0].strip()
-                continue
-            if (
-                current_job
-                and re.match(r"^\s*permissions\s*:", line)
-                and indent == (job_indent + 2)
-            ):
-                out.append(_parse_permission_block(lines, i, scope_what=current_job))
-    return out
-
-
-def _parse_permission_block(lines: list[str], i: int, scope_what: str) -> PermissionBlock:
-    """Parse a single ``permissions:`` block starting at line ``i``.
-
-    Handles the three shapes documented in
-    :func:`_extract_workflow_permissions`.  Caller responsibility:
-    ensure the block belongs to the requested scope.
-    """
-    line = lines[i]
-    m = _PERMISSIONS_KEY_RE.match(line)
-    assert m, "caller must pass a line that starts with permissions:"  # nosec B101
-    block_indent = len(m.group("indent"))
-    rest = m.group("rest").strip()
-
-    is_write_all = False
-    is_read_all = False
-    grants: dict[str, str] = {}
-
-    # Inline shorthand on the same line.
-    if rest:
-        if rest in {"{}"}:
-            return PermissionBlock(
-                scope_what=scope_what,
-                is_write_all=False,
-                is_read_all=False,
-                grants={},
-                line=i + 1,
-            )
-        rest_clean = rest.split("#", 1)[0].strip().strip("'\"").lower()
-        if rest_clean == "write-all":
-            is_write_all = True
-        elif rest_clean == "read-all":
-            is_read_all = True
-        return PermissionBlock(
-            scope_what=scope_what,
-            is_write_all=is_write_all,
-            is_read_all=is_read_all,
-            grants=grants,
-            line=i + 1,
+        root = next(
+            event for event in branch if event.kind is EventKind.MAP_KEY and event.path == path
         )
-
-    # Block mapping: read indented child lines until the indent comes
-    # back to ``block_indent`` or shallower.
-    n = len(lines)
-    for j in range(i + 1, n):
-        nxt = lines[j]
-        stripped = nxt.lstrip()
-        if not stripped or stripped.startswith("#"):
+        leaves = [event for event in branch if event.kind is EventKind.LEAF_SCALAR]
+        children = {
+            event.path for event in branch if event.kind is EventKind.MAP_KEY and event.path != path
+        }
+        grant_values: dict[str, str] = {}
+        grant_lines: dict[str, int] = {}
+        scalar = None
+        if len(leaves) == 1 and leaves[0].path == path and not children:
+            leaf = leaves[0]
+            if leaf.value_kind not in {"plain", "quoted"} or leaf.value not in {
+                "read-all",
+                "write-all",
+            }:
+                continue
+            scalar = leaf.value
+        elif leaves:
+            for leaf in leaves:
+                name = leaf.path[-1]
+                if (
+                    leaf.path not in children
+                    or len(leaf.path) != len(path) + 1
+                    or not isinstance(name, str)
+                    or not re.fullmatch(r"[a-z][a-z-]*", name)
+                    or name in grant_values
+                    or keys[leaf.path] != 1
+                    or leaf.value_kind not in {"plain", "quoted"}
+                    or leaf.value not in {"read", "write", "none"}
+                ):
+                    break
+                grant_values[name] = leaf.value
+                grant_lines[name] = leaf.line
+            else:
+                if len(grant_values) == len(children):
+                    result[path] = PermissionBlock(
+                        str(path[1]) if len(path) == 3 else "workflow",
+                        False,
+                        False,
+                        grant_values,
+                        root.line,
+                        grant_lines,
+                    )
             continue
-        indent = len(nxt) - len(stripped)
-        if indent <= block_indent:
-            break
-        gm = _GRANT_LINE_RE.match(nxt)
-        if gm:
-            grants[gm.group("key")] = gm.group("value")
-    return PermissionBlock(
-        scope_what=scope_what,
-        is_write_all=False,
-        is_read_all=False,
-        grants=grants,
-        line=i + 1,
-    )
+        elif children or not _EMPTY_PERMISSION_MAP.match(lines[root.line - 1][root.column - 1 :]):
+            continue
+        result[path] = PermissionBlock(
+            str(path[1]) if len(path) == 3 else "workflow",
+            scalar == "write-all",
+            scalar == "read-all",
+            {},
+            root.line,
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------

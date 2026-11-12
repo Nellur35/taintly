@@ -25,7 +25,7 @@ from typing import Any
 from .agentguards import AgentGuardIndex
 from .parsers.segmentation import for_each_job
 from .parsers.structural import triggers
-from .workflow_corpus import _extract_job_permissions, _extract_workflow_permissions
+from .workflow_corpus import PermissionBlock, _read_permission_blocks
 
 # ---------------------------------------------------------------------------
 # Signal detection — each regex is intentionally forgiving so trailing
@@ -64,22 +64,6 @@ _RE_SECRETS_REF = re.compile(
     r"\bwithCredentials\s*\(|"
     r"\$CI_JOB_TOKEN\b|\$VAULT_\w+|\$CI_REGISTRY_PASSWORD\b"
 )
-_RE_WRITE_PERM = re.compile(
-    r"^\s*(contents|packages|id-token|deployments|actions|pull-requests|issues|"
-    r"statuses|checks|pages|security-events|attestations)\s*:\s*write",
-    re.MULTILINE,
-)
-_RE_WRITE_ALL = re.compile(r"^\s*permissions\s*:\s*write-all\b", re.MULTILINE)
-# ``id-token: write`` is the OIDC-federation signal: it grants the job a
-# short-lived, dynamically-minted token to authenticate to a cloud provider
-# WITHOUT a static secret in the repo. ``_RE_WRITE_PERM`` already folds
-# ``id-token`` into the generic ``has_write_permissions`` flag, but that
-# conflates "has SOME write scope" with "uses OIDC" — two very different
-# threat models (a static-secret leak vs. a token that can't be exfiltrated
-# for reuse). This distinct flag lets the scorer tell them apart. Anchored
-# to start-of-line + tolerant of the no-space ``id-token:write`` form.
-_RE_ID_TOKEN_WRITE = re.compile(r"^\s*id-token\s*:\s*['\"]?write\b", re.MULTILINE)
-_RE_PERMISSIONS_BLOCK = re.compile(r"^\s*permissions\s*:", re.MULTILINE)
 # GitHub-Actions positive marker: ``${{ … }}`` expressions and ``uses:`` step
 # references are GitHub-only syntax (GitLab uses ``$VAR`` / Jenkins uses Groovy),
 # so either one identifies the content as a GitHub workflow WITHOUT relying on a
@@ -237,7 +221,9 @@ class WorkflowContext:
         }
 
 
-def analyze(content: str, file: str = "") -> WorkflowContext:
+def analyze(
+    content: str, file: str = "", *, permission_blocks: tuple[PermissionBlock, ...] | None = None
+) -> WorkflowContext:
     """Return a :class:`WorkflowContext` from raw YAML workflow content.
 
     Pure function: no I/O, no state.  Safe to call on arbitrarily large
@@ -253,6 +239,10 @@ def analyze(content: str, file: str = "") -> WorkflowContext:
     other_fork_signal = bool(
         _RE_FORK_TRIGGER_OTHER.search(content) or _RE_JENKINS_PARAMS.search(content)
     )
+    if permission_blocks is None:
+        permission_blocks = tuple(
+            block for block in _read_permission_blocks(content).values() if block is not None
+        )
     return WorkflowContext(
         file=file,
         has_fork_triggered=bool((gh_events & _GH_FORK_EVENTS) or other_fork_signal),
@@ -263,9 +253,13 @@ def analyze(content: str, file: str = "") -> WorkflowContext:
         ),
         has_checkout=bool(_RE_CHECKOUT.search(content)),
         has_secrets_reference=bool(_RE_SECRETS_REF.search(content)),
-        has_write_permissions=bool(_RE_WRITE_PERM.search(content) or _RE_WRITE_ALL.search(content)),
-        has_id_token_write=bool(_RE_ID_TOKEN_WRITE.search(content)),
-        has_explicit_permissions=bool(_RE_PERMISSIONS_BLOCK.search(content)),
+        has_write_permissions=any(
+            block.is_write_all or "write" in block.grants.values() for block in permission_blocks
+        ),
+        has_id_token_write=any(
+            block.grants.get("id-token") == "write" for block in permission_blocks
+        ),
+        has_explicit_permissions=bool(permission_blocks),
         is_release_workflow=bool(
             _RE_RELEASE_TRIGGER.search(content) or _RE_REGISTRY_PUBLISH.search(content)
         ),
@@ -336,19 +330,22 @@ def analyze_job_contexts(content: str, file: str = "") -> dict[str, WorkflowCont
     """
     if not triggers(content):
         return {}
-    lines = content.splitlines()
-    globals_ctx = analyze(_github_global_content(content), file=file)
-    workflow_permissions = _extract_workflow_permissions(lines)
-    job_permissions = {block.scope_what: block for block in _extract_job_permissions(lines)}
+    declared = _read_permission_blocks(content)
+    workflow_permissions = declared.get(("permissions",))
+    globals_ctx = analyze(
+        _github_global_content(content),
+        file=file,
+        permission_blocks=(workflow_permissions,) if workflow_permissions is not None else (),
+    )
     contexts: dict[str, WorkflowContext] = {}
     guard_index = AgentGuardIndex(content)
     for job in for_each_job(content):
         if not job.name:
             continue
-        local_ctx = analyze(job.text, file=file)
+        local_ctx = analyze(job.text, file=file, permission_blocks=())
         direct_fields = _direct_job_fields(job.body_lines)
         calls_reusable = any(re.match(r"\s*uses\s*:", line) for line in direct_fields)
-        permissions = job_permissions.get(job.name, workflow_permissions)
+        permissions = declared.get(("jobs", job.name, "permissions"), workflow_permissions)
         has_write = permissions is not None and (
             permissions.is_write_all or "write" in permissions.grants.values()
         )

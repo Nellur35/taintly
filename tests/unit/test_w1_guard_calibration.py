@@ -9,9 +9,10 @@ fork-reachable triggers in every ``on:`` YAML shape.
 
 from __future__ import annotations
 
+import pytest
+
 from taintly.engine import (
     _annotate_guarded_findings,
-    _detect_github_guards,
     _detect_gitlab_guards,
     _propagate_guard_calibration_to_composites,
 )
@@ -29,23 +30,11 @@ def _mk(line: int = 0) -> Finding:
     )
 
 
-def test_detect_github_guards():
-    assert _detect_github_guards("if: github.actor == 'admin'") == ["actor-identity check"]
-    assert _detect_github_guards("if: github.triggering_actor != 'bot'") == ["actor-identity check"]
-    assert "same-repository check" in _detect_github_guards(
-        "if: github.event.pull_request.head.repo.full_name == github.repository"
-    )
-    assert "author-association check" in _detect_github_guards(
-        "if: github.event.comment.author_association == 'OWNER'"
-    )
-    assert _detect_github_guards("run: echo hi") == []
-
-
 # A guarded job's finding is annotated (block-style trigger).
 # Lines: 1 on:/2 pull_request_target:/3 types/4 jobs:/5 x:/6 if:/7 steps:/8 run
 _BLOCK_GUARDED = (
     "on:\n  pull_request_target:\n    types: [opened]\n"
-    "jobs:\n  x:\n    if: github.actor == 'admin'\n    steps:\n      - run: echo hi\n"
+    "jobs:\n  x:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    steps:\n      - run: echo hi\n"
 )
 
 
@@ -66,11 +55,41 @@ def test_fork_reachable_without_guard_is_untouched():
     assert f.calibration_reason == ""
 
 
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "github.actor != 'dependabot[bot]'",
+        "github.actor == 'dependabot[bot]'",
+        "github.event.pull_request.head.repo.full_name == github.repository || inputs.override",
+    ],
+)
+def test_unproven_job_condition_preserves_exploitability(condition):
+    source = _BLOCK_GUARDED.replace(
+        "github.event.pull_request.head.repo.full_name == github.repository", condition
+    )
+    finding = _mk(line=8)
+    _annotate_guarded_findings([finding], source)
+    assert finding.exploitability == "medium"
+    assert finding.calibration_reason == ""
+
+
+def test_step_guard_only_calibrates_own_step():
+    source = (
+        "on: pull_request_target\njobs:\n  x:\n    steps:\n"
+        "      - if: github.event.pull_request.head.repo.full_name == github.repository\n"
+        "        run: echo guarded\n      - run: echo unrelated\n"
+    )
+    guarded, unrelated = _mk(line=6), _mk(line=7)
+    _annotate_guarded_findings([guarded, unrelated], source)
+    assert guarded.exploitability == "low"
+    assert unrelated.exploitability == "medium"
+
+
 def test_guard_without_fork_reachability_is_untouched():
     # A guard on a maintainer-only workflow is moot — don't annotate.
     content = (
         "on:\n  push:\n    tags: [v*]\n"
-        "jobs:\n  x:\n    if: github.actor == 'admin'\n    steps:\n      - run: echo hi\n"
+        "jobs:\n  x:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    steps:\n      - run: echo hi\n"
     )
     f = _mk(line=8)
     _annotate_guarded_findings([f], content)
@@ -85,7 +104,7 @@ def test_flow_mapping_trigger_is_detected():
     # on: { pull_request_target: {...} } — the block-only regex missed this.
     content = (
         "on: { pull_request_target: { types: [opened] } }\n"
-        "jobs:\n  x:\n    if: github.actor == 'admin'\n    steps:\n      - run: echo hi\n"
+        "jobs:\n  x:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    steps:\n      - run: echo hi\n"
     )
     f = _mk(line=6)  # run: step inside job x
     _annotate_guarded_findings([f], content)
@@ -96,9 +115,9 @@ def test_flow_list_trigger_is_detected():
     # on: [pull_request_target] — list shorthand, also previously missed.
     content = (
         "on: [pull_request_target]\n"
-        "jobs:\n  x:\n    if: github.actor == 'admin'\n    steps:\n      - run: echo hi\n"
+        "jobs:\n  x:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    steps:\n      - run: echo hi\n"
     )
-    f = _mk(line=5)  # run: step inside job x
+    f = _mk(line=6)  # run: step inside job x
     _annotate_guarded_findings([f], content)
     assert f.exploitability == "low"
 
@@ -110,7 +129,7 @@ def test_flow_list_trigger_is_detected():
 _TWO_JOBS_GUARD_IN_A = (
     "on:\n  pull_request_target:\n"
     "jobs:\n"
-    "  a:\n    if: github.actor == 'admin'\n    steps:\n      - run: echo a\n"
+    "  a:\n    if: github.event.pull_request.head.repo.full_name == github.repository\n    steps:\n      - run: echo a\n"
     "  b:\n    steps:\n      - run: echo b\n"
 )
 

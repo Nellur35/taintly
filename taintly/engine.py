@@ -12,6 +12,7 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import cast
 
+from .agentguards import AgentGuardIndex
 from .families import classify_rule, default_confidence, default_review_needed
 from .gitlabguard import (
     GitLabContext,
@@ -1032,43 +1033,9 @@ def _maintainer_downgrade_postprocessor(findings: list[Finding], ctx: _PostProce
 # ---------------------------------------------------------------------------
 # Guard / trigger-reachability calibration (calibration only).
 #
-# A control-flow analyzer can downgrade a finding when an identity / repo /
-# association guard dominates the sink.  taintly has no control-flow graph,
-# so it cannot PROVE dominance.  This pass is therefore CALIBRATION ONLY: when
-# a fork-reachable GitHub/GitLab pipeline ALSO declares a strong guard, mark
-# the finding's exploitability "low" and record why — but do NOT change
-# severity.  Rationale: a mis-attributed guard must never suppress a real
-# finding, so a presence-only signal may inform triage but must not act as a
-# gate.  Downgrading severity would require a validated job/step dominance
-# approximation, which is out of scope here.
+# The GitHub path requires a structural condition that excludes the modeled
+# outside trigger at the finding's own step. This affects exploitability only.
 # ---------------------------------------------------------------------------
-
-# Same-repository check — the canonical fork-PR guard: the step only runs
-# when the PR head repo equals the base repo (i.e. not a fork).
-_GUARD_SAME_REPO_RE = re.compile(
-    r"github\.event\.pull_request\.head\.repo\.full_name\s*==\s*github\.repository"
-)
-# Actor / triggering-actor / PR-author identity comparison in a condition.
-_GUARD_ACTOR_RE = re.compile(
-    r"\bgithub\.(?:actor|triggering_actor)\b\s*(?:==|!=)"
-    r"|\bgithub\.event\.pull_request\.user\.login\b\s*(?:==|!=)"
-)
-# author_association gate (MEMBER / OWNER / COLLABORATOR membership).
-_GUARD_ASSOCIATION_RE = re.compile(r"\bauthor_association\b")
-
-
-def _detect_github_guards(content: str) -> list[str]:
-    """Return labels for strong identity/repo guards declared anywhere in a
-    GitHub workflow.  Presence-only — no dominance proof."""
-    guards: list[str] = []
-    if _GUARD_SAME_REPO_RE.search(content):
-        guards.append("same-repository check")
-    if _GUARD_ACTOR_RE.search(content):
-        guards.append("actor-identity check")
-    if _GUARD_ASSOCIATION_RE.search(content):
-        guards.append("author-association check")
-    return guards
-
 
 # GitLab fork-reachable triggers: MR pipelines (incl. the GitHub-mirror
 # external-PR bridge) and the ``only: merge_requests`` shorthand.
@@ -1108,41 +1075,29 @@ def _detect_gitlab_guards(content: str) -> list[str]:
 
 
 def _annotate_guarded_findings(findings: list[Finding], content: str) -> None:
-    """Calibration: on a fork-reachable GitHub or GitLab pipeline where a
-    strong guard is declared IN THE SAME JOB as a finding, set that
-    finding's exploitability to "low" and record the guard in
-    ``calibration_reason``.  Severity is unchanged — a guard's presence is
-    not proof that it dominates the sink.
-
-    Two correctness properties:
-      * Fork-reachability is checked across all four ``on:`` YAML shapes
-        (block / flow-mapping / flow-list / bare) via the shared
-        :func:`is_fork_reachable` parser, so a flow-style trigger is not
-        missed.
-      * Guards are detected and applied PER JOB: a guard in job A never
-        calibrates a finding in job B.  A finding with no resolvable job
-        (``line <= 0`` or preamble) is left untouched — the conservative
-        direction for a calibration that must never suppress a real
-        finding.
-
-    The platform-specific guard detectors self-gate (GitHub guards only
-    match GitHub content, GitLab guards only GitLab content)."""
+    """Calibrate GitHub from an owning guard proof and preserve the GitLab profile."""
     if not findings:
         return
     if is_fork_reachable(content):
-        detect = _detect_github_guards
-    elif _GL_FORK_REACHABLE_RE.search(content):
-        detect = _detect_gitlab_guards
-    else:
+        index = AgentGuardIndex(content)
+        for finding in findings:
+            if finding.origin != "file" or finding.exploitability == "low":
+                continue
+            owner = index.owner(finding.line)
+            if owner is not None and index.excludes(owner):
+                _record_guard_calibration(
+                    finding,
+                    "The owning job or step guard excludes the modeled outside-trigger path. "
+                    "This leaves source integrity and other execution contexts unverified.",
+                )
         return
-    # Guards live in job/step ``if:`` (GitHub) or ``rules:`` (GitLab)
-    # bodies; detect them per job segment so each guard's reach is bounded
-    # to its own job.  ``for_each_job`` segments both GitHub and GitLab.
+    if not _GL_FORK_REACHABLE_RE.search(content):
+        return
     guards_by_job: dict[str, list[str]] = {}
     for job in for_each_job(content):
         if not job.name:
             continue
-        job_guards = detect(job.text)
+        job_guards = _detect_gitlab_guards(job.text)
         if job_guards:
             guards_by_job[job.name] = job_guards
     if not guards_by_job:
@@ -1160,11 +1115,13 @@ def _annotate_guarded_findings(findings: list[Finding], content: str) -> None:
             f"This job is fork-reachable but declares a guard ({', '.join(guards)}); "
             "verify it dominates this finding's step before treating it as exploitable."
         )
-        f.exploitability = "low"
-        f.context_tags.append("guard-calibration")
-        f.calibration_reason = (
-            f"{f.calibration_reason} {note}".strip() if f.calibration_reason else note
-        )
+        _record_guard_calibration(f, note)
+
+
+def _record_guard_calibration(finding: Finding, note: str) -> None:
+    finding.exploitability = "low"
+    finding.context_tags.append("guard-calibration")
+    finding.calibration_reason = f"{finding.calibration_reason} {note}".strip()
 
 
 def _propagate_guard_calibration_to_composites(findings: list[Finding]) -> None:

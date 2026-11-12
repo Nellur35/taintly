@@ -25,10 +25,9 @@ from taintly.workflow_corpus import (
     _extract_cache_refs,
     _extract_concurrency_refs,
     _extract_environment_refs,
-    _extract_job_permissions,
     _extract_raw_events,
     _extract_reusable_refs,
-    _extract_workflow_permissions,
+    _read_permission_blocks,
     _parse_yaml_bool,
     build_corpus,
 )
@@ -519,14 +518,14 @@ def test_reusable_mixed_action_and_reusable_one_workflow():
 
 
 # ---------------------------------------------------------------------------
-# _extract_workflow_permissions / _extract_job_permissions
+# _read_permission_blocks
 # ---------------------------------------------------------------------------
 
 
 def test_workflow_permissions_write_all_shorthand():
-    block = _extract_workflow_permissions(
-        "on: push\npermissions: write-all\njobs: {}\n".splitlines()
-    )
+    block = _read_permission_blocks("on: push\npermissions: write-all\njobs: {}\n")[
+        ("permissions",)
+    ]
     assert block is not None
     assert block.is_write_all is True
     assert block.is_read_all is False
@@ -534,9 +533,7 @@ def test_workflow_permissions_write_all_shorthand():
 
 
 def test_workflow_permissions_read_all_shorthand():
-    block = _extract_workflow_permissions(
-        "on: push\npermissions: read-all\njobs: {}\n".splitlines()
-    )
+    block = _read_permission_blocks("on: push\npermissions: read-all\njobs: {}\n")[("permissions",)]
     assert block is not None
     assert block.is_read_all is True
 
@@ -549,7 +546,7 @@ def test_workflow_permissions_block_mapping():
         "  pull-requests: read\n"
         "jobs: {}\n"
     )
-    block = _extract_workflow_permissions(content.splitlines())
+    block = _read_permission_blocks(content)[("permissions",)]
     assert block is not None
     assert block.grants == {
         "contents": "write",
@@ -559,7 +556,7 @@ def test_workflow_permissions_block_mapping():
 
 
 def test_workflow_permissions_empty_mapping_means_deny_default():
-    block = _extract_workflow_permissions("on: push\npermissions: {}\njobs: {}\n".splitlines())
+    block = _read_permission_blocks("on: push\npermissions: {}\njobs: {}\n")[("permissions",)]
     # The empty form is "deny everything" per GitHub Actions semantics —
     # represented by no flags and no grants.  Cross-file rules can
     # distinguish this from "absent" via the None vs PermissionBlock
@@ -571,7 +568,19 @@ def test_workflow_permissions_empty_mapping_means_deny_default():
 
 
 def test_workflow_permissions_absent_returns_none():
-    assert _extract_workflow_permissions("on: push\njobs: {}\n".splitlines()) is None
+    assert _read_permission_blocks("on: push\njobs: {}\n") == {}
+
+
+def test_permission_blocks_do_not_conflate_unknown_and_empty():
+    content = (
+        "on: push\npermissions: {contents: read}\njobs:\n"
+        '  unresolved:\n    "permissions": []\n    steps: []\n'
+        '  empty:\n    "permissions": {}\n    steps: []\n'
+    )
+    blocks = _read_permission_blocks(content)
+    assert blocks[("jobs", "unresolved", "permissions")] is None
+    empty = blocks[("jobs", "empty", "permissions")]
+    assert empty is not None and empty.grants == {}
 
 
 def test_job_permissions_per_job_block():
@@ -586,8 +595,8 @@ def test_job_permissions_per_job_block():
         "    permissions: read-all\n"
         "    steps: []\n"
     )
-    blocks = _extract_job_permissions(content.splitlines())
-    by_scope = {b.scope_what: b for b in blocks}
+    blocks = _read_permission_blocks(content)
+    by_scope = {b.scope_what: b for b in blocks.values() if b is not None}
     assert by_scope["build"].grants == {"contents": "write", "packages": "write"}
     assert by_scope["deploy"].is_read_all is True
 
@@ -596,7 +605,7 @@ def test_job_permissions_does_not_pick_up_workflow_level():
     content = "on: push\npermissions:\n  contents: read\njobs:\n  build:\n    steps: []\n"
     # The workflow-level permissions block must NOT appear in the
     # job-level extractor's output.
-    assert _extract_job_permissions(content.splitlines()) == []
+    assert list(_read_permission_blocks(content)) == [("permissions",)]
 
 
 # ---------------------------------------------------------------------------
