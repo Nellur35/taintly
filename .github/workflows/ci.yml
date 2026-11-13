@@ -217,11 +217,7 @@ jobs:
         run: pip install --require-hashes -r requirements-dev.lock
 
       - name: Unit + integration + evasion + playground tests
-        # Branch coverage enabled here too (not just via pyproject) so
-        # the floor reflects both line AND branch coverage. Current
-        # floor is 78; target is 85 — see pyproject.toml
-        # [tool.coverage.report] for the ratchet plan and per-module
-        # drag list. MUST stay in lockstep with pyproject's fail_under.
+        # The coverage floor and ratchet plan are in pyproject.toml.
         # tests/playground/ is the light-e2e harness — fixture-driven
         # find/fix assertions plus posture-rule API replay; cheap and
         # gates against the kind of CI miss that surfaced in the
@@ -232,9 +228,9 @@ jobs:
             --tb=short -q \
             --cov=taintly \
             --cov-branch \
+            --cov-config=pyproject.toml \
             --cov-report=term-missing \
-            --cov-report=xml \
-            --cov-fail-under=78
+            --cov-report=xml
 
       - name: Per-module coverage floors
         # The global 78% gate above can hide per-module regressions —
@@ -285,30 +281,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Rule self-tests
-        run: python -m taintly --self-test --no-color
-        # Exit 10 if any rule self-test fails
-
-      - name: FP simulator (advisory)
-        # Benignises each rule's own positive samples and reports rules
-        # that still fire. This advisory release exits 0
-        # regardless, so this step never blocks a merge; it surfaces
-        # FP-prone rules in the build log for triage. See the docstring
-        # on ``taintly.testing.fp_simulator``.
-        run: python -m taintly --self-test --fp-simulate --no-color
-
-      - name: Mutation tests (100% kill rate modulo documented gaps)
-        # ``100% kill rate`` is the wall-clock claim, but the
-        # underlying harness counts entries in
-        # ``taintly.testing.self_test._KNOWN_MUTATION_GAPS`` as kills
-        # — every entry there is a documented rule-engineering gap
-        # that the kill-rate gate intentionally tolerates while it's
-        # being worked. The honest description: "100% kill rate
-        # modulo N documented gaps." See the docstring on
-        # ``_KNOWN_MUTATION_GAPS`` for the discipline (no new
-        # entries to silence freshly-introduced regressions).
-        run: python -m taintly --self-test --mutate --no-color
-        # Exit 12 if mutation kill rate < 100%
+      - name: Rule self-tests, mutation gate and advisory FP report
+        # Self-test failures exit 10; unexpected mutation survivors exit 12.
+        # The FP simulator reports advisory results in the same step.
+        run: python -m taintly --self-test --mutate --fp-simulate --no-color
 
       - name: Mutation gap-growth gate
         # The 100%-modulo-allowlist gate above stays green even if

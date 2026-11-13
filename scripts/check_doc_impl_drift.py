@@ -24,9 +24,7 @@ Specific checks:
 
   1. ``fix_invariants`` keys named in tests/playground/README.md must
      be referenced in tests/playground/test_playground.py.
-  2. Every ``--cov-fail-under`` value mentioned in pyproject.toml
-     must match the value in .github/workflows/ci.yml.
-  3. Every ``api-fixtures/<platform>/`` path mentioned in
+  2. Every ``api-fixtures/<platform>/`` path mentioned in
      tests/playground/README.md must exist as a directory.
 
 Usage:
@@ -79,29 +77,6 @@ def _check_fix_invariants_keys() -> list[str]:
     return issues
 
 
-def _check_cov_fail_under_in_sync() -> list[str]:
-    """pyproject's fail_under and CI's --cov-fail-under must match."""
-    py = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    ci_path = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
-    if not ci_path.exists():
-        return []
-    ci = ci_path.read_text(encoding="utf-8")
-
-    py_match = re.search(r"^fail_under\s*=\s*(\d+)", py, re.MULTILINE)
-    ci_matches = re.findall(r"--cov-fail-under=(\d+)", ci)
-
-    issues = []
-    if py_match and ci_matches:
-        py_val = py_match.group(1)
-        for ci_val in ci_matches:
-            if py_val != ci_val:
-                issues.append(
-                    f"pyproject.toml fail_under={py_val} but CI uses "
-                    f"--cov-fail-under={ci_val} — gates will diverge."
-                )
-    return issues
-
-
 def _check_api_fixture_paths_exist() -> list[str]:
     """Every api-fixtures platform mentioned in the README must exist
     as a directory. The README documents a layout block of the form
@@ -145,7 +120,6 @@ def _check_api_fixture_paths_exist() -> list[str]:
 def main() -> int:
     issues: list[str] = []
     issues.extend(_check_fix_invariants_keys())
-    issues.extend(_check_cov_fail_under_in_sync())
     issues.extend(_check_api_fixture_paths_exist())
 
     if issues:

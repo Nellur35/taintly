@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Per-module coverage gate.
 
-The global ``--cov-fail-under=78`` only checks total branch coverage.
+The global floor in ``pyproject.toml`` only checks total branch coverage.
 It cannot catch a regression where a single high-risk module's
 coverage drops while the overall total stays above 78 — the global
 denominator hides per-module drift. This script reads ``coverage.xml``
