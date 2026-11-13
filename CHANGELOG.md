@@ -10,6 +10,12 @@ first version is tagged, its entries move under a dated `[x.y.z]` heading and th
 
 ## [Unreleased]
 
+### Added
+
+- An offline CodeBuild project snapshot mode identifies and scans the configured
+  buildspec at a locally available pinned Git commit, with explicit diagnostics
+  when project or source evidence is missing.
+
 ### Fixed
 
 - The composite Action uses an existing pinned Python setup action and scanner

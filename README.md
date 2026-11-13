@@ -31,7 +31,7 @@ that a credential was available, or prove that an attack succeeded.
 | GitHub Actions | Expressions, environment and output propagation, local action/workflow calls, permissions and source-to-consumer paths | Available source and supported ownership/condition profiles determine which paths can be joined. |
 | GitLab CI | Owned job/script structure, variable consumers, artifact selections and bounded job-token transfers | Includes, variable precedence, runner behavior and external settings can leave questions unresolved. |
 | Jenkins | Jenkinsfile structure, credential bindings, Groovy/shell boundaries and bounded HTTP consumers | Plugin/job configuration, checkout identity and unsupported Groovy remain separate evidence requirements. |
-| AWS CodeBuild | Buildspec configuration, secret declarations, bounded shell/body transfers and secret build arguments | Project/start-build overrides, effective IAM and actual build execution are not established by a buildspec. |
+| AWS CodeBuild | Buildspec configuration, secret declarations, bounded shell/body transfers and secret build arguments. An optional project snapshot identifies a configured buildspec at a pinned commit. | Runtime overrides, effective IAM and actual execution require separate evidence. |
 
 The platforms have different supported profiles. A rule inventory is not a
 measure of equal coverage, precision or recall. See the exact
@@ -129,6 +129,32 @@ python -m taintly --gitlab-group my-group
 python -m taintly /path/to/repo --platform jenkins
 python -m taintly /path/to/repo --platform codebuild
 ```
+
+### CodeBuild project snapshots
+
+With Git installed, you can scan the configured buildspec for a single project
+using a complete, trusted `BatchGetProjects` JSON response and a trusted local
+checkout. Pass the project ARN and the repository's HTTPS GitHub.com identity
+from a trusted source independent of the response:
+
+```bash
+python -m taintly /path/to/checkout --format json \
+  --codebuild-project-snapshot projects.json \
+  arn:aws:codebuild:us-east-1:123456789012:project/example \
+  https://github.com/example-org/example-repo
+```
+
+The project must name a full commit ID available locally. An omitted or empty
+buildspec selector uses `buildspec.yml` at the repository root. A nonempty
+selector must be a supported literal repository-relative YAML path. The report
+identifies the selected file, commit and SHA-256. Missing or ambiguous selection
+produces an incomplete report. Analysis supports Linux containers with an empty
+project environment variable list and no fleet or secondary sources.
+
+Keep captures private because project metadata can include plaintext environment
+values. This offline mode reads the committed file with Git and supports text
+and JSON. It disregards checkout configuration and inline waivers, and applies
+no fixes. The report describes project defaults. A build can override them.
 
 ## CI integration
 
