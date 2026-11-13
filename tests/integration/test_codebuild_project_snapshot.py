@@ -66,6 +66,151 @@ def scan(source, name, *extra, output="json"):
     )
 
 
+BUILD_ID = "review:01234567-89ab-cdef-0123-456789abcdef"
+
+
+@pytest.fixture
+def receipt(source):
+    root, revision, response = source
+    return root, {
+        "build": {
+            "id": BUILD_ID,
+            "projectName": "review",
+            "source": {**response["projects"][0]["source"], "buildspec": "./ci/review.yml"},
+            "sourceVersion": "pr/17",
+            "resolvedSourceVersion": revision,
+            "buildComplete": True,
+            "phases": [{"phaseType": "DOWNLOAD_SOURCE", "phaseStatus": "SUCCEEDED"}],
+            "environment": response["projects"][0]["environment"],
+            "secondarySources": [],
+        }
+    }
+
+
+def scan_receipt(receipt, build_id=BUILD_ID, origin=ORIGIN, *extra, raw=None):
+    root, response = receipt
+    capture = root.parent / "receipt.json"
+    capture.write_text(raw if raw is not None else json.dumps(response), encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, "-m", "taintly", str(root), "--format", "json",
+         "--codebuild-public-build", str(capture), build_id, origin, *extra],
+        capture_output=True, encoding="utf-8", timeout=20,
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+
+
+def test_public_build_scans_only_the_resolved_committed_file(receipt):
+    root, response = receipt
+    path = root / "ci/review.yml"
+    path.write_text(PLAIN, encoding="utf-8")
+    result = scan_receipt(receipt)
+    assert result.returncode == 1, result.stderr
+    report = json.loads(result.stdout)
+    assert report["files_scanned"] == 1
+    assert report["errors"] == []
+    assert report["codebuild_run"]["build_id"] == BUILD_ID
+    assert report["codebuild_run"]["selection_state"] == "bound"
+    assert report["codebuild_run"]["buildspec"] == {
+        "repository": "example-ci/codebuild-pilot",
+        "commit": response["build"]["resolvedSourceVersion"],
+        "path": "ci/review.yml",
+        "sha256": hashlib.sha256(RISK.encode()).hexdigest(),
+    }
+    assert ("SEC3-CB-001", "ci/review.yml", 5) in {
+        (f["rule_id"], f["file"], f["line"]) for f in report["findings"]
+    }
+
+
+@pytest.mark.parametrize(("change", "reason"), [
+    ("sibling", "does not match the requested build ID"),
+    ("wrong-project", "does not match the requested build ID and project"),
+    ("wrong-origin", "does not match the supplied repository"),
+    ("missing-resolved", "resolvedSourceVersion is absent"),
+    ("missing-selector", "no explicit buildspec selector"),
+    ("bad-download", "one successful DOWNLOAD_SOURCE"),
+    ("duplicate-download", "one successful DOWNLOAD_SOURCE"),
+    ("traversal", "outside the literal repository-path profile"),
+    ("batch-wrapper", "no batch or project wrapper"),
+    ("duplicate-key", "duplicate JSON keys"),
+    ("oversized-number", "oversized JSON integer"),
+])
+def test_public_build_does_not_borrow_or_infer_missing_source(receipt, change, reason):
+    _, response = receipt
+    build = response["build"]
+    build_id = BUILD_ID
+    origin = ORIGIN
+    raw = None
+    if change == "sibling":
+        build_id = BUILD_ID[:-1] + "0"
+    elif change == "wrong-project":
+        build["projectName"] = "other"
+    elif change == "wrong-origin":
+        origin = "https://github.com/example-ci/other"
+    elif change == "missing-resolved":
+        build["sourceVersion"] = build.pop("resolvedSourceVersion")
+    elif change == "missing-selector":
+        del build["source"]["buildspec"]
+    elif change == "bad-download":
+        build["phases"][0]["phaseStatus"] = "FAILED"
+    elif change == "duplicate-download":
+        build["phases"] *= 2
+    elif change == "traversal":
+        build["source"]["buildspec"] = "./../ci/review.yml"
+    elif change == "batch-wrapper":
+        response["publicBuildBatch"] = response.pop("build")
+    elif change == "duplicate-key":
+        raw = '{"build": null, "build": ' + json.dumps(build) + '}'
+    elif change == "oversized-number":
+        raw = '{"build": {"unrelated": ' + ("9" * 5000) + '}}'
+    result = scan_receipt(receipt, build_id, origin, "--min-severity", "HIGH", "--fail-on", "INFO", raw=raw)
+    assert result.returncode == 11, result.stderr
+    report = json.loads(result.stdout)
+    assert report["files_scanned"] == 0
+    assert report["codebuild_run"]["selection_state"] == "unresolved"
+    assert report["codebuild_run"]["buildspec"] is None
+    assert report["coverage_status"] == "incomplete"
+    assert reason in report["errors"][0]["title"]
+
+
+@pytest.mark.parametrize(
+    "change", ["missing-secondary-sources", "batch-spec", "root-merge", "multi-document"]
+)
+def test_public_build_binding_does_not_establish_analysis_coverage(receipt, change):
+    root, response = receipt
+    build = response["build"]
+    if change == "missing-secondary-sources":
+        del build["secondarySources"]
+        reason = "outside the supported Linux profile"
+    else:
+        path = root / "ci/review.yml"
+        if change == "batch-spec":
+            content = "batch:\n  build-list: []\n" + RISK
+            reason = "batch orchestration"
+        elif change == "root-merge":
+            content = "x: &x\n  batch:\n    build-list: []\n<<: *x\n" + RISK
+            reason = "root YAML merge"
+        else:
+            content = "---\nproject: different\n---\n" + RISK
+            reason = "YAML document markers"
+        path.write_bytes(content.encode())
+        subprocess.run(["git", "-C", str(root), "add", "ci/review.yml"], check=True)
+        subprocess.run(
+            ["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-qm", "batch"],
+            check=True,
+        )
+        build["resolvedSourceVersion"] = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+        ).strip()
+    result = scan_receipt(receipt)
+    assert result.returncode == 11, result.stderr
+    report = json.loads(result.stdout)
+    assert report["codebuild_run"]["selection_state"] == "bound"
+    assert report["files_scanned"] == 0
+    assert report["coverage_status"] == "incomplete"
+    assert reason in report["errors"][0]["title"]
+
+
 @pytest.mark.parametrize(("name", "path", "code"), [
     ("review", "ci/review.yml", 1), ("publish", "ci/publish.yml", 0), ("default", "buildspec.yml", 1),
 ])

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 from gettext import gettext
 from typing import Any
 
@@ -181,11 +182,18 @@ def main():
     parser.add_argument(
         "--platform", choices=[platform.value for platform in Platform], default=None
     )
-    parser.add_argument(
+    codebuild_input = parser.add_mutually_exclusive_group()
+    codebuild_input.add_argument(
         "--codebuild-project-snapshot",
         nargs=3,
         metavar=("JSON", "PROJECT_ARN", "GITHUB_ORIGIN"),
         help="Scan one configured CodeBuild default from a full local BatchGetProjects response.",
+    )
+    codebuild_input.add_argument(
+        "--codebuild-public-build",
+        nargs=3,
+        metavar=("JSON", "BUILD_ID", "GITHUB_ORIGIN"),
+        help="Scan one pinned buildspec from a trusted, saved CodeBuild public build response.",
     )
     parser.add_argument(
         "--min-severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"], default=None
@@ -579,8 +587,8 @@ def main():
 
     args = parser.parse_args()
 
-    if args.codebuild_project_snapshot:
-        _scan_codebuild_project_snapshot(parser, args)
+    if args.codebuild_project_snapshot or args.codebuild_public_build:
+        _scan_codebuild_snapshot(parser, args)
         return
 
     if args.require_files and any(
@@ -1554,19 +1562,25 @@ def main():
     _exit_for_findings(all_findings, effective_fail_on, review_advisory=args.review_advisory)
 
 
-def _scan_codebuild_project_snapshot(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> None:
+def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Scan a selected Git blob using the existing CodeBuild rule pack."""
     from pathlib import Path
 
-    from .ingestion.codebuild_snapshot import PROJECT_ARN, SnapshotError, bind_buildspec
+    from .ingestion.codebuild_snapshot import (
+        BUILD_ID,
+        PROJECT_ARN,
+        BoundBuildspec,
+        SnapshotError,
+        bind_buildspec,
+        bind_public_build,
+    )
     from .models import AuditReport
     from .source_inventory import SourceIssue
 
     allowed = {
         "path",
         "codebuild_project_snapshot",
+        "codebuild_public_build",
         "platform",
         "format",
         "no_config",
@@ -1586,13 +1600,33 @@ def _scan_codebuild_project_snapshot(
             "CodeBuild snapshot mode requires the codebuild platform and text or JSON format"
         )
 
-    snapshot, arn, origin = args.codebuild_project_snapshot
-    if not PROJECT_ARN.fullmatch(arn):
-        parser.error("CodeBuild snapshot mode requires a full project ARN")
-    report = AuditReport(repo_path=arn, platform=Platform.CODEBUILD.value)
+    bind: Callable[[Path, str, Path, str], BoundBuildspec]
+    if args.codebuild_public_build:
+        snapshot, subject, origin = args.codebuild_public_build
+        if not BUILD_ID.fullmatch(subject):
+            parser.error("CodeBuild public build mode requires a full build ID")
+        bind = bind_public_build
+        report_key = "codebuild_run"
+        subject_key = "build_id"
+        subject_label = "CodeBuild public build"
+        scope = (
+            "Trusted saved public build response and committed source only. "
+            "Capture authenticity, AWS account, command execution, secret delivery "
+            "and effective IAM are unverified."
+        )
+    else:
+        snapshot, subject, origin = args.codebuild_project_snapshot
+        if not PROJECT_ARN.fullmatch(subject):
+            parser.error("CodeBuild snapshot mode requires a full project ARN")
+        bind = bind_buildspec
+        report_key = "codebuild_project"
+        subject_key = "arn"
+        subject_label = "CodeBuild project"
+        scope = "Configured buildspec only. Build overrides, execution, secret delivery and effective IAM are unverified."
+    report = AuditReport(repo_path=subject, platform=Platform.CODEBUILD.value)
     selection = None
     try:
-        selection = bind_buildspec(Path(snapshot), arn, Path(args.path).resolve(), origin)
+        selection = bind(Path(snapshot), subject, Path(args.path).resolve(), origin)
     except (OSError, RuntimeError):
         reason = "The supplied local checkout could not be resolved"
     except SnapshotError as exc:
@@ -1601,7 +1635,7 @@ def _scan_codebuild_project_snapshot(
         reason = selection.analysis_limit or ""
 
     if reason:
-        finding = SourceIssue(selection.path if selection else arn, reason).finding()
+        finding = SourceIssue(selection.path if selection else subject, reason).finding()
         finding.title = f"{'Buildspec scan incomplete' if selection else 'Buildspec selection unresolved'}: {reason}"
         report.add(finding)
     elif selection is not None:
@@ -1625,13 +1659,12 @@ def _scan_codebuild_project_snapshot(
         )
         report.files_scanned = 1
 
-    scope = "Configured buildspec only. Build overrides, execution, secret delivery and effective IAM are unverified."
     report.filter_severity(Severity[args.min_severity] if args.min_severity else Severity.INFO)
     _print_engine_errors_to_stderr(report)
     if args.format == "json":
         data = json.loads(format_json(report))
-        data["codebuild_project"] = {
-            "arn": arn,
+        data[report_key] = {
+            subject_key: subject,
             "selection_state": "bound" if selection else "unresolved",
             "scope": scope,
             "buildspec": {
@@ -1645,7 +1678,7 @@ def _scan_codebuild_project_snapshot(
         }
         print(json.dumps(data, indent=2))
     else:
-        print(f"CodeBuild project {arn}\n{scope}")
+        print(f"{subject_label} {subject}\n{scope}")
         if selection:
             print(f"Buildspec: {selection.repository}@{selection.commit}:{selection.path}")
             print(f"SHA-256: {selection.sha256}")
