@@ -156,6 +156,31 @@ values. This offline mode reads the committed file with Git and supports text
 and JSON. It disregards checkout configuration and inline waivers, and applies
 no fixes. The report describes project defaults. A build can override them.
 
+### Saved public CodeBuild runs
+
+To analyze the committed buildspec selected for a specific build, use a saved
+CodeBuild public console JSON response with one top-level `build` record.
+Supply the expected build ID and repository identity from trusted sources:
+
+```bash
+python -m taintly /path/to/checkout --format json \
+  --codebuild-public-build receipt.json example:01234567-89ab-cdef-0123-456789abcdef \
+  https://github.com/example-org/example-repo
+```
+
+The offline command uses a completed build's successful `DOWNLOAD_SOURCE`,
+explicit repository-relative YAML selector, and full `resolvedSourceVersion`.
+The exact commit and buildspec blob must already be available locally. The
+same Linux profile, configuration and waiver handling as project snapshots
+apply. Use the child build's own response and ID. A batch response, authenticated
+`BatchGetBuilds` response, or omitted selector cannot establish the selection.
+The report can identify the selected blob and still mark analysis incomplete
+when the selected file contains batch orchestration, root YAML merges,
+YAML document markers or an unsupported execution context.
+
+Keep captures private. Taintly does not authenticate the saved response or
+establish the AWS account, command execution, secret delivery or effective IAM.
+
 ## CI integration
 
 **GitHub Actions** — after checking out the target repository:

@@ -1,4 +1,4 @@
-"""Read one CodeBuild project's configured buildspec from a local Git object."""
+"""Bind a CodeBuild project or saved run to a buildspec in a local Git object."""
 
 from __future__ import annotations
 
@@ -13,9 +13,11 @@ from pathlib import Path
 from taintly.parsers.structural import EventKind, walk_workflow
 
 PROJECT_ARN = re.compile(r"arn:aws:codebuild:[a-z0-9-]+:[0-9]{12}:project/[A-Za-z0-9_-]+")
+BUILD_ID = re.compile(r"[A-Za-z0-9_-]+:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 _GITHUB_URL = re.compile(r"https://github\.com/([A-Za-z0-9-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?")
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}")
 _YAML_PATH = re.compile(r"(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml")
+_DOCUMENT_MARKER = re.compile(r"^(?:---|\.\.\.)(?:[ \t\r]|$)", re.MULTILINE)
 _MAX_BYTES = 1024 * 1024
 
 
@@ -60,25 +62,40 @@ def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
-            raise SnapshotError("Project snapshot contains duplicate JSON keys")
+            raise SnapshotError("CodeBuild capture contains duplicate JSON keys")
         result[key] = value
     return result
 
 
-def _project(snapshot: Path, project_arn: str) -> dict[str, object]:
+def _capture_int(value: str) -> int:
+    if len(value) > 100:
+        raise SnapshotError("CodeBuild capture contains an oversized JSON integer")
+    return int(value)
+
+
+def _read_capture(snapshot: Path, label: str) -> dict[str, object]:
     try:
         with snapshot.open("rb") as handle:
             raw = handle.read(_MAX_BYTES + 1)
     except OSError as exc:
-        raise SnapshotError("Project snapshot could not be read") from exc
+        raise SnapshotError(f"{label} could not be read") from exc
     if len(raw) > _MAX_BYTES:
-        raise SnapshotError("Project snapshot exceeds the input size limit")
+        raise SnapshotError(f"{label} exceeds the input size limit")
     try:
-        response = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_keys)
-    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
-        raise SnapshotError("Project snapshot is not a supported UTF-8 JSON response") from exc
+        response = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_unique_keys, parse_int=_capture_int
+        )
+    except SnapshotError:
+        raise
+    except (ValueError, RecursionError) as exc:
+        raise SnapshotError(f"{label} is not a supported UTF-8 JSON response") from exc
     if not isinstance(response, dict):
-        raise SnapshotError("Expected a complete BatchGetProjects response")
+        raise SnapshotError(f"{label} must contain a JSON object")
+    return response
+
+
+def _project(snapshot: Path, project_arn: str) -> dict[str, object]:
+    response = _read_capture(snapshot, "Project snapshot")
     projects = response.get("projects")
     missing = response.get("projectsNotFound", [])
     if not isinstance(projects, list) or not all(isinstance(row, dict) for row in projects):
@@ -99,17 +116,54 @@ def bind_buildspec(snapshot: Path, project_arn: str, root: Path, origin: str) ->
     if not PROJECT_ARN.fullmatch(project_arn):
         raise SnapshotError("A full AWS CodeBuild project ARN is required")
     project = _project(snapshot, project_arn)
-    source = project.get("source")
+    return _bind_record(project, root, origin, run=False)
+
+
+def bind_public_build(snapshot: Path, build_id: str, root: Path, origin: str) -> BoundBuildspec:
+    """Bind one saved public build record, assuming the caller trusts its capture."""
+    if not BUILD_ID.fullmatch(build_id):
+        raise SnapshotError("A full CodeBuild build ID is required")
+    response = _read_capture(snapshot, "Public build receipt")
+    build = response.get("build")
+    if set(response) != {"build"} or not isinstance(build, dict):
+        raise SnapshotError("Expected one public build record, with no batch or project wrapper")
+    if build.get("id") != build_id or build.get("projectName") != build_id.split(":", 1)[0]:
+        raise SnapshotError(
+            "Public build receipt does not match the requested build ID and project"
+        )
+    phases = build.get("phases")
+    if not isinstance(phases, list) or not all(isinstance(phase, dict) for phase in phases):
+        raise SnapshotError("Public build receipt has no supported phase list")
+    downloads = [phase for phase in phases if phase.get("phaseType") == "DOWNLOAD_SOURCE"]
+    if (
+        build.get("buildComplete") is not True
+        or len(downloads) != 1
+        or downloads[0].get("phaseStatus") != "SUCCEEDED"
+    ):
+        raise SnapshotError("Expected a completed build with one successful DOWNLOAD_SOURCE phase")
+    return _bind_record(build, root, origin, run=True)
+
+
+def _bind_record(
+    record: dict[str, object], root: Path, origin: str, *, run: bool
+) -> BoundBuildspec:
+    subject = "Build" if run else "Project"
+    source = record.get("source")
     if not isinstance(source, dict) or source.get("type") != "GITHUB":
-        raise SnapshotError("The project has no supported primary GitHub source")
+        raise SnapshotError(f"{subject} has no supported primary GitHub source")
     identity = _github_identity(origin)
     if _github_identity(source.get("location")) != identity:
-        raise SnapshotError("Project source does not match the supplied repository identity")
-    revision = project.get("sourceVersion")
+        raise SnapshotError(f"{subject} source does not match the supplied repository identity")
+    revision_field = "resolvedSourceVersion" if run else "sourceVersion"
+    revision = record.get(revision_field)
     if not isinstance(revision, str) or not _COMMIT_ID.fullmatch(revision):
-        raise SnapshotError("Project sourceVersion is absent or is not a full commit ID")
-    path = source.get("buildspec", "")
-    if path == "":
+        raise SnapshotError(f"{subject} {revision_field} is absent or is not a full commit ID")
+    path = source.get("buildspec")
+    if run:
+        if not isinstance(path, str) or not path:
+            raise SnapshotError("Public build receipt has no explicit buildspec selector")
+        path = path.removeprefix("./")
+    elif source.get("buildspec", "") == "":
         path = "buildspec.yml"
     if (
         not isinstance(path, str)
@@ -117,13 +171,13 @@ def bind_buildspec(snapshot: Path, project_arn: str, root: Path, origin: str) ->
         or any(part.endswith(".") for part in path.split("/"))
     ):
         raise SnapshotError("Buildspec selector is outside the literal repository-path profile")
-    environment = project.get("environment")
+    environment = record.get("environment")
     unsupported_environment = (
         not isinstance(environment, dict)
         or environment.get("type") not in ("LINUX_CONTAINER", "ARM_CONTAINER")
         or environment.get("environmentVariables") != []
         or "fleet" in environment
-        or project.get("secondarySources", []) != []
+        or record.get("secondarySources", None if run else []) != []
     )
 
     if not root.is_dir():
@@ -141,7 +195,9 @@ def bind_buildspec(snapshot: Path, project_arn: str, root: Path, origin: str) ->
     if _git(
         root, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"
     ).strip() != (revision.encode("ascii")):
-        raise SnapshotError("Configured sourceVersion does not identify the exact local Git commit")
+        raise SnapshotError(
+            f"{subject} {revision_field} does not identify the exact local Git commit"
+        )
     entry = _git(root, "ls-tree", "--full-tree", "-z", revision, "--", path)
     blob = re.fullmatch(
         rb"(?:100644|100755) blob ([0-9a-f]{40})\t" + re.escape(path.encode("ascii")) + rb"\0",
@@ -149,7 +205,7 @@ def bind_buildspec(snapshot: Path, project_arn: str, root: Path, origin: str) ->
     )
     if blob is None:
         raise SnapshotError(
-            "Selected buildspec is unavailable as a regular blob at the configured commit"
+            "Selected buildspec is unavailable as a regular blob at the selected commit"
         )
     oid = blob[1].decode("ascii")
     if int(_git(root, "cat-file", "-s", oid)) > _MAX_BYTES:
@@ -162,18 +218,33 @@ def bind_buildspec(snapshot: Path, project_arn: str, root: Path, origin: str) ->
 
     limit: str | None
     if unsupported_environment:
-        limit = "Project execution context is outside the supported Linux profile"
+        limit = f"{subject} execution context is outside the supported Linux profile"
     else:
-        limit = _buildspec_structure_limit(path, content)
+        limit = _buildspec_structure_limit(path, content, run=run)
     return BoundBuildspec(
         identity, revision, path, hashlib.sha256(data).hexdigest(), content, limit
     )
 
 
-def _buildspec_structure_limit(path: str, content: str) -> str | None:
-    events = list(walk_workflow(path, content=content, include_keys=True))
+def _buildspec_structure_limit(path: str, content: str, *, run: bool) -> str | None:
+    if run and _DOCUMENT_MARKER.search(content.lstrip("\ufeff")):
+        return "Selected buildspec has YAML document markers outside the native build profile"
+    events = list(
+        walk_workflow(path, content=content, include_keys=True, include_merge_origins=run)
+    )
     if any(event.kind in (EventKind.ERROR, EventKind.CUTOFF) for event in events):
         return "Selected buildspec has unsupported or malformed YAML structure"
+    if run and any(
+        event.kind is EventKind.MAP_KEY and event.path == ("batch",) for event in events
+    ):
+        return "Selected buildspec contains batch orchestration outside the native build profile"
+    if run and any(
+        event.kind is EventKind.MAP_KEY
+        and event.value_kind == "merge_key"
+        and event.path == ("<<",)
+        for event in events
+    ):
+        return "Selected buildspec has a root YAML merge outside the native build profile"
     versions = [
         event.value
         for event in events
