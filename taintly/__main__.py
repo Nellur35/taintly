@@ -1666,6 +1666,13 @@ def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Nam
 
     report.filter_severity(Severity[args.min_severity] if args.min_severity else Severity.INFO)
     _print_engine_errors_to_stderr(report)
+    script_scope = (
+        "The selected buildspec asks Bash to source these relative paths. Review "
+        "whether the PR can change the script and what authority it receives. The "
+        "Git blob identifies a tree entry at the selected commit. Runtime resolution "
+        "depends on the working directory and filesystem state. Execution and "
+        "authority are unverified."
+    )
     if args.format == "json":
         data = json.loads(format_json(report))
         data[report_key] = {
@@ -1681,12 +1688,38 @@ def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Nam
             if selection
             else None,
         }
+        if selection and selection.checkout_scripts:
+            data[report_key]["checkout_scripts"] = {
+                "scope": script_scope,
+                "pull_request_ref": selection.pull_request_ref,
+                "references": [
+                    {
+                        "phase": item.reference.phase,
+                        "command_index": item.reference.command_index,
+                        "line": item.reference.line,
+                        "column": item.reference.column,
+                        "path": item.reference.path,
+                        "git_blob": item.git_blob,
+                    }
+                    for item in selection.checkout_scripts
+                ],
+            }
         print(json.dumps(data, indent=2))
     else:
         print(f"{subject_label} {subject}\n{scope}")
         if selection:
             print(f"Buildspec: {selection.repository}@{selection.commit}:{selection.path}")
             print(f"SHA-256: {selection.sha256}")
+            if selection.checkout_scripts:
+                print(f"Requested source: {selection.pull_request_ref}")
+                print(script_scope)
+                for item in selection.checkout_scripts:
+                    ref = item.reference
+                    blob = item.git_blob or "regular blob unresolved"
+                    print(
+                        f"  {selection.path}:{ref.line}:{ref.column} "
+                        f"({ref.phase}.commands[{ref.command_index}]) -> ./{ref.path} ({blob})"
+                    )
         print(
             format_text(
                 report, use_color=not args.no_color and sys.stdout.isatty(), verbose=args.verbose

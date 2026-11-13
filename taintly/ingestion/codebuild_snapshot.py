@@ -10,6 +10,7 @@ import subprocess  # nosec B404
 from dataclasses import dataclass
 from pathlib import Path
 
+from taintly.ingestion.codebuild_checkout import CheckoutScriptReference, checkout_script_references
 from taintly.parsers.structural import EventKind, walk_workflow
 
 PROJECT_ARN = re.compile(r"arn:aws:codebuild:[a-z0-9-]+:[0-9]{12}:project/[A-Za-z0-9_-]+")
@@ -26,6 +27,12 @@ class SnapshotError(ValueError):
 
 
 @dataclass(frozen=True)
+class BoundScriptReference:
+    reference: CheckoutScriptReference
+    git_blob: str | None
+
+
+@dataclass(frozen=True)
 class BoundBuildspec:
     repository: str
     commit: str
@@ -33,6 +40,8 @@ class BoundBuildspec:
     sha256: str
     content: str
     analysis_limit: str | None = None
+    checkout_scripts: tuple[BoundScriptReference, ...] = ()
+    pull_request_ref: str | None = None
 
 
 def _git(root: Path, *args: str) -> bytes:
@@ -172,13 +181,23 @@ def _bind_record(
     ):
         raise SnapshotError("Buildspec selector is outside the literal repository-path profile")
     environment = record.get("environment")
-    unsupported_environment = (
-        not isinstance(environment, dict)
-        or environment.get("type") not in ("LINUX_CONTAINER", "ARM_CONTAINER")
-        or environment.get("environmentVariables") != []
-        or "fleet" in environment
-        or record.get("secondarySources", None if run else []) != []
+    known_environment = (
+        isinstance(environment, dict)
+        and environment.get("environmentVariables") == []
+        and "fleet" not in environment
+        and record.get("secondarySources", None if run else []) == []
     )
+    environment_type = environment.get("type") if isinstance(environment, dict) else None
+    source_version = record.get("sourceVersion")
+    pull_request_ref = None
+    if (
+        run
+        and known_environment
+        and environment_type == "LINUX_EC2"
+        and isinstance(source_version, str)
+        and re.fullmatch(r"pr/[1-9][0-9]*", source_version)
+    ):
+        pull_request_ref = source_version
 
     if not root.is_dir():
         raise SnapshotError("The supplied local checkout is unavailable")
@@ -198,16 +217,11 @@ def _bind_record(
         raise SnapshotError(
             f"{subject} {revision_field} does not identify the exact local Git commit"
         )
-    entry = _git(root, "ls-tree", "--full-tree", "-z", revision, "--", path)
-    blob = re.fullmatch(
-        rb"(?:100644|100755) blob ([0-9a-f]{40})\t" + re.escape(path.encode("ascii")) + rb"\0",
-        entry,
-    )
-    if blob is None:
+    oid = _regular_blob(root, revision, path)
+    if oid is None:
         raise SnapshotError(
             "Selected buildspec is unavailable as a regular blob at the selected commit"
         )
-    oid = blob[1].decode("ascii")
     if int(_git(root, "cat-file", "-s", oid)) > _MAX_BYTES:
         raise SnapshotError("Selected buildspec exceeds the input size limit")
     data = _git(root, "cat-file", "blob", oid)
@@ -216,18 +230,56 @@ def _bind_record(
     except UnicodeError as exc:
         raise SnapshotError("Selected buildspec is not UTF-8") from exc
 
-    limit: str | None
-    if unsupported_environment:
+    scripts: tuple[BoundScriptReference, ...] = ()
+    if pull_request_ref:
+        limit = _buildspec_structure_limit(path, content, run=True, allow_document_start=True)
+        if limit is None:
+            references = checkout_script_references(path, content)
+            blobs: dict[str, str | None] = {}
+            for reference in references:
+                if reference.path not in blobs:
+                    try:
+                        blobs[reference.path] = _regular_blob(root, revision, reference.path)
+                    except SnapshotError:
+                        blobs[reference.path] = None
+            scripts = tuple(BoundScriptReference(ref, blobs[ref.path]) for ref in references)
+            limit = "LINUX_EC2 profile is limited to configured checkout script references"
+    elif not known_environment or environment_type not in ("LINUX_CONTAINER", "ARM_CONTAINER"):
         limit = f"{subject} execution context is outside the supported Linux profile"
     else:
         limit = _buildspec_structure_limit(path, content, run=run)
     return BoundBuildspec(
-        identity, revision, path, hashlib.sha256(data).hexdigest(), content, limit
+        identity,
+        revision,
+        path,
+        hashlib.sha256(data).hexdigest(),
+        content,
+        limit,
+        scripts,
+        pull_request_ref,
     )
 
 
-def _buildspec_structure_limit(path: str, content: str, *, run: bool) -> str | None:
-    if run and _DOCUMENT_MARKER.search(content.lstrip("\ufeff")):
+def _regular_blob(root: Path, revision: str, path: str) -> str | None:
+    entry = _git(root, "ls-tree", "--full-tree", "-z", revision, "--", path)
+    match = re.fullmatch(
+        rb"(?:100644|100755) blob ([0-9a-f]{40})\t" + re.escape(path.encode("ascii")) + rb"\0",
+        entry,
+    )
+    return match[1].decode("ascii") if match else None
+
+
+def _buildspec_structure_limit(
+    path: str, content: str, *, run: bool, allow_document_start: bool = False
+) -> str | None:
+    document = content.lstrip("\ufeff")
+    if allow_document_start:
+        document = document.replace("\r\n", "\n").replace("\r", "\n")
+        if "\ufeff" in document:
+            return "Selected buildspec has a noninitial YAML byte order mark"
+    if allow_document_start and document.startswith("---\n"):
+        document = document.partition("\n")[2]
+    if run and _DOCUMENT_MARKER.search(document):
         return "Selected buildspec has YAML document markers outside the native build profile"
     events = list(
         walk_workflow(path, content=content, include_keys=True, include_merge_origins=run)
