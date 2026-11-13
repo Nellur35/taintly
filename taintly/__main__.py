@@ -182,6 +182,12 @@ def main():
         "--platform", choices=[platform.value for platform in Platform], default=None
     )
     parser.add_argument(
+        "--codebuild-project-snapshot",
+        nargs=3,
+        metavar=("JSON", "PROJECT_ARN", "GITHUB_ORIGIN"),
+        help="Scan one configured CodeBuild default from a full local BatchGetProjects response.",
+    )
+    parser.add_argument(
         "--min-severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"], default=None
     )
     parser.add_argument(
@@ -572,6 +578,10 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.codebuild_project_snapshot:
+        _scan_codebuild_project_snapshot(parser, args)
+        return
 
     if args.require_files and any(
         (
@@ -1542,6 +1552,115 @@ def main():
         sys.exit(11 if any(f.rule_id == "ENGINE-ERR" for f in all_findings) else 0)
 
     _exit_for_findings(all_findings, effective_fail_on, review_advisory=args.review_advisory)
+
+
+def _scan_codebuild_project_snapshot(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    """Scan a selected Git blob using the existing CodeBuild rule pack."""
+    from pathlib import Path
+
+    from .ingestion.codebuild_snapshot import PROJECT_ARN, SnapshotError, bind_buildspec
+    from .models import AuditReport
+    from .source_inventory import SourceIssue
+
+    allowed = {
+        "path",
+        "codebuild_project_snapshot",
+        "platform",
+        "format",
+        "no_config",
+        "no_color",
+        "verbose",
+        "min_severity",
+        "fail_on",
+        "review_advisory",
+        "max_scan_seconds",
+        "require_files",
+    }
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(f"--{name.replace('_', '-')} is unavailable in CodeBuild snapshot mode")
+    if args.platform not in (None, "codebuild") or args.format not in ("text", "json"):
+        parser.error(
+            "CodeBuild snapshot mode requires the codebuild platform and text or JSON format"
+        )
+
+    snapshot, arn, origin = args.codebuild_project_snapshot
+    if not PROJECT_ARN.fullmatch(arn):
+        parser.error("CodeBuild snapshot mode requires a full project ARN")
+    report = AuditReport(repo_path=arn, platform=Platform.CODEBUILD.value)
+    selection = None
+    try:
+        selection = bind_buildspec(Path(snapshot), arn, Path(args.path).resolve(), origin)
+    except (OSError, RuntimeError):
+        reason = "The supplied local checkout could not be resolved"
+    except SnapshotError as exc:
+        reason = str(exc)
+    else:
+        reason = selection.analysis_limit or ""
+
+    if reason:
+        finding = SourceIssue(selection.path if selection else arn, reason).finding()
+        finding.title = f"{'Buildspec scan incomplete' if selection else 'Buildspec selection unresolved'}: {reason}"
+        report.add(finding)
+    elif selection is not None:
+        rules = load_rules_for_platform(Platform.CODEBUILD)
+        if not rules or _rule_registry._IMPORT_FAILURES:
+            print(
+                "taintly: CodeBuild rule loading failed; cannot continue with incomplete coverage",
+                file=sys.stderr,
+            )
+            sys.exit(3)
+        report.rules_loaded = len(rules)
+        report.findings.extend(
+            scan_file(
+                selection.path,
+                rules,
+                _content=selection.content,
+                local_repository_available=False,
+                respect_inline_suppressions=False,
+                max_scan_seconds=args.max_scan_seconds,
+            )
+        )
+        report.files_scanned = 1
+
+    scope = "Configured buildspec only. Build overrides, execution, secret delivery and effective IAM are unverified."
+    report.filter_severity(Severity[args.min_severity] if args.min_severity else Severity.INFO)
+    _print_engine_errors_to_stderr(report)
+    if args.format == "json":
+        data = json.loads(format_json(report))
+        data["codebuild_project"] = {
+            "arn": arn,
+            "selection_state": "bound" if selection else "unresolved",
+            "scope": scope,
+            "buildspec": {
+                "repository": selection.repository,
+                "commit": selection.commit,
+                "path": selection.path,
+                "sha256": selection.sha256,
+            }
+            if selection
+            else None,
+        }
+        print(json.dumps(data, indent=2))
+    else:
+        print(f"CodeBuild project {arn}\n{scope}")
+        if selection:
+            print(f"Buildspec: {selection.repository}@{selection.commit}:{selection.path}")
+            print(f"SHA-256: {selection.sha256}")
+        print(
+            format_text(
+                report, use_color=not args.no_color and sys.stdout.isatty(), verbose=args.verbose
+            )
+        )
+    # An absent finding must not make an INFO threshold mask a source diagnostic.
+    threshold = (
+        Severity[args.fail_on]
+        if args.fail_on and any(f.rule_id != "ENGINE-ERR" for f in report.findings)
+        else None
+    )
+    _exit_for_findings(report.findings, threshold, review_advisory=args.review_advisory)
 
 
 def _print_engine_errors_to_stderr(report) -> None:
