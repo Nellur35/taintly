@@ -2057,8 +2057,9 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             f"  Run {build['run']} selected {result['artifact']['name']} "
             f"at {build['path']}:{build['upload_line']}.\n"
             f"  Run {deploy['run']} reported Worker {deploy['worker']} at "
-            f"{deploy['version_url']} using the configured {deploy['credential_binding']} "
-            f"binding ({deploy['path']}:{deploy['command_line']}).\n"
+            f"{deploy['version_url']} ({deploy['path']}:{deploy['command_line']}).\n"
+            f"  Configured apiToken uses a GitHub Actions secret reference "
+            f"({deploy['path']}:{deploy['credential_line']}).\n"
             f"{result['scope']}\n{result['review']}"
         )
     elif state == "version-upload-reported":

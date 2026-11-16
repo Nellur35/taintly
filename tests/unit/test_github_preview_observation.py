@@ -183,7 +183,11 @@ def test_preview_observation_reports_owned_source_operation_and_scope(tmp_path, 
     assert report["producer"]["revision"] == MERGE
     assert report["artifact"]["selectors"] == ["dist/", "wrangler.jsonc"]
     assert report["consumer"]["operation"] == "workers-preview"
-    assert report["consumer"]["credential_binding"] == "secrets.PREVIEW_TOKEN"
+    assert report["consumer"]["credential_binding"] == "github-actions-secret-reference"
+    line = report["consumer"]["credential_line"]
+    source = (tmp_path / report["consumer"]["path"]).read_text().splitlines()
+    assert "apiToken:" in source[line - 1]
+    assert "PREVIEW_TOKEN" not in json.dumps(report)
     assert "principal identity" in report["scope"]
 
 

@@ -297,8 +297,8 @@ the following records:
 This profile uses one producer and one consumer, exact audited action pins,
 the trigger's run ID, the default download destination, and an adjacent
 literal Worker Preview action. `preview-reported` means the selected
-records agree about this publication. The report includes the configured
-secret's symbolic binding and preserves uncertainty about the principal,
+records agree about this publication. The report locates the configured
+`apiToken` secret reference in the workflow and preserves uncertainty about the principal,
 archive contents, and wider permissions. Incompatible or missing evidence
 returns `unresolved` and exit `11`. The separate observation mode leaves
 ordinary repository scans and finding policy intact.

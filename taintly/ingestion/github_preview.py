@@ -405,8 +405,9 @@ def _publish(
         "checkout or producer/archive identity differs from the saved download",
     )
     operation = _inputs(deploys, publish, {"apiToken", "command"})
-    secret = re.fullmatch(
-        r"\$\{\{[ \t]*secrets\.([A-Za-z_][A-Za-z0-9_]*)[ \t]*\}\}", str(operation["apiToken"].value)
+    secret_reference = re.fullmatch(
+        r"\$\{\{[ \t]*secrets\.[A-Za-z_][A-Za-z0-9_]*[ \t]*\}\}",
+        str(operation["apiToken"].value),
     )
     command = re.fullmatch(
         rf'preview --worker-name ({_WORKER}) --name "\$\{{\{{[ \t]*steps\.{_EXPR_ID}\.outputs\.{_EXPR_ID}[ \t]*\}}\}}"',
@@ -416,7 +417,7 @@ def _publish(
         rf"wrangler preview --worker-name ({_WORKER}) --name ({_WORKER})",
         _receipt(trace, pub_obs, deploy_job, "preview-command"),
     )
-    if not (secret and command and runtime and command[1] == runtime[1]):
+    if not (secret_reference and command and runtime and command[1] == runtime[1]):
         raise PreviewEvidenceError("configured and reported Preview command or credential disagree")
     url = _receipt(trace, pub_obs, deploy_job, "version-url")
     _require(
@@ -450,7 +451,8 @@ def _publish(
             "operation": "workers-preview",
             "worker": runtime[1],
             "alias": runtime[2],
-            "credential_binding": f"secrets.{secret[1]}",
+            "credential_binding": "github-actions-secret-reference",
+            "credential_line": operation["apiToken"].line,
             "version_url": url,
             "download_line": down["name"].line,
             "command_line": operation["command"].line,
