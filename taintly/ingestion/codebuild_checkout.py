@@ -6,7 +6,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 
-from taintly.parsers.structural import EventKind, walk_workflow
+from taintly.parsers.structural import Event, EventKind, walk_workflow
 from taintly.parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
 
 _PHASES = {"install", "pre_build", "build", "post_build"}
@@ -30,24 +30,30 @@ class CheckoutScriptReference:
     path: str
 
 
-def checkout_script_references(path: str, content: str) -> tuple[CheckoutScriptReference, ...]:
-    """Find configured relative source operands, independent of runtime shell state."""
+def unambiguous_checkout_events(path: str, content: str) -> list[Event]:
+    """Read source ownership without admitting aliases or ambiguous keys."""
     events = list(walk_workflow(path, content=content, include_keys=True))
     if any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
-        return ()
+        return []
     for kind in (EventKind.MAP_KEY, EventKind.LEAF_SCALAR):
         counts = Counter(event.path for event in events if event.kind is kind)
         if any(count != 1 for count in counts.values()):
-            return ()
+            return []
     try:
         if any(
             token.kind in {TokenKind.ALIAS, TokenKind.MERGE_KEY}
             or (token.kind is TokenKind.KEY and "\\" in token.value)
             for token in tokenize(content)
         ):
-            return ()
+            return []
     except TokenizerError:
-        return ()
+        return []
+    return events
+
+
+def checkout_script_references(path: str, content: str) -> tuple[CheckoutScriptReference, ...]:
+    """Find configured relative source operands, independent of runtime shell state."""
+    events = unambiguous_checkout_events(path, content)
     leaves = [event for event in events if event.kind is EventKind.LEAF_SCALAR]
     values = {event.path: event.value for event in leaves}
     if values.get(("version",)) != "0.2" or values.get(("env", "shell")) != "bash":

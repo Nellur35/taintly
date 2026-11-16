@@ -203,6 +203,24 @@ def main():
         metavar=("JSON", "PUBLIC_PROJECT_ID", "GITHUB_ORIGIN", "PR_EVENT"),
         help="Assess one GitHub PR event against trusted, saved CodeBuild project filters.",
     )
+    evidence_input.add_argument(
+        "--codebuild-public-s3-observation",
+        nargs=3,
+        metavar=("JSON", "BUILD_ARN", "GITHUB_ORIGIN"),
+        help="Corroborate a saved CodeBuild-managed S3 ZIP and its source member.",
+    )
+    evidence_input.add_argument(
+        "--codebuild-public-deploy-observation",
+        nargs=3,
+        metavar=("JSON", "BUILD_ID", "GITHUB_ORIGIN"),
+        help="Compare a saved CodeBuild deployment skip with its selected source.",
+    )
+    evidence_input.add_argument(
+        "--codebuild-start-observation",
+        nargs=4,
+        metavar=("JSON", "GITHUB_ORIGIN", "RUN", "JOB"),
+        help="Bind a saved GitHub caller job to its observed CodeBuild start or guard stop.",
+    )
     parser.add_argument(
         "--codebuild-webhook-sender",
         metavar="ID",
@@ -628,6 +646,15 @@ def main():
         return
     if args.gitlab_mr_artifact_observation:
         _check_gitlab_mr_artifact(parser, args)
+        return
+    if args.codebuild_public_s3_observation:
+        _assess_codebuild_s3(parser, args)
+        return
+    if args.codebuild_public_deploy_observation:
+        _assess_codebuild_deploy(parser, args)
+        return
+    if args.codebuild_start_observation:
+        _assess_codebuild_start(parser, args)
         return
 
     if args.codebuild_project_snapshot or args.codebuild_public_build:
@@ -1812,6 +1839,137 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
         )
     else:
         print(f"GitLab observation unresolved: {report['reason']}.\n{report['scope']}")
+    sys.exit(11 if state == "unresolved" else 0)
+
+
+def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from .ingestion.codebuild_s3 import codebuild_s3_observation
+
+    allowed = {
+        "path",
+        "codebuild_public_s3_observation",
+        "platform",
+        "format",
+        "no_config",
+        "no_color",
+    }
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(
+                f"--{name.replace('_', '-')} is unavailable in CodeBuild S3 observation mode"
+            )
+    if args.platform not in (None, "codebuild") or args.format not in ("text", "json"):
+        parser.error("CodeBuild S3 observation requires codebuild and text or JSON format")
+    capture, build_arn, origin = args.codebuild_public_s3_observation
+    result = codebuild_s3_observation(Path(capture), Path(args.path), build_arn, origin)
+    resolved = result["state"] == "managed-s3-object-observed"
+    if args.format == "json":
+        print(json.dumps({"codebuild_s3_observation": result}, indent=2))
+    elif result["state"] in ("managed-s3-object-observed", "managed-s3-link-unverified"):
+        if resolved:
+            print(f"Build {result['build']} recorded the digest of the observed managed S3 ZIP.")
+        else:
+            print(
+                f"Build {result['build']} and the retrieved ZIP are consistent with a managed upload."
+            )
+            print("  Exact linkage remains unverified without the CodeBuild artifact digest.")
+        print(f"  S3 object: {result['publication']['target']}")
+        print(f"  Changed source in ZIP: {result['influence']['archive_member']}")
+        print(result["scope"])
+    else:
+        print(f"CodeBuild S3 observation unresolved: {result['reason']}")
+        print(result["scope"])
+    sys.exit(0 if resolved else 11)
+
+
+def _assess_codebuild_deploy(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from .ingestion.codebuild_deploy import codebuild_deploy_observation
+
+    allowed = {
+        "path",
+        "codebuild_public_deploy_observation",
+        "platform",
+        "format",
+        "no_config",
+        "no_color",
+    }
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(
+                f"--{name.replace('_', '-')} is unavailable in CodeBuild deployment observation mode"
+            )
+    if args.platform not in (None, "codebuild") or args.format not in ("text", "json"):
+        parser.error("CodeBuild deployment observation requires codebuild and text or JSON format")
+    capture, build_id, origin = args.codebuild_public_deploy_observation
+    result = codebuild_deploy_observation(Path(capture), Path(args.path), origin, build_id)
+    resolved = result["state"] == "guard-skip-reported"
+    if args.format == "json":
+        print(json.dumps({"codebuild_deploy_observation": result}, indent=2))
+    elif resolved:
+        print(
+            f"Build {result['build']} has saved records consistent with a configured deployment skip for {result['pull_request_ref']}."
+        )
+        print(f"  Source: {result['source']['path']}:{result['source']['line']}")
+        for operation in result["configured_operations"]:
+            print(
+                f"  Guarded operation in committed script: {operation['operation']} -> {operation['target']}"
+            )
+        print(result["scope"])
+    else:
+        print(f"CodeBuild deployment observation unresolved: {result['reason']}")
+        print(result["scope"])
+    sys.exit(0 if resolved else 11)
+
+
+def _assess_codebuild_start(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from .ingestion.codebuild_start import codebuild_start_observation
+
+    allowed = {"path", "codebuild_start_observation", "platform", "format", "no_config", "no_color"}
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(
+                f"--{name.replace('_', '-')} is unavailable in CodeBuild start observation mode"
+            )
+    if args.platform not in (None, "codebuild") or args.format not in ("text", "json"):
+        parser.error(
+            "CodeBuild start observation mode requires the codebuild platform and text or JSON format"
+        )
+    capture, origin, run, job = args.codebuild_start_observation
+    if any(not value.isascii() or not value.isdecimal() or len(value) > 19 for value in (run, job)):
+        parser.error("CodeBuild start observation mode requires decimal run and job IDs")
+    result = codebuild_start_observation(Path(capture), Path(args.path), origin, int(run), int(job))
+    state = result["state"]
+    if args.format == "json":
+        print(json.dumps({"codebuild_start_observation": result}, indent=2))
+    elif state == "starts-observed":
+        print(
+            f"Saved run {result['run']}, job {result['job']} reports CodeBuild starts for {result['pull_request_ref']}."
+        )
+        for build in result["builds"]:
+            print(f"  {build['build_id']} selected {build['revision']} using {build['buildspec']}.")
+            for copy in build["configured_publication"]:
+                print(
+                    f"    Configured Nix cache copy to {copy['bucket']}: object write unverified."
+                )
+                if copy["reported_nix_paths"] is not None:
+                    print(
+                        f"    The saved command output reports {copy['reported_nix_paths']} Nix paths to copy."
+                    )
+        print(result["scope"])
+        print(result["review"])
+    elif state == "automatic-start-blocked":
+        print(
+            f"Saved run {result['run']}, job {result['job']} records the PR guard stopping automatic CodeBuild start."
+        )
+        print(result["scope"])
+    else:
+        print(f"CodeBuild start unresolved: {result['reason']}.\n{result['scope']}")
     sys.exit(11 if state == "unresolved" else 0)
 
 

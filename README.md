@@ -201,6 +201,41 @@ member. Published Pages content, push access to registries, protected
 variables, and authorization to play a manual job require separate
 evidence. Missing or conflicting evidence returns exit `11`.
 
+### Saved GitHub-to-CodeBuild start observations
+
+```sh
+taintly /path/to/git-checkout --format json \
+  --codebuild-start-observation observation.json https://github.com/OWNER/REPO RUN JOB
+```
+
+This offline profile reads trusted saved evidence for a GitHub
+`pull_request_target` job that uses the collaborator permission to decide
+whether to launch standalone CodeBuild runs. It reads the caller workflow,
+its launcher and selected buildspecs from the exact local Git commits.
+The start result is scoped to the named job, AWS initiator session and
+returned build IDs. An observed guard stop is scoped to automatic
+launches by that job.
+
+The `codebuild-start-v1` capture contains a GitHub `run` and its `job`
+from the attempt-scoped jobs API, a `pr` with `number` and `base` and
+`head` objects (`repo` and `sha`), `observations`, `build_responses`, and
+`build_commands`. The run uses a literal `head_repository` full name.
+`observations` are reduced log rows with `run_id`, `job_id`, `attempt`,
+`time`, `role`, and `value`. Capture the reported base checkout revision,
+assumed-role run session, PR author permission, and returned standalone
+build IDs or explicit guard stop. Preserve the step timestamps from the
+attempt-scoped job. Enter selected AWS public build responses unchanged
+in `build_responses`.
+
+Optional CodeBuild log rows in `build_commands` use the exact `build_id`,
+`time`, `kind`, and `command`. They can corroborate `running-command`
+entries from a supported buildspec. A `nix-copy-summary` row also carries
+the integer `paths` reported by the copy. The CLI keeps the configured S3
+destination, observed path count and S3 object-write evidence separate.
+The caller role cannot establish the build's own publication permission.
+Missing or incompatible start evidence returns exit `11`. The report
+retains existing CodeBuild analysis limits.
+
 ### CodeBuild project snapshots
 
 With Git installed, you can scan the configured buildspec for a single project
@@ -259,6 +294,67 @@ and filesystem state. The overall scan remains incomplete in this profile.
 
 Keep captures private. Taintly does not authenticate the saved response or
 establish the AWS account, command execution, secret delivery or effective IAM.
+
+### Saved CodeBuild-managed S3 ZIP
+
+```bash
+python -m taintly ./repo --format json --codebuild-public-s3-observation \
+  observation.json arn:aws:codebuild:us-east-1:123456789012:build/example:01234567-89ab-cdef-0123-456789abcdef \
+  https://github.com/owner/repo
+```
+
+Supply a trusted local `codebuild-managed-s3-v1` JSON receipt and the downloaded
+`archive.zip` beside it. The local Git repository must contain the exact PR head
+and base objects and have the matching HTTPS origin. The receipt contains:
+
+- `pr`: `number`, `head`, `base`, `repository`, and `fork` (the PR head repository).
+- `build`: provider run fields including the selected revision, inline buildspec,
+  S3 artifact type, status, and phase timestamps.
+- `logs`: `build` (the exact build ID), the inline buildspec-selection log row
+  under `selection`, and owned command, artifact, and phase rows under `rows`.
+- `artifact.provider`: the separately captured artifact lookup, with `build`
+  and `s3Arn`. Include the SHA-256 supplied by CodeBuild as `sha256sum` or
+  `sha256Checksum` when present in the provider record. `artifact.object`
+  contains `build_id`, canonical S3 `url`,
+  `http_status`, `archive_sha256` and the S3 response `headers` for length,
+  last modification time and CodeBuild build ARN metadata.
+- `witness`: the changed `source_path` and its exact ZIP `archive_member`.
+
+The supported profile runs `make dist-src` with a version 0.2 inline buildspec
+that selects a root ZIP. The observation checks that the published member
+matches the PR head and differs from the base, permitting LF/CRLF conversion
+for UTF-8 text. The archive is read with size limits and is never extracted.
+Without the independent CodeBuild digest, the report preserves the retrieved
+object and matched member, returns `managed-s3-link-unverified` and exits
+`11`. The S3 object's user-managed metadata does not establish the exact
+build-to-object binding.
+The exact service-role session, general IAM permissions and subsequent use
+remain unverified. Inconsistent or missing evidence returns exit 11.
+
+### Saved CodeBuild deployment skip
+
+Use a trusted saved CodeBuild build and runner receipt with the matching Git checkout.
+
+```bash
+python -m taintly ./repo --format json --codebuild-public-deploy-observation \
+  observation.json example:01234567-89ab-cdef-0123-456789abcdef https://github.com/owner/repo
+```
+
+The JSON object contains `schema: "codebuild-deploy-observation-v1"`, the public
+`build` record, and `trace`. Set `trace.build` to the selected build ID.
+Save the three ordered runner rows for the source workspace, the root
+`buildspec.yml` selection, and successful source download in `trace.download`.
+Save four ordered deployment rows in `trace.deployment`: invocation, emitted
+branch and PR source ref, skip message, and the owning successful BUILD phase
+completion. Capture the invocation and its output together, from that build.
+The supported profile uses a directly declared literal `bash` script in a
+version 0.2 buildspec on Linux, with a branch and PR-ref guard around S3
+sync and CloudFront invalidation.
+
+The command describes the reported invocation and points to the configured
+script and target. Effective AWS permissions, runtime script bytes and the producer of log lines
+remain unverified. Missing or conflicting evidence returns exit 11. The
+receipt is local and must come from a trusted capture of the selected run.
 
 ### Saved CodeBuild webhook filters
 
