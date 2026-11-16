@@ -10,6 +10,18 @@ from pathlib import Path
 import pytest
 
 from taintly.__main__ import main
+from taintly.ingestion.gitlab_registry_job import RegistryJobError, load_registry_job
+
+
+def test_denied_receipt_metadata_stays_a_reviewable_input_error(tmp_path, monkeypatch):
+    path = tmp_path / "receipt.json"
+
+    def denied(self):
+        raise PermissionError("directory not accessible")
+
+    monkeypatch.setattr(Path, "is_file", denied)
+    with pytest.raises(RegistryJobError, match="receipt is not readable"):
+        load_registry_job(path, "1", "3")
 
 _CONFIG = """\
 preview:

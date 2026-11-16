@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from taintly.parsers.structural import Event, EventKind, walk_workflow
 from taintly.parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
 from taintly.path_safety import is_within_repo
 
@@ -88,7 +89,13 @@ class GitLabRegistryJob:
             raise RegistryJobError("Root configuration is not UTF-8") from exc
         if parsed_config != scanned_content:
             raise RegistryJobError("Root configuration differs from the parsed source")
-        _check_workflow_ownership(parsed_config)
+        events = _owned_workflow_events(parsed_config)
+        if any(
+            event.value_kind == "merge_key"
+            and event.path[0] in {path.job, "variables", "workflow", "default"}
+            for event in events
+        ):
+            raise RegistryJobError("GitLab source uses a merge in the selected registry context")
         recipe = _source_bytes(repo, repo / path.dockerfile, "Dockerfile")
         recipe_sha = hashlib.sha256(recipe).hexdigest()
         if recipe_sha != self.dockerfile_sha256:
@@ -199,17 +206,25 @@ def _one_line(lines: list[str], expected: str) -> int:
     return indices[0]
 
 
-def _check_workflow_ownership(content: str) -> None:
+def _owned_workflow_events(content: str) -> list[Event]:
     if "\ufeff" in content or re.search(r"^(?:(?:---|\.\.\.)(?:[ \t]|$)|%)", content, re.MULTILINE):
         raise RegistryJobError("GitLab source contains unsupported document boundaries")
     try:
         for token in tokenize(content):
-            if token.kind is TokenKind.MERGE_KEY or (
-                token.kind is TokenKind.KEY and "\\" in token.value
-            ):
+            if token.kind is TokenKind.KEY and "\\" in token.value:
                 raise RegistryJobError("GitLab source contains ambiguous key ownership")
     except TokenizerError as exc:
         raise RegistryJobError("GitLab source tokenization is incomplete") from exc
+    events = list(
+        walk_workflow(
+            ".gitlab-ci.yml", content=content, include_keys=True, include_merge_origins=True
+        )
+    )
+    if any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
+        raise RegistryJobError("GitLab source structural analysis is incomplete")
+    if any(event.value_kind == "merge_key" and event.path == ("<<",) for event in events):
+        raise RegistryJobError("GitLab source contains ambiguous root merge ownership")
+    return events
 
 
 def _source_bytes(repo: Path, path: Path, label: str) -> bytes:
@@ -270,9 +285,9 @@ def _time(value: object, label: str) -> datetime:
 
 
 def _load_job_receipt(path: Path) -> dict[str, object]:
-    if not path.is_file():
-        raise RegistryJobError("GitLab job receipt must be a regular file")
     try:
+        if not path.is_file():
+            raise RegistryJobError("GitLab job receipt must be a regular file")
         with path.open("rb") as handle:
             raw = handle.read(_MAX_RECEIPT_BYTES + 1)
     except OSError as exc:

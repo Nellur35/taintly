@@ -52,7 +52,7 @@ def capture(tmp_path):
             "id": 33,
             "name": "package",
             "status": "success",
-            "pipeline": dict(run),
+            "pipeline": {**run, "created_at": time(0), "updated_at": time(7)},
             "web_url": JOB,
             "started_at": time(1),
             "finished_at": time(5),
@@ -101,19 +101,34 @@ def test_artifact_retrieval_has_to_follow_job(tmp_path, capture):
     assert evaluate(tmp_path, capture)["state"] == "unresolved"
 
 
+def test_pipeline_cannot_begin_after_the_selected_job(tmp_path, capture):
+    capture["job"]["pipeline"]["created_at"] = time(2)
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "unresolved"
+    assert result["reason"] == "selected job is outside the recorded pipeline window"
+
+
 @pytest.mark.parametrize(
-    "extra",
+    ("extra", "reason"),
     [
-        "---\npackage: {}\n",
-        "...\npackage: {}\n",
-        '"p\\u0061ckage": {}\n',
-        "<<: {package: {script: echo other}}\n",
+        ("---\npackage: {}\n", "GitLab source contains unsupported document boundaries"),
+        ("...\npackage: {}\n", "GitLab source contains unsupported document boundaries"),
+        ('"p\\u0061ckage": {}\n', "GitLab source contains ambiguous key ownership"),
+        (".more: &extra\n  package: {}\n<<: *extra\n", "GitLab source contains ambiguous root merge ownership"),
+        ("<<: {package: {script: echo other}}\n", "GitLab source structural analysis is incomplete"),
     ],
 )
-def test_document_and_key_ambiguity_cannot_prove_ownership(tmp_path, capture, extra):
+def test_document_and_key_ambiguity_cannot_prove_ownership(tmp_path, capture, extra, reason):
     result = evaluate(tmp_path, capture, BUILDSPEC + extra)
     assert result["state"] == "unresolved"
-    assert "GitLab source contains" in result["reason"]
+    assert result["reason"] == reason
+
+
+def test_merge_under_job_rules_does_not_change_observed_build_ownership(tmp_path, capture):
+    source = ".allow: &allow\n  when: always\n" + BUILDSPEC.replace(
+        "  script:", "  rules:\n    - <<: *allow\n  script:"
+    )
+    assert evaluate(tmp_path, capture, source)["state"] == "job-artifact-observed"
 
 
 def test_manual_job_preserves_unknown_effective_values_and_start_permission(tmp_path, capture):

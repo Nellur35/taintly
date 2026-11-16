@@ -192,6 +192,10 @@ corroborate an explicit same-project job guard and manual fallback using
 the supplied project IDs and a job with no recorded start. For that
 case use empty `trace` and null `artifact`.
 
+For a successful archive observation, include the provider's pipeline
+`created_at` and `updated_at` in `job.pipeline`. The recorded job and
+its runner events must fit the pipeline and job windows.
+
 An observed archive upload covers only the selected job and artifact
 member. Published Pages content, push access to registries, protected
 variables, and authorization to play a manual job require separate

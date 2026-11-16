@@ -13,14 +13,14 @@ from taintly.ingestion.gitlab_registry_job import (
     _PROJECT,
     _SHA,
     RegistryJobError,
-    _check_workflow_ownership,
     _identifier,
     _load_job_receipt,
+    _owned_workflow_events,
     _source_bytes,
     _time,
     _value,
 )
-from taintly.parsers.structural import Event, EventKind, walk_workflow
+from taintly.parsers.structural import Event, EventKind
 from taintly.rules.gitlab.mr_publish import command_text
 
 _Row = dict[str, Any]
@@ -46,14 +46,10 @@ def _need(condition: object, reason: str) -> None:
 class _Config:
     def __init__(self, source: str) -> None:
         source = source.replace("\r\n", "\n").replace("\r", "\n")
-        _check_workflow_ownership(source)
         self.lines = source.splitlines()
-        events = list(walk_workflow(".gitlab-ci.yml", content=source, include_keys=True))
-        _need(
-            not any(row.kind in {EventKind.ERROR, EventKind.CUTOFF} for row in events),
-            "source structural analysis is incomplete",
-        )
+        events = _owned_workflow_events(source)
         self.keys = Counter(row.path for row in events if row.kind is EventKind.MAP_KEY)
+        self.merges = {row.path[:-1] for row in events if row.value_kind == "merge_key"}
         self.leaves: dict[tuple[object, ...], list[Event]] = {}
         for row in events:
             if row.kind is EventKind.LEAF_SCALAR:
@@ -61,6 +57,10 @@ class _Config:
 
     def owner(self, path: tuple[object, ...]) -> None:
         _need(self.keys[path] == 1, "selected source owner is missing or ambiguous")
+        _need(
+            not any(path[: len(merge)] == merge for merge in self.merges),
+            "GitLab source contains a merge in the selected source owner",
+        )
 
     def scalar(self, path: tuple[object, ...]) -> Event:
         self.owner(path)
@@ -180,11 +180,18 @@ def _successful(
         "saved runner records do not show the exact checkout, build and archive upload",
     )
     times = [_time(row["time"], "runner observation time") for row in receipt]
+    start = _time(job["started_at"], "job start")
     end = _time(job["finished_at"], "job end")
+    owning_pipeline = job["pipeline"]
     _need(
-        _time(job["started_at"], "job start") <= times[0]
-        and times[-1] <= end
-        and all(a < b for a, b in pairwise(times)),
+        _time(owning_pipeline["created_at"], "owning pipeline creation")
+        <= start
+        <= end
+        <= _time(owning_pipeline["updated_at"], "owning pipeline last update"),
+        "selected job is outside the recorded pipeline window",
+    )
+    _need(
+        start <= times[0] and times[-1] <= end and all(a < b for a, b in pairwise(times)),
         "saved runner observations are outside the job window or out of order",
     )
     _need(
