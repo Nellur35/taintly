@@ -182,20 +182,20 @@ def main():
     parser.add_argument(
         "--platform", choices=[platform.value for platform in Platform], default=None
     )
-    codebuild_input = parser.add_mutually_exclusive_group()
-    codebuild_input.add_argument(
+    evidence_input = parser.add_mutually_exclusive_group()
+    evidence_input.add_argument(
         "--codebuild-project-snapshot",
         nargs=3,
         metavar=("JSON", "PROJECT_ARN", "GITHUB_ORIGIN"),
         help="Scan one configured CodeBuild default from a full local BatchGetProjects response.",
     )
-    codebuild_input.add_argument(
+    evidence_input.add_argument(
         "--codebuild-public-build",
         nargs=3,
         metavar=("JSON", "BUILD_ID", "GITHUB_ORIGIN"),
         help="Scan one pinned buildspec from a trusted, saved CodeBuild public build response.",
     )
-    codebuild_input.add_argument(
+    evidence_input.add_argument(
         "--codebuild-webhook-snapshot",
         nargs=4,
         metavar=("JSON", "PUBLIC_PROJECT_ID", "GITHUB_ORIGIN", "PR_EVENT"),
@@ -205,6 +205,12 @@ def main():
         "--codebuild-webhook-sender",
         metavar="ID",
         help="GitHub webhook sender account ID for --codebuild-webhook-snapshot.",
+    )
+    evidence_input.add_argument(
+        "--jenkins-incrementals-observation",
+        nargs=4,
+        metavar=("JSON", "OWNER/REPO", "PR", "JENKINS_CHECK"),
+        help="Corroborate a saved Jenkins Incrementals publication with exact registry bytes.",
     )
     parser.add_argument(
         "--min-severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"], default=None
@@ -603,6 +609,9 @@ def main():
         return
     if args.codebuild_webhook_sender is not None:
         parser.error("--codebuild-webhook-sender requires --codebuild-webhook-snapshot")
+    if args.jenkins_incrementals_observation:
+        _check_jenkins_incrementals(parser, args)
+        return
 
     if args.codebuild_project_snapshot or args.codebuild_public_build:
         _scan_codebuild_snapshot(parser, args)
@@ -1677,6 +1686,46 @@ def _assess_codebuild_webhook(parser: argparse.ArgumentParser, args: argparse.Na
                         f"  Group {group.index}, filter {check.index} ({check.kind}): {status}. {check.reason}"
                     )
     sys.exit(11 if result["filter_outcome"] == "unresolved" else 0)
+
+
+def _check_jenkins_incrementals(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from .ingestion.jenkins_incrementals import incrementals_observation
+
+    mode = "jenkins_incrementals_observation"
+    allowed = {"path", mode, "platform", "format", "no_config", "no_color"}
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(f"--{name.replace('_', '-')} is unavailable in Jenkins observation mode")
+    if args.platform not in (None, "jenkins") or args.format not in ("text", "json"):
+        parser.error(
+            "Jenkins observation mode requires the jenkins platform and text or JSON format"
+        )
+    snapshot, repository, pr, check = args.jenkins_incrementals_observation
+    if any(
+        not value.isascii() or not value.isdecimal() or len(value) > 19 for value in (pr, check)
+    ):
+        parser.error("Jenkins observation mode requires decimal PR and Jenkins check IDs")
+    result = incrementals_observation(
+        Path(snapshot), Path(args.path), repository, int(pr), int(check)
+    )
+    resolved = result["state"] == "publication-observed"
+    if args.format == "json":
+        print(json.dumps({mode: result}, indent=2))
+    elif resolved:
+        publication = result["publication"]
+        print(
+            f"Saved evidence corroborates an Incrementals publication for "
+            f"{result['repository']} PR #{result['pr']}, revision {result['head']}.\n"
+            f"  Registry writer: {publication['registry_actor']}.\n"
+            f"  Object: {publication['object_url']}\n  SHA-256: {publication['sha256']}\n"
+            f"  Jenkins reported a successful PR job at {result['jenkins']['job_url']}.\n"
+            f"{result['scope']}"
+        )
+    else:
+        print(f"Jenkins publication unresolved: {result['reason']}.\n{result['scope']}")
+    sys.exit(0 if resolved else 11)
 
 
 def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
