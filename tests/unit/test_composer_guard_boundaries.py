@@ -69,6 +69,7 @@ def test_disjoint_job_and_authority_step_events_do_not_compose(tmp_path) -> None
             structure.keys,
             structure.guards,
             structure.owners,
+            source=content,
         ),
     )
 

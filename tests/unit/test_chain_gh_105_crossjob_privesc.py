@@ -115,6 +115,26 @@ def test_positive_read_producer_into_write_consumer(tmp_path: Path) -> None:
     assert "needs.produce.outputs.val" in f.snippet
 
 
+def test_cross_job_edge_and_guard_use_same_captured_workflow(tmp_path: Path) -> None:
+    from taintly.composer import run_composer
+    from taintly.rules.github.chain_compose import _compose_chain_gh_105
+    from taintly.workflow_corpus import build_corpus
+
+    source = _POSITIVE.replace("on: pull_request_target", "on: workflow_run").replace(
+        "  produce:\n",
+        "  produce:\n"
+        "    if: github.event.workflow_run.head_repository.full_name == github.repository\n",
+    )
+    path = _write_workflow(tmp_path, "w.yml", source)
+    captured = build_corpus(str(tmp_path))
+    path.write_text("on: push\njobs: {}\n", encoding="utf-8")
+
+    [composite] = run_composer(captured, [], [_compose_chain_gh_105])
+    assert composite.workflow_run_fork_block == ("produce", 4)
+    assert "needs.produce.outputs.val" in composite.snippet
+    assert not run_composer(build_corpus(str(tmp_path)), [], [_compose_chain_gh_105])
+
+
 def test_positive_external_issue_event_can_retain_write_token(tmp_path: Path) -> None:
     content = _POSITIVE.replace("on: pull_request_target", "on: issues")
     _write_workflow(tmp_path, "w.yml", content)
