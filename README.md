@@ -189,6 +189,37 @@ and filesystem state. The overall scan remains incomplete in this profile.
 Keep captures private. Taintly does not authenticate the saved response or
 establish the AWS account, command execution, secret delivery or effective IAM.
 
+### Saved CodeBuild webhook filters
+
+The offline webhook assessment takes a trusted project snapshot and an
+explicit GitHub PR event. Supply the project selector independently from a
+trusted CodeBuild public project URL. It is `public:REGION:SHA256`, where
+`SHA256` is the lowercase SHA-256 of the UTF-8 public project alias after
+percent-decoding the path segment immediately after `/project/` once.
+
+```bash
+python -m taintly --format json --codebuild-webhook-snapshot filters.json \
+  public:us-east-1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  https://github.com/example-org/example-repo PULL_REQUEST_UPDATED \
+  --codebuild-webhook-sender 123456789
+```
+
+Save `project_id`, `region`, `observed_at` (UTC with trailing `Z`),
+and the public response's `project` fields `name`, `source.type`,
+`source.location`, and `webhook.filterGroups`. Preserve all the groups and
+their filters, including each filter's `excludeMatchedPattern` boolean. The
+CLI reads the saved receipt offline. Exclude delivery URLs and environment
+values from the capture. For a specific delivery, pass its GitHub
+`sender.id`. Leave the sender absent if that identity is unavailable.
+
+The evaluator models event lists and a bounded numeric subset of sender
+patterns. It reports whether every group is excluded, a group matches, or
+more information is required. Exit 0 means the filter question was answered,
+and exit 11 indicates unresolved evidence. This query does no repository
+scan. Its result is limited to the supplied event and captured settings.
+Approval, actual execution and effective publication permissions require
+separate evidence.
+
 ## CI integration
 
 **GitHub Actions** — after checking out the target repository:

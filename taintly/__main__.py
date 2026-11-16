@@ -195,6 +195,17 @@ def main():
         metavar=("JSON", "BUILD_ID", "GITHUB_ORIGIN"),
         help="Scan one pinned buildspec from a trusted, saved CodeBuild public build response.",
     )
+    codebuild_input.add_argument(
+        "--codebuild-webhook-snapshot",
+        nargs=4,
+        metavar=("JSON", "PUBLIC_PROJECT_ID", "GITHUB_ORIGIN", "PR_EVENT"),
+        help="Assess one GitHub PR event against trusted, saved CodeBuild project filters.",
+    )
+    parser.add_argument(
+        "--codebuild-webhook-sender",
+        metavar="ID",
+        help="GitHub webhook sender account ID for --codebuild-webhook-snapshot.",
+    )
     parser.add_argument(
         "--min-severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"], default=None
     )
@@ -586,6 +597,12 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.codebuild_webhook_snapshot:
+        _assess_codebuild_webhook(parser, args)
+        return
+    if args.codebuild_webhook_sender is not None:
+        parser.error("--codebuild-webhook-sender requires --codebuild-webhook-snapshot")
 
     if args.codebuild_project_snapshot or args.codebuild_public_build:
         _scan_codebuild_snapshot(parser, args)
@@ -1565,6 +1582,101 @@ def main():
         sys.exit(11 if any(f.rule_id == "ENGINE-ERR" for f in all_findings) else 0)
 
     _exit_for_findings(all_findings, effective_fail_on, review_advisory=args.review_advisory)
+
+
+def _assess_codebuild_webhook(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from dataclasses import asdict
+    from pathlib import Path
+
+    from .ingestion.codebuild_snapshot import SnapshotError
+    from .ingestion.codebuild_webhook import (
+        WEBHOOK_PR_EVENTS,
+        WEBHOOK_PROJECT_ID,
+        WEBHOOK_SENDER_ID,
+        assess_webhook_snapshot,
+    )
+
+    allowed = {
+        "codebuild_webhook_snapshot",
+        "codebuild_webhook_sender",
+        "platform",
+        "format",
+        "no_color",
+        "no_config",
+    }
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            option = "the scan path" if name == "path" else "--" + name.replace("_", "-")
+            parser.error(f"{option} is unavailable in CodeBuild webhook assessment mode")
+    if args.platform not in (None, "codebuild") or args.format not in ("text", "json"):
+        parser.error(
+            "CodeBuild webhook assessment requires the codebuild platform and text or JSON"
+        )
+
+    snapshot, project_id, origin, event = args.codebuild_webhook_snapshot
+    sender = args.codebuild_webhook_sender
+    if not WEBHOOK_PROJECT_ID.fullmatch(project_id):
+        parser.error("CodeBuild webhook assessment requires a regional public project alias digest")
+    if event not in WEBHOOK_PR_EVENTS:
+        parser.error("CodeBuild webhook assessment requires a supported GitHub PR event")
+    if sender is not None and not WEBHOOK_SENDER_ID.fullmatch(sender):
+        parser.error("CodeBuild webhook assessment requires a numeric webhook sender ID")
+
+    scope = (
+        "Saved webhook filters for the supplied event and sender. Capture authenticity, "
+        "approval, actual execution and effective publication permissions are unverified."
+    )
+    try:
+        assessment = assess_webhook_snapshot(Path(snapshot), project_id, origin, event, sender)
+    except SnapshotError as exc:
+        decision = None
+        result = {
+            "project_id": project_id,
+            "event": event,
+            "sender_id": sender,
+            "filter_outcome": "unresolved",
+            "reason": str(exc),
+        }
+    else:
+        decision = assessment
+        result = asdict(decision)
+
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "codebuild_webhook": {
+                        **result,
+                        "scope": scope,
+                        "approval": "unverified",
+                        "execution": "unverified",
+                        "publication_authority": "unverified",
+                    }
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"CodeBuild webhook filters: {result['filter_outcome']}\n{scope}")
+        print(f"Project identity: {project_id}\nEvent: {event}\nSender: {sender or 'unknown'}")
+        if decision is None:
+            print(result["reason"])
+        else:
+            print(f"Project: {result['project_name']} ({result['repository']})")
+            print(f"Observed: {result['observed_at']}")
+            for group in decision.groups:
+                group_status = (
+                    "unknown" if group.matches is None else "match" if group.matches else "miss"
+                )
+                print(f"  Group {group.index}: {group_status}")
+                for check in group.filters:
+                    status = (
+                        "unknown" if check.matches is None else "match" if check.matches else "miss"
+                    )
+                    print(
+                        f"  Group {group.index}, filter {check.index} ({check.kind}): {status}. {check.reason}"
+                    )
+    sys.exit(11 if result["filter_outcome"] == "unresolved" else 0)
 
 
 def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
