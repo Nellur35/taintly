@@ -26,6 +26,16 @@ _CONTROLLER = "https://ci-builds.apache.org"
 _REGISTRY = "https://repository.apache.org"
 _REPOSITORY = "/content/repositories/snapshots/"
 _COMMAND = "mvn deploy -Dmaven.test.skip=true"
+_PACKAGE = (
+    "mvn clean org.jacoco:jacoco-maven-plugin:prepare-agent package "
+    "org.jacoco:jacoco-maven-plugin:report -T 1C"
+)
+_UPSTREAM_SCOPE = (
+    "Corroboration of the reported Git checkout feeding the selected Maven stage. "
+    "The fetched snapshot matches the Maven node digest. The authority for that write "
+    "is unresolved. Other ways that fork data might enter the build, effective repository "
+    "policy, and filesystem identity are outside this observation."
+)
 _SCOPE = (
     "Corroboration of trusted saved GitHub, Jenkins and Apache Nexus records for one Maven "
     "snapshot object. The Nexus stored request identifies the writer. Other credentials, "
@@ -36,18 +46,22 @@ _SCOPE = (
 _Row = dict[str, Any]
 
 
-def _source(root: Path, data: _Row, head: str) -> int:
-    raw = _project_file(root, "source/Jenkinsfile", 50000)
+def _source_bytes(root: Path, data: _Row, revision: str, name: str) -> bytes:
+    raw = _project_file(root, f"source/{name}", 50000)
     blob = hashlib.sha1(
         b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw, usedforsecurity=False
     ).hexdigest()
     _require(
         data["path"] == "Jenkinsfile"
-        and data["commit"] == head
+        and data["commit"] == revision
         and data["blob"] == blob
         and data["sha256"] == hashlib.sha256(raw).hexdigest(),
         "saved Jenkinsfile differs from the controller-selected Git source",
     )
+    return raw
+
+
+def _maven_line(raw: bytes) -> int:
     tokens = [
         token
         for token in tokenize(raw.decode("utf-8"))
@@ -81,7 +95,51 @@ def _reject_constant(_value: str) -> None:
     raise EvidenceError("saved capture contains a nonfinite JSON value")
 
 
-def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row, str]:
+def _upstream_branch(data: _Row, nodes: list[_Row], pr: int, repo: str, head: str) -> str:
+    revision = data["pull"]["base"]
+    if not isinstance(revision, str):
+        raise EvidenceError("upstream checkout revision is unavailable")
+    compare = data["comparison"]
+    _require(
+        re.fullmatch(r"[a-f0-9]{40}", revision)
+        and revision != head
+        and compare["repository"] == repo
+        and compare["base"] == compare["merge_base"] == revision
+        and compare["head"] == head
+        and compare["status"] == "ahead"
+        and type(compare["ahead_by"]) is int
+        and compare["ahead_by"] > 0
+        and type(compare["behind_by"]) is int
+        and compare["behind_by"] == 0,
+        "no pinned upstream-to-fork ancestry for the checkout",
+    )
+    # An upstream checkout may merely initialize a workspace. Limit the interval
+    # to the observed build, Sonar submission and POM read; a later PR fetch can
+    # make an initially correct upstream checkout irrelevant to publication.
+    expected_names = ("Shell Script", "Print Message", "Shell Script", "Read a maven project file.")
+    _require(
+        tuple(node.get("name") for node in nodes) == expected_names
+        and all(node["status"] == "SUCCESS" for node in nodes),
+        "unsupported operation between upstream checkout and Maven deployment",
+    )
+    package, message, sonar, pom = (node.get("parameterDescription") for node in nodes)
+    _require(
+        package == _PACKAGE
+        and message == "Will use SonarQube instance at https://sonarcloud.io"
+        and isinstance(sonar, str)
+        and re.fullmatch(
+            r"mvn sonar:sonar -Dsonar\.projectKey=[A-Za-z0-9_.-]+ -Dsonar\.organization=apache "
+            rf"-Dsonar\.branch\.name=PR-{pr} -Dsonar\.host\.url=https://sonarcloud\.io "
+            r"-Dsonar\.login=\$\{SONAR_TOKEN\}",
+            sonar,
+        )
+        and pom == "pom.xml",
+        "unsupported command between upstream checkout and Maven deployment",
+    )
+    return revision
+
+
+def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row, str, str]:
     base = owner.removeprefix(_CONTROLLER)
     stage = data["stage"]
     stage_ref = f"{base}execution/node/{stage['id']}/wfapi/describe"
@@ -109,13 +167,36 @@ def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row,
     checkouts = [
         node
         for node in nodes
-        if node["name"] == "Check out from version control" and _interval(node)[0] <= command_start
+        if node["name"] in ("Check out from version control", "Git")
+        and _interval(node)[0] <= command_start
     ]
     checkout = _one(checkouts, "no unique checkout for the selected Maven deployment stage")
     _require(
         _interval(checkout)[1] <= command_start, "checkout overlaps the selected deployment command"
     )
-    for node in (checkout, command):
+    between = nodes[nodes.index(checkout) + 1 : nodes.index(command)]
+    upstream = checkout["name"] == "Git"
+    revision = _upstream_branch(data, between, pr, repo, head) if upstream else head
+    owned_nodes = nodes if upstream else [checkout, command]
+    if upstream:
+        flow = data["flow"]
+        flow_start, flow_end = _interval(flow)
+        fields = ("id", "name", "status", "startTimeMillis", "durationMillis", "_links")
+        _require(
+            flow["id"] == str(data["run"]["number"])
+            and flow["status"] == "SUCCESS"
+            and flow_start <= stage_start <= stage_end <= flow_end
+            and sum(all(s.get(k) == stage.get(k) for k in fields) for s in flow["stages"]) == 1,
+            "upstream deployment stage conflicts with its parent run",
+        )
+        _require(
+            nodes[0]["name"] == "Delete workspace when build is done"
+            and nodes[1] is checkout
+            and nodes[-1] is command
+            and all(_interval(a)[1] <= _interval(b)[0] for a, b in pairwise(nodes)),
+            "upstream deployment stage has unsupported steps or ordering",
+        )
+    for node in owned_nodes:
         start, end = _interval(node)
         _require(
             node["status"] == "SUCCESS"
@@ -125,27 +206,39 @@ def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row,
             == f"{base}execution/node/{node['id']}/wfapi/describe",
             "checkout or command does not belong to the selected successful Jenkins stage",
         )
-    checkout_executor = checkout.get("execNode")
-    command_executor = command.get("execNode")
+    executors = {node["execNode"] for node in owned_nodes if node.get("execNode")}
     _require(
-        not (checkout_executor and command_executor and checkout_executor != command_executor),
+        len(executors) <= 1,
         "checkout and Maven command report different executors",
     )
     checkout_log = data["checkout_log"]
     lines = checkout_log["text"].splitlines()
+    url = f"https://github.com/{repo}" + ("" if upstream else ".git")
+    branch = "refs/remotes/origin/master" if upstream else f"PR-{pr}"
+    if upstream:
+        clones = [line for line in lines if line.lstrip().startswith("Cloning repository")]
+        revisions = [line for line in lines if line.lstrip().startswith("Checking out Revision")]
+        _require(
+            clones == [f"Cloning repository <a href='{url}'>{url}</a>"]
+            and revisions == [f"Checking out Revision {revision} ({branch})"],
+            "selected Git node has ambiguous upstream repository or revision evidence",
+        )
     _require(
         checkout_log["nodeId"] == checkout["id"]
         and checkout_log["nodeStatus"] == "SUCCESS"
         and checkout_log["hasMore"] is False
         and checkout_log["consoleUrl"] == f"{base}execution/node/{checkout['id']}/log"
-        and f"Checking out Revision {head} (PR-{pr})" in lines
-        and f"https://github.com/{repo}.git" in checkout_log["text"]
+        and f"Checking out Revision {revision} ({branch})" in lines
+        and url in checkout_log["text"]
         and any(
-            row.get("remoteUrls") == [f"https://github.com/{repo}.git"]
-            and row.get("lastBuiltRevision", {}).get("SHA1") == head
+            row.get("remoteUrls") == [url]
+            and row.get("lastBuiltRevision", {}).get("SHA1") == revision
+            and (not upstream or row["lastBuiltRevision"].get("branch") == [{"name": branch}])
             for row in data["run"]["actions"]
         ),
-        "selected checkout node cannot establish the exact fork revision and repository",
+        "selected upstream checkout node cannot establish the exact base revision and repository"
+        if upstream
+        else "selected checkout node cannot establish the exact fork revision and repository",
     )
     workspaces = [
         match[1]
@@ -153,10 +246,18 @@ def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row,
         if (match := re.fullmatch(r" &gt; git init (/[-A-Za-z0-9_/]+) # timeout=[0-9]+", line))
     ]
     _require(len(workspaces) == 1, "checkout workspace path could not be established")
-    return command, workspaces[0]
+    return command, workspaces[0], revision
 
 
-def _registry(root: Path, data: _Row, archive_path: str, target_url: str, command: _Row) -> _Row:
+def _registry(
+    root: Path,
+    data: _Row,
+    archive_path: str,
+    target_url: str,
+    command: _Row,
+    *,
+    attribute_writer: bool,
+) -> _Row:
     target = target_url.removeprefix(_REGISTRY + _REPOSITORY)
     coordinate = re.fullmatch(
         r"((?:[A-Za-z0-9_-]+/)+)([A-Za-z0-9_.-]+)/([0-9]+(?:\.[0-9]+)*-SNAPSHOT)/"
@@ -177,7 +278,6 @@ def _registry(root: Path, data: _Row, archive_path: str, target_url: str, comman
     _require(
         re.fullmatch(r"[0-9]{13}", milliseconds)
         and stored["storageItem-created"] == stored["storageItem-modified"] == milliseconds
-        and stored["storageItem-generation"] == "1"
         and command["startTimeMillis"]
         <= int(milliseconds)
         <= command["startTimeMillis"] + command["durationMillis"],
@@ -194,11 +294,6 @@ def _registry(root: Path, data: _Row, archive_path: str, target_url: str, comman
         and response["responseUid"] == f"snapshots:/{target}",
         "Nexus hosted-object receipt does not identify the exact requested target",
     )
-    actor = stored.get("request.user", "")
-    _require(
-        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", actor) and actor.lower() != "anonymous",
-        "Nexus stored write identity is unavailable",
-    )
     job_bytes = _project_file(root, "artifact.jar", 8 * 1024 * 1024)
     registry_bytes = _project_file(root, "registry-artifact.jar", 8 * 1024 * 1024)
     digest = hashlib.sha256(job_bytes).hexdigest()
@@ -208,13 +303,23 @@ def _registry(root: Path, data: _Row, archive_path: str, target_url: str, comman
         and stored["digest.sha512"] == hashlib.sha512(job_bytes).hexdigest(),
         "Jenkins archive and Nexus object bytes or stored digests differ",
     )
-    return {
-        "operation": "maven-snapshot-write",
-        "object_url": target_url,
-        "sha256": digest,
-        "registry_actor": actor,
-        "created_ms": int(milliseconds),
-    }
+    result = {"object_url": target_url, "sha256": digest, "created_ms": int(milliseconds)}
+    if attribute_writer:
+        actor = stored.get("request.user", "")
+        _require(
+            stored["storageItem-generation"] == "1"
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", actor)
+            and actor.lower() != "anonymous",
+            "Nexus stored write identity is unavailable",
+        )
+        return {
+            "operation": "maven-snapshot-write",
+            "object_url": target_url,
+            "sha256": digest,
+            "registry_actor": actor,
+            "created_ms": int(milliseconds),
+        }
+    return result
 
 
 def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target: str) -> _Row:
@@ -255,15 +360,24 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             capture["jenkinsfile_loader"] == f"Obtained Jenkinsfile from {head}",
             "controller did not identify the supported exact PR-head Jenkinsfile",
         )
-        line = _source(root, capture["source"], head)
-        command, workspace = _stage(capture, job, head, pr, repo)
+        original = _source_bytes(root, capture["source"], head, "Jenkinsfile")
+        line = _maven_line(original)
+        command, workspace, revision = _stage(capture, job, head, pr, repo)
+        upstream = revision != head
+        if upstream:
+            pinned = _source_bytes(
+                root, capture["upstream_definition"], revision, "base.Jenkinsfile"
+            )
+            _require(original == pinned, "fork and upstream Jenkinsfile differ for this checkout")
         artifact_path = capture["archive_path"]
         _require(
             capture["archive_url"] == job + "artifact/" + artifact_path
             and sum(item.get("relativePath") == artifact_path for item in run["artifacts"]) == 1,
             "no unique matching Jenkins job artifact",
         )
-        publication = _registry(root, capture["registry"], artifact_path, target, command)
+        publication = _registry(
+            root, capture["registry"], artifact_path, target, command, attribute_writer=not upstream
+        )
         artifact_name = artifact_path.rsplit("/", 1)[1]
         sha512 = capture["registry"]["stored_attributes"]["digest.sha512"]
         deploy_log = capture["deploy_log"]
@@ -284,8 +398,9 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             ),
             "Maven artifact path differs from the checkout workspace",
         )
-        return {
-            "state": "snapshot-write-observed",
+        state = "upstream-checkout-observed" if upstream else "snapshot-write-observed"
+        result = {
+            "state": state,
             "repository": repo,
             "pr": pr,
             "head_repository": pull["head_repository"],
@@ -296,11 +411,26 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             "command": _COMMAND,
             "reported_workspace": workspace,
             "jenkins_artifact": job + "artifact/" + artifact_path,
-            "publication": publication,
-            "review_action": "If fork PRs must not publish snapshots, remove the snapshot "
-            "publisher from fork builds and use a separate job bound to an approved revision.",
-            "scope": _SCOPE,
         }
+        if upstream:
+            result.update(
+                checkout={
+                    "repository": repo,
+                    "ref": "refs/remotes/origin/master",
+                    "revision": revision,
+                },
+                snapshot_evidence=publication,
+                authority="unresolved",
+                scope=_UPSTREAM_SCOPE,
+            )
+        else:
+            result.update(
+                publication=publication,
+                review_action="If fork PRs must not publish snapshots, remove the snapshot "
+                "publisher from fork builds and use a separate job bound to an approved revision.",
+                scope=_SCOPE,
+            )
+        return result
     except EvidenceError as exc:
         reason = str(exc)
     except (AttributeError, KeyError, OSError, RecursionError, RuntimeError, TypeError, ValueError):

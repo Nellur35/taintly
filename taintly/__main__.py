@@ -1856,9 +1856,20 @@ def _check_jenkins_maven_snapshot(
     if not pr.isascii() or not pr.isdecimal() or not 1 <= len(pr) <= 12:
         parser.error("Maven snapshot observation mode requires a decimal PR ID")
     result = maven_snapshot_observation(Path(args.path), repo, int(pr), job, target)
-    resolved = result["state"] == "snapshot-write-observed"
+    resolved = result["state"] in {"snapshot-write-observed", "upstream-checkout-observed"}
     if args.format == "json":
         print(json.dumps({mode: result}, indent=2))
+    elif result["state"] == "upstream-checkout-observed":
+        checkout = result["checkout"]
+        artifact = result["snapshot_evidence"]
+        print(
+            f"Maven in {result['repository']} PR #{result['pr']} used the reported upstream "
+            f"checkout {checkout['revision']} ({checkout['ref']}).\n"
+            f"  PR head: {result['head']}.\n"
+            f"  Jenkins job: {result['job']} (node {result['node']}).\n"
+            f"  Matching snapshot bytes: {artifact['object_url']} ({artifact['sha256']}).\n"
+            f"{result['scope']}"
+        )
     elif resolved:
         publication = result["publication"]
         source = result["source"]

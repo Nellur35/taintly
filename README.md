@@ -193,6 +193,18 @@ operation, exact JAR and recorded Nexus writer. It keeps wider
 permissions, production promotion and future fork admission unresolved.
 Missing or incompatible evidence returns exit `11`.
 
+For the supported explicit upstream Git checkout variant, also supply
+`source/base.Jenkinsfile`, its `upstream_definition` blob record, the
+PR's captured base revision, and the trusted GitHub `comparison` with
+repository, base, head, merge base, status and revision counts. The
+loaded definition must match the base file. The selected Jenkins stage
+must show a clean workspace and the bounded command sequence from the
+upstream checkout to Maven, with matching job artifact and registry
+bytes. The `upstream-checkout-observed` result reports the upstream
+commit and the separate PR head. The registry writer remains unresolved
+for this result. A later PR checkout or an unsupported intermediate
+operation leaves the source unresolved.
+
 ### Saved GitLab fork MR artifact observations
 
 ```sh
