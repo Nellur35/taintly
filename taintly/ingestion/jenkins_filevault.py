@@ -262,4 +262,9 @@ def filevault_exclusion(root: Path, data: _Row, repo: str, pr: int, job: str, ta
         },
         "authority": "unresolved",
         "scope": FILEVAULT_SCOPE,
+        "review_action": (
+            "Keep the remote stage restricted to master. Verify that the Maven server binding "
+            "for apache.snapshots.https is available only on the trusted publishing executor "
+            "and match it to the Nexus request or stored writer for the snapshot."
+        ),
     }

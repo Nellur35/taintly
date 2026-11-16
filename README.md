@@ -223,7 +223,8 @@ The `remote-publisher-excluded` result distinguishes the observed
 workspace-local Maven deployment from the configured remote Wagon stage.
 It requires the original branch guard, a complete stage inventory, and
 matching command and workspace evidence. It leaves Nexus permissions and
-other publication paths unresolved.
+other publication paths unresolved. The review action identifies which
+Maven server binding to verify on the trusted publishing executor.
 
 ### Saved GitLab fork MR artifact observations
 
@@ -341,7 +342,9 @@ triggering run and uses an explicitly configured secret through `GH_TOKEN`
 for a SHA-suffixed `gh release create` command. The result identifies the
 recorded asset uploader and the configured credential name. The credential
 contents, other permissions, archive bytes and later installations remain
-unverified. Conflicting or incomplete evidence returns exit 11.
+unverified. The review action identifies producer and asset checks to
+perform before publishing previews. Conflicting or incomplete evidence
+returns exit 11.
 
 The same command also accepts a trusted `github-signed-release-v1`
 receipt for a bounded same-repository PR recipe with separate build,

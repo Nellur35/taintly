@@ -286,6 +286,11 @@ def release_observation(
             "configured_publish": plan,
             "publication": publication,
             "scope": _SCOPE,
+            "review_action": (
+                "Before publishing PR previews, verify the approved producer run and revision, "
+                "allowlist the archive members to release, and bind the approval to the exact "
+                "release asset digest. Limit the publishing credential to the preview repository."
+            ),
         }
     except PreviewEvidenceError as exc:
         reason = str(exc)
