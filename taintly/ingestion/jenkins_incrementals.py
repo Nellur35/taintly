@@ -125,7 +125,9 @@ def _source(root: Path, source: _Row, head: str, base: str, core: bool) -> _Row:
 def _manifest(raw: bytes) -> dict[str, str]:
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         infos = [
-            info for info in archive.infolist() if info.filename.upper() == "META-INF/MANIFEST.MF"
+            info
+            for info in archive.infolist()
+            if info.filename.isascii() and info.filename.upper() == "META-INF/MANIFEST.MF"
         ]
         _require(
             len(infos) == 1
@@ -140,20 +142,27 @@ def _manifest(raw: bytes) -> dict[str, str]:
         with archive.open(infos[0]) as stream:
             data = stream.read(16385)
     _require(len(data) <= 16384, "package manifest exceeds its limit")
-    text = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n").replace("\n ", "")
+    _require(data.endswith((b"\r", b"\n")), "package manifest has an unterminated physical line")
+    text = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     main = text.partition("\n\n")[0]
-    fields = {}
+    fields: dict[str, str] = {}
+    current: str | None = None
     for line in main.removesuffix("\n").split("\n"):
+        _require("\0" not in line, "package manifest is malformed or ambiguous")
+        if line.startswith(" "):
+            if current is None:
+                raise IncrementalsEvidenceError("package manifest has an orphan continuation")
+            fields[current] += line[1:]
+            continue
         key, separator, value = line.partition(": ")
-        key = key.lower()
+        current = key.lower()
         _require(
             separator
-            and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,69}", key)
-            and "\0" not in value
-            and key not in fields,
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,69}", key)
+            and current not in fields,
             "package manifest is malformed or ambiguous",
         )
-        fields[key] = value
+        fields[current] = value
     return fields
 
 

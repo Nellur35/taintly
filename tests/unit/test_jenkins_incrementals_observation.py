@@ -7,7 +7,11 @@ import zipfile
 
 import pytest
 
-from taintly.ingestion.jenkins_incrementals import incrementals_observation
+from taintly.ingestion.jenkins_incrementals import (
+    IncrementalsEvidenceError,
+    _manifest,
+    incrementals_observation,
+)
 
 HEAD, BASE = "a" * 40, "b" * 40
 DIRECTORY = "https://repo.jenkins-ci.org/incrementals/org/jenkins-ci/plugins/git/1.2/"
@@ -116,6 +120,39 @@ def test_case_variant_of_an_existing_main_manifest_header_is_ambiguous(tmp_path,
     result = evaluate(tmp_path, capture)
     assert result["state"] == "unresolved"
     assert result["reason"] == "package manifest is malformed or ambiguous"
+
+
+@pytest.mark.parametrize(
+    ("filename", "body", "reason"),
+    [
+        ("META-\u0131NF/MANIFEST.MF", "Implementation-Build: abc\n", "manifest is missing"),
+        ("META-INF/MANIFEST.MF", "Implementation-Build: abc", "unterminated physical line"),
+        ("META-INF/MANIFEST.MF", "Kelvin-\u212a: abc\n", "manifest is malformed"),
+        ("META-INF/MANIFEST.MF", "Implementation-\n Build: abc\n", "manifest is malformed"),
+        ("META-INF/MANIFEST.MF", " Implementation-Build: abc\n", "orphan continuation"),
+    ],
+)
+def test_manifest_checks_actual_archive_name_and_physical_header_syntax(filename, body, reason):
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        archive.writestr(filename, body)
+    with pytest.raises(IncrementalsEvidenceError, match=reason):
+        _manifest(stream.getvalue())
+
+
+def test_manifest_continuations_keep_main_section_ownership():
+    body = (
+        "Manifest-Version: 1.0\r\n"
+        "Implementation-Build: ab\r\n"
+        " cd\r\n\r\n"
+        " Implementation-Version: 2.0\r\n"
+    )
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("META-INF/MANIFEST.MF", body)
+    fields = _manifest(stream.getvalue())
+    assert fields["implementation-build"] == "abcd"
+    assert "implementation-version" not in fields
 
 
 def test_valid_checksum_does_not_link_package_to_unrelated_revision(tmp_path, capture):
