@@ -1256,6 +1256,7 @@ def main():
         from .models import AuditReport
         from .platform.jenkins_checks import run_all_checks as jk_run_all_checks
         from .platform.jenkins_client import JenkinsClient
+        from .source_inventory import SourceIssue
 
         jenkins_url = args.jenkins_url.rstrip("/")
         jenkins_user = os.environ.get("JENKINS_USER", "")
@@ -1270,8 +1271,12 @@ def main():
         try:
             for finding in jk_run_all_checks(jenkins_url, jk_client):
                 report.add(finding)
-        except Exception as e:
-            print(f"Warning: Jenkins posture checks failed: {e}", file=sys.stderr)
+        except Exception:
+            report.add(
+                SourceIssue(
+                    report.repo_path, "The Jenkins posture audit ended before checks completed."
+                ).finding()
+            )
 
         report.findings = apply_config_ignores(report.findings, audit_config.ignores, args.path)
         report.filter_severity(effective_min_sev)
@@ -1760,9 +1765,7 @@ def _exit_for_findings(
     worst = max(blocking, default=Severity.INFO)
     if worst == Severity.CRITICAL:
         sys.exit(2)
-    if worst == Severity.HIGH or (
-        fail_on and worst >= fail_on and (blocking or not review_advisory)
-    ):
+    if worst == Severity.HIGH or (fail_on is not None and blocking and worst >= fail_on):
         sys.exit(1)
     if any(finding.rule_id == "ENGINE-ERR" for finding in findings):
         sys.exit(11)
