@@ -236,6 +236,27 @@ The caller role cannot establish the build's own publication permission.
 Missing or incompatible start evidence returns exit `11`. The report
 retains existing CodeBuild analysis limits.
 
+### Saved GitHub Release publication
+
+```bash
+python -m taintly ./saved-source --format json --github-release-observation \
+  observation.json owner/repo PRODUCER_RUN RELEASE_RUN
+```
+
+Use a trusted offline `github-workflow-run-release-v1` receipt and the exact
+publisher workflow at its repository-relative path. The receipt binds the PR
+and its selected checkout to the producer job, uploaded artifact ID, digest
+and owning upload window. It also records the downstream download of that
+artifact ID, the publishing job, the exact release tag and commit, and
+GitHub's release and asset metadata.
+
+The supported workflow binds its origin lookup and artifact download to the
+triggering run and uses an explicitly configured secret through `GH_TOKEN`
+for a SHA-suffixed `gh release create` command. The result identifies the
+recorded asset uploader and the configured credential name. The credential
+contents, other permissions, archive bytes and later installations remain
+unverified. Conflicting or incomplete evidence returns exit 11.
+
 ### Saved GitHub Preview observations
 
 When reviewing a completed fork build, use the named operation and both

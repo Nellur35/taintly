@@ -245,6 +245,12 @@ def main():
         help="Check saved target-project fork MR artifact or manual job evidence.",
     )
     evidence_input.add_argument(
+        "--github-release-observation",
+        nargs=4,
+        metavar=("JSON", "OWNER/REPO", "PRODUCER_RUN", "RELEASE_RUN"),
+        help="Corroborate a saved GitHub workflow_run publication and its recorded uploader.",
+    )
+    evidence_input.add_argument(
         "--github-preview-observation",
         nargs=4,
         metavar=("JSON", "OWNER/REPO", "PRODUCER_RUN", "CONSUMER_RUN"),
@@ -668,7 +674,11 @@ def main():
     if args.codebuild_start_observation:
         _assess_codebuild_start(parser, args)
         return
-    if args.github_preview_observation or args.github_version_upload_observation:
+    if (
+        args.github_preview_observation
+        or args.github_version_upload_observation
+        or args.github_release_observation
+    ):
         _check_github_observation(parser, args)
         return
 
@@ -1993,10 +2003,14 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
 
     from .ingestion.github_preview import preview_observation
 
-    mode = (
-        "github_preview_observation"
-        if args.github_preview_observation
-        else "github_version_upload_observation"
+    mode = next(
+        name
+        for name in (
+            "github_preview_observation",
+            "github_version_upload_observation",
+            "github_release_observation",
+        )
+        if getattr(args, name)
     )
     allowed = {"path", mode, "platform", "format", "no_config", "no_color"}
     for name, value in vars(args).items():
@@ -2010,7 +2024,11 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
     ):
         parser.error("GitHub observation mode requires two decimal IDs")
     inputs = Path(snapshot), Path(args.path), repository, int(first), int(second)
-    if mode == "github_version_upload_observation":
+    if mode == "github_release_observation":
+        from .ingestion.github_release_observation import release_observation
+
+        result = release_observation(*inputs)
+    elif mode == "github_version_upload_observation":
         from .ingestion.github_version_upload import version_upload_observation
 
         result = version_upload_observation(*inputs)
@@ -2019,6 +2037,17 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
     state = result["state"]
     if args.format == "json":
         print(json.dumps({mode: result}, indent=2))
+    elif state == "release-asset-observed":
+        publication = result["publication"]
+        print(
+            f"GitHub records {publication['recorded_uploader']['login']} as uploader of "
+            f"{publication['asset']} to {publication['target_repository']} at {publication['tag']}.\n"
+            f"  PR #{result['pr']['number']}, producer run {result['producer_run']}, "
+            f"publishing run {result['consumer_run']}.\n"
+            f"  Configured credential: {result['configured_publish']['credential_binding']} "
+            f"({result['source']['path']}:{result['configured_publish']['line']}).\n"
+            f"{result['scope']}"
+        )
     elif state == "preview-reported":
         build = result["producer"]
         deploy = result["consumer"]
