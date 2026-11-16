@@ -9,6 +9,7 @@ import re
 import sys
 from collections.abc import Callable
 from gettext import gettext
+from pathlib import Path
 from typing import Any
 
 from ._gitlab_transport import GitLabTransportError
@@ -45,6 +46,7 @@ from .engine import (
     scan_repo,
     validate_scan_seconds,
 )
+from .ingestion.gitlab_registry_job import RegistryJobError, load_registry_job
 from .models import Finding, Platform, Severity, _defer_context_regex_compilation
 from .reporters._encoding import ensure_utf8_stdout
 from .reporters.json_report import format_json
@@ -211,6 +213,12 @@ def main():
         nargs=4,
         metavar=("JSON", "OWNER/REPO", "PR", "JENKINS_CHECK"),
         help="Corroborate a saved Jenkins Incrementals publication with exact registry bytes.",
+    )
+    evidence_input.add_argument(
+        "--gitlab-job-evidence",
+        nargs=3,
+        metavar=("JSON", "PROJECT_ID", "JOB_ID"),
+        help="Compare one trusted, saved GitLab MR registry job receipt with this local source scan.",
     )
     parser.add_argument(
         "--min-severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"], default=None
@@ -616,6 +624,33 @@ def main():
     if args.codebuild_project_snapshot or args.codebuild_public_build:
         _scan_codebuild_snapshot(parser, args)
         return
+
+    registry_job = None
+    if args.gitlab_job_evidence:
+        if args.platform not in (None, Platform.GITLAB.value) or not Path(args.path).is_dir():
+            parser.error("--gitlab-job-evidence requires a local GitLab repository directory")
+        if any(
+            (
+                args.self_test,
+                args.integration_test,
+                args.guide,
+                args.fix,
+                args.fix_dry_run,
+                args.platform_audit,
+                args.github_org,
+                args.gitlab_group,
+                args.jenkins_url,
+                args.diff,
+                args.baseline,
+            )
+        ):
+            parser.error("--gitlab-job-evidence is supported only in a local source scan")
+        snapshot, project_id, job_id = args.gitlab_job_evidence
+        try:
+            registry_job = load_registry_job(Path(snapshot), project_id, job_id)
+        except RegistryJobError as exc:
+            parser.error(str(exc))
+        args.platform = Platform.GITLAB.value
 
     if args.require_files and any(
         (
@@ -1395,6 +1430,7 @@ def main():
         max_scan_seconds=args.max_scan_seconds,
         coalesce_overlaps=False,
         respect_inline_suppressions=not args.no_inline_suppressions,
+        gitlab_registry_job=registry_job,
     )
 
     missing_scan_files = args.require_files and not any(report.files_scanned for report in reports)
