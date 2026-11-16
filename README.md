@@ -272,6 +272,10 @@ findings, a scanner error, or both. Inspect JSON `errors`
 as well as the exit code: a HIGH/CRITICAL finding and a coverage error can
 coexist. Exit `0` does not prove complete semantic coverage.
 
+A Jenkins pipeline source that resolves outside the repository is refused and
+reported as a coverage error. During a Jenkins controller audit, check failures
+are reported as coverage errors alongside any findings from successful checks.
+
 ### Pattern A — fail-fast for clean codebases
 
 Run on every PR and fail on any HIGH-or-above finding. Use this without a

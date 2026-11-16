@@ -41,8 +41,9 @@ from .models import (
 )
 from .parsers.anchor_expander import expand_anchors
 from .parsers.segmentation import for_each_job, job_at_line
-from .path_safety import iter_files_within_repo, resolve_local_include
+from .path_safety import is_within_repo, iter_files_within_repo, resolve_local_include
 from .pse_enrichment import enrich_pse_findings
+from .source_inventory import SourceIssue
 from .staticguard import WorkflowContext as StaticGuardContext
 from .staticguard import (
     detect_github_workflow_context,
@@ -980,10 +981,11 @@ def _github_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext
     # Whole-workflow short-circuit: if every job in the file is
     # statically dead, the entire file is moot.  Suppress all findings
     # (including trigger-level ones that the per-job pass deliberately
-    # leaves alone).  Per-job suppression handles the remaining cases:
+    # leaves alone). Analysis failures still describe input coverage.
+    # Per-job suppression handles the remaining cases:
     # live-jobs-with-dead-steps, mixed-dead-and-live-jobs.
     if is_workflow_whole_dead(ctx.content, ctx.repoctx):
-        findings.clear()
+        findings[:] = [f for f in findings if f.rule_id.startswith("ENGINE-")]
         return
     _suppress_dead_findings(findings, ctx.content, ctx.repoctx)
     if findings:
@@ -1012,7 +1014,7 @@ def _gitlab_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContext
     # the entire file is moot.  Suppress all findings (including
     # pipeline-level ones the per-job pass deliberately leaves alone).
     if is_pipeline_whole_dead(ctx.content, ctx.gitlabctx):
-        findings.clear()
+        findings[:] = [f for f in findings if f.rule_id.startswith("ENGINE-")]
         return
     _suppress_gitlab_dead_findings(findings, ctx.content, ctx.gitlabctx)
 
@@ -1021,7 +1023,7 @@ def _jenkins_dead_postprocessor(findings: list[Finding], ctx: _PostProcessContex
     if not any(rule.platform == Platform.JENKINS for rule in ctx.rules):
         return
     if is_jenkinsfile_whole_dead(ctx.content, ctx.jenkinsctx):
-        findings.clear()
+        findings[:] = [f for f in findings if f.rule_id.startswith("ENGINE-")]
         return
     _suppress_jenkins_dead_findings(findings, ctx.content, ctx.jenkinsctx)
 
@@ -1235,7 +1237,9 @@ def _suppress_gitlab_dead_findings(
     findings[:] = [
         f
         for f in findings
-        if f.line <= 0 or not any(start <= f.line <= end for start, end in dead_ranges)
+        if f.rule_id.startswith("ENGINE-")
+        or f.line <= 0
+        or not any(start <= f.line <= end for start, end in dead_ranges)
     ]
 
 
@@ -1251,7 +1255,9 @@ def _suppress_jenkins_dead_findings(
     findings[:] = [
         f
         for f in findings
-        if f.line <= 0 or not any(start <= f.line <= end for start, end in dead_ranges)
+        if f.rule_id.startswith("ENGINE-")
+        or f.line <= 0
+        or not any(start <= f.line <= end for start, end in dead_ranges)
     ]
 
 
@@ -1437,7 +1443,8 @@ def _suppress_dead_findings(
         f
         for f in findings
         if (
-            f.line <= 0
+            f.rule_id.startswith("ENGINE-")
+            or f.line <= 0
             or not any(start <= f.line <= end for start, end in dead_ranges)
             or (f.rule_id == "SEC3-GH-006" and (f.file, f.line) in shared_inventory_sites)
             or (f.rule_id == "SEC10-GH-002" and (f.file, f.line) in shared_artifact_sites)
@@ -1684,16 +1691,6 @@ def _read_text_head(path: str, limit: int = 65536) -> str:
         return ""
 
 
-def _is_within_repo(repo_path: str, candidate: str) -> bool:
-    """Return whether candidate resolves inside repo_path."""
-    try:
-        repo_real = os.path.normcase(os.path.realpath(repo_path))
-        candidate_real = os.path.normcase(os.path.realpath(candidate))
-        return os.path.commonpath((repo_real, candidate_real)) == repo_real
-    except ValueError:
-        return False
-
-
 _CODEBUILD_VERSION = re.compile(
     r"^version\s*:\s*['\"]?(?:0\.1|0\.2)['\"]?\s*(?:#.*)?$", re.MULTILINE
 )
@@ -1715,13 +1712,13 @@ def _discover_codebuild_files(repo_path: str) -> list[str]:
             directory
             for directory in dirs
             if directory not in excluded_segments
-            and _is_within_repo(repo_path, os.path.join(root, directory))
+            and is_within_repo(repo_path, os.path.join(root, directory))
         ]
         for name in names:
             if not name.lower().endswith((".yml", ".yaml")):
                 continue
             candidate = os.path.join(root, name)
-            if _is_within_repo(repo_path, candidate) and _codebuild_yaml_is_buildspec(candidate):
+            if is_within_repo(repo_path, candidate) and _codebuild_yaml_is_buildspec(candidate):
                 files.append(candidate)
     return files
 
@@ -1816,10 +1813,10 @@ def _discover_gitlab_entry_files(repo_path: str) -> list[str]:
     files: list[str] = []
     for name in _GITLAB_ENTRY_FILENAMES:
         root_entry = os.path.join(repo_path, name)
-        if os.path.isfile(root_entry) and _is_within_repo(repo_path, root_entry):
+        if os.path.isfile(root_entry) and is_within_repo(repo_path, root_entry):
             files.append(root_entry)
         hidden_entry = os.path.join(repo_path, ".gitlab", name)
-        if os.path.isfile(hidden_entry) and _is_within_repo(repo_path, hidden_entry):
+        if os.path.isfile(hidden_entry) and is_within_repo(repo_path, hidden_entry):
             files.append(hidden_entry)
     return files
 
@@ -2047,35 +2044,38 @@ def _is_jenkinsfile_name(name: str) -> bool:
     return name.endswith(".jenkinsfile")
 
 
-def _discover_jenkins_files(repo_path: str) -> list[str]:
-    """Find Jenkins pipeline files using the platform-specific naming rules."""
+def _outside_repo_issue(path: str) -> SourceIssue:
+    return SourceIssue(path, "The requested scan source resolves outside the repository.")
+
+
+def _discover_jenkins_files(repo_path: str) -> tuple[list[str], list[SourceIssue]]:
+    """Find Jenkins pipeline files and refused paths before inspecting their bytes."""
     files: list[str] = []
+    issues: list[SourceIssue] = []
     excluded_segments = {"node_modules", ".git", "vendor", "__pycache__"}
     for root, dirs, names in os.walk(repo_path):
-        # Prune vendor/dep dirs in-place so os.walk doesn't descend.
-        # Hidden dirs (``.jenkins``, ``.ci``, etc.) stay in the list.
-        dirs[:] = [d for d in dirs if d not in excluded_segments]
-        rel_root = os.path.relpath(root, repo_path)
-        in_jenkins_dir = rel_root != "." and (
-            rel_root.split(os.sep)[0] == "jenkins"
-            or "jenkins" in rel_root.replace(os.sep, "/").split("/")
-        )
+        # Include hidden configuration directories, prune dependencies and
+        # avoid traversing a Windows junction into another source tree.
+        dirs[:] = [
+            name
+            for name in dirs
+            if name not in excluded_segments and is_within_repo(repo_path, os.path.join(root, name))
+        ]
+        in_jenkins_dir = "jenkins" in os.path.relpath(root, repo_path).split(os.sep)
         for name in names:
-            if _is_jenkinsfile_name(name):
-                files.append(os.path.join(root, name))
-            elif name.endswith(".groovy") and in_jenkins_dir:
-                # ``jenkins/**/*.groovy`` form - only inside a
-                # ``jenkins`` directory. Skip random ``*.groovy`` files
-                # elsewhere in the repo (usually build-tool scripts).
-                # ``jenkins`` is also a Groovy package namespace, so
-                # content-gate: keep only files with a pipeline marker.
-                cand = os.path.join(root, name)
-                if _groovy_looks_like_pipeline(cand):
-                    files.append(cand)
-    return files
+            named_pipeline = _is_jenkinsfile_name(name)
+            if not named_pipeline and not (in_jenkins_dir and name.endswith(".groovy")):
+                continue
+            candidate = os.path.normpath(os.path.join(root, name))
+            source_path = os.path.realpath(candidate)
+            if not is_within_repo(repo_path, source_path):
+                issues.append(_outside_repo_issue(candidate))
+            elif named_pipeline or _groovy_looks_like_pipeline(source_path):
+                files.append(candidate)
+    return sorted(set(files)), sorted(issues, key=lambda issue: issue.source)
 
 
-def detect_platform(repo_path: str) -> Platform | None:
+def detect_platform(repo_path: str, *, _jenkins_present: bool | None = None) -> Platform | None:
     """Auto-detect CI/CD platform from directory structure.
 
     Returns a single Platform when exactly one platform's signal is
@@ -2097,7 +2097,9 @@ def detect_platform(repo_path: str) -> Platform | None:
         for ext in ("yml", "yaml")
     )
     has_gitlab = bool(_discover_gitlab_entry_files(repo_path))
-    has_jenkins = bool(_discover_jenkins_files(repo_path))
+    if _jenkins_present is None:
+        jenkins_files, jenkins_issues = _discover_jenkins_files(repo_path)
+        _jenkins_present = bool(jenkins_files or jenkins_issues)
     has_codebuild = bool(_discover_codebuild_files(repo_path))
 
     detected: list[Platform] = []
@@ -2105,7 +2107,7 @@ def detect_platform(repo_path: str) -> Platform | None:
         detected.append(Platform.GITHUB)
     if has_gitlab:
         detected.append(Platform.GITLAB)
-    if has_jenkins:
+    if _jenkins_present:
         detected.append(Platform.JENKINS)
     if has_codebuild:
         detected.append(Platform.CODEBUILD)
@@ -2139,40 +2141,8 @@ def discover_files(repo_path: str, platform: Platform) -> list[str]:
         files.extend(gl_files)
 
     elif platform == Platform.JENKINS:
-        # ``glob.glob(recursive=True)`` SKIPS hidden directories by
-        # default on every Python version (``include_hidden=True`` is
-        # 3.11+; lab supports 3.10+).  Apache and infra projects
-        # commonly use ``.jenkins/Jenkinsfile`` / ``.ci/Jenkinsfile``
-        # layouts that the old glob never visited — apache/cassandra
-        # has a 667-line ``.jenkins/Jenkinsfile`` that 2026-05-18
-        # audit found was completely missed.  Walk manually so we
-        # descend into dot-prefixed dirs while still pruning the
-        # documented vendor/dep dirs.
-        excluded_segments = {"node_modules", ".git", "vendor", "__pycache__"}
-        for root, dirs, names in os.walk(repo_path):
-            # Prune vendor/dep dirs in-place so os.walk doesn't
-            # descend.  Hidden dirs (``.jenkins``, ``.ci``, etc.)
-            # stay in the list — that's the point of the rewrite.
-            dirs[:] = [d for d in dirs if d not in excluded_segments]
-            rel_root = os.path.relpath(root, repo_path)
-            in_jenkins_dir = rel_root != "." and (
-                rel_root.split(os.sep)[0] == "jenkins"
-                or "jenkins" in rel_root.replace(os.sep, "/").split("/")
-            )
-            for name in names:
-                if _is_jenkinsfile_name(name):
-                    files.append(os.path.join(root, name))
-                elif name.endswith(".groovy") and in_jenkins_dir:
-                    # ``jenkins/**/*.groovy`` form — only inside a
-                    # ``jenkins`` directory.  Skip random ``*.groovy``
-                    # files elsewhere in the repo (these are usually
-                    # build-tool scripts, not pipeline definitions).
-                    # ``jenkins`` is also a Groovy package namespace
-                    # (jenkinsci/jenkins ships UI views / plain classes
-                    # under it), so content-gate on a pipeline marker.
-                    cand = os.path.join(root, name)
-                    if _groovy_looks_like_pipeline(cand):
-                        files.append(cand)
+        jenkins_files, _ = _discover_jenkins_files(repo_path)
+        return jenkins_files
 
     elif platform == Platform.CODEBUILD:
         files.extend(_discover_codebuild_files(repo_path))
@@ -2227,9 +2197,15 @@ def scan_repo(
     repo_path, explicit_files = _normalize_input_path(repo_path)
     # Explicit paths bypass discovery, so enforce the real-path boundary
     # before platform classification can inspect file content.
-    explicit_files = [
-        filepath for filepath in explicit_files if _is_within_repo(repo_path, filepath)
+    explicit_issues = [
+        _outside_repo_issue(path) for path in explicit_files if not is_within_repo(repo_path, path)
     ]
+    if explicit_issues:
+        report = AuditReport(repo_path=repo_path, platform=platform.value if platform else "")
+        for issue in explicit_issues:
+            report.add(issue.finding())
+        report.summarize()
+        return [report]
     if explicit_files:
         # Surface that we're operating in scoped mode so a misconfigured
         # caller doesn't conclude "clean" from "we only scanned 1 file".
@@ -2241,20 +2217,33 @@ def scan_repo(
 
     reports = []
 
+    jenkins_files: list[str] = []
+    jenkins_issues: list[SourceIssue] = []
+    if not explicit_files and platform in (None, Platform.JENKINS):
+        jenkins_files, jenkins_issues = _discover_jenkins_files(repo_path)
+
     platforms_to_scan = []
     if platform:
         platforms_to_scan = [platform]
     else:
-        detected = detect_platform(repo_path)
+        jenkins_present = bool(jenkins_files or jenkins_issues)
+        detected = detect_platform(
+            repo_path, _jenkins_present=jenkins_present if not explicit_files else None
+        )
         if detected:
             platforms_to_scan = [detected]
         else:
-            # Check all supported platforms
-            for p in Platform:
-                if discover_files(repo_path, p) or any(
-                    _file_matches_platform(ef, p) for ef in explicit_files
-                ):
-                    platforms_to_scan.append(p)
+            for candidate_platform in Platform:
+                if explicit_files:
+                    present = any(
+                        _file_matches_platform(path, candidate_platform) for path in explicit_files
+                    )
+                elif candidate_platform == Platform.JENKINS:
+                    present = jenkins_present
+                else:
+                    present = bool(discover_files(repo_path, candidate_platform))
+                if present:
+                    platforms_to_scan.append(candidate_platform)
 
     if not platforms_to_scan:
         report = AuditReport(repo_path=repo_path)
@@ -2275,6 +2264,8 @@ def scan_repo(
             # ``discover_files``) so the dynamic-include count is captured
             # for the coverage disclosure below.
             files, n_dynamic_includes = _discover_gitlab_files(repo_path)
+        elif plat == Platform.JENKINS:
+            files = jenkins_files
         else:
             files = discover_files(repo_path, plat)
         report.files_scanned = len(files)
@@ -2283,7 +2274,9 @@ def scan_repo(
         # capped at review-needed by _apply_discovery_confidence below.
         discovery_conf = _discovery_confidence(repo_path, plat, files)
 
-        all_findings: list[Finding] = []
+        all_findings = (
+            [issue.finding() for issue in jenkins_issues] if plat == Platform.JENKINS else []
+        )
         if n_dynamic_includes and files:
             # Coverage disclosure: GitLab ``include: local:`` refs that
             # interpolate a runtime variable resolve only at pipeline-run
@@ -2364,6 +2357,11 @@ def scan_repo(
         workflow_contents: dict[str, str] = {}
         workflow_reads: set[str] = set()
         for fpath in files:
+            source_path = os.path.realpath(fpath) if plat == Platform.JENKINS else fpath
+            if plat == Platform.JENKINS and not is_within_repo(repo_path, source_path):
+                report.files_scanned -= 1
+                all_findings.append(_outside_repo_issue(fpath).finding())
+                continue
             file_rules = _rules_for_file(fpath, platform_rules)
             # Share the read across the scan and surface evaluation. For
             # captured workflows, a failed read cannot acquire a different
@@ -2376,10 +2374,10 @@ def scan_repo(
             if workflow_source:
                 workflow_reads.add(fpath)
             try:
-                with open(fpath, encoding="utf-8", errors="replace") as _f:
+                with open(source_path, encoding="utf-8", errors="replace") as _f:
                     _content = _f.read()
             except OSError as exc:
-                if workflow_source:
+                if workflow_source or plat == Platform.JENKINS:
                     all_findings.append(_file_read_error(fpath, exc))
                     continue
                 _content = None

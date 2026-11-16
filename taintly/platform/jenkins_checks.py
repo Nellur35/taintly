@@ -109,8 +109,9 @@ def check_anonymous_access(instance: str, client: JenkinsClient) -> list[Finding
                         stride=["I", "E"],
                     )
                 ]
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
-        pass
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (401, 403, 404):
+            raise
     return []
 
 
@@ -282,8 +283,9 @@ def check_script_console(instance: str, client: JenkinsClient) -> list[Finding]:
                         stride=["E", "T"],
                     )
                 ]
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError):
-        pass
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (401, 403, 404):
+            raise
     return []
 
 
@@ -769,7 +771,7 @@ def run_all_checks(
 ) -> list[Finding]:
     """Run every (or selected) platform check against the Jenkins instance.
 
-    API errors on individual checks are captured as PLAT-JK-ERR findings.
+    Failed checks report incomplete coverage without discarding other results.
     """
     results: list[Finding] = []
     selected = checks or list(ALL_CHECKS.keys())
@@ -779,21 +781,19 @@ def run_all_checks(
             continue
         try:
             results.extend(fn(instance, client))
-        except APIError as e:
+        except Exception as exc:
+            status = f" (HTTP {exc.status})" if isinstance(exc, APIError) else ""
             results.append(
-                _finding(
-                    rule_id="PLAT-JK-ERR",
-                    severity=Severity.MEDIUM,
-                    title=f"Platform check {rule_id} failed (HTTP {e.status})",
+                Finding(
+                    rule_id="ENGINE-ERR",
+                    severity=Severity.LOW,
+                    title=f"Jenkins posture check {rule_id} did not complete{status}",
                     description=(
-                        f"The {rule_id} check returned HTTP {e.status} from "
-                        f"{e.endpoint}. This may mean the API is not "
-                        "accessible or credentials are incorrect."
+                        "This check could not obtain or process its Jenkins evidence. "
+                        "Verify endpoint availability, API access and credentials."
                     ),
-                    instance=instance,
-                    remediation="Verify JENKINS_USER and JENKINS_TOKEN are correct.",
-                    reference="",
-                    owasp_cicd="",
+                    file=f"jenkins:{instance}",
+                    origin="platform",
                 )
             )
     return results
