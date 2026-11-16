@@ -1978,24 +1978,22 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
         parser.error("CodeBuild S3 observation requires codebuild and text or JSON format")
     capture, build_arn, origin = args.codebuild_public_s3_observation
     result = codebuild_s3_observation(Path(capture), Path(args.path), build_arn, origin)
-    resolved = result["state"] == "managed-s3-object-observed"
     if args.format == "json":
         print(json.dumps({"codebuild_s3_observation": result}, indent=2))
-    elif result["state"] in ("managed-s3-object-observed", "managed-s3-link-unverified"):
-        if resolved:
-            print(f"Build {result['build']} recorded the digest of the observed managed S3 ZIP.")
-        else:
-            print(
-                f"Build {result['build']} and the retrieved ZIP are consistent with a managed upload."
-            )
-            print("  Exact linkage remains unverified without the CodeBuild artifact digest.")
+    elif result["state"] == "managed-s3-link-unverified":
+        print(
+            f"Build {result['build']} and the retrieved ZIP are consistent with a managed upload."
+        )
+        print("  Exact linkage requires independent evidence for this specific object.")
+        if "provider_checksum_scope" in result["publication"]:
+            print("  The supplied provider checksum has unverified scope for this file.")
         print(f"  S3 object: {result['publication']['target']}")
         print(f"  Changed source in ZIP: {result['influence']['archive_member']}")
         print(result["scope"])
     else:
         print(f"CodeBuild S3 observation unresolved: {result['reason']}")
         print(result["scope"])
-    sys.exit(0 if resolved else 11)
+    sys.exit(11)
 
 
 def _assess_codebuild_deploy(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
