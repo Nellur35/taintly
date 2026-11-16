@@ -172,3 +172,116 @@ def test_refuses_different_workspace(tmp_path, capture):
         "/ci/workspace/", "/different/workspace/"
     )
     assert "differs from the checkout workspace" in evaluate(tmp_path, capture)["reason"]
+
+
+@pytest.fixture
+def upstream_capture(tmp_path, capture):
+    base = "b" * 40
+    raw = (tmp_path / "source" / "Jenkinsfile").read_bytes()
+    (tmp_path / "source" / "base.Jenkinsfile").write_bytes(raw)
+    capture["pull"]["base"] = base
+    capture["upstream_definition"] = {**capture["source"], "commit": base}
+    capture["comparison"] = {
+        "repository": REPO,
+        "base": base,
+        "merge_base": base,
+        "head": HEAD,
+        "status": "ahead",
+        "ahead_by": 1,
+        "behind_by": 0,
+    }
+    branch = "refs/remotes/origin/master"
+    capture["run"]["actions"] = [
+        {
+            "remoteUrls": [f"https://github.com/{REPO}"],
+            "lastBuiltRevision": {"SHA1": base, "branch": [{"name": branch}]},
+        }
+    ]
+    stage = capture["stage"]
+    checkout, publisher = stage["stageFlowNodes"]
+    checkout["name"] = "Git"
+    capture["checkout_log"]["text"] = (
+        f"Cloning repository <a href='https://github.com/{REPO}'>https://github.com/{REPO}</a>\n"
+        f" &gt; git init /ci/workspace/example # timeout=10\nChecking out Revision {base} ({branch})"
+    )
+    capture["flow"].update(
+        id="3", status="SUCCESS", startTimeMillis=START - 6000, durationMillis=8000
+    )
+
+    def step(identifier, name, parameter, start):
+        return {
+            "id": identifier,
+            "name": name,
+            "parameterDescription": parameter,
+            "status": "SUCCESS",
+            "startTimeMillis": start,
+            "durationMillis": 1,
+            "_links": {"self": {"href": JOB_PATH + f"execution/node/{identifier}/wfapi/describe"}},
+        }
+
+    cleanup = step("8", "Delete workspace when build is done", None, START - 4900)
+    intermediate = [
+        step(
+            "9",
+            "Shell Script",
+            (
+                "mvn clean org.jacoco:jacoco-maven-plugin:prepare-agent package "
+                "org.jacoco:jacoco-maven-plugin:report -T 1C"
+            ),
+            START - 3000,
+        ),
+        step(
+            "10",
+            "Print Message",
+            "Will use SonarQube instance at https://sonarcloud.io",
+            START - 2000,
+        ),
+        step(
+            "11",
+            "Shell Script",
+            (
+                "mvn sonar:sonar -Dsonar.projectKey=example -Dsonar.organization=apache "
+                "-Dsonar.branch.name=PR-7 -Dsonar.host.url=https://sonarcloud.io "
+                "-Dsonar.login=$"
+                "{SONAR_TOKEN}"
+            ),
+            START - 1500,
+        ),
+        step("12", "Read a maven project file.", "pom.xml", START - 1000),
+    ]
+    stage["stageFlowNodes"] = [cleanup, checkout, *intermediate, publisher]
+    capture["registry"]["stored_attributes"]["storageItem-generation"] = "2"
+    return capture
+
+
+def test_reports_upstream_checkout_and_keeps_writer_unknown(tmp_path, upstream_capture):
+    result = evaluate(tmp_path, upstream_capture)
+    assert result["state"] == "upstream-checkout-observed"
+    assert result["checkout"]["revision"] == "b" * 40
+    assert result["head"] == HEAD
+    assert result["authority"] == "unresolved"
+    assert "registry_actor" not in result["snapshot_evidence"]
+
+
+def test_checkout_initialization_does_not_hide_a_later_pr_fetch(tmp_path, upstream_capture):
+    intermediate = upstream_capture["stage"]["stageFlowNodes"][2]
+    intermediate["parameterDescription"] = "git fetch origin pull/7/head && git checkout FETCH_HEAD"
+    assert "unsupported command" in evaluate(tmp_path, upstream_capture)["reason"]
+
+
+def test_missing_upstream_ancestry_remains_unresolved(tmp_path, upstream_capture):
+    upstream_capture["comparison"]["head"] = "c" * 40
+    assert "pinned upstream-to-fork ancestry" in evaluate(tmp_path, upstream_capture)["reason"]
+
+
+def test_identity_proof_still_required_on_fork_checkout(tmp_path, capture):
+    capture["registry"]["stored_attributes"]["storageItem-generation"] = "2"
+    assert "write identity is unavailable" in evaluate(tmp_path, capture)["reason"]
+
+
+def test_refuses_multiple_reported_revisions_in_one_git_node(tmp_path, upstream_capture):
+    checkout = upstream_capture["checkout_log"]
+    checkout["text"] += f"\nChecking out Revision {HEAD} (PR-7)"
+    result = evaluate(tmp_path, upstream_capture)
+    assert result["state"] == "unresolved"
+    assert "ambiguous upstream repository or revision" in result["reason"]
