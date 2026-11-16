@@ -73,11 +73,15 @@ class _Index:
 
     @classmethod
     def build(cls, workflow: WorkflowSummary) -> _Index:
+        return cls.from_source(workflow.filepath, workflow.content)
+
+    @classmethod
+    def from_source(cls, filepath: str, content: str) -> _Index:
         events: list[Event] = []
         for count, event in enumerate(
             walk_workflow(
-                workflow.filepath,
-                content=workflow.content,
+                filepath,
+                content=content,
                 recover=True,
                 include_keys=True,
                 include_merge_origins=True,
@@ -96,7 +100,7 @@ class _Index:
                 values[event.path].append(event)
             elif event.kind is EventKind.MAP_KEY:
                 keys[event.path].append(event)
-        if error is None and _contains_alias_or_anchor(workflow.content):
+        if error is None and _contains_alias_or_anchor(content):
             error = "aliases or anchors make workflow ownership unresolved"
         return cls(tuple(events), dict(values), dict(keys), error)
 

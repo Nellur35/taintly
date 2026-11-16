@@ -236,6 +236,102 @@ The caller role cannot establish the build's own publication permission.
 Missing or incompatible start evidence returns exit `11`. The report
 retains existing CodeBuild analysis limits.
 
+### Saved GitHub Release publication
+
+```bash
+python -m taintly ./saved-source --format json --github-release-observation \
+  observation.json owner/repo PRODUCER_RUN RELEASE_RUN
+```
+
+Use a trusted offline `github-workflow-run-release-v1` receipt and the exact
+publisher workflow at its repository-relative path. The receipt binds the PR
+and its selected checkout to the producer job, uploaded artifact ID, digest
+and owning upload window. It also records the downstream download of that
+artifact ID, the publishing job, the exact release tag and commit, and
+GitHub's release and asset metadata.
+
+The supported workflow binds its origin lookup and artifact download to the
+triggering run and uses an explicitly configured secret through `GH_TOKEN`
+for a SHA-suffixed `gh release create` command. The result identifies the
+recorded asset uploader and the configured credential name. The credential
+contents, other permissions, archive bytes and later installations remain
+unverified. Conflicting or incomplete evidence returns exit 11.
+
+### Saved GitHub Preview observations
+
+When reviewing a completed fork build, use the named operation and both
+run IDs to check whether saved evidence links its artifact to a Cloudflare
+Workers Preview. The source directory must contain the two original
+workflow files at their recorded relative paths.
+
+```sh
+taintly ./source-projection --format json \
+  --github-preview-observation observation.json OWNER/REPO PRODUCER_RUN CONSUMER_RUN
+```
+
+The offline input is a trusted, reduced capture, rather than GitHub
+credentials or executable content. The `github-preview-v1` schema uses
+the following records:
+
+- `producer` and `consumer`: `id`, `html_url`, `event`, `conclusion`,
+  `head_sha`, `head_repo`, `path`, `run_attempt`, and `referenced_workflows`.
+- `producer_job` and `consumer_job`: `id`, `name`, `conclusion`, `run_id`,
+  `run_attempt`, `head_sha`, timestamps `started_at` and `completed_at`,
+  and `steps` with matching names, conclusions, timestamps and `number`.
+- `producer_source` and `consumer_source`: `path`, `revision`, and
+  `sha256` of the original workflow bytes. Use the checked-out PR merge
+  and the consumer workflow revision respectively.
+- `pr`: `number`, `head`, `base`, `head_repo`, and `base_repo`.
+  `merge`: the checked-out `sha` and ordered `parents`.
+- `artifacts`: objects with `id`, `name`, `digest` (prefixed with
+  `sha256:`), `run`, `head_sha`, `created_at`, and `size_in_bytes`.
+- `steps`: names of the selected steps under `checkout`, `build`,
+  `upload`, `download`, and `publish`.
+- `receipts`: rows with `run_id`, `job_id`, `attempt`, `time`, `kind`,
+  and `value`. Use verified log or other trusted step records and preserve
+  their ownership and times. The producer needs `checkout` and
+  `upload-id`. The consumer needs `producer-id`, `download-id`,
+  `download-digest`, `preview-command`, and `version-url`. Use strings
+  for receipt values and ISO 8601 timestamps with timezone offsets.
+
+This profile uses one producer and one consumer, exact audited action pins,
+the trigger's run ID, the default download destination, and an adjacent
+literal Worker Preview action. `preview-reported` means the selected
+records agree about this publication. The report locates the configured
+`apiToken` secret reference in the workflow and preserves uncertainty about the principal,
+archive contents, and wider permissions. Incompatible or missing evidence
+returns `unresolved` and exit `11`. The separate observation mode leaves
+ordinary repository scans and finding policy intact.
+
+### Saved GitHub Worker version uploads and fork skips
+
+```sh
+taintly ./source-projection --format json \
+  --github-version-upload-observation observation.json OWNER/REPO RUN JOB
+```
+
+The `github-version-upload-v1` capture uses a single `run`, `job` and
+`source` using the records above. Set `source_job` to the literal ID of
+the workflow job. For an observed upload, include `pr`, `merge` and
+`config_source`, a source identity for the original Wrangler JSON or JSONC
+file. Set `steps.build` and `steps.upload` to the selected step names.
+The `receipts` use the same ownership fields as Preview observations,
+with kinds `checkout`, `workspace`, `version-command`, `reported-worker`
+and `worker-version`.
+
+The profile resolves one literal matrix row and requires agreement between
+its build workspace, config, reported upload command, named Worker and
+version ID. A sibling job or a later route operation cannot supply this
+evidence. It reports a version upload under the configured credential and
+account bindings. Principal identity, exact published bytes and broader
+grants need separate evidence.
+
+For a fork skip, the recorded job must be skipped with empty `steps`
+and `receipts`. Use the known fork-head workflow in `source`. The command
+reports when that source's guard excludes the fork and the saved job was
+observed to skip. The exact source GitHub evaluated and the actual reason
+for the skip remain unverified. Missing or incompatible evidence exits `11`.
+
 ### CodeBuild project snapshots
 
 With Git installed, you can scan the configured buildspec for a single project

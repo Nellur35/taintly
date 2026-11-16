@@ -244,6 +244,24 @@ def main():
         metavar=("JSON", "PROJECT", "PIPELINE", "JOB"),
         help="Check saved target-project fork MR artifact or manual job evidence.",
     )
+    evidence_input.add_argument(
+        "--github-release-observation",
+        nargs=4,
+        metavar=("JSON", "OWNER/REPO", "PRODUCER_RUN", "RELEASE_RUN"),
+        help="Corroborate a saved GitHub workflow_run publication and its recorded uploader.",
+    )
+    evidence_input.add_argument(
+        "--github-preview-observation",
+        nargs=4,
+        metavar=("JSON", "OWNER/REPO", "PRODUCER_RUN", "CONSUMER_RUN"),
+        help="Check one saved GitHub fork artifact and Wrangler Preview observation offline.",
+    )
+    evidence_input.add_argument(
+        "--github-version-upload-observation",
+        nargs=4,
+        metavar=("JSON", "OWNER/REPO", "RUN", "JOB"),
+        help="Check a saved GitHub same-run Wrangler version upload or fork skip offline.",
+    )
     parser.add_argument(
         "--min-severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"], default=None
     )
@@ -655,6 +673,13 @@ def main():
         return
     if args.codebuild_start_observation:
         _assess_codebuild_start(parser, args)
+        return
+    if (
+        args.github_preview_observation
+        or args.github_version_upload_observation
+        or args.github_release_observation
+    ):
+        _check_github_observation(parser, args)
         return
 
     if args.codebuild_project_snapshot or args.codebuild_public_build:
@@ -1970,6 +1995,91 @@ def _assess_codebuild_start(parser: argparse.ArgumentParser, args: argparse.Name
         print(result["scope"])
     else:
         print(f"CodeBuild start unresolved: {result['reason']}.\n{result['scope']}")
+    sys.exit(11 if state == "unresolved" else 0)
+
+
+def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from .ingestion.github_preview import preview_observation
+
+    mode = next(
+        name
+        for name in (
+            "github_preview_observation",
+            "github_version_upload_observation",
+            "github_release_observation",
+        )
+        if getattr(args, name)
+    )
+    allowed = {"path", mode, "platform", "format", "no_config", "no_color"}
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(f"--{name.replace('_', '-')} is unavailable in GitHub observation mode")
+    if args.platform not in (None, "github") or args.format not in ("text", "json"):
+        parser.error("GitHub observation mode requires the github platform and text or JSON format")
+    snapshot, repository, first, second = getattr(args, mode)
+    if any(
+        not value.isascii() or not value.isdecimal() or len(value) > 19 for value in (first, second)
+    ):
+        parser.error("GitHub observation mode requires two decimal IDs")
+    inputs = Path(snapshot), Path(args.path), repository, int(first), int(second)
+    if mode == "github_release_observation":
+        from .ingestion.github_release_observation import release_observation
+
+        result = release_observation(*inputs)
+    elif mode == "github_version_upload_observation":
+        from .ingestion.github_version_upload import version_upload_observation
+
+        result = version_upload_observation(*inputs)
+    else:
+        result = preview_observation(*inputs)
+    state = result["state"]
+    if args.format == "json":
+        print(json.dumps({mode: result}, indent=2))
+    elif state == "release-asset-observed":
+        publication = result["publication"]
+        print(
+            f"GitHub records {publication['recorded_uploader']['login']} as uploader of "
+            f"{publication['asset']} to {publication['target_repository']} at {publication['tag']}.\n"
+            f"  PR #{result['pr']['number']}, producer run {result['producer_run']}, "
+            f"publishing run {result['consumer_run']}.\n"
+            f"  Configured credential: {result['configured_publish']['credential_binding']} "
+            f"({result['source']['path']}:{result['configured_publish']['line']}).\n"
+            f"{result['scope']}"
+        )
+    elif state == "preview-reported":
+        build = result["producer"]
+        deploy = result["consumer"]
+        print(
+            f"Saved records report Preview of fork PR #{result['pr']['number']} "
+            f"for {result['repository']}.\n"
+            f"  Run {build['run']} selected {result['artifact']['name']} "
+            f"at {build['path']}:{build['upload_line']}.\n"
+            f"  Run {deploy['run']} reported Worker {deploy['worker']} at "
+            f"{deploy['version_url']} ({deploy['path']}:{deploy['command_line']}).\n"
+            f"  Configured apiToken uses a GitHub Actions secret reference "
+            f"({deploy['path']}:{deploy['credential_line']}).\n"
+            f"{result['scope']}\n{result['review']}"
+        )
+    elif state == "version-upload-reported":
+        publication = result["publication"]
+        print(
+            f"Saved records report Worker version {publication['version_id']} for "
+            f"{publication['worker']} in run {result['run']}, job {result['job']}.\n"
+            f"  {publication['command']} using the configured "
+            f"{publication['credential_binding']} binding "
+            f"({result['source']['path']}:{publication['command_line']}).\n{result['scope']}"
+        )
+    elif state == "fork-job-skipped":
+        print(
+            f"Run {result['run']}, job {result['job']} was skipped. "
+            f"The supplied source excludes this fork "
+            f"({result['source']['path']}:{result['guard_line']}).\n"
+            f"The historical cause of the skip is unverified.\n{result['scope']}"
+        )
+    else:
+        print(f"GitHub observation unresolved: {result['reason']}.\n{result['scope']}")
     sys.exit(11 if state == "unresolved" else 0)
 
 
