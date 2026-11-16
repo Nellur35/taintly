@@ -10,6 +10,7 @@ from collections.abc import Callable
 
 from taintly.gitlab_workflow_corpus import GitLabCorpusMatches, GitLabWorkflowCorpus
 from taintly.gitlabguard import _RESERVED_TOP_LEVEL
+from taintly.ingestion.gitlab_registry_job import RegistryPath
 from taintly.parsers.structural import Event, EventKind, walk_workflow
 from taintly.parsers.yaml_command_scalar import decode_single_line_command_scalar
 
@@ -34,8 +35,8 @@ _PUBLICATION = frozenset(
 _NOOP = {"--help", "--version", "-h"}
 _REGISTRY_LOGIN = 'echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"'
 _PATH = r"[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*"
-_TAG_ASSIGN = re.compile(r"TAG=\$\(sha256sum (" + _PATH + r") \| cut -c1-[1-9][0-9]?\)")
-_IMAGE_ASSIGN = re.compile(r'IMAGE="\$\{CI_REGISTRY_IMAGE\}/[a-z0-9][a-z0-9_.-]*"')
+_TAG_ASSIGN = re.compile(r"TAG=\$\(sha256sum (" + _PATH + r") \| cut -c1-([1-9][0-9]?)\)")
+_IMAGE_ASSIGN = re.compile(r'IMAGE="\$\{CI_REGISTRY_IMAGE\}/([a-z0-9][a-z0-9_.-]*)"')
 _BUILD = re.compile(
     r'docker build -t "\$\{IMAGE\}:\$\{TAG\}" -f (' + _PATH + r") (?:\.|" + _PATH + r")"
 )
@@ -401,9 +402,7 @@ def _direct_publish(commands: list[Event], lines: list[str]) -> int | None:
     return None
 
 
-def _registry_path(
-    commands: list[Event], lines: list[str]
-) -> tuple[int, int, int, str, bool] | None:
+def _registry_path(job: str, commands: list[Event], lines: list[str]) -> RegistryPath | None:
     """Own login, tag, local build and push in one bounded shell sequence."""
     if len(commands) not in {4, 5}:
         return None
@@ -411,7 +410,8 @@ def _registry_path(
     if command_text(login, lines) != _REGISTRY_LOGIN:
         return None
     tag_match = _TAG_ASSIGN.fullmatch(command_text(tag, lines) or "")
-    if not tag_match or not _IMAGE_ASSIGN.fullmatch(command_text(image, lines) or ""):
+    image_match = _IMAGE_ASSIGN.fullmatch(command_text(image, lines) or "")
+    if not tag_match or not image_match:
         return None
     if len(tail) == 1:
         block = tail[0]
@@ -433,7 +433,16 @@ def _registry_path(
         build, push = (command_text(event, lines) or "" for event in tail)
     build_match = _BUILD.fullmatch(build)
     if push == _PUSH and build_match and build_match[1] == tag_match[1]:
-        return login.line, build_line, push_line, build_match[1], len(tail) == 1
+        return RegistryPath(
+            job,
+            login.line,
+            build_line,
+            push_line,
+            build_match[1],
+            image_match[1],
+            int(tag_match[2]),
+            len(tail) == 1,
+        )
     return None
 
 
@@ -465,6 +474,7 @@ def _mr_lines(branch: list[Event], lines: list[str]) -> list[int]:
 def compose_mr_publication(corpus: GitLabWorkflowCorpus) -> GitLabCorpusMatches:
     matches: list[tuple[str, int, str]] = []
     notes: dict[tuple[str, int, str], tuple[str, ...]] = {}
+    registry_paths: dict[tuple[str, int, str], RegistryPath] = {}
     # Effective cross-file merge, inherited jobs and remote policy are outside this review.
     workflow = corpus.by_filepath(corpus.entry_filepath) if corpus.entry_filepath else None
     if workflow is None or not any(
@@ -520,21 +530,22 @@ def compose_mr_publication(corpus: GitLabWorkflowCorpus) -> GitLabCorpusMatches:
             keys[prefix]
             for prefix in ((job, "before_script"), ("default", "before_script"), ("before_script",))
         ):
-            registry = _registry_path(commands, workflow.lines)
+            registry = _registry_path(job, commands, workflow.lines)
         tokens = _declared_tokens(branch, job, workflow.lines)
         evidence = [
             f"Job '{job}' has a possible selection under its source-local rules in a native merge request (event rule at line {mr_lines[0]})."
         ]
         if registry:
-            login, build, publish, dockerfile, conditional = registry
+            publish = registry.push_line
             evidence.append(
-                f"Line {login}: GitLab registry login using CI_REGISTRY_PASSWORD. Line {build}: build from the "
-                f"pipeline workspace Dockerfile {dockerfile}. Line {publish}: push the same configured image tag."
+                f"Line {registry.login_line}: GitLab registry login using CI_REGISTRY_PASSWORD. "
+                f"Line {registry.build_line}: build from the pipeline workspace Dockerfile "
+                f"{registry.dockerfile}. Line {publish}: push the same configured image tag."
             )
             evidence.append(
                 "This source path assumes standard checkout and native GitLab registry variables."
             )
-            if conditional:
+            if registry.skips_existing:
                 evidence.append(
                     "The build and push are configured only when the manifest check returns nonzero."
                 )
@@ -561,4 +572,6 @@ def compose_mr_publication(corpus: GitLabWorkflowCorpus) -> GitLabCorpusMatches:
         )
         matches.append(key)
         notes[key] = tuple(evidence)
-    return GitLabCorpusMatches(matches, notes=notes)
+        if registry:
+            registry_paths[key] = registry
+    return GitLabCorpusMatches(matches, notes=notes, registry_paths=registry_paths)

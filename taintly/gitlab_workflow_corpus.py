@@ -53,12 +53,16 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from .models import _MAX_SAFE_TEXT_LEN
 from .parsers.structural import EventKind, walk_workflow
 from .parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
 from .path_safety import is_within_repo, resolve_local_include
 from .workflow_corpus import TriggerFamily
+
+if TYPE_CHECKING:
+    from .ingestion.gitlab_registry_job import RegistryPath
 
 # ---------------------------------------------------------------------------
 # $CI_PIPELINE_SOURCE → TriggerFamily mapping
@@ -958,9 +962,11 @@ class GitLabCorpusMatches(list[tuple[str, int, str]]):
         matches: GitLabCorpusFindings,
         *,
         notes: Mapping[tuple[str, int, str], tuple[str, ...]],
+        registry_paths: Mapping[tuple[str, int, str], RegistryPath] | None = None,
     ) -> None:
         super().__init__(matches)
         self.notes = MappingProxyType({key: tuple(value) for key, value in notes.items()})
+        self.registry_paths = MappingProxyType(dict(registry_paths or {}))
 
 
 @dataclass

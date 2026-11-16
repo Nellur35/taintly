@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 from .agentguards import AgentGuardIndex
@@ -20,6 +21,7 @@ from .gitlabguard import (
     find_dead_gitlab_job_ranges,
     is_pipeline_whole_dead,
 )
+from .ingestion.gitlab_registry_job import GitLabRegistryJob, RegistryJobError
 from .jenkinsguard import (
     JenkinsContext,
     find_dead_jenkins_stage_ranges,
@@ -2176,6 +2178,7 @@ def scan_repo(
     max_scan_seconds: float | None = None,
     coalesce_overlaps: bool = True,
     respect_inline_suppressions: bool = True,
+    gitlab_registry_job: GitLabRegistryJob | None = None,
 ) -> list[AuditReport]:
     """Scan an entire repository. Returns one report per platform detected.
 
@@ -2195,6 +2198,10 @@ def scan_repo(
 
     validate_scan_seconds(max_scan_seconds)
     repo_path, explicit_files = _normalize_input_path(repo_path)
+    if gitlab_registry_job is not None:
+        if platform not in (None, Platform.GITLAB) or explicit_files:
+            raise ValueError("GitLab job evidence requires a local GitLab repository scan")
+        platform = Platform.GITLAB
     # Explicit paths bypass discovery, so enforce the real-path boundary
     # before platform classification can inspect file content.
     explicit_issues = [
@@ -2463,7 +2470,9 @@ def scan_repo(
             # run any rule whose pattern is a GitLabCorpusPattern.
             # Mirrors the GH _run_corpus_rules shape; per-file rules
             # are unaffected because GitLabCorpusPattern.check stubs to [].
-            all_findings.extend(_run_gitlab_corpus_rules(repo_path, platform_rules))
+            all_findings.extend(
+                _run_gitlab_corpus_rules(repo_path, platform_rules, gitlab_registry_job)
+            )
         # Order matters: drop superseded same-line duplicates first so
         # the project-scope dedup sees the post-supersedes finding set
         # (otherwise a superseded finding could "win" the project-scope
@@ -2611,7 +2620,9 @@ def _run_corpus_rules(
     return findings
 
 
-def _run_gitlab_corpus_rules(repo_path: str, rules: list[Rule]) -> list[Finding]:
+def _run_gitlab_corpus_rules(
+    repo_path: str, rules: list[Rule], registry_job: GitLabRegistryJob | None = None
+) -> list[Finding]:
     """Build a GitLabWorkflowCorpus and run every GitLabCorpusPattern
     rule against it.
 
@@ -2628,11 +2639,12 @@ def _run_gitlab_corpus_rules(repo_path: str, rules: list[Rule]) -> list[Finding]
     )
 
     corpus_rules = [r for r in rules if isinstance(r.pattern, GitLabCorpusPattern)]
-    if not corpus_rules:
+    if not corpus_rules and registry_job is None:
         return []
 
     corpus = build_gitlab_corpus(repo_path)
     findings: list[Finding] = []
+    registry_gap: str | None = "No supported root-config path belongs to this GitLab registry job"
     with scan_session():
         for rule in corpus_rules:
             corpus_pattern = rule.pattern
@@ -2650,8 +2662,33 @@ def _run_gitlab_corpus_rules(repo_path: str, rules: list[Rule]) -> list[Finding]
                     )
                 )
                 continue
-            notes = hits.notes if isinstance(hits, GitLabCorpusMatches) else {}
             for filepath, line_num, snippet in hits:
+                key = (filepath, line_num, snippet)
+                notes = (
+                    list(hits.notes.get(key, ())) if isinstance(hits, GitLabCorpusMatches) else []
+                )
+                tags: list[str] = []
+                if registry_job is not None and isinstance(hits, GitLabCorpusMatches):
+                    path = hits.registry_paths.get(key)
+                    workflow = corpus.by_filepath(filepath)
+                    if (
+                        path is not None
+                        and path.job == registry_job.job_name
+                        and workflow is not None
+                    ):
+                        try:
+                            observation = registry_job.observe(
+                                Path(repo_path).absolute(),
+                                Path(filepath).absolute(),
+                                workflow.content,
+                                path,
+                            )
+                        except RegistryJobError as exc:
+                            registry_gap = str(exc)
+                        else:
+                            notes.append(observation.note)
+                            tags.append(observation.tag)
+                            registry_gap = None
                 family = rule.finding_family or classify_rule(rule.id, rule.owasp_cicd)
                 confidence = rule.confidence or default_confidence(rule.id)
                 review_needed = rule.review_needed or default_review_needed(rule.id)
@@ -2676,7 +2713,16 @@ def _run_gitlab_corpus_rules(repo_path: str, rules: list[Rule]) -> list[Finding]
                         confidence=confidence,
                         exploitability="medium",
                         review_needed=review_needed,
-                        context_notes=list(notes.get((filepath, line_num, snippet), ())),
+                        context_notes=notes,
+                        context_tags=tags,
                     )
                 )
+    if registry_job is not None and registry_gap is not None:
+        findings.append(
+            SourceIssue(
+                repo_path,
+                f"GitLab registry evidence for project {registry_job.project_id}, "
+                f"job {registry_job.job_id} is unresolved: {registry_gap}",
+            ).finding()
+        )
     return findings

@@ -9,6 +9,7 @@ import re
 import sys
 from collections.abc import Callable
 from gettext import gettext
+from pathlib import Path
 from typing import Any
 
 from ._gitlab_transport import GitLabTransportError
@@ -45,6 +46,7 @@ from .engine import (
     scan_repo,
     validate_scan_seconds,
 )
+from .ingestion.gitlab_registry_job import RegistryJobError, load_registry_job
 from .models import Finding, Platform, Severity, _defer_context_regex_compilation
 from .reporters._encoding import ensure_utf8_stdout
 from .reporters.json_report import format_json
@@ -211,6 +213,18 @@ def main():
         nargs=4,
         metavar=("JSON", "OWNER/REPO", "PR", "JENKINS_CHECK"),
         help="Corroborate a saved Jenkins Incrementals publication with exact registry bytes.",
+    )
+    evidence_input.add_argument(
+        "--gitlab-job-evidence",
+        nargs=3,
+        metavar=("JSON", "PROJECT_ID", "JOB_ID"),
+        help="Compare one trusted, saved GitLab MR registry job receipt with this local source scan.",
+    )
+    evidence_input.add_argument(
+        "--gitlab-mr-artifact-observation",
+        nargs=4,
+        metavar=("JSON", "PROJECT", "PIPELINE", "JOB"),
+        help="Check saved target-project fork MR artifact or manual job evidence.",
     )
     parser.add_argument(
         "--min-severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"], default=None
@@ -612,10 +626,40 @@ def main():
     if args.jenkins_incrementals_observation:
         _check_jenkins_incrementals(parser, args)
         return
+    if args.gitlab_mr_artifact_observation:
+        _check_gitlab_mr_artifact(parser, args)
+        return
 
     if args.codebuild_project_snapshot or args.codebuild_public_build:
         _scan_codebuild_snapshot(parser, args)
         return
+
+    registry_job = None
+    if args.gitlab_job_evidence:
+        if args.platform not in (None, Platform.GITLAB.value) or not Path(args.path).is_dir():
+            parser.error("--gitlab-job-evidence requires a local GitLab repository directory")
+        if any(
+            (
+                args.self_test,
+                args.integration_test,
+                args.guide,
+                args.fix,
+                args.fix_dry_run,
+                args.platform_audit,
+                args.github_org,
+                args.gitlab_group,
+                args.jenkins_url,
+                args.diff,
+                args.baseline,
+            )
+        ):
+            parser.error("--gitlab-job-evidence is supported only in a local source scan")
+        snapshot, project_id, job_id = args.gitlab_job_evidence
+        try:
+            registry_job = load_registry_job(Path(snapshot), project_id, job_id)
+        except RegistryJobError as exc:
+            parser.error(str(exc))
+        args.platform = Platform.GITLAB.value
 
     if args.require_files and any(
         (
@@ -1395,6 +1439,7 @@ def main():
         max_scan_seconds=args.max_scan_seconds,
         coalesce_overlaps=False,
         respect_inline_suppressions=not args.no_inline_suppressions,
+        gitlab_registry_job=registry_job,
     )
 
     missing_scan_files = args.require_files and not any(report.files_scanned for report in reports)
@@ -1726,6 +1771,48 @@ def _check_jenkins_incrementals(parser: argparse.ArgumentParser, args: argparse.
     else:
         print(f"Jenkins publication unresolved: {result['reason']}.\n{result['scope']}")
     sys.exit(0 if resolved else 11)
+
+
+def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from .ingestion.gitlab_mr_artifact import mr_artifact_observation
+
+    mode = "gitlab_mr_artifact_observation"
+    allowed = {"path", mode, "platform", "format", "no_config", "no_color"}
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(f"--{name.replace('_', '-')} is unavailable in GitLab observation mode")
+    if args.platform not in (None, "gitlab") or args.format not in ("text", "json"):
+        parser.error("GitLab observation mode requires gitlab and text or JSON format")
+    snapshot, project, pipeline, job = args.gitlab_mr_artifact_observation
+    if any(
+        not value.isascii() or not value.isdecimal() or len(value) > 18
+        for value in (project, pipeline, job)
+    ):
+        parser.error("GitLab observation mode requires decimal project, pipeline and job IDs")
+    report = mr_artifact_observation(
+        Path(snapshot), Path(args.path), int(project), int(pipeline), int(job)
+    )
+    state = report["state"]
+    if args.format == "json":
+        print(json.dumps({mode: report}, indent=2))
+    elif state == "job-artifact-observed":
+        publication = report["publication"]
+        print(
+            f"GitLab job {report['job']} built a target-project merge of fork MR !{report['mr']}.\n"
+            f"  {report['source_path']}:{report['command_line']}: {report['command']}\n"
+            f"  Managed artifact: {publication['target']}\n"
+            f"  SHA-256: {publication['sha256']}\n{report['scope']}"
+        )
+    elif state == "manual-job-not-started":
+        print(
+            f"GitLab job {report['job']} remained unstarted on its manual fallback.\n"
+            f"  The guard excludes this fork when evaluated using the recorded project IDs "
+            f"({report['source_path']}:{report['guard_line']}).\n"
+            f"Manual start permission is unverified.\n{report['scope']}"
+        )
+    else:
+        print(f"GitLab observation unresolved: {report['reason']}.\n{report['scope']}")
+    sys.exit(11 if state == "unresolved" else 0)
 
 
 def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:

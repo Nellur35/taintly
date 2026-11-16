@@ -160,6 +160,47 @@ shared libraries, credentials accessible to PR code and wider registry
 permissions require independent evidence. Absent or incompatible
 evidence returns exit `11`.
 
+### Saved GitLab fork MR artifact observations
+
+```sh
+taintly ./saved-gitlab-source --format json \
+  --gitlab-mr-artifact-observation observation.json PROJECT PIPELINE JOB
+```
+
+This offline profile verifies one successful job artifact upload or one
+unstarted manual job in a target-project merged-result pipeline for a fork
+MR. Use trusted reduced GitLab API and runner records. Supply the selected
+commit's original `.gitlab-ci.yml` and, for an upload, the original
+downloaded member as `published-file.bin` (at most 128 KiB). The scanner
+compares the original bytes without running the build or inspecting code
+inside the artifact.
+
+The `gitlab-mr-artifact-v1` receipt contains a `project` (`id`, `path`),
+`mr` (`iid`, `source_project_id`, `target_project_id`, `sha`), `pipeline`
+identity (`id`, `project_id`, `sha`, `ref`, `source`), merge commit
+(`id`, `parent_ids`) and `source_sha256`. Preserve the job's `id`,
+`name`, `status`, `started_at`, `finished_at`, `artifacts`, `web_url`,
+and `pipeline` from the pipeline-jobs API. Reduce the selected job log
+to timestamped `trace` records for `checkout`, selected literal
+`command` entries, and the `upload` status and job number. The
+`artifact` retrieval record provides `url`, `path`, `http_status`,
+`size`, `sha256`, and `observed_at`. Exclude tokens from the capture.
+
+The profile resolves one literal artifact directory with an owned build
+command, including one supported local `extends` template. It can also
+corroborate an explicit same-project job guard and manual fallback using
+the supplied project IDs and a job with no recorded start. For that
+case use empty `trace` and null `artifact`.
+
+For a successful archive observation, include the provider's pipeline
+`created_at` and `updated_at` in `job.pipeline`. The recorded job and
+its runner events must fit the pipeline and job windows.
+
+An observed archive upload covers only the selected job and artifact
+member. Published Pages content, push access to registries, protected
+variables, and authorization to play a manual job require separate
+evidence. Missing or conflicting evidence returns exit `11`.
+
 ### CodeBuild project snapshots
 
 With Git installed, you can scan the configured buildspec for a single project
