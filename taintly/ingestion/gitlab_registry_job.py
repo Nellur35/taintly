@@ -254,10 +254,7 @@ def _time(value: object, label: str) -> datetime:
         raise RegistryJobError(f"{label} requires a valid UTC timestamp") from exc
 
 
-def load_registry_job(path: Path, project_id: str, job_id: str) -> GitLabRegistryJob:
-    """Read one saved receipt without making requests or reading credentials."""
-    if not _ID.fullmatch(project_id) or not _ID.fullmatch(job_id):
-        raise RegistryJobError("Select a literal GitLab project ID and job ID")
+def _load_job_receipt(path: Path) -> dict[str, object]:
     if not path.is_file():
         raise RegistryJobError("GitLab job receipt must be a regular file")
     try:
@@ -276,7 +273,14 @@ def load_registry_job(path: Path, project_id: str, job_id: str) -> GitLabRegistr
     except (OSError, ValueError, RecursionError) as exc:
         raise RegistryJobError("GitLab job receipt is not readable UTF-8 JSON") from exc
 
-    receipt = _record(receipt, "receipt")
+    return _record(receipt, "receipt")
+
+
+def load_registry_job(path: Path, project_id: str, job_id: str) -> GitLabRegistryJob:
+    """Read one saved receipt without making requests or reading credentials."""
+    if not _ID.fullmatch(project_id) or not _ID.fullmatch(job_id):
+        raise RegistryJobError("Select a literal GitLab project ID and job ID")
+    receipt = _load_job_receipt(path)
     project = _record(receipt.get("project"), "project")
     job = _record(receipt.get("job"), "job")
     run = _record(job.get("pipeline"), "pipeline")

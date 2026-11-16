@@ -220,6 +220,12 @@ def main():
         metavar=("JSON", "PROJECT_ID", "JOB_ID"),
         help="Compare one trusted, saved GitLab MR registry job receipt with this local source scan.",
     )
+    evidence_input.add_argument(
+        "--gitlab-mr-artifact-observation",
+        nargs=4,
+        metavar=("JSON", "PROJECT", "PIPELINE", "JOB"),
+        help="Check saved target-project fork MR artifact or manual job evidence.",
+    )
     parser.add_argument(
         "--min-severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"], default=None
     )
@@ -619,6 +625,9 @@ def main():
         parser.error("--codebuild-webhook-sender requires --codebuild-webhook-snapshot")
     if args.jenkins_incrementals_observation:
         _check_jenkins_incrementals(parser, args)
+        return
+    if args.gitlab_mr_artifact_observation:
+        _check_gitlab_mr_artifact(parser, args)
         return
 
     if args.codebuild_project_snapshot or args.codebuild_public_build:
@@ -1762,6 +1771,48 @@ def _check_jenkins_incrementals(parser: argparse.ArgumentParser, args: argparse.
     else:
         print(f"Jenkins publication unresolved: {result['reason']}.\n{result['scope']}")
     sys.exit(0 if resolved else 11)
+
+
+def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from .ingestion.gitlab_mr_artifact import mr_artifact_observation
+
+    mode = "gitlab_mr_artifact_observation"
+    allowed = {"path", mode, "platform", "format", "no_config", "no_color"}
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(f"--{name.replace('_', '-')} is unavailable in GitLab observation mode")
+    if args.platform not in (None, "gitlab") or args.format not in ("text", "json"):
+        parser.error("GitLab observation mode requires gitlab and text or JSON format")
+    snapshot, project, pipeline, job = args.gitlab_mr_artifact_observation
+    if any(
+        not value.isascii() or not value.isdecimal() or len(value) > 18
+        for value in (project, pipeline, job)
+    ):
+        parser.error("GitLab observation mode requires decimal project, pipeline and job IDs")
+    report = mr_artifact_observation(
+        Path(snapshot), Path(args.path), int(project), int(pipeline), int(job)
+    )
+    state = report["state"]
+    if args.format == "json":
+        print(json.dumps({mode: report}, indent=2))
+    elif state == "job-artifact-observed":
+        publication = report["publication"]
+        print(
+            f"GitLab job {report['job']} built a target-project merge of fork MR !{report['mr']}.\n"
+            f"  {report['source_path']}:{report['command_line']}: {report['command']}\n"
+            f"  Managed artifact: {publication['target']}\n"
+            f"  SHA-256: {publication['sha256']}\n{report['scope']}"
+        )
+    elif state == "manual-job-not-started":
+        print(
+            f"GitLab job {report['job']} remained unstarted on its manual fallback.\n"
+            f"  The guard excludes this fork when evaluated using the recorded project IDs "
+            f"({report['source_path']}:{report['guard_line']}).\n"
+            f"Manual start permission is unverified.\n{report['scope']}"
+        )
+    else:
+        print(f"GitLab observation unresolved: {report['reason']}.\n{report['scope']}")
+    sys.exit(11 if state == "unresolved" else 0)
 
 
 def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
