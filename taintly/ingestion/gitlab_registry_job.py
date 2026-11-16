@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from taintly.parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
 from taintly.path_safety import is_within_repo
 
 _MAX_RECEIPT_BYTES = 1_048_576
@@ -87,6 +88,7 @@ class GitLabRegistryJob:
             raise RegistryJobError("Root configuration is not UTF-8") from exc
         if parsed_config != scanned_content:
             raise RegistryJobError("Root configuration differs from the parsed source")
+        _check_workflow_ownership(parsed_config)
         recipe = _source_bytes(repo, repo / path.dockerfile, "Dockerfile")
         recipe_sha = hashlib.sha256(recipe).hexdigest()
         if recipe_sha != self.dockerfile_sha256:
@@ -195,6 +197,19 @@ def _one_line(lines: list[str], expected: str) -> int:
     if len(indices) != 1:
         raise RegistryJobError("Trace lacks a unique required command or completion marker")
     return indices[0]
+
+
+def _check_workflow_ownership(content: str) -> None:
+    if "\ufeff" in content or re.search(r"^(?:(?:---|\.\.\.)(?:[ \t]|$)|%)", content, re.MULTILINE):
+        raise RegistryJobError("GitLab source contains unsupported document boundaries")
+    try:
+        for token in tokenize(content):
+            if token.kind is TokenKind.MERGE_KEY or (
+                token.kind is TokenKind.KEY and "\\" in token.value
+            ):
+                raise RegistryJobError("GitLab source contains ambiguous key ownership")
+    except TokenizerError as exc:
+        raise RegistryJobError("GitLab source tokenization is incomplete") from exc
 
 
 def _source_bytes(repo: Path, path: Path, label: str) -> bytes:

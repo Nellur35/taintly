@@ -13,6 +13,7 @@ from taintly.ingestion.gitlab_registry_job import (
     _PROJECT,
     _SHA,
     RegistryJobError,
+    _check_workflow_ownership,
     _identifier,
     _load_job_receipt,
     _source_bytes,
@@ -44,6 +45,8 @@ def _need(condition: object, reason: str) -> None:
 
 class _Config:
     def __init__(self, source: str) -> None:
+        source = source.replace("\r\n", "\n").replace("\r", "\n")
+        _check_workflow_ownership(source)
         self.lines = source.splitlines()
         events = list(walk_workflow(".gitlab-ci.yml", content=source, include_keys=True))
         _need(

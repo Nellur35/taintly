@@ -101,6 +101,21 @@ def test_artifact_retrieval_has_to_follow_job(tmp_path, capture):
     assert evaluate(tmp_path, capture)["state"] == "unresolved"
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "---\npackage: {}\n",
+        "...\npackage: {}\n",
+        '"p\\u0061ckage": {}\n',
+        "<<: {package: {script: echo other}}\n",
+    ],
+)
+def test_document_and_key_ambiguity_cannot_prove_ownership(tmp_path, capture, extra):
+    result = evaluate(tmp_path, capture, BUILDSPEC + extra)
+    assert result["state"] == "unresolved"
+    assert "GitLab source contains" in result["reason"]
+
+
 def test_manual_job_preserves_unknown_effective_values_and_start_permission(tmp_path, capture):
     capture["job"].update(status="manual", started_at=None, finished_at=None, artifacts=[])
     capture.update(trace=[], artifact=None)
