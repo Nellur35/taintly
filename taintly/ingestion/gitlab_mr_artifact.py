@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import Counter
+from fnmatch import fnmatchcase
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -240,7 +241,235 @@ def _successful(
     }
 
 
-def _assess(data: _Row, root: Path, project_id: int, pipeline_id: int, job_id: int) -> _Row:
+def _npm_gate(cfg: _Config, name: str) -> tuple[str, str, int, list[int]]:
+    cfg.owner((name,))
+    _need(
+        not any(
+            cfg.keys[(name, key)] for key in ("rules", "only", "except", "parallel", "trigger")
+        ),
+        "publisher overrides the supported local template",
+    )
+    parent = _value(cfg.scalar((name, "extends")).value, _JOB, "publisher template")
+    cfg.owner((parent,))
+    cfg.owner((parent, "rules"))
+    _need(
+        not any(cfg.keys[(parent, key)] for key in ("only", "except", "parallel", "trigger")),
+        "publisher template has unsupported admission fields",
+    )
+    builtin = "CI_MERGE_REQUEST_SOURCE_PROJECT_ID"
+    _need(
+        not any(key[-2:] == ("variables", builtin) for key in cfg.keys),
+        "source overrides the project identity used by the declared gate",
+    )
+    fields = {"<<", "if", "when", "allow_failure"}
+    by_rule = {key[2] for key in cfg.keys if len(key) == 4 and key[:2] == (parent, "rules")}
+    _need(
+        by_rule == {0, 1}
+        and all(
+            len(key) == 4 and key[-1] in fields and count == 1 and key[2] in by_rule
+            for key, count in cfg.keys.items()
+            if len(key) > 2 and key[:2] == (parent, "rules")
+        )
+        and all(
+            len(key) == 4 and key[-1] in fields and key[2] in by_rule and len(values) == 1
+            for key, values in cfg.leaves.items()
+            if len(key) > 2 and key[:2] == (parent, "rules")
+        ),
+        "publisher rule list is outside the supported two-rule profile",
+    )
+    lines = []
+    for i in (0, 1):
+        rule = (parent, "rules", i)
+        rows = cfg.leaves.get((*rule, "if"), [])
+        _need(
+            len(rows) == 1
+            and isinstance(rows[0].value, str)
+            and rows[0].value_kind in {"plain", "quoted"},
+            "unsupported condition in the publisher rule list",
+        )
+        condition = rows[0].value
+        if not isinstance(condition, str):
+            raise RegistryJobError("publisher condition is not a string")
+        clause = r'\$[A-Z_]+\s*==\s*(?:\$[A-Z_]+|"[A-Za-z0-9_.-]+"|null)'
+        _need(
+            re.fullmatch(rf"{clause}(?:\s*&&\s*{clause}){{0,4}}", condition)
+            and f"${builtin} == null" in {item.strip() for item in condition.split("&&")}
+            and len(cfg.leaves.get((*rule, "when"), [])) == 1
+            and cfg.leaves[(*rule, "when")][0].value == "manual",
+            "publisher rules do not require an absent merge-request source project",
+        )
+        lines.append(rows[0].line)
+
+    commands = cfg.sequence((name, "script"))
+    _need(len(commands) == 2, "publisher script is outside the supported npm shape")
+    selector, command = (command_text(row, cfg.lines) or "" for row in commands)
+    match = re.fullmatch(
+        r'export ([A-Z_]+)="\$\((?:find) (tmp/packages) -name "([A-Za-z0-9_.-]+)\*\.tgz" -type f\)"',
+        selector,
+    )
+    if match is None:
+        raise RegistryJobError("publisher lacks a bounded archive selector")
+    variable, directory, prefix = match.groups()
+    _need(
+        re.fullmatch(rf"npm publish --tag \$[A-Z_]+ --access public \${variable}", command),
+        "requested job is outside the non-dry-run npm publication profile",
+    )
+    _need(
+        cfg.scalar((parent, "id_tokens", "NPM_ID_TOKEN", "aud")).value == "npm:registry.npmjs.org",
+        "publisher has no supported configured npm identity audience",
+    )
+    needs = (parent, "needs")
+    expected_need = {(*needs, 0, "job"), (*needs, 0, "artifacts")}
+    _need(
+        {key for key in cfg.keys if len(key) > 2 and key[:2] == needs} == expected_need
+        and {key for key in cfg.leaves if key[:2] == needs} == expected_need
+        and cfg.scalar((parent, "needs", 0, "artifacts")).value == "true"
+        and not cfg.keys[(name, "needs")]
+        and not cfg.keys[(name, "id_tokens")],
+        "publisher does not identify one local artifact-producing job",
+    )
+    producer = _value(cfg.scalar((parent, "needs", 0, "job")).value, _JOB, "publisher artifact job")
+    paths = cfg.sequence((producer, "artifacts", "paths"))
+    _need(
+        len(paths) == 1 and paths[0].value == directory, "package archive directory does not match"
+    )
+    return producer, prefix, commands[-1].line, lines
+
+
+def _complete_page(packet: _Row, rows: object, expected_url: str, after: object) -> None:
+    _need(
+        packet["url"] == expected_url
+        and _identifier(packet["page"], "inventory page") == 1
+        and _identifier(packet["total_pages"], "inventory pages") == 1
+        and packet["next_page"] == ""
+        and isinstance(rows, list)
+        and 1 <= len(rows) <= 100
+        and _identifier(packet["total"], "inventory total") == len(rows)
+        and _time(packet["observed_at"], "inventory time") >= _time(after, "inventory lower bound"),
+        "inventory is missing, incomplete or unowned",
+    )
+
+
+def _npm_admission(data: _Row, cfg: _Config, path: str, name: str) -> _Row:
+    try:
+        publisher = _value(name, _JOB, "requested npm publisher")
+        producer, prefix, line, gates = _npm_gate(cfg, publisher)
+        packet = data["publication_inventory"]
+        rows = packet["jobs"]
+        pipe, job = data["pipeline"], data["job"]
+        owning_pipeline = job["pipeline"]
+        url = f"https://gitlab.com/api/v4/projects/{pipe['project_id']}/pipelines/{pipe['id']}/jobs"
+        _need(owning_pipeline["status"] in ("success", "failed"), "parent pipeline is unfinished")
+        _complete_page(
+            packet, rows, url + "?per_page=100&include_retried=true", owning_pipeline["updated_at"]
+        )
+        if "updated_at" in pipe:
+            _need(
+                _time(packet["observed_at"], "inventory time")
+                >= _time(pipe["updated_at"], "pipeline evidence update"),
+                "inventory predates the supplied pipeline update",
+            )
+        ids = set()
+        for row in rows:
+            identifier = _identifier(row["id"], "inventory job")
+            owned = row["pipeline"]
+            job_name = row["name"]
+            _need(
+                isinstance(job_name, str) and job_name.isprintable() and bool(job_name.strip()),
+                "inventory has an unnamed or malformed job",
+            )
+            _need(
+                identifier not in ids
+                and all(
+                    owned[key] == pipe[key] for key in ("id", "project_id", "sha", "ref", "source")
+                )
+                and row["web_url"] == f"https://gitlab.com/{path}/-/jobs/{identifier}",
+                "job inventory contains duplicate or different pipeline evidence",
+            )
+            ids.add(identifier)
+        _need(
+            any(
+                row["id"] == job["id"]
+                and row["name"] == job["name"]
+                and row["status"] == job["status"]
+                for row in rows
+            )
+            and all(
+                row["name"] != publisher and not row["name"].startswith(publisher + ":")
+                for row in rows
+            ),
+            "requested publisher is present or selected artifact job is absent",
+        )
+        sources = [row for row in rows if row["name"] == producer]
+        _need(
+            len(sources) == 1
+            and sources[0]["status"] == "success"
+            and sources[0]["archive_present"] is True,
+            "publisher's declared producer lacks a unique completed archive job",
+        )
+        origin = sources[0]
+        _need(
+            _time(owning_pipeline["created_at"], "pipeline creation")
+            <= _time(origin["started_at"], "producer start")
+            <= _time(origin["finished_at"], "producer finish")
+            <= _time(owning_pipeline["updated_at"], "pipeline update"),
+            "archive producer is outside the recorded pipeline window",
+        )
+        listing = data["publisher_artifact_listing"]
+        entries = listing["entries"]
+        tree_url = (
+            f"https://gitlab.com/api/v4/projects/{pipe['project_id']}/jobs/{origin['id']}"
+            "/artifacts/tree?path=tmp%2Fpackages&per_page=100"
+        )
+        _complete_page(listing, entries, tree_url, origin["finished_at"])
+        candidates = [
+            entry
+            for entry in entries
+            if entry["type"] == "file" and fnmatchcase(entry["name"], prefix + "*.tgz")
+        ]
+        _need(
+            len(candidates) == 1 and _identifier(candidates[0]["size"], "package size"),
+            "saved producer directory does not show one matching top-level file",
+        )
+        item = candidates[0]
+        member = _value(item["path"], _PATH, "matching package path")
+        _need(
+            member == f"tmp/packages/{item['name']}", "package path is outside the saved directory"
+        )
+        return {
+            "state": "publish-job-absent",
+            "job_name": publisher,
+            "operation": "npm-publish",
+            "command_line": line,
+            "local_rule_lines": gates,
+            "local_rules_using_recorded_source_project": "do-not-match",
+            "artifact_producer": origin["web_url"],
+            "archive_member": member,
+            "matching_archive": f"{origin['web_url']}/artifacts/raw/{member}",
+            "recursive_selection": "unverified",
+            "configured_oidc_audience": "npm:registry.npmjs.org",
+            "effective_configuration": "unverified",
+            "authorization": "unverified",
+            "scope": "The named npm publisher is absent from this saved pipeline. "
+            "The visible local rules require no MR source project. The saved directory "
+            "shows a matching file. Recursive selection, historical includes, runtime "
+            "settings and other publication routes remain unverified.",
+        }
+    except RegistryJobError as exc:
+        reason = str(exc)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        reason = "required publisher source or pipeline inventory is unavailable or malformed"
+    return {"state": "unresolved", "reason": reason}
+
+
+def _assess(
+    data: _Row,
+    root: Path,
+    project_id: int,
+    pipeline_id: int,
+    job_id: int,
+    publisher: str | None,
+) -> _Row:
     project, pr, pipe, merge, job = (data[k] for k in ("project", "mr", "pipeline", "merge", "job"))
     for label, value in (
         ("project", project["id"]),
@@ -286,6 +515,8 @@ def _assess(data: _Row, root: Path, project_id: int, pipeline_id: int, job_id: i
         if job["status"] == "manual"
         else _successful(data, root, cfg, pipe, name, job_url)
     )
+    if publisher is not None:
+        detail["publication_admission"] = _npm_admission(data, cfg, path, publisher)
     return {
         "repository": path,
         "project": project_id,
@@ -304,14 +535,20 @@ def _assess(data: _Row, root: Path, project_id: int, pipeline_id: int, job_id: i
 
 
 def mr_artifact_observation(
-    snapshot: Path, root: Path, project: int, pipeline: int, job: int
+    snapshot: Path,
+    root: Path,
+    project: int,
+    pipeline: int,
+    job: int,
+    *,
+    publisher: str | None = None,
 ) -> _Row:
     try:
         data = _load_job_receipt(snapshot)
         _need(
             data.get("schema") == "gitlab-mr-artifact-v1", "unsupported artifact observation schema"
         )
-        return _assess(data, root.resolve(), project, pipeline, job)
+        return _assess(data, root.resolve(), project, pipeline, job, publisher)
     except RegistryJobError as exc:
         reason = str(exc)
     except (

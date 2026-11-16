@@ -246,6 +246,27 @@ member. Published Pages content, push access to registries, protected
 variables, and authorization to play a manual job require separate
 evidence. Missing or conflicting evidence returns exit `11`.
 
+For the supported npm profile, add `--gitlab-mr-publish-job JOB_NAME`
+to check whether the named npm publication job was absent from that
+same completed fork pipeline. The scanner binds the job's local rules,
+literal archive selector, configured npm identity audience, and single
+local archive producer. A matching archived file is evidence that the
+producer created a candidate for the configured selector. It does not
+establish the result of that recursive selector at runtime.
+
+Add `publication_inventory` from the pipeline jobs API with
+`?per_page=100&include_retried=true` and `publisher_artifact_listing`
+from the producer's artifact tree API with `?path=tmp%2Fpackages&per_page=100`.
+Each saved page carries its `url`, `page`, `total_pages`, `next_page`,
+`total`, and `observed_at`. Inventory `jobs` need names, IDs, status,
+pipeline identity and job URLs. The producer row also needs its start
+and finish timestamps and `archive_present` from its archive metadata.
+Save listing `entries` with `type`, `name`, `path` and `size` for files.
+Both pages must be complete. The result preserves the primary job
+artifact observation if the requested check returns `unresolved` and
+exit `11`. Historical includes, registry authorization, and other
+publication routes remain unverified.
+
 ### Saved GitHub-to-CodeBuild start observations
 
 ```sh

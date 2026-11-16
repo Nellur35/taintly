@@ -250,6 +250,11 @@ def main():
         metavar=("JSON", "PROJECT", "PIPELINE", "JOB"),
         help="Check saved target-project fork MR artifact or manual job evidence.",
     )
+    parser.add_argument(
+        "--gitlab-mr-publish-job",
+        metavar="NAME",
+        help="Also assess admission of an npm publisher in the saved GitLab MR pipeline.",
+    )
     evidence_input.add_argument(
         "--github-release-observation",
         nargs=4,
@@ -674,6 +679,8 @@ def main():
     if args.gitlab_mr_artifact_observation:
         _check_gitlab_mr_artifact(parser, args)
         return
+    if args.gitlab_mr_publish_job is not None:
+        parser.error("--gitlab-mr-publish-job requires --gitlab-mr-artifact-observation")
     if args.codebuild_public_s3_observation:
         _assess_codebuild_s3(parser, args)
         return
@@ -1891,7 +1898,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     from .ingestion.gitlab_mr_artifact import mr_artifact_observation
 
     mode = "gitlab_mr_artifact_observation"
-    allowed = {"path", mode, "platform", "format", "no_config", "no_color"}
+    allowed = {"path", mode, "platform", "format", "no_config", "no_color", "gitlab_mr_publish_job"}
     for name, value in vars(args).items():
         if name not in allowed and value != parser.get_default(name):
             parser.error(f"--{name.replace('_', '-')} is unavailable in GitLab observation mode")
@@ -1904,9 +1911,15 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     ):
         parser.error("GitLab observation mode requires decimal project, pipeline and job IDs")
     report = mr_artifact_observation(
-        Path(snapshot), Path(args.path), int(project), int(pipeline), int(job)
+        Path(snapshot),
+        Path(args.path),
+        int(project),
+        int(pipeline),
+        int(job),
+        publisher=args.gitlab_mr_publish_job,
     )
     state = report["state"]
+    admission = report.get("publication_admission")
     if args.format == "json":
         print(json.dumps({mode: report}, indent=2))
     elif state == "job-artifact-observed":
@@ -1926,7 +1939,21 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
         )
     else:
         print(f"GitLab observation unresolved: {report['reason']}.\n{report['scope']}")
-    sys.exit(11 if state == "unresolved" else 0)
+    if admission is not None and args.format == "text":
+        if admission["state"] == "publish-job-absent":
+            print(
+                f"  npm publisher {admission['job_name']} is absent from pipeline {report['pipeline']}.\n"
+                f"  Matching archived file: {admission['matching_archive']}.\n"
+                f"  Local npm command at {report['source_path']}:{admission['command_line']}. "
+                f"OIDC audience: {admission['configured_oidc_audience']}.\n"
+                f"{admission['scope']}"
+            )
+        else:
+            print(f"npm job admission unresolved: {admission['reason']}.")
+    incomplete = state == "unresolved" or (
+        admission is not None and admission["state"] == "unresolved"
+    )
+    sys.exit(11 if incomplete else 0)
 
 
 def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
