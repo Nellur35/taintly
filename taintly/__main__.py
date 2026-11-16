@@ -1942,7 +1942,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             f"GitLab job {report['job']} built a target-project merge of fork MR !{report['mr']}.\n"
             f"  {report['source_path']}:{report['command_line']}: {report['command']}\n"
             f"  Managed artifact: {publication['target']}\n"
-            f"  SHA-256: {publication['sha256']}\n{report['scope']}"
+            f"  SHA-256: {publication['sha256']}\n{report['scope']}\n{report['review_action']}"
         )
     elif state == "manual-job-not-started":
         print(
@@ -2004,6 +2004,7 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
         print(f"  S3 object: {result['publication']['target']}")
         print(f"  Changed source in ZIP: {result['influence']['archive_member']}")
         print(result["scope"])
+        print(result["next_evidence"])
     else:
         print(f"CodeBuild S3 observation unresolved: {result['reason']}")
         print(result["scope"])
@@ -2140,13 +2141,14 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
         print(json.dumps({mode: result}, indent=2))
     elif state == "release-asset-observed":
         publication = result["publication"]
+        configured = result["configured_publish"]
         print(
             f"GitHub records {publication['recorded_uploader']['login']} as uploader of "
             f"{publication['asset']} to {publication['target_repository']} at {publication['tag']}.\n"
             f"  PR #{result['pr']['number']}, producer run {result['producer_run']}, "
             f"publishing run {result['consumer_run']}.\n"
-            f"  Configured credential: {result['configured_publish']['credential_binding']} "
-            f"({result['source']['path']}:{result['configured_publish']['line']}).\n"
+            f"  Configured credential: {configured['credential_binding']} "
+            f"({result['source']['path']}:{configured.get('credential_line', configured['line'])}).\n"
             f"{result['scope']}"
         )
         if "review_action" in result:
