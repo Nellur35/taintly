@@ -295,6 +295,36 @@ and filesystem state. The overall scan remains incomplete in this profile.
 Keep captures private. Taintly does not authenticate the saved response or
 establish the AWS account, command execution, secret delivery or effective IAM.
 
+### Saved CodeBuild-managed S3 ZIP
+
+```bash
+python -m taintly ./repo --format json --codebuild-public-s3-observation \
+  observation.json arn:aws:codebuild:us-east-1:123456789012:build/example:01234567-89ab-cdef-0123-456789abcdef \
+  https://github.com/owner/repo
+```
+
+Supply a trusted local `codebuild-managed-s3-v1` JSON receipt and the downloaded
+`archive.zip` beside it. The local Git repository must contain the exact PR head
+and base objects and have the matching HTTPS origin. The receipt contains:
+
+- `pr`: `number`, `head`, `base`, `repository`, and `fork` (the PR head repository).
+- `build`: provider run fields including the selected revision, inline buildspec,
+  S3 artifact type, status, and phase timestamps.
+- `logs`: `build` (the exact build ID), the inline buildspec-selection log row
+  under `selection`, and owned command, artifact, and phase rows under `rows`.
+- `artifact.provider`: the separately captured artifact lookup, with `build`
+  and `s3Arn`. `artifact.object` contains `build_id`, canonical S3 `url`,
+  `http_status`, `archive_sha256` and the S3 response `headers` for length,
+  last modification time and CodeBuild build ARN metadata.
+- `witness`: the changed `source_path` and its exact ZIP `archive_member`.
+
+The supported profile runs `make dist-src` with a version 0.2 inline buildspec
+that selects a root ZIP. The observation checks that the published member
+matches the PR head and differs from the base, permitting LF/CRLF conversion
+for UTF-8 text. The archive is read with size limits and is never extracted.
+The exact service-role session, general IAM permissions and subsequent use
+remain unverified. Inconsistent or missing evidence returns exit 11.
+
 ### Saved CodeBuild deployment skip
 
 Use a trusted saved CodeBuild build and runner receipt with the matching Git checkout.

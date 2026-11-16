@@ -204,6 +204,12 @@ def main():
         help="Assess one GitHub PR event against trusted, saved CodeBuild project filters.",
     )
     codebuild_input.add_argument(
+        "--codebuild-public-s3-observation",
+        nargs=3,
+        metavar=("JSON", "BUILD_ARN", "GITHUB_ORIGIN"),
+        help="Corroborate a saved CodeBuild-managed S3 ZIP and its source member.",
+    )
+    codebuild_input.add_argument(
         "--codebuild-public-deploy-observation",
         nargs=3,
         metavar=("JSON", "BUILD_ID", "GITHUB_ORIGIN"),
@@ -640,6 +646,9 @@ def main():
         return
     if args.gitlab_mr_artifact_observation:
         _check_gitlab_mr_artifact(parser, args)
+        return
+    if args.codebuild_public_s3_observation:
+        _assess_codebuild_s3(parser, args)
         return
     if args.codebuild_public_deploy_observation:
         _assess_codebuild_deploy(parser, args)
@@ -1831,6 +1840,42 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     else:
         print(f"GitLab observation unresolved: {report['reason']}.\n{report['scope']}")
     sys.exit(11 if state == "unresolved" else 0)
+
+
+def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from .ingestion.codebuild_s3 import codebuild_s3_observation
+
+    allowed = {
+        "path",
+        "codebuild_public_s3_observation",
+        "platform",
+        "format",
+        "no_config",
+        "no_color",
+    }
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(
+                f"--{name.replace('_', '-')} is unavailable in CodeBuild S3 observation mode"
+            )
+    if args.platform not in (None, "codebuild") or args.format not in ("text", "json"):
+        parser.error("CodeBuild S3 observation requires codebuild and text or JSON format")
+    capture, build_arn, origin = args.codebuild_public_s3_observation
+    result = codebuild_s3_observation(Path(capture), Path(args.path), build_arn, origin)
+    resolved = result["state"] == "managed-s3-object-observed"
+    if args.format == "json":
+        print(json.dumps({"codebuild_s3_observation": result}, indent=2))
+    elif resolved:
+        print(f"Build {result['build']} produced the observed managed S3 ZIP.")
+        print(f"  S3 object: {result['publication']['target']}")
+        print(f"  Changed source in ZIP: {result['influence']['archive_member']}")
+        print(result["scope"])
+    else:
+        print(f"CodeBuild S3 observation unresolved: {result['reason']}")
+        print(result["scope"])
+    sys.exit(0 if resolved else 11)
 
 
 def _assess_codebuild_deploy(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
