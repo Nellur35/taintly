@@ -330,6 +330,11 @@ def codebuild_s3_observation(path: Path, root: Path, build_arn: str, origin: str
             "influence": witness,
             "publication": publication,
             "scope": _SCOPE,
+            "next_evidence": (
+                "Obtain the S3 data event for this object and match its acting session "
+                "to this build. For a successful write, verify the recorded object version "
+                "or an independent full-object digest tied to that write."
+            ),
         }
     except (
         ValueError,

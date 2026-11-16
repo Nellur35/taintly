@@ -265,7 +265,8 @@ its runner events must fit the pipeline and job windows.
 An observed archive upload covers only the selected job and artifact
 member. Published Pages content, push access to registries, protected
 variables, and authorization to play a manual job require separate
-evidence. Missing or conflicting evidence returns exit `11`.
+evidence. The review action identifies archive audience and downstream
+deployment checks. Missing or conflicting evidence returns exit `11`.
 
 For the supported npm profile, add `--gitlab-mr-publish-job JOB_NAME`
 to check whether the named npm publication job was absent from that
@@ -340,8 +341,8 @@ GitHub's release and asset metadata.
 The supported workflow binds its origin lookup and artifact download to the
 triggering run and uses an explicitly configured secret through `GH_TOKEN`
 for a SHA-suffixed `gh release create` command. The result identifies the
-recorded asset uploader and the configured credential name. The credential
-contents, other permissions, archive bytes and later installations remain
+recorded asset uploader and the source line of the configured credential.
+Its value, other permissions, archive bytes and later installations remain
 unverified. The review action identifies producer and asset checks to
 perform before publishing previews. Conflicting or incomplete evidence
 returns exit 11.
@@ -529,7 +530,8 @@ It preserves the retrieved object and matched member, returns
 `managed-s3-link-unverified` and exits `11`. Binding the exact object to the
 build requires independent evidence for that object. A checksum supplied
 alongside the directory ARN has unverified scope for the retrieved file.
-CodeBuild-packaged archives require a different profile.
+The report names the object write record, build session and byte linkage
+needed to follow up. CodeBuild-packaged archives require a different profile.
 The exact service-role session, general IAM permissions and subsequent use
 remain unverified. Inconsistent or missing evidence returns exit 11.
 

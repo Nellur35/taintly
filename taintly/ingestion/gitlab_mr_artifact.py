@@ -231,6 +231,11 @@ def _successful(
         "command_line": build.line,
         "declaration_owner": owner,
         "artifact_path_line": selectors[0].line,
+        "review_action": (
+            "Review who can download this job archive. If a privileged deployment consumes it, "
+            "verify the approved producer and revision, and compare the consumed member with "
+            "an independently approved digest."
+        ),
         "publication": {
             "operation": "gitlab-job-artifact-upload",
             "authority": "gitlab-runner-job-scoped-upload",

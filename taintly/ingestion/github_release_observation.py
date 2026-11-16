@@ -105,7 +105,8 @@ def _release_plan(index: _Index, consumer: _Row, destination: str) -> dict[str, 
         and {key[-1] for key in index.keys if key[:-1] == (*publish, "env")} == {"GH_TOKEN"},
         "The publishing step does not have a single explicit GH_TOKEN binding",
     )
-    token = str(_field(index, (*publish, "env", "GH_TOKEN")).value)
+    credential = _field(index, (*publish, "env", "GH_TOKEN"))
+    token = str(credential.value)
     binding = re.fullmatch(r"\$\{\{[ \t]*secrets\.([A-Za-z_][A-Za-z0-9_]{0,127})[ \t]*\}\}", token)
     if binding is None:
         raise PreviewEvidenceError(
@@ -130,6 +131,7 @@ def _release_plan(index: _Index, consumer: _Row, destination: str) -> dict[str, 
     return {
         "line": program.line,
         "credential_binding": "secrets." + binding[1],
+        "credential_line": credential.line,
         "step": published["number"],
     }
 
