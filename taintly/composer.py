@@ -149,6 +149,7 @@ class CompositeFact:
     anchor_line: int
     snippet: str
     checkout_build: CheckoutBuildWitness | None = field(default=None, compare=False)
+    workflow_run_fork_block: tuple[str, int] | None = None
 
     def fact_key(self):
         return (self.chain_id, self.file, self.job, self.anchor_line)
@@ -628,6 +629,8 @@ class ExecutionContextFact:
     keys: frozenset[tuple[object, ...]]
     guards: tuple[tuple[tuple[object, ...], str | None], ...]
     owners: tuple[tuple[int, tuple[object, ...]], ...]
+    job_guard_lines: tuple[tuple[str, int], ...] = ()
+    source: str = ""
 
     def fact_key(self):
         return (self.file,)
@@ -644,6 +647,7 @@ class _ExecutionStructure:
     keys: frozenset[tuple[object, ...]]
     guards: tuple[tuple[tuple[object, ...], str | None], ...]
     owners: tuple[tuple[int, tuple[object, ...]], ...]
+    job_guard_lines: tuple[tuple[str, int], ...]
 
 
 @dataclass
@@ -688,12 +692,18 @@ def _build_execution_structure(content: str) -> _ExecutionStructure:
 
     index = AgentGuardIndex(content)
     events = _certified_composer_events(content) if index.valid else None
+    guards = _certified_guards(content, index)
     return _ExecutionStructure(
         events=events,
         keys=frozenset(index.keys),
-        guards=_certified_guards(content, index),
+        guards=guards,
         owners=tuple(
             (line, owner) for line in index.owners if (owner := index.owner(line)) is not None
+        ),
+        job_guard_lines=tuple(
+            (path[1], index.keys[path])
+            for path, _value in guards
+            if len(path) == 3 and path[0] == "jobs" and isinstance(path[1], str)
         ),
     )
 
@@ -782,6 +792,74 @@ def execution_constraints_for(
     }
 
 
+def direct_workflow_run_fork_guard_line(
+    db: Database, file: str, job: str, line: int | None = None
+) -> int | None:
+    """Cite an owning job guard that excludes a direct, different-repo run.
+
+    The repository comparison applies to the immediate run in the GitHub
+    payload. Other events, a same-repository intermediary, and authority or
+    artifact trust outside this path are separate questions.
+    """
+    from taintly.eventguard import event_guard_verdict
+
+    fact = db.get("execution_context", (file,))
+    if not isinstance(fact, ExecutionContextFact) or "workflow_run" not in (fact.events or ()):
+        return None
+    if line is not None:
+        owner = dict(fact.owners).get(line)
+        if owner is None or owner[:2] != ("jobs", job):
+            return None
+    guard = dict(fact.guards).get(("jobs", job, "if"))
+    if guard is None or event_guard_verdict(guard, "workflow_run") is False:
+        return None
+    different_repository = frozenset(
+        ("github.event.workflow_run.head_repository.full_name", "github.repository")
+    )
+    if (
+        event_guard_verdict(guard, "workflow_run", path_equalities={different_repository: False})
+        is False
+    ):
+        return dict(fact.job_guard_lines).get(job)
+    return None
+
+
+def needs_job_default_success(fact: ExecutionContextFact, consumer: str, producer: str) -> bool:
+    """Certify GitHub's default success check for a bounded job-if profile.
+
+    The caller must separately prove the direct needs declaration. A missing
+    if or an equality comparing a direct output with a string has no status
+    function. Other conditions may override the default and stay unresolved.
+    """
+    from taintly.parsers.gha_expr import Binary, ExprSyntaxError, Lit, canonical_path, parse
+
+    job_path = ("jobs", consumer)
+    if fact.events is None or job_path not in fact.keys:
+        return False
+    path = job_path + ("if",)
+    if path not in fact.keys:
+        return True
+    guard = dict(fact.guards).get(path)
+    if guard is None or len(guard) > 8192:
+        return False
+    source = guard.strip()
+    if source.startswith("${{") and source.endswith("}}"):
+        source = source[3:-2].strip()
+    try:
+        node = parse(source)
+    except (ExprSyntaxError, RecursionError):
+        return False
+    if not isinstance(node, Binary) or node.op != "==":
+        return False
+    need_prefix = f"needs.{producer.lower()}.outputs."
+    return any(
+        isinstance(value, Lit)
+        and value.kind == "string"
+        and (canonical_path(output) or "").startswith(need_prefix)
+        for output, value in ((node.left, node.right), (node.right, node.left))
+    )
+
+
 def _certified_guards(content: str, index) -> tuple:
     """Keep scalar guards only when the entire value span is represented."""
     from taintly.parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
@@ -863,6 +941,8 @@ def _seed_execution_contexts(db: Database, corpus: WorkflowCorpus) -> None:
                 structure.keys,
                 structure.guards,
                 structure.owners,
+                structure.job_guard_lines,
+                workflow.content,
             ),
         )
 

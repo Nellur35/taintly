@@ -30,6 +30,110 @@ def _ids(findings):
     return {finding.rule_id for finding in findings}
 
 
+@pytest.mark.parametrize(
+    ("job_guard", "extra_job", "proved"),
+    [
+        (">-\n      github.event.workflow_run.head_repository.full_name == github.repository", "", True),
+        ("github.repository == github.event.workflow_run.head_repository.full_name", "", True),
+        ("github.event.workflow_run.head_repository.full_name != github.repository", "", False),
+        (
+            "github.event.workflow_run.head_repository.full_name == github.repository || inputs.override",
+            "",
+            False,
+        ),
+        ("false", "", False),
+        (
+            "inputs.enabled",
+            "  sibling:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    if: github.event.workflow_run.head_repository.full_name == github.repository\n"
+            "    steps:\n"
+            "      - run: echo hello\n",
+            False,
+        ),
+    ],
+)
+def test_workflow_run_checkout_review_uses_owning_fork_guard(tmp_path, job_guard, extra_job, proved):
+    body = (
+        "on: workflow_run\n"
+        "jobs:\n"
+        "  publish:\n"
+        "    runs-on: ubuntu-latest\n"
+        f"    if: {job_guard}\n"
+        "    permissions:\n"
+        "      contents: write\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - run: git push origin HEAD:refs/heads/demo\n"
+        f"{extra_job}"
+    )
+    _workflow(tmp_path, body)
+    findings = _findings(tmp_path)
+    chain = [finding for finding in findings if finding.rule_id == "CHAIN-GH-101"]
+    if job_guard == "false":
+        assert not chain
+        return
+    assert "SEC4-GH-005" in _ids(findings)
+    assert len(chain) == 1
+    finding = chain[0]
+    assert finding.review_needed
+    assert ("direct-workflow-run-fork-job-blocked" in finding.context_tags) is proved
+    if proved:
+        assert any("skipped by its guard at line 5" in note for note in finding.context_notes)
+
+
+@pytest.mark.parametrize(
+    ("consumer_if", "needs", "blocked"),
+    [
+        ("", "prepare", True),
+        ("    if: needs.prepare.outputs.tag == 'approved'\n", "[prepare]", True),
+        ("    if: always()\n", "prepare", False),
+        ("    if: '!cancelled()'\n", "prepare", False),
+        ("", "sibling", False),
+    ],
+)
+def test_workflow_run_fork_exclusion_follows_certified_need(
+    tmp_path, consumer_if, needs, blocked
+):
+    _workflow(
+        tmp_path,
+        "on: workflow_run\n"
+        "jobs:\n"
+        "  prepare:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    if: github.event.workflow_run.head_repository.full_name == github.repository\n"
+        "    permissions: {contents: read}\n"
+        "    outputs:\n"
+        "      tag: ${{ steps.plan.outputs.tag }}\n"
+        "    steps:\n"
+        "      - id: plan\n"
+        '        run: echo "tag=approved" >> "$GITHUB_OUTPUT"\n'
+        "  sibling:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo hello\n"
+        "  publish:\n"
+        f"    needs: {needs}\n"
+        f"{consumer_if}"
+        "    runs-on: ubuntu-latest\n"
+        "    permissions: {contents: write}\n"
+        "    steps:\n"
+        '      - run: git push origin "HEAD:refs/tags/${{ needs.prepare.outputs.tag }}"\n',
+    )
+    findings = _findings(tmp_path)
+    chain = [finding for finding in findings if finding.rule_id == "CHAIN-GH-105"]
+    if needs == "sibling":
+        assert not chain
+        return
+    assert len(chain) == 1
+    finding = chain[0]
+    assert finding.review_needed
+    assert ("direct-workflow-run-fork-job-blocked" in finding.context_tags) is blocked
+    if blocked:
+        assert any("job 'prepare' is skipped by its guard at line 5" in note for note in finding.context_notes)
+        assert any("Job 'publish' requires that job to succeed" in note for note in finding.context_notes)
+
+
 def _taint_workflow(
     *,
     job_if: str = "",

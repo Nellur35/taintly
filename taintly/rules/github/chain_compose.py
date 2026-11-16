@@ -46,10 +46,13 @@ from typing import TYPE_CHECKING
 from taintly.composer import (
     CheckoutBuildFact,
     CompositeFact,
+    ExecutionContextFact,
     context_for,
+    direct_workflow_run_fork_guard_line,
     execution_constraints_for,
     execution_events_for,
     findings_by_rule,
+    needs_job_default_success,
 )
 from taintly.models import Platform, Rule, Severity
 from taintly.rules.github._crossjob_authority import (
@@ -90,6 +93,23 @@ _CHAIN_101_REMEDIATION = (
     "  3. Declare minimum GITHUB_TOKEN permissions and separately restrict any custom token.\n"
     "Review repository defaults, workflow_run parent provenance and event/job/step guards. "
     "Requested write scopes and a trigger name alone do not establish an exploitable chain."
+)
+_CHAIN_105_TITLE = (
+    "Review: cross-job output with configured privilege gradient and authority-operation indicator"
+)
+_CHAIN_105_REMEDIATION = (
+    "Break the gradient or harden the boundary:\n"
+    "  1. Treat `${{ needs.*.outputs.* }}` from a lower-privilege "
+    "job as untrusted in the write-capable consumer — validate / "
+    "allowlist it before it drives any write, publish, or "
+    "deploy action;\n"
+    "  2. Drop the consumer job's permissions to the minimum it "
+    "actually needs (`permissions: contents: read`) so the "
+    "escalation surface disappears;\n"
+    "  3. If the producer genuinely needs to feed a privileged "
+    "step, move the value through an explicitly validated "
+    "intermediate (e.g. a checksum / enum check) rather than "
+    "consuming it raw."
 )
 
 
@@ -196,6 +216,7 @@ def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
             "Attacker-controlled code execution and effective persisted-token "
             "authority are not proven by this join."
         )
+        guard_line = direct_workflow_run_fork_guard_line(db, f.file, f.job, f.line)
         yield (
             "composite",
             CompositeFact(
@@ -204,6 +225,7 @@ def _compose_chain_gh_101(db: Database) -> Iterable[tuple[str, Fact]]:
                 job=f.job,
                 anchor_line=f.line,
                 snippet=snippet,
+                workflow_run_fork_block=(f.job, guard_line) if guard_line is not None else None,
             ),
         )
 
@@ -588,13 +610,16 @@ class _CrossJobEdge:
     * ``output`` — the referenced output name (for the snippet).
     """
 
-    __slots__ = ("consumer", "line", "output", "producer")
+    __slots__ = ("consumer", "declared", "line", "output", "producer")
 
-    def __init__(self, producer: str, consumer: str, line: int, output: str) -> None:
+    def __init__(
+        self, producer: str, consumer: str, line: int, output: str, *, declared: bool
+    ) -> None:
         self.producer = producer
         self.consumer = consumer
         self.line = line
         self.output = output
+        self.declared = declared
 
 
 def _producer_jobs_in_lines(lines: list[str]) -> set[str]:
@@ -687,6 +712,10 @@ def _crossjob_edges_in_content(content: str) -> list[_CrossJobEdge]:
                         consumer=consumer,
                         line=start_idx + offset + 1,  # 1-based file line
                         output=output,
+                        declared=(
+                            output_verdict is DeclarationVerdict.PRESENT
+                            and needs_verdict is DeclarationVerdict.PRESENT
+                        ),
                     )
                 )
     return edges
@@ -900,11 +929,10 @@ def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
     """
     files = _files_with_contexts(db)
     for file in sorted(files):
-        try:
-            with open(file, encoding="utf-8", errors="replace") as fh:
-                content = fh.read()
-        except OSError:
+        execution = db.get("execution_context", (file,))
+        if not isinstance(execution, ExecutionContextFact):
             continue
+        content = execution.source
         edges = _crossjob_edges_in_content(content)
         if not edges:
             continue
@@ -961,6 +989,9 @@ def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
                 "compatible guards, token identity and effective provider authority; "
                 "this composition does not establish a successful privilege escalation."
             )
+            guard_line = None
+            if edge.declared and needs_job_default_success(execution, edge.consumer, edge.producer):
+                guard_line = direct_workflow_run_fork_guard_line(db, file, edge.producer)
             yield (
                 "composite",
                 CompositeFact(
@@ -969,6 +1000,9 @@ def _compose_chain_gh_105(db: Database) -> Iterable[tuple[str, Fact]]:
                     job=edge.consumer,
                     anchor_line=edge.line,
                     snippet=snippet,
+                    workflow_run_fork_block=(edge.producer, guard_line)
+                    if guard_line is not None
+                    else None,
                 ),
             )
 
@@ -985,6 +1019,24 @@ COMPOSER_RULES = [
 # ---------------------------------------------------------------------------
 # Rule registrations
 # ---------------------------------------------------------------------------
+
+
+def _fork_run_block_note(composite: CompositeFact) -> str | None:
+    if composite.workflow_run_fork_block is None:
+        return None
+    guard_job, guard_line = composite.workflow_run_fork_block
+    note = (
+        "Direct different-repository workflow_run path blocked: "
+        f"job '{guard_job}' is skipped by its guard at line {guard_line}. "
+    )
+    if guard_job != composite.job:
+        note += (
+            f"Job '{composite.job}' requires that job to succeed through 'needs', "
+            "so it cannot run on this path. "
+        )
+    return (
+        note + "Same-repository runs, indirect sources and other triggers require separate review."
+    )
 
 
 def _make_chain_callback(chain_id: str):
@@ -1008,6 +1060,7 @@ def _make_chain_callback(chain_id: str):
         for c in composites:
             if c.chain_id != chain_id:
                 continue
+            block_note = _fork_run_block_note(c)
             if chain_id == "CHAIN-GH-101":
                 if c.checkout_build is not None:
                     w = c.checkout_build
@@ -1089,6 +1142,11 @@ def _make_chain_callback(chain_id: str):
                         )
                     )
                     continue
+                notes = (_CHAIN_101_REASON,)
+                tags = ("execution-unproven", "credential-authority-unproven")
+                if block_note is not None:
+                    notes += (block_note,)
+                    tags += ("direct-workflow-run-fork-job-blocked",)
                 results.append(
                     CorpusEvidence(
                         file=c.file,
@@ -1096,9 +1154,21 @@ def _make_chain_callback(chain_id: str):
                         snippet=c.snippet,
                         title=_CHAIN_101_TITLE,
                         remediation=_CHAIN_101_REMEDIATION,
-                        context_notes=(_CHAIN_101_REASON,),
-                        context_tags=("execution-unproven", "credential-authority-unproven"),
+                        context_notes=notes,
+                        context_tags=tags,
                         calibration_reason=_CHAIN_101_REASON,
+                    )
+                )
+            elif block_note is not None and chain_id == "CHAIN-GH-105":
+                results.append(
+                    CorpusEvidence(
+                        file=c.file,
+                        line=c.anchor_line,
+                        snippet=c.snippet,
+                        title=_CHAIN_105_TITLE,
+                        remediation=_CHAIN_105_REMEDIATION,
+                        context_notes=(block_note,),
+                        context_tags=("direct-workflow-run-fork-job-blocked",),
                     )
                 )
             else:
@@ -1261,9 +1331,7 @@ RULES: list[Rule] = [
     ),
     Rule(
         id="CHAIN-GH-105",
-        title=(
-            "Review: cross-job output with configured privilege gradient and authority-operation indicator"
-        ),
+        title=_CHAIN_105_TITLE,
         severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-2",
@@ -1271,20 +1339,7 @@ RULES: list[Rule] = [
             "Joins a declared producer output, consumer needs reference, configured read-to-write permission gradient and consumer authority-operation indicator. Proven disjoint event guards are excluded. Producer attacker control, argument-level propagation, runtime success, token identity and effective provider authority remain unverified."
         ),
         pattern=CorpusPattern(callback=_make_chain_callback("CHAIN-GH-105")),
-        remediation=(
-            "Break the gradient or harden the boundary:\n"
-            "  1. Treat `${{ needs.*.outputs.* }}` from a lower-privilege "
-            "job as untrusted in the write-capable consumer — validate / "
-            "allowlist it before it drives any write, publish, or "
-            "deploy action;\n"
-            "  2. Drop the consumer job's permissions to the minimum it "
-            "actually needs (`permissions: contents: read`) so the "
-            "escalation surface disappears;\n"
-            "  3. If the producer genuinely needs to feed a privileged "
-            "step, move the value through an explicitly validated "
-            "intermediate (e.g. a checksum / enum check) rather than "
-            "consuming it raw."
-        ),
+        remediation=_CHAIN_105_REMEDIATION,
         reference=(
             "https://owasp.org/www-project-top-10-ci-cd-security-risks/CICD-SEC-02-Inadequate-Identity-And-Access-Management"
         ),
