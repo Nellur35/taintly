@@ -97,9 +97,15 @@ def _local_staging(
     graph, stage = data["graph"], data["stage"]
     _own_metadata(graph, root_path + "wfapi/describe")
     graph_start, graph_end = _interval(graph)
+    queued, delay = run["timestamp"], graph["queueDurationMillis"]
+    # The run API reports enqueue time, while Stage View reports executor start.
     _require(
         graph["id"] == str(run["number"])
-        and graph_start == run["timestamp"]
+        and type(queued) is int
+        and type(delay) is int
+        and 10**12 <= queued <= graph_start
+        and delay == graph_start - queued
+        and type(run["duration"]) is int
         and graph_end == graph["endTimeMillis"] == graph_start + run["duration"],
         "completed graph does not match the selected run interval",
     )
@@ -145,6 +151,8 @@ def _local_staging(
     for node in (checkout, shell):
         _require(re.fullmatch(r"[1-9][0-9]{0,9}", node["id"]), "malformed Jenkins node ID")
         _own_metadata(node, f"{root_path}execution/node/{node['id']}/wfapi/describe")
+    executors = {node["execNode"] for node in (checkout, shell) if node.get("execNode")}
+    _require(len(executors) <= 1, "checkout and Maven command report different executors")
     checkout_start, checkout_end = _interval(checkout)
     shell_start, shell_end = _interval(shell)
     _require(

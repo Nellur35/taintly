@@ -1876,8 +1876,8 @@ def _check_jenkins_maven_snapshot(
             f"Jenkins PR #{result['pr']} ran Maven against "
             f"{result['local_staging']['destination']} (node {result['node']}).\n"
             f"  The configured remote publisher stage was absent. "
-            f"Its guard requires {remote['required_branch']}; the job ran {result['branch']}.\n"
-            f"  Configured target: {remote['target']}.\n"
+            f"Its guard requires {remote['required_branch']}. The job ran {result['branch']}.\n"
+            f"  The configured destination was {remote['target']}.\n"
             f"{result['scope']}"
         )
     elif result["state"] == "upstream-checkout-observed":

@@ -214,7 +214,10 @@ and the scoped `checkout_log` and `maven_log`. Include the controller's
 branch and library log records and `jenkinsfile_checkout` with the exact
 loaded merge revision, parents, and loader line. Save the loaded Jenkinsfile
 with its `source` digest and Git blob record and the reviewed library files
-under `source/library/` at their original paths.
+under `source/library/` at their original paths. Those files are
+`vars/vaultPipeline.groovy`, `vars/vaultStageBuild.groovy`,
+`vars/vaultStageDeploy.groovy`, and
+`src/org/apache/jackrabbit/vault/PipelineSupport.groovy`.
 
 The `remote-publisher-excluded` result distinguishes the observed
 workspace-local Maven deployment from the configured remote Wagon stage.
