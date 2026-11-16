@@ -1878,7 +1878,7 @@ def _check_jenkins_maven_snapshot(
             f"  The configured remote publisher stage was absent. "
             f"Its guard requires {remote['required_branch']}. The job ran {result['branch']}.\n"
             f"  The configured destination was {remote['target']}.\n"
-            f"{result['scope']}"
+            f"{result['scope']}\n{result['review_action']}"
         )
     elif result["state"] == "upstream-checkout-observed":
         checkout = result["checkout"]
@@ -2149,6 +2149,8 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             f"({result['source']['path']}:{result['configured_publish']['line']}).\n"
             f"{result['scope']}"
         )
+        if "review_action" in result:
+            print(result["review_action"])
     elif state == "preview-reported":
         build = result["producer"]
         deploy = result["consumer"]
