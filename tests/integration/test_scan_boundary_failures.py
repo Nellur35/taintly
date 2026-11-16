@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -134,18 +135,21 @@ def test_jenkins_posture_preserves_transport_status(
 
     def urlopen(request, **_kwargs):
         url = request.full_url
-        if mode == "offline" and "example.test" in url:
+        target = urlsplit(url)
+        if target.hostname == "raw.githubusercontent.com":
+            return _Response(b"[]")
+
+        assert target.hostname == "example.test"
+        if mode == "offline":
             raise URLError("private transport text")
-        if url.endswith("/script") or (
-            url == "https://example.test/api/json" and not request.has_header("Authorization")
+        if target.path == "/script" or (
+            target.path == "/api/json" and not request.has_header("Authorization")
         ):
             raise HTTPError(url, 403, "forbidden", {}, None)
-        if url.endswith("/computer/api/json") and mode == "partial":
+        if target.path == "/computer/api/json" and mode == "partial":
             raise URLError("private transport text")
-        if url.endswith("/crumbIssuer/api/json"):
+        if target.path == "/crumbIssuer/api/json":
             return _Response(b"{}" if mode == "partial" else b'{"crumb": "dummy"}')
-        if "raw.githubusercontent.com" in url:
-            return _Response(b"[]")
         return _Response(b"{}")
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
