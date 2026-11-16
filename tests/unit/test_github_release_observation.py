@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from taintly.ingestion.github_preview import PreviewEvidenceError
-from taintly.ingestion.github_release_observation import _job_window, _publisher_index
+from taintly.ingestion.github_release_observation import _job_window, _publisher_index, _tag_receipt
 
 
 BASE = """on:
@@ -59,3 +59,61 @@ def test_lexically_plausible_job_cannot_move_outside_run():
     _job_window(run, job)
     with pytest.raises(PreviewEvidenceError, match="owning run"):
         _job_window(run, {**job, "completed_at": "2026-11-16T15:35:01Z"})
+
+
+def test_tag_receipt_requires_exact_attempt_and_ref_target():
+    revision = "a" * 40
+    tag = "pr-release-6-aaaaaaa"
+    target = "team/preview"
+    api = f"https://api.github.com/repos/{target}/git"
+    evidence = {
+        "run": 51,
+        "job": 64,
+        "attempt": 2,
+        "push_start": {
+            "row": 7,
+            "time": "2026-11-16T15:33:05.124Z",
+            "value": "##[group]Run git init --bare lean4.git",
+        },
+        "next_start": {
+            "row": 12,
+            "time": "2026-11-16T15:33:07.510Z",
+            "value": "##[group]Run # Delete any existing releases for this PR.",
+        },
+        "remote": {
+            "row": 10,
+            "time": "2026-11-16T15:33:07.134Z",
+            "value": f"https://github.com/{target}.git",
+        },
+        "new_tag": {"row": 11, "time": "2026-11-16T15:33:07.433Z", "value": tag},
+        "ref": {
+            "ref": f"refs/tags/{tag}",
+            "url": f"{api}/refs/tags/{tag}",
+            "object": {"sha": revision, "url": f"{api}/commits/{revision}", "type": "commit"},
+        },
+        "retrieved_at": "2026-11-16T15:36:00Z",
+    }
+    job = {"id": 64, "run_id": 51, "run_attempt": 2, "completed_at": "2026-11-16T15:35:00Z"}
+    step = {"started_at": "2026-11-16T15:33:05Z", "completed_at": "2026-11-16T15:33:07Z"}
+    following = {"started_at": "2026-11-16T15:33:07Z", "completed_at": "2026-11-16T15:33:09Z"}
+    pr = {"number": 6, "source_head": revision}
+
+    result = _tag_receipt(evidence, job, step, following, pr, "team/source")
+    assert result["ref"] == f"refs/tags/{tag}"
+    assert result["operation"] == "github-git-tag-push"
+    with pytest.raises(PreviewEvidenceError, match="exact job, target, time and PR commit"):
+        _tag_receipt({**evidence, "attempt": 1}, job, step, following, pr, "team/source")
+    with pytest.raises(PreviewEvidenceError, match="exact job, target, time and PR commit"):
+        _tag_receipt(
+            {**evidence, "remote": {**evidence["remote"], "value": "https://github.com/team/sibling.git"}},
+            job,
+            step,
+            following,
+            pr,
+            "team/source",
+        )
+    outside_group = {**evidence["new_tag"], "time": "2026-11-16T15:33:07.511Z"}
+    with pytest.raises(PreviewEvidenceError, match="exact job, target, time and PR commit"):
+        _tag_receipt(
+            {**evidence, "new_tag": outside_group}, job, step, following, pr, "team/source"
+        )

@@ -347,6 +347,20 @@ unverified. The review action identifies producer and asset checks to
 perform before publishing previews. Conflicting or incomplete evidence
 returns exit 11.
 
+For a failed publisher that completed the supported Git tag-push step,
+the same command accepts a `github-workflow-run-tag-push-v1` receipt.
+Supply the same producer, consumer and publisher source records. The
+`tag_push` record binds `run`, `job` and `attempt` to the adjacent
+`remote` and `new_tag` log rows, each with `row`, `time` and `value`.
+Record the literal remote URL and the SHA-suffixed tag reported as newly
+created. Preserve the log group headers of the push and immediately
+following release-cleanup step as `push_start` and `next_start`, using
+the same row shape and keeping fractional timestamps.
+Include the GitHub Git ref API record as `ref` and its read time
+as `retrieved_at`. The result covers the exact source tag and commit.
+Authentication identity, release assets and downstream use require
+separate evidence.
+
 The same command also accepts a trusted `github-signed-release-v1`
 receipt for a bounded same-repository PR recipe with separate build,
 reusable signing, and publishing jobs. Preserve their source files under

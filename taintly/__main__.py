@@ -2153,6 +2153,19 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
         )
         if "review_action" in result:
             print(result["review_action"])
+    elif state == "release-tag-push-observed":
+        publication = result["publication"]
+        configured = result["configured_publish"]
+        print(
+            f"GitHub records corroborate the push of {publication['ref']} to "
+            f"{publication['target_repository']} before publishing run {result['consumer_run']} failed.\n"
+            f"  PR #{result['pr']['number']} revision {publication['commit']}, "
+            f"job {result['consumer_job']}.\n"
+            f"  Git push command: {result['source']['path']}:{configured['line']}.\n"
+            f"  Configured credential: {configured['credential_binding']} "
+            f"({result['source']['path']}:{configured['credential_line']}).\n"
+            f"{result['scope']}\n{result['review_action']}"
+        )
     elif state == "preview-reported":
         build = result["producer"]
         deploy = result["consumer"]
