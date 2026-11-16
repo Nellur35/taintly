@@ -233,6 +233,12 @@ def main():
         help="Corroborate a saved Jenkins Incrementals publication with exact registry bytes.",
     )
     evidence_input.add_argument(
+        "--jenkins-maven-snapshot-observation",
+        nargs=4,
+        metavar=("OWNER/REPO", "PR", "JENKINS_JOB", "OBJECT_URL"),
+        help="Corroborate a saved ASF Jenkins fork build and Maven snapshot object.",
+    )
+    evidence_input.add_argument(
         "--gitlab-job-evidence",
         nargs=3,
         metavar=("JSON", "PROJECT_ID", "JOB_ID"),
@@ -661,6 +667,9 @@ def main():
         parser.error("--codebuild-webhook-sender requires --codebuild-webhook-snapshot")
     if args.jenkins_incrementals_observation:
         _check_jenkins_incrementals(parser, args)
+        return
+    if args.jenkins_maven_snapshot_observation:
+        _check_jenkins_maven_snapshot(parser, args)
         return
     if args.gitlab_mr_artifact_observation:
         _check_gitlab_mr_artifact(parser, args)
@@ -1822,6 +1831,48 @@ def _check_jenkins_incrementals(parser: argparse.ArgumentParser, args: argparse.
         )
     else:
         print(f"Jenkins publication unresolved: {result['reason']}.\n{result['scope']}")
+    sys.exit(0 if resolved else 11)
+
+
+def _check_jenkins_maven_snapshot(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    from pathlib import Path
+
+    from .ingestion.jenkins_maven_snapshot import maven_snapshot_observation
+
+    mode = "jenkins_maven_snapshot_observation"
+    allowed = {"path", mode, "platform", "format", "no_config", "no_color"}
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(
+                f"--{name.replace('_', '-')} is unavailable in Maven snapshot observation mode"
+            )
+    if args.platform not in (None, "jenkins") or args.format not in ("text", "json"):
+        parser.error(
+            "Maven snapshot observation mode requires the jenkins platform and text or JSON format"
+        )
+    repo, pr, job, target = args.jenkins_maven_snapshot_observation
+    if not pr.isascii() or not pr.isdecimal() or not 1 <= len(pr) <= 12:
+        parser.error("Maven snapshot observation mode requires a decimal PR ID")
+    result = maven_snapshot_observation(Path(args.path), repo, int(pr), job, target)
+    resolved = result["state"] == "snapshot-write-observed"
+    if args.format == "json":
+        print(json.dumps({mode: result}, indent=2))
+    elif resolved:
+        publication = result["publication"]
+        source = result["source"]
+        print(
+            f"Saved evidence corroborates a Maven snapshot write from {result['repository']} PR "
+            f"#{result['pr']}, revision {result['head']}.\n"
+            f"  Command: {result['command']} ({source['path']}:{source['line']}).\n"
+            f"  Jenkins job: {result['job']} (node {result['node']}).\n"
+            f"  Nexus writer: {publication['registry_actor']}.\n"
+            f"  Object: {publication['object_url']}\n  SHA-256: {publication['sha256']}\n"
+            f"{result['scope']}\n{result['review_action']}"
+        )
+    else:
+        print(f"Maven snapshot write unresolved: {result['reason']}.\n{result['scope']}")
     sys.exit(0 if resolved else 11)
 
 

@@ -160,6 +160,39 @@ shared libraries, credentials accessible to PR code and wider registry
 permissions require independent evidence. Absent or incompatible
 evidence returns exit `11`.
 
+### Saved ASF Jenkins Maven snapshot observations
+
+~~~sh
+taintly ./saved-jenkins-run --format json \
+  --jenkins-maven-snapshot-observation OWNER/REPO PR JENKINS_JOB_URL MAVEN_SNAPSHOT_URL
+~~~
+
+This offline profile corroborates one observed Maven snapshot JAR write
+from an Apache Jenkins fork PR. The evidence directory contains the exact
+loaded Jenkinsfile at `source/Jenkinsfile`, the Jenkins job archive
+at `artifact.jar`, the hosted snapshot bytes at `registry-artifact.jar`
+and a trusted `snapshot.json` capture. Each JAR is limited to 8 MiB.
+The scanner compares bytes without extracting or executing either file.
+
+The `jenkins-asf-maven-snapshot-v1` capture contains an exact GitHub PR
+identity (`pull`), Jenkins run, top-level execution flow and stage
+(`run`, `flow`, `stage`), the exact Git blob and SHA-256 of the loaded
+Jenkinsfile (`source` and `jenkinsfile_loader`), the job-relative
+`archive_path` and exact `archive_url`. Preserve the owning checkout
+node's `checkout_log` with its URL, selected revision and workspace line.
+
+The `deploy_log` projection carries `url`, `node_id`, `complete`,
+`command_line`, `digest_line` and `artifact_install_line` from the
+selected shell node. The `registry` projection contains the hosted
+Nexus item's `provider_url`, `response` identity, `stored_attributes`
+and `stored_properties`. Preserve the stored first-write principal
+separately from the account that retrieved the evidence.
+
+The result reports the selected historical run, source line, Maven
+operation, exact JAR and recorded Nexus writer. It keeps wider
+permissions, production promotion and future fork admission unresolved.
+Missing or incompatible evidence returns exit `11`.
+
 ### Saved GitLab fork MR artifact observations
 
 ```sh
