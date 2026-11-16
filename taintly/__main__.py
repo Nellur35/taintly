@@ -204,6 +204,12 @@ def main():
         help="Assess one GitHub PR event against trusted, saved CodeBuild project filters.",
     )
     codebuild_input.add_argument(
+        "--codebuild-public-deploy-observation",
+        nargs=3,
+        metavar=("JSON", "BUILD_ID", "GITHUB_ORIGIN"),
+        help="Compare a saved CodeBuild deployment skip with its selected source.",
+    )
+    codebuild_input.add_argument(
         "--codebuild-start-observation",
         nargs=4,
         metavar=("JSON", "GITHUB_ORIGIN", "RUN", "JOB"),
@@ -634,6 +640,9 @@ def main():
         return
     if args.gitlab_mr_artifact_observation:
         _check_gitlab_mr_artifact(parser, args)
+        return
+    if args.codebuild_public_deploy_observation:
+        _assess_codebuild_deploy(parser, args)
         return
     if args.codebuild_start_observation:
         _assess_codebuild_start(parser, args)
@@ -1822,6 +1831,47 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     else:
         print(f"GitLab observation unresolved: {report['reason']}.\n{report['scope']}")
     sys.exit(11 if state == "unresolved" else 0)
+
+
+def _assess_codebuild_deploy(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from .ingestion.codebuild_deploy import codebuild_deploy_observation
+
+    allowed = {
+        "path",
+        "codebuild_public_deploy_observation",
+        "platform",
+        "format",
+        "no_config",
+        "no_color",
+    }
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(
+                f"--{name.replace('_', '-')} is unavailable in CodeBuild deployment observation mode"
+            )
+    if args.platform not in (None, "codebuild") or args.format not in ("text", "json"):
+        parser.error("CodeBuild deployment observation requires codebuild and text or JSON format")
+    capture, build_id, origin = args.codebuild_public_deploy_observation
+    result = codebuild_deploy_observation(Path(capture), Path(args.path), origin, build_id)
+    resolved = result["state"] == "guard-skip-reported"
+    if args.format == "json":
+        print(json.dumps({"codebuild_deploy_observation": result}, indent=2))
+    elif resolved:
+        print(
+            f"Build {result['build']} has saved records consistent with a configured deployment skip for {result['pull_request_ref']}."
+        )
+        print(f"  Source: {result['source']['path']}:{result['source']['line']}")
+        for operation in result["configured_operations"]:
+            print(
+                f"  Guarded operation in committed script: {operation['operation']} -> {operation['target']}"
+            )
+        print(result["scope"])
+    else:
+        print(f"CodeBuild deployment observation unresolved: {result['reason']}")
+        print(result["scope"])
+    sys.exit(0 if resolved else 11)
 
 
 def _assess_codebuild_start(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:

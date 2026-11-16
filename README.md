@@ -295,6 +295,31 @@ and filesystem state. The overall scan remains incomplete in this profile.
 Keep captures private. Taintly does not authenticate the saved response or
 establish the AWS account, command execution, secret delivery or effective IAM.
 
+### Saved CodeBuild deployment skip
+
+Use a trusted saved CodeBuild build and runner receipt with the matching Git checkout.
+
+```bash
+python -m taintly ./repo --format json --codebuild-public-deploy-observation \
+  observation.json example:01234567-89ab-cdef-0123-456789abcdef https://github.com/owner/repo
+```
+
+The JSON object contains `schema: "codebuild-deploy-observation-v1"`, the public
+`build` record, and `trace`. Set `trace.build` to the selected build ID.
+Save the three ordered runner rows for the source workspace, the root
+`buildspec.yml` selection, and successful source download in `trace.download`.
+Save four ordered deployment rows in `trace.deployment`: invocation, emitted
+branch and PR source ref, skip message, and the owning successful BUILD phase
+completion. Capture the invocation and its output together, from that build.
+The supported profile uses a directly declared literal `bash` script in a
+version 0.2 buildspec on Linux, with a branch and PR-ref guard around S3
+sync and CloudFront invalidation.
+
+The command describes the reported invocation and points to the configured
+script and target. Effective AWS permissions, runtime script bytes and the producer of log lines
+remain unverified. Missing or conflicting evidence returns exit 11. The
+receipt is local and must come from a trusted capture of the selected run.
+
 ### Saved CodeBuild webhook filters
 
 The offline webhook assessment takes a trusted project snapshot and an
