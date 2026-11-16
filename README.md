@@ -130,6 +130,36 @@ python -m taintly /path/to/repo --platform jenkins
 python -m taintly /path/to/repo --platform codebuild
 ```
 
+### Saved Jenkins Incrementals publications
+
+```sh
+taintly ./saved-source-and-package --format json \
+  --jenkins-incrementals-observation observation.json OWNER/REPO PR JENKINS_CHECK
+```
+
+This offline profile corroborates one published Incrementals package for
+a Jenkins project PR revision. Supply the exact head `Jenkinsfile`, the
+observed base version as `base.Jenkinsfile`, and a downloaded JAR or HPI
+as `package.zip`. The package limit is 2 MiB. The command reads its
+manifest without extracting or executing code.
+
+The trusted `jenkins-incrementals-v1` JSON capture has `repository`,
+`pr` (`number`, `head`, `base`, `head_repo`), `source` (`head` and
+`base` records with `commit`, `sha256`, and Git `blob`), GitHub
+`checks` (`id`, `app` with `id` and `slug`, `name`, `head_sha`,
+`conclusion`, `details_url`, `external_id`, `started_at`, `completed_at`,
+and `summary` from the publisher check), and the Artifactory File Info
+`registry` record. Preserve file size, path, creation time, creation and
+modification identities, and the SHA-256 checksum.
+
+The report links the observed registry operation, writing identity,
+package bytes, revision and exact target. It also reports the Jenkins PR
+job whose check identifies the same revision. The publisher check does
+not identify which exact Jenkins invocation supplied the bytes. Loaded
+shared libraries, credentials accessible to PR code and wider registry
+permissions require independent evidence. Absent or incompatible
+evidence returns exit `11`.
+
 ### CodeBuild project snapshots
 
 With Git installed, you can scan the configured buildspec for a single project
