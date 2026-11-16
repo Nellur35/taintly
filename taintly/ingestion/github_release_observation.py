@@ -19,10 +19,9 @@ from taintly.ingestion.github_preview import (
     _observed_step,
     _require,
     _run,
-    _source_bytes,
+    _source,
     _time,
 )
-from taintly.parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
 from taintly.rules.github._workflow_run_artifact import (
     _Index,
     _is_exact_identifier_expression,
@@ -41,35 +40,7 @@ _Row = dict[str, Any]
 
 
 def _publisher_index(root: Path, run: _Row, saved: _Row) -> tuple[_Index, _Row]:
-    path = run["path"]
-    _require(
-        _matches(path, r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml"), "Unsupported publisher path"
-    )
-    raw, identity = _source_bytes(root, saved, path, run["head_sha"])
-    text = raw.decode("utf-8").replace("\r\n", "\n")
-    _require(
-        "\r" not in text
-        and "\ufeff" not in text
-        and not re.search(r"^(?:---|\.\.\.)(?:[ \t]|$)", text, re.MULTILINE),
-        "Publisher source contains unsupported document boundaries",
-    )
-    try:
-        _require(
-            not any(
-                tok.kind in {TokenKind.ALIAS, TokenKind.MERGE_KEY}
-                or (tok.kind is TokenKind.KEY and "\\" in tok.value)
-                for tok in tokenize(text)
-            ),
-            "Publisher source contains ambiguous keys or aliases",
-        )
-    except TokenizerError as exc:
-        raise PreviewEvidenceError("Publisher source tokenization is incomplete") from exc
-    index = _Index.from_source(path, text)
-    _require(
-        index.error is None and len(index.keys.get(("on",), ())) == 1,
-        "Publisher workflow event source is incomplete or ambiguous",
-    )
-    return index, identity
+    return _source(root, run, saved, run["head_sha"])
 
 
 def _job_window(run: _Row, job: _Row) -> None:

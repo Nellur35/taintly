@@ -79,6 +79,7 @@ def run_and_job(run, job, head, name, path, specs):
             "run_attempt": 1,
             "conclusion": "success",
             "path": path,
+            "created_at": time(specs[0][1]),
             "referenced_workflows": [],
         },
         {
@@ -184,6 +185,23 @@ def test_preview_observation_reports_owned_source_operation_and_scope(tmp_path, 
     assert report["consumer"]["operation"] == "workers-preview"
     assert report["consumer"]["credential_binding"] == "secrets.PREVIEW_TOKEN"
     assert "principal identity" in report["scope"]
+
+
+def test_successful_preview_requires_run_and_job_chronology(tmp_path, capture):
+    capture["producer"]["created_at"] = time(20)
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "unresolved"
+    assert result["reason"] == "selected job timestamps are outside the recorded run"
+
+
+@pytest.mark.parametrize("addition", ['\n---\non: {}\n', '\n"j\\u006fbs": {}\n'])
+def test_source_projection_requires_unambiguous_job_and_event_owner(tmp_path, capture, addition):
+    path = tmp_path / capture["producer_source"]["path"]
+    raw = path.read_bytes() + addition.encode()
+    path.write_bytes(raw)
+    capture["producer_source"]["sha256"] = hashlib.sha256(raw).hexdigest()
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "unresolved"
 
 
 @pytest.mark.parametrize(

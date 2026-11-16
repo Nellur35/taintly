@@ -26,6 +26,7 @@ from taintly.ingestion.github_preview import (
     _require,
     _Row,
     _run_identity,
+    _run_window,
     _source,
     _source_bytes,
     _step,
@@ -161,6 +162,7 @@ def _upload(capture: _Row, root: Path, repository: str, run: _Row, job: _Row) ->
         and merge["parents"] == [pr["base"], pr["head"]],
         "PR merge and successful same-repository invocation are unresolved",
     )
+    _run_window(run, job)
     index, identity = _source(root, run, capture["source"], merge["sha"])
     owner, template = _owned_job(index, capture["source_job"], job["name"])
     axis, workdir, config = _matrix_values(index, owner, template, job["name"])
@@ -212,6 +214,7 @@ def _upload(capture: _Row, root: Path, repository: str, run: _Row, job: _Row) ->
     )
     _require(
         _matches(build_command.value, r"(?:vp|pnpm|npm|yarn) (?:run )?build")
+        and (*build, "shell") not in index.keys
         and _is_exact_identifier_expression(
             str(_field(index, (*build, "working-directory")).value), working_expr
         )

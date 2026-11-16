@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from taintly.parsers.structural import Event
+from taintly.parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
 from taintly.rules.github._workflow_run_artifact import (
     _Index,
     _is_exact_identifier_expression,
@@ -88,8 +89,29 @@ def _source(root: Path, run: _Row, source: _Row, revision: str) -> tuple[_Index,
     path = run["path"]
     _require(_matches(path, _WORKFLOW), "run lacks a supported workflow path")
     raw, identity = _source_bytes(root, source, path, revision)
-    index = _Index.from_source(path, raw.decode("utf-8"))
-    _require(index.error is None, "workflow structure is incomplete or ambiguous")
+    text = raw.decode("utf-8").replace("\r\n", "\n")
+    _require(
+        "\r" not in text
+        and "\ufeff" not in text
+        and not re.search(r"^(?:(?:---|\.\.\.)(?:[ \t]|$)|%)", text, re.MULTILINE),
+        "workflow source contains unsupported document boundaries",
+    )
+    try:
+        _require(
+            not any(
+                tok.kind in {TokenKind.ALIAS, TokenKind.MERGE_KEY}
+                or (tok.kind is TokenKind.KEY and "\\" in tok.value)
+                for tok in tokenize(text)
+            ),
+            "workflow source contains ambiguous keys or aliases",
+        )
+    except TokenizerError as exc:
+        raise PreviewEvidenceError("workflow source tokenization is incomplete") from exc
+    index = _Index.from_source(path, text)
+    _require(
+        index.error is None and len(index.keys.get(("on",), ())) == 1,
+        "workflow structure is incomplete or ambiguous",
+    )
     return index, identity
 
 
@@ -137,12 +159,22 @@ def _run(run: _Row, job: _Row, repository: str, run_id: int, event: str) -> None
         run["conclusion"] == job["conclusion"] == "success" and _matches(job["name"], _NAME),
         "saved run and job do not identify one successful direct invocation",
     )
+    _run_window(run, job)
 
 
 def _time(value: str) -> datetime:
     result = datetime.fromisoformat(value.replace("Z", "+00:00"))
     _require(result.utcoffset() is not None, "observation timestamp has no offset")
     return result
+
+
+def _run_window(run: _Row, job: _Row) -> None:
+    start, end = _time(job["started_at"]), _time(job["completed_at"])
+    upper = run.get("updated_at")
+    _require(
+        _time(run["created_at"]) <= start <= end and (upper is None or end <= _time(upper)),
+        "selected job timestamps are outside the recorded run",
+    )
 
 
 def _observed_step(job: _Row, name: str) -> _Row:
@@ -332,6 +364,7 @@ def _publish(
     _require(
         _matches(build_command.value, r"(?:pnpm|npm|yarn) (?:run )?build")
         and (*build, "uses") not in builds.keys
+        and (*build, "shell") not in builds.keys
         and (*build, "working-directory") not in builds.keys
         and (*build, "shell") not in builds.keys,
         "build command or its workspace is unsupported",
