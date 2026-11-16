@@ -37,9 +37,10 @@ _PR_REPO = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+")
 _ARCHIVE_LIMIT = 3_000_000
 _MEMBER_LIMIT = 131_072
 _SCOPE = (
-    "Trusted saved public AWS and GitHub observations. The receipts can corroborate one "
-    "CodeBuild-managed S3 publication and a PR-bound member. The upload's effective principal "
-    "and policies, later use of the artifact, and individual log producers remain unverified."
+    "Trusted saved AWS and GitHub observations. The S3 receipt identifies the retrieved "
+    "object and one PR-bound member. An independent CodeBuild artifact digest identifies "
+    "the build's exact output. The effective upload principal, policy and later use remain "
+    "unverified."
 )
 _Row = dict[str, Any]
 
@@ -175,7 +176,7 @@ def _observe_plan(inline: str, logs: _Row, build: _Row, filename: str) -> dict[s
 
 def _object(
     receipt: _Row, parent: Path, build_arn: str, region: str, build: _Row
-) -> tuple[bytes, str, str, str]:
+) -> tuple[bytes, str, str, str, bool]:
     obs = _map(receipt.get("object"), "S3 response")
     headers = _map(obs.get("headers"), "S3 headers")
     provider = _owned_record(receipt.get("provider"), "build", build["id"])
@@ -213,14 +214,22 @@ def _object(
     )
     with archive.open("rb") as stream:
         data = stream.read(_ARCHIVE_LIMIT + 1)
+    provider_digests = [
+        provider[field]
+        for field in ("sha256sum", "sha256Checksum")
+        if provider.get(field) not in (None, "")
+    ]
     _need(
         0 < len(data) <= _ARCHIVE_LIMIT
-        and provider.get("sha256Checksum") in (None, "", digest)
         and str(len(data)) == headers.get("Content-Length")
         and hashlib.sha256(data).hexdigest() == digest,
         "Saved ZIP differs from the observed S3 object",
     )
-    return data, url, digest, prefix + "/" + url.rsplit("/", 1)[1]
+    _need(
+        all(recorded == digest for recorded in provider_digests),
+        "CodeBuild's recorded artifact digest conflicts with the retrieved S3 object",
+    )
+    return data, url, digest, prefix + "/" + url.rsplit("/", 1)[1], bool(provider_digests)
 
 
 def _archive_witness(raw: bytes, witness: _Row, root: Path, pr: _Row) -> dict[str, object]:
@@ -293,13 +302,13 @@ def codebuild_s3_observation(path: Path, root: Path, build_arn: str, origin: str
         )
         root = root.resolve()
         identity, pr, inline = _source_identity(cap, build, root, origin)
-        raw, url, digest, object_arn = _object(
+        raw, url, digest, object_arn, build_digest = _object(
             _map(cap.get("artifact"), "artifact"), path.resolve().parent, build_arn, region, build
         )
         sources = _observe_plan(inline, logs, build, object_arn.rsplit("/", 1)[1])
         witness = _archive_witness(raw, _map(cap.get("witness"), "archive witness"), root, pr)
         return {
-            "state": "managed-s3-object-observed",
+            "state": "managed-s3-object-observed" if build_digest else "managed-s3-link-unverified",
             "build": build_id,
             "build_arn": build_arn,
             "repository": identity,
@@ -313,6 +322,9 @@ def codebuild_s3_observation(path: Path, root: Path, build_arn: str, origin: str
                 "target": url,
                 "sha256": digest,
                 "object_arn": object_arn,
+                "build_object_binding": (
+                    "matches-codebuild-artifact-digest" if build_digest else "unverified"
+                ),
                 "service_role_session": "unverified",
             },
             "scope": _SCOPE,

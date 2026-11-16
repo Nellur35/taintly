@@ -313,7 +313,9 @@ and base objects and have the matching HTTPS origin. The receipt contains:
 - `logs`: `build` (the exact build ID), the inline buildspec-selection log row
   under `selection`, and owned command, artifact, and phase rows under `rows`.
 - `artifact.provider`: the separately captured artifact lookup, with `build`
-  and `s3Arn`. `artifact.object` contains `build_id`, canonical S3 `url`,
+  and `s3Arn`. Include the SHA-256 supplied by CodeBuild as `sha256sum` or
+  `sha256Checksum` when present in the provider record. `artifact.object`
+  contains `build_id`, canonical S3 `url`,
   `http_status`, `archive_sha256` and the S3 response `headers` for length,
   last modification time and CodeBuild build ARN metadata.
 - `witness`: the changed `source_path` and its exact ZIP `archive_member`.
@@ -322,6 +324,10 @@ The supported profile runs `make dist-src` with a version 0.2 inline buildspec
 that selects a root ZIP. The observation checks that the published member
 matches the PR head and differs from the base, permitting LF/CRLF conversion
 for UTF-8 text. The archive is read with size limits and is never extracted.
+Without the independent CodeBuild digest, the report preserves the retrieved
+object and matched member, returns `managed-s3-link-unverified` and exits
+`11`. The S3 object's user-managed metadata does not establish the exact
+build-to-object binding.
 The exact service-role session, general IAM permissions and subsequent use
 remain unverified. Inconsistent or missing evidence returns exit 11.
 

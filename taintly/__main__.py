@@ -1867,8 +1867,14 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
     resolved = result["state"] == "managed-s3-object-observed"
     if args.format == "json":
         print(json.dumps({"codebuild_s3_observation": result}, indent=2))
-    elif resolved:
-        print(f"Build {result['build']} produced the observed managed S3 ZIP.")
+    elif result["state"] in ("managed-s3-object-observed", "managed-s3-link-unverified"):
+        if resolved:
+            print(f"Build {result['build']} recorded the digest of the observed managed S3 ZIP.")
+        else:
+            print(
+                f"Build {result['build']} and the retrieved ZIP are consistent with a managed upload."
+            )
+            print("  Exact linkage remains unverified without the CodeBuild artifact digest.")
         print(f"  S3 object: {result['publication']['target']}")
         print(f"  Changed source in ZIP: {result['influence']['archive_member']}")
         print(result["scope"])

@@ -1,5 +1,6 @@
 """Regression controls for a bounded S3 archive source witness."""
 
+import hashlib
 import io
 import zipfile
 
@@ -54,3 +55,35 @@ def test_archive_witness_rejects_base_and_ambiguous_stored_names(compare):
     dup = dup.replace(b"WRONGtail", b"\0RONGtail").replace(b"OTHERtail", b"\0THERtail")
     with pytest.raises(SnapshotError, match="ambiguous"):
         compare(dup)
+
+
+def test_saved_object_digest_does_not_replace_provider_bound_artifact_digest(tmp_path, monkeypatch):
+    build_id = "project:governed-build"
+    arn = f"arn:aws:codebuild:us-east-1:123456789012:build/{build_id}"
+    raw = zipped("source/Makefile", b"updated\n")
+    digest = hashlib.sha256(raw).hexdigest()
+    (tmp_path / "archive.zip").write_bytes(raw)
+    monkeypatch.setattr(codebuild_s3, "_phase_window", lambda *_: (0, 2))
+    provider = {"build": build_id, "s3Arn": "arn:aws:s3:::test-bucket/builds/governed-build"}
+    observed = {
+        "build_id": build_id,
+        "http_status": 200,
+        "url": "https://s3.us-east-1.amazonaws.com/test-bucket/builds/governed-build/output.zip",
+        "archive_sha256": digest,
+        "headers": {
+            "x-amz-meta-codebuild-buildarn": arn,
+            "Last-Modified": "Thu, 01 Jan 1970 00:00:01 GMT",
+            "Content-Length": str(len(raw)),
+        },
+    }
+    receipt = {"provider": provider, "object": observed}
+
+    def bind():
+        return codebuild_s3._object(receipt, tmp_path, arn, "us-east-1", {"id": build_id})
+
+    assert bind()[-1] is False
+    provider["sha256sum"] = digest
+    assert bind()[-1] is True
+    provider["sha256Checksum"] = "0" * 64
+    with pytest.raises(SnapshotError, match="recorded artifact digest conflicts"):
+        bind()
