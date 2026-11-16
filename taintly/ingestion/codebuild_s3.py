@@ -197,7 +197,10 @@ def _object(
         obs.get("url"), re.compile(re.escape(url_root) + rf"{_SEGMENT}\.zip"), "S3 ZIP object URL"
     )
     start, end = _phase_window(build, "UPLOAD_ARTIFACTS")
-    modified = parsedate_to_datetime(headers["Last-Modified"])
+    modified_header = headers.get("Last-Modified")
+    if not isinstance(modified_header, str) or not 0 < len(modified_header) <= 64:
+        raise SnapshotError("Expected an S3 Last-Modified header")
+    modified = parsedate_to_datetime(modified_header)
     _need(
         modified.tzinfo is not None and floor(start) <= modified.timestamp() <= ceil(end),
         "The S3 object's last modification is outside the observed upload phase",
