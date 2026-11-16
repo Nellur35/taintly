@@ -323,6 +323,22 @@ recorded asset uploader and the configured credential name. The credential
 contents, other permissions, archive bytes and later installations remain
 unverified. Conflicting or incomplete evidence returns exit 11.
 
+The same command also accepts a trusted `github-signed-release-v1`
+receipt for a bounded same-repository PR recipe with separate build,
+reusable signing, and publishing jobs. Preserve their source files under
+`producer/`, `signer/`, and `publisher/`, each with its original workflow
+path, plus the downloaded `published-SHA256SUMS.txt` at the root. Supply the
+producer and publisher run records, the three job records, the PR and its
+producer merge record, and the original and signed archive inventories.
+The reduced trace records identify the owning job, attempt and step, the
+archive transfers, and the signer-reported member digest. The hosted
+release records must identify the checksum manifest and the exact APK.
+
+This profile verifies reviewed command bodies, the configured App-token
+target, the recorded uploader, and agreement across the three digest
+records. APK bytes, signature validity, signing approval and broader
+App permissions require separate evidence.
+
 ### Saved GitHub Preview observations
 
 When reviewing a completed fork build, use the named operation and both

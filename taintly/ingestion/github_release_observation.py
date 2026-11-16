@@ -28,6 +28,7 @@ from taintly.rules.github._workflow_run_artifact import (
 )
 
 _SCHEMA = "github-workflow-run-release-v1"
+_SIGNED_SCHEMA = "github-signed-release-v1"
 _DISCOVER = "Retrieve information about the original workflow"
 _DOWNLOAD = "Download artifact from the previous workflow."
 _RELEASE = "Release (SHA-suffixed format)"
@@ -242,8 +243,12 @@ def release_observation(
     """Bind an observed public release to an exact GitHub workflow handoff."""
     try:
         _require(_matches(repository, _REPOSITORY), "Expected a literal GitHub repository")
-        cap = _observation_capture(snapshot, _SCHEMA)
+        cap = _observation_capture(snapshot, _SCHEMA, _SIGNED_SCHEMA)
         _require(cap["repository"] == repository, "Receipt belongs to another repository")
+        if cap["schema"] == _SIGNED_SCHEMA:
+            from taintly.ingestion.github_signed_release import signed_release
+
+            return signed_release(cap, root.resolve(), repository, source_run, release_run)
         producer, pr, artifact = _producer(cap, repository, source_run)
         consumer = cap["consumer"]
         _run(consumer, consumer["job"], repository, release_run, "workflow_run")

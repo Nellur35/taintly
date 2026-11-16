@@ -177,9 +177,14 @@ def _run_window(run: _Row, job: _Row) -> None:
     )
 
 
-def _observed_step(job: _Row, name: str) -> _Row:
+def _observed_step(job: _Row, name: str, *, number: object = None) -> _Row:
+    _require(number is None or _id(number), "saved step number is invalid")
     step = _one(
-        [row for row in job["steps"] if row["name"] == name],
+        [
+            row
+            for row in job["steps"]
+            if row["name"] == name and (number is None or row["number"] == number)
+        ],
         "saved job does not identify one selected step",
     )
     _require(
@@ -477,10 +482,10 @@ def preview_observation(
     return {"state": "unresolved", "reason": reason, "scope": _SCOPE}
 
 
-def _observation_capture(snapshot: Path, schema: str) -> _Row:
+def _observation_capture(snapshot: Path, schema: str, *other_schemas: str) -> _Row:
     capture = json.loads(
         _bounded_read(snapshot).decode("utf-8"), object_pairs_hook=_keys, parse_int=_integer
     )
-    if not isinstance(capture, dict) or capture.get("schema") != schema:
+    if not isinstance(capture, dict) or capture.get("schema") not in (schema, *other_schemas):
         raise PreviewEvidenceError("unsupported observation schema")
     return capture
