@@ -211,6 +211,80 @@ def test_public_build_binding_does_not_establish_analysis_coverage(receipt, chan
     assert reason in report["errors"][0]["title"]
 
 
+@pytest.mark.parametrize(
+    ("case", "expected_references"),
+    [
+        ("bound", 2),
+        ("missing-blob", 2),
+        ("literal-output", 0),
+        ("multiple-documents", 0),
+        ("multiple-cr-documents", 0),
+        ("multiple-bom-documents", 0),
+        ("duplicate-owner", 0),
+        ("escaped-owner", 0),
+        ("escaped-shell", 0),
+        ("override", 0),
+    ],
+)
+def test_ec2_receipt_reviews_only_owned_checkout_source_operands(receipt, case, expected_references):
+    root, response = receipt
+    build = response["build"]
+    build["environment"]["type"] = "LINUX_EC2"
+    script = "nix develop .#test --command bash -c 'source ./ci/helper.sh && unit'"
+    commands = [script, f'TEST_OPTION="-DASAN=ON" {script}']
+    if case == "literal-output":
+        commands = ['echo "nix develop .#test --command bash -c source ./ci/helper.sh"']
+    body = (
+        "---\nversion: 0.2\nenv:\n  shell: bash\nphases:\n  build:\n    commands:\n"
+        + "".join(f"      - {line}\n" for line in commands)
+    )
+    if case in {"multiple-documents", "multiple-cr-documents", "multiple-bom-documents"}:
+        if case == "multiple-bom-documents":
+            body += "\ufeff"
+        body += "---\nother: config\n"
+        if case == "multiple-cr-documents":
+            body = body.replace("\n", "\r")
+    elif case == "duplicate-owner":
+        body += "  build:\n    commands:\n      - echo harmless\n"
+    elif case == "escaped-owner":
+        body += '"p\\u0068ases": {}\n'
+    elif case == "escaped-shell":
+        body = body.replace("  shell: bash\n", '  shell: bash\n  "s\\u0068ell": sh\n')
+    elif case == "override":
+        build["environment"]["environmentVariables"] = [{"name": "PATH", "value": "unknown"}]
+    (root / "ci/review.yml").write_bytes(body.encode())
+    helper = root / "ci/helper.sh"
+    if case != "missing-blob":
+        helper.write_bytes(b"echo committed\n")
+    subprocess.run(["git", "-C", str(root), "add", "--", "ci"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+         "-c", "commit.gpgsign=false", "commit", "-qm", "checkout source"],
+        check=True,
+    )
+    commit = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    build["resolvedSourceVersion"] = commit
+    helper.write_text("echo uncommitted\n", encoding="utf-8")
+    result = scan_receipt(receipt)
+    assert result.returncode == 11, result.stderr
+    report = json.loads(result.stdout)
+    assert report["coverage_status"] == "incomplete"
+    assert report["files_scanned"] == 0
+    context = report["codebuild_run"]
+    assert context["selection_state"] == "bound"
+    evidence = context.get("checkout_scripts", {})
+    references = evidence.get("references", [])
+    assert len(references) == expected_references
+    if expected_references:
+        blob = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", f"{commit}:ci/helper.sh"], text=True
+        ).strip() if case == "bound" else None
+        assert evidence["pull_request_ref"] == "pr/17"
+        assert [(ref["phase"], ref["line"], ref["path"], ref["git_blob"]) for ref in references] == [
+            ("build", 8, "ci/helper.sh", blob), ("build", 9, "ci/helper.sh", blob),
+        ]
+
+
 @pytest.mark.parametrize(("name", "path", "code"), [
     ("review", "ci/review.yml", 1), ("publish", "ci/publish.yml", 0), ("default", "buildspec.yml", 1),
 ])

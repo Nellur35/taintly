@@ -178,6 +178,14 @@ The report can identify the selected blob and still mark analysis incomplete
 when the selected file contains batch orchestration, root YAML merges,
 YAML document markers or an unsupported execution context.
 
+For a saved `LINUX_EC2` build with a `pr/<number>` source ref, Taintly
+can also identify a literal checkout script passed to Bash `source` or
+`.` inside a supported `nix develop` command in a version 0.2 Bash
+buildspec. This profile accepts a single leading YAML document marker.
+The report identifies the phase, command and matching regular Git tree
+entry when available. Runtime resolution depends on the working directory
+and filesystem state. The overall scan remains incomplete in this profile.
+
 Keep captures private. Taintly does not authenticate the saved response or
 establish the AWS account, command execution, secret delivery or effective IAM.
 
