@@ -213,6 +213,9 @@ def test_explicit_codebuild_symlink_outside_repo_is_never_read(
     except OSError as exc:
         pytest.skip(f"symlink creation is unavailable: {exc}")
 
+    # A refused explicit source must not turn into a repository-wide scan.
+    (repo / "other-buildspec.yml").write_text(_buildspec("echo sibling"), encoding="utf-8")
+
     original_read = engine_module._read_text_head
 
     def reject_outside_read(path: str, limit: int = 200_000) -> str:
@@ -224,4 +227,16 @@ def test_explicit_codebuild_symlink_outside_repo_is_never_read(
     report = scan_repo(str(link), _codebuild_rules(), Platform.CODEBUILD)[0]
 
     assert report.files_scanned == 0
-    assert report.findings == []
+    assert len(report.findings) == 1
+    diagnostic = report.findings[0]
+    assert diagnostic.rule_id == "ENGINE-ERR"
+    assert Path(diagnostic.file) == link
+    assert "outside the repository" in diagnostic.description
+    assert diagnostic.snippet == ""
+
+    result = _run_cli(link)
+    assert result.returncode == 11, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["files_scanned"] == 0
+    assert payload["coverage_status"] == "incomplete"
+    assert [finding["rule_id"] for finding in payload["findings"]] == ["ENGINE-ERR"]
