@@ -203,19 +203,19 @@ def main():
         metavar=("JSON", "PUBLIC_PROJECT_ID", "GITHUB_ORIGIN", "PR_EVENT"),
         help="Assess one GitHub PR event against trusted, saved CodeBuild project filters.",
     )
-    codebuild_input.add_argument(
+    evidence_input.add_argument(
         "--codebuild-public-s3-observation",
         nargs=3,
         metavar=("JSON", "BUILD_ARN", "GITHUB_ORIGIN"),
         help="Corroborate a saved CodeBuild-managed S3 ZIP and its source member.",
     )
-    codebuild_input.add_argument(
+    evidence_input.add_argument(
         "--codebuild-public-deploy-observation",
         nargs=3,
         metavar=("JSON", "BUILD_ID", "GITHUB_ORIGIN"),
         help="Compare a saved CodeBuild deployment skip with its selected source.",
     )
-    codebuild_input.add_argument(
+    evidence_input.add_argument(
         "--codebuild-start-observation",
         nargs=4,
         metavar=("JSON", "GITHUB_ORIGIN", "RUN", "JOB"),
