@@ -124,20 +124,35 @@ def _source(root: Path, source: _Row, head: str, base: str, core: bool) -> _Row:
 
 def _manifest(raw: bytes) -> dict[str, str]:
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-        infos = [info for info in archive.infolist() if info.filename == "META-INF/MANIFEST.MF"]
+        infos = [
+            info for info in archive.infolist() if info.filename.upper() == "META-INF/MANIFEST.MF"
+        ]
         _require(
-            len(infos) == 1 and infos[0].file_size <= 16384,
+            len(infos) == 1
+            and infos[0].orig_filename == infos[0].filename
+            and infos[0].file_size <= 16384,
             "package manifest is missing, oversized or ambiguous",
+        )
+        _require(
+            infos[0].compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED),
+            "package manifest uses unsupported ZIP compression",
         )
         with archive.open(infos[0]) as stream:
             data = stream.read(16385)
     _require(len(data) <= 16384, "package manifest exceeds its limit")
-    text = data.decode("utf-8").replace("\r\n", "\n").replace("\n ", "")
+    text = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n").replace("\n ", "")
     main = text.partition("\n\n")[0]
     fields = {}
-    for line in main.splitlines():
+    for line in main.removesuffix("\n").split("\n"):
         key, separator, value = line.partition(": ")
-        _require(separator and key not in fields, "package manifest is malformed or ambiguous")
+        key = key.lower()
+        _require(
+            separator
+            and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,69}", key)
+            and "\0" not in value
+            and key not in fields,
+            "package manifest is malformed or ambiguous",
+        )
         fields[key] = value
     return fields
 
@@ -230,8 +245,8 @@ def _assess(data: _Row, root: Path, repository: str, number: int, check_id: int)
     )
     fields = _manifest(package)
     _require(
-        fields.get("Implementation-Build") == head
-        and fields.get("Implementation-Version") == version,
+        fields.get("implementation-build") == head
+        and fields.get("implementation-version") == version,
         "published package manifest differs from the exact PR revision or version",
     )
     return {

@@ -13,12 +13,12 @@ HEAD, BASE = "a" * 40, "b" * 40
 DIRECTORY = "https://repo.jenkins-ci.org/incrementals/org/jenkins-ci/plugins/git/1.2/"
 
 
-def package(head):
+def package(head, *, compression=zipfile.ZIP_STORED, extra=""):
     stream = io.BytesIO()
-    with zipfile.ZipFile(stream, "w") as archive:
+    with zipfile.ZipFile(stream, "w", compression=compression) as archive:
         archive.writestr(
             "META-INF/MANIFEST.MF",
-            f"Implementation-Build: {head}\r\nImplementation-Version: 1.2\r\n",
+            f"Implementation-Build: {head}\r\nImplementation-Version: 1.2\r\n{extra}",
         )
     return stream.getvalue()
 
@@ -95,6 +95,27 @@ def test_observed_registry_permission_preserves_missing_handoff(tmp_path, captur
 def test_successful_check_does_not_replace_artifact_bytes(tmp_path, capture):
     (tmp_path / "package.zip").unlink()
     assert evaluate(tmp_path, capture)["state"] == "unresolved"
+
+
+def test_lzma_manifest_is_unresolved_before_decompression(tmp_path, capture):
+    raw = package(HEAD, compression=zipfile.ZIP_LZMA)
+    (tmp_path / "package.zip").write_bytes(raw)
+    capture["registry"]["size"] = str(len(raw))
+    capture["registry"]["checksums"]["sha256"] = hashlib.sha256(raw).hexdigest()
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "unresolved"
+    assert result["reason"] == "package manifest uses unsupported ZIP compression"
+
+
+@pytest.mark.parametrize("line_end", ["\r\n", "\n", "\r"])
+def test_case_variant_of_an_existing_main_manifest_header_is_ambiguous(tmp_path, capture, line_end):
+    raw = package(HEAD, extra=f"implementation-build: {BASE}{line_end}")
+    (tmp_path / "package.zip").write_bytes(raw)
+    capture["registry"]["size"] = str(len(raw))
+    capture["registry"]["checksums"]["sha256"] = hashlib.sha256(raw).hexdigest()
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "unresolved"
+    assert result["reason"] == "package manifest is malformed or ambiguous"
 
 
 def test_valid_checksum_does_not_link_package_to_unrelated_revision(tmp_path, capture):
