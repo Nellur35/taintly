@@ -323,6 +323,9 @@ def _registry(
 
 
 def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target: str) -> _Row:
+    from .jenkins_filevault import FILEVAULT_SCHEMA, FILEVAULT_SCOPE, filevault_exclusion
+
+    scope = _SCOPE
     try:
         root = root.resolve()
         capture = json.loads(
@@ -331,6 +334,9 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             parse_int=_int,
             parse_constant=_reject_constant,
         )
+        if capture["schema"] == FILEVAULT_SCHEMA:
+            scope = FILEVAULT_SCOPE
+            return filevault_exclusion(root, capture, repo, pr, job, target)
         _require(
             capture["schema"] == "jenkins-asf-maven-snapshot-v1"
             and re.fullmatch(r"apache/[a-z0-9][a-z0-9-]{0,110}", repo)
@@ -435,4 +441,4 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         reason = str(exc)
     except (AttributeError, KeyError, OSError, RecursionError, RuntimeError, TypeError, ValueError):
         reason = "saved Jenkins, source or Nexus evidence is unavailable or malformed"
-    return {"state": "unresolved", "reason": reason, "scope": _SCOPE}
+    return {"state": "unresolved", "reason": reason, "scope": scope}

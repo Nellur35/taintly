@@ -1863,9 +1863,23 @@ def _check_jenkins_maven_snapshot(
     if not pr.isascii() or not pr.isdecimal() or not 1 <= len(pr) <= 12:
         parser.error("Maven snapshot observation mode requires a decimal PR ID")
     result = maven_snapshot_observation(Path(args.path), repo, int(pr), job, target)
-    resolved = result["state"] in {"snapshot-write-observed", "upstream-checkout-observed"}
+    resolved = result["state"] in {
+        "snapshot-write-observed",
+        "upstream-checkout-observed",
+        "remote-publisher-excluded",
+    }
     if args.format == "json":
         print(json.dumps({mode: result}, indent=2))
+    elif result["state"] == "remote-publisher-excluded":
+        remote = result["remote_publisher"]
+        print(
+            f"Jenkins PR #{result['pr']} ran Maven against "
+            f"{result['local_staging']['destination']} (node {result['node']}).\n"
+            f"  The configured remote publisher stage was absent. "
+            f"Its guard requires {remote['required_branch']}; the job ran {result['branch']}.\n"
+            f"  Configured target: {remote['target']}.\n"
+            f"{result['scope']}"
+        )
     elif result["state"] == "upstream-checkout-observed":
         checkout = result["checkout"]
         artifact = result["snapshot_evidence"]

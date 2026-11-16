@@ -205,6 +205,23 @@ commit and the separate PR head. The registry writer remains unresolved
 for this result. A later PR checkout or an unsupported intermediate
 operation leaves the source unresolved.
 
+For a same-repository FileVault Package Maven Plugin PR with the reviewed
+shared library, use the same command with the Nexus snapshots repository URL
+as the last argument and `jenkins-asf-filevault-exclusion-v1` in
+`snapshot.json`. Supply the `pull` and completed `run` records with Git
+`BuildData`, the complete run `graph`, the owning stage and its flow nodes,
+and the scoped `checkout_log` and `maven_log`. Include the controller's
+branch and library log records and `jenkinsfile_checkout` with the exact
+loaded merge revision, parents, and loader line. Save the loaded Jenkinsfile
+with its `source` digest and Git blob record and the reviewed library files
+under `source/library/` at their original paths.
+
+The `remote-publisher-excluded` result distinguishes the observed
+workspace-local Maven deployment from the configured remote Wagon stage.
+It requires the original branch guard, a complete stage inventory, and
+matching command and workspace evidence. It leaves Nexus permissions and
+other publication paths unresolved.
+
 ### Saved GitLab fork MR artifact observations
 
 ```sh
