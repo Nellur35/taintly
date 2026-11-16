@@ -236,6 +236,52 @@ The caller role cannot establish the build's own publication permission.
 Missing or incompatible start evidence returns exit `11`. The report
 retains existing CodeBuild analysis limits.
 
+### Saved GitHub Preview observations
+
+When reviewing a completed fork build, use the named operation and both
+run IDs to check whether saved evidence links its artifact to a Cloudflare
+Workers Preview. The source directory must contain the two original
+workflow files at their recorded relative paths.
+
+```sh
+taintly ./source-projection --format json \
+  --github-preview-observation observation.json OWNER/REPO PRODUCER_RUN CONSUMER_RUN
+```
+
+The offline input is a trusted, reduced capture, rather than GitHub
+credentials or executable content. The `github-preview-v1` schema uses
+the following records:
+
+- `producer` and `consumer`: `id`, `html_url`, `event`, `conclusion`,
+  `head_sha`, `head_repo`, `path`, `run_attempt`, and `referenced_workflows`.
+- `producer_job` and `consumer_job`: `id`, `name`, `conclusion`, `run_id`,
+  `run_attempt`, `head_sha`, timestamps `started_at` and `completed_at`,
+  and `steps` with matching names, conclusions, timestamps and `number`.
+- `producer_source` and `consumer_source`: `path`, `revision`, and
+  `sha256` of the original workflow bytes. Use the checked-out PR merge
+  and the consumer workflow revision respectively.
+- `pr`: `number`, `head`, `base`, `head_repo`, and `base_repo`.
+  `merge`: the checked-out `sha` and ordered `parents`.
+- `artifacts`: objects with `id`, `name`, `digest` (prefixed with
+  `sha256:`), `run`, `head_sha`, `created_at`, and `size_in_bytes`.
+- `steps`: names of the selected steps under `checkout`, `build`,
+  `upload`, `download`, and `publish`.
+- `receipts`: rows with `run_id`, `job_id`, `attempt`, `time`, `kind`,
+  and `value`. Use verified log or other trusted step records and preserve
+  their ownership and times. The producer needs `checkout` and
+  `upload-id`. The consumer needs `producer-id`, `download-id`,
+  `download-digest`, `preview-command`, and `version-url`. Use strings
+  for receipt values and ISO 8601 timestamps with timezone offsets.
+
+This profile uses one producer and one consumer, exact audited action pins,
+the trigger's run ID, the default download destination, and an adjacent
+literal Worker Preview action. `preview-reported` means the selected
+records agree about this publication. The report includes the configured
+secret's symbolic binding and preserves uncertainty about the principal,
+archive contents, and wider permissions. Incompatible or missing evidence
+returns `unresolved` and exit `11`. The separate observation mode leaves
+ordinary repository scans and finding policy intact.
+
 ### CodeBuild project snapshots
 
 With Git installed, you can scan the configured buildspec for a single project

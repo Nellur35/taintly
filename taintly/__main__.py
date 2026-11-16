@@ -244,6 +244,12 @@ def main():
         metavar=("JSON", "PROJECT", "PIPELINE", "JOB"),
         help="Check saved target-project fork MR artifact or manual job evidence.",
     )
+    evidence_input.add_argument(
+        "--github-preview-observation",
+        nargs=4,
+        metavar=("JSON", "OWNER/REPO", "PRODUCER_RUN", "CONSUMER_RUN"),
+        help="Check one saved GitHub fork artifact and Wrangler Preview observation offline.",
+    )
     parser.add_argument(
         "--min-severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"], default=None
     )
@@ -655,6 +661,9 @@ def main():
         return
     if args.codebuild_start_observation:
         _assess_codebuild_start(parser, args)
+        return
+    if args.github_preview_observation:
+        _check_github_preview_observation(parser, args)
         return
 
     if args.codebuild_project_snapshot or args.codebuild_public_build:
@@ -1971,6 +1980,49 @@ def _assess_codebuild_start(parser: argparse.ArgumentParser, args: argparse.Name
     else:
         print(f"CodeBuild start unresolved: {result['reason']}.\n{result['scope']}")
     sys.exit(11 if state == "unresolved" else 0)
+
+
+def _check_github_preview_observation(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    from pathlib import Path
+
+    from .ingestion.github_preview import preview_observation
+
+    allowed = {"path", "github_preview_observation", "platform", "format", "no_config", "no_color"}
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(f"--{name.replace('_', '-')} is unavailable in GitHub observation mode")
+    if args.platform not in (None, "github") or args.format not in ("text", "json"):
+        parser.error("GitHub observation mode requires the github platform and text or JSON format")
+    snapshot, repository, producer, consumer = args.github_preview_observation
+    if any(
+        not value.isascii() or not value.isdecimal() or len(value) > 19
+        for value in (producer, consumer)
+    ):
+        parser.error("GitHub observation mode requires two decimal run IDs")
+    result = preview_observation(
+        Path(snapshot), Path(args.path), repository, int(producer), int(consumer)
+    )
+    resolved = result["state"] == "preview-reported"
+    if args.format == "json":
+        print(json.dumps({"github_preview_observation": result}, indent=2))
+    elif resolved:
+        build = result["producer"]
+        deploy = result["consumer"]
+        print(
+            f"Saved records report Preview of fork PR #{result['pr']['number']} "
+            f"for {result['repository']}.\n"
+            f"  Run {build['run']} selected {result['artifact']['name']} "
+            f"at {build['path']}:{build['upload_line']}.\n"
+            f"  Run {deploy['run']} reported Worker {deploy['worker']} at "
+            f"{deploy['version_url']} using the configured {deploy['credential_binding']} "
+            f"binding ({deploy['path']}:{deploy['command_line']}).\n"
+            f"{result['scope']}\n{result['review']}"
+        )
+    else:
+        print(f"GitHub Preview unresolved: {result['reason']}.\n{result['scope']}")
+    sys.exit(0 if resolved else 11)
 
 
 def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
