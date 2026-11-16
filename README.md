@@ -282,6 +282,35 @@ archive contents, and wider permissions. Incompatible or missing evidence
 returns `unresolved` and exit `11`. The separate observation mode leaves
 ordinary repository scans and finding policy intact.
 
+### Saved GitHub Worker version uploads and fork skips
+
+```sh
+taintly ./source-projection --format json \
+  --github-version-upload-observation observation.json OWNER/REPO RUN JOB
+```
+
+The `github-version-upload-v1` capture uses a single `run`, `job` and
+`source` using the records above. Set `source_job` to the literal ID of
+the workflow job. For an observed upload, include `pr`, `merge` and
+`config_source`, a source identity for the original Wrangler JSON or JSONC
+file. Set `steps.build` and `steps.upload` to the selected step names.
+The `receipts` use the same ownership fields as Preview observations,
+with kinds `checkout`, `workspace`, `version-command`, `reported-worker`
+and `worker-version`.
+
+The profile resolves one literal matrix row and requires agreement between
+its build workspace, config, reported upload command, named Worker and
+version ID. A sibling job or a later route operation cannot supply this
+evidence. It reports a version upload under the configured credential and
+account bindings. Principal identity, exact published bytes and broader
+grants need separate evidence.
+
+For a fork skip, the recorded job must be skipped with empty `steps`
+and `receipts`. Use the known fork-head workflow in `source`. The command
+reports when that source's guard excludes the fork and the saved job was
+observed to skip. The exact source GitHub evaluated and the actual reason
+for the skip remain unverified. Missing or incompatible evidence exits `11`.
+
 ### CodeBuild project snapshots
 
 With Git installed, you can scan the configured buildspec for a single project

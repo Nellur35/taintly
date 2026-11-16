@@ -250,6 +250,12 @@ def main():
         metavar=("JSON", "OWNER/REPO", "PRODUCER_RUN", "CONSUMER_RUN"),
         help="Check one saved GitHub fork artifact and Wrangler Preview observation offline.",
     )
+    evidence_input.add_argument(
+        "--github-version-upload-observation",
+        nargs=4,
+        metavar=("JSON", "OWNER/REPO", "RUN", "JOB"),
+        help="Check a saved GitHub same-run Wrangler version upload or fork skip offline.",
+    )
     parser.add_argument(
         "--min-severity", choices=["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"], default=None
     )
@@ -662,8 +668,8 @@ def main():
     if args.codebuild_start_observation:
         _assess_codebuild_start(parser, args)
         return
-    if args.github_preview_observation:
-        _check_github_preview_observation(parser, args)
+    if args.github_preview_observation or args.github_version_upload_observation:
+        _check_github_observation(parser, args)
         return
 
     if args.codebuild_project_snapshot or args.codebuild_public_build:
@@ -1982,32 +1988,38 @@ def _assess_codebuild_start(parser: argparse.ArgumentParser, args: argparse.Name
     sys.exit(11 if state == "unresolved" else 0)
 
 
-def _check_github_preview_observation(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> None:
+def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     from pathlib import Path
 
     from .ingestion.github_preview import preview_observation
 
-    allowed = {"path", "github_preview_observation", "platform", "format", "no_config", "no_color"}
+    mode = (
+        "github_preview_observation"
+        if args.github_preview_observation
+        else "github_version_upload_observation"
+    )
+    allowed = {"path", mode, "platform", "format", "no_config", "no_color"}
     for name, value in vars(args).items():
         if name not in allowed and value != parser.get_default(name):
             parser.error(f"--{name.replace('_', '-')} is unavailable in GitHub observation mode")
     if args.platform not in (None, "github") or args.format not in ("text", "json"):
         parser.error("GitHub observation mode requires the github platform and text or JSON format")
-    snapshot, repository, producer, consumer = args.github_preview_observation
+    snapshot, repository, first, second = getattr(args, mode)
     if any(
-        not value.isascii() or not value.isdecimal() or len(value) > 19
-        for value in (producer, consumer)
+        not value.isascii() or not value.isdecimal() or len(value) > 19 for value in (first, second)
     ):
-        parser.error("GitHub observation mode requires two decimal run IDs")
-    result = preview_observation(
-        Path(snapshot), Path(args.path), repository, int(producer), int(consumer)
-    )
-    resolved = result["state"] == "preview-reported"
+        parser.error("GitHub observation mode requires two decimal IDs")
+    inputs = Path(snapshot), Path(args.path), repository, int(first), int(second)
+    if mode == "github_version_upload_observation":
+        from .ingestion.github_version_upload import version_upload_observation
+
+        result = version_upload_observation(*inputs)
+    else:
+        result = preview_observation(*inputs)
+    state = result["state"]
     if args.format == "json":
-        print(json.dumps({"github_preview_observation": result}, indent=2))
-    elif resolved:
+        print(json.dumps({mode: result}, indent=2))
+    elif state == "preview-reported":
         build = result["producer"]
         deploy = result["consumer"]
         print(
@@ -2020,9 +2032,25 @@ def _check_github_preview_observation(
             f"binding ({deploy['path']}:{deploy['command_line']}).\n"
             f"{result['scope']}\n{result['review']}"
         )
+    elif state == "version-upload-reported":
+        publication = result["publication"]
+        print(
+            f"Saved records report Worker version {publication['version_id']} for "
+            f"{publication['worker']} in run {result['run']}, job {result['job']}.\n"
+            f"  {publication['command']} using the configured "
+            f"{publication['credential_binding']} binding "
+            f"({result['source']['path']}:{publication['command_line']}).\n{result['scope']}"
+        )
+    elif state == "fork-job-skipped":
+        print(
+            f"Run {result['run']}, job {result['job']} was skipped. "
+            f"The supplied source excludes this fork "
+            f"({result['source']['path']}:{result['guard_line']}).\n"
+            f"The historical cause of the skip is unverified.\n{result['scope']}"
+        )
     else:
-        print(f"GitHub Preview unresolved: {result['reason']}.\n{result['scope']}")
-    sys.exit(0 if resolved else 11)
+        print(f"GitHub observation unresolved: {result['reason']}.\n{result['scope']}")
+    sys.exit(11 if state == "unresolved" else 0)
 
 
 def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:

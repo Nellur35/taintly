@@ -87,6 +87,13 @@ def _bounded_read(path: Path) -> bytes:
 def _source(root: Path, run: _Row, source: _Row, revision: str) -> tuple[_Index, _Row]:
     path = run["path"]
     _require(_matches(path, _WORKFLOW), "run lacks a supported workflow path")
+    raw, identity = _source_bytes(root, source, path, revision)
+    index = _Index.from_source(path, raw.decode("utf-8"))
+    _require(index.error is None, "workflow structure is incomplete or ambiguous")
+    return index, identity
+
+
+def _source_bytes(root: Path, source: _Row, path: str, revision: str) -> tuple[bytes, _Row]:
     _require(
         source["path"] == path
         and source["revision"] == revision
@@ -99,26 +106,35 @@ def _source(root: Path, run: _Row, source: _Row, revision: str) -> tuple[_Index,
     raw = _bounded_read(resolved)
     digest = hashlib.sha256(raw).hexdigest()
     _require(digest == source["sha256"], "workflow bytes differ from the saved source")
-    index = _Index.from_source(path, raw.decode("utf-8"))
-    _require(index.error is None, "workflow structure is incomplete or ambiguous")
-    return index, {"path": path, "revision": revision, "sha256": digest}
+    return raw, {"path": path, "revision": revision, "sha256": digest}
 
 
-def _run(run: _Row, job: _Row, repository: str, run_id: int, event: str) -> None:
+def _run_identity(run: _Row, job: _Row, repository: str, run_id: int, event: str) -> None:
     _require(
         run["id"] == run_id
         and _id(run["id"])
         and run["html_url"] == f"https://github.com/{repository}/actions/runs/{run_id}"
         and run["event"] == event
-        and run["conclusion"] == job["conclusion"] == "success"
         and _matches(run["head_sha"], _SHA)
         and _id(job["id"])
         and _id(run["run_attempt"])
         and job["run_id"] == run_id
         and job["run_attempt"] == run["run_attempt"]
         and job["head_sha"] == run["head_sha"]
-        and _matches(job["name"], _NAME)
-        and not run["referenced_workflows"],
+        and run["referenced_workflows"] == [],
+        "saved run and job do not identify one direct invocation",
+    )
+
+
+def _run(run: _Row, job: _Row, repository: str, run_id: int, event: str) -> None:
+    try:
+        _run_identity(run, job, repository, run_id, event)
+    except PreviewEvidenceError as exc:
+        raise PreviewEvidenceError(
+            "saved run and job do not identify one successful direct invocation"
+        ) from exc
+    _require(
+        run["conclusion"] == job["conclusion"] == "success" and _matches(job["name"], _NAME),
         "saved run and job do not identify one successful direct invocation",
     )
 
@@ -417,13 +433,19 @@ def preview_observation(
     """Return a bounded decision from a trusted offline capture and source projection."""
     try:
         _require(_matches(repository, _REPOSITORY), "expected a literal GitHub repository")
-        capture = json.loads(
-            _bounded_read(snapshot).decode("utf-8"), object_pairs_hook=_keys, parse_int=_integer
-        )
-        _require(capture["schema"] == "github-preview-v1", "unsupported observation schema")
+        capture = _observation_capture(snapshot, "github-preview-v1")
         return _publish(capture, root.resolve(), repository, producer_id, consumer_id)
     except PreviewEvidenceError as exc:
         reason = str(exc)
     except (AttributeError, IndexError, KeyError, OSError, RecursionError, TypeError, ValueError):
         reason = "required observation fields or workflow bytes are unavailable or malformed"
     return {"state": "unresolved", "reason": reason, "scope": _SCOPE}
+
+
+def _observation_capture(snapshot: Path, schema: str) -> _Row:
+    capture = json.loads(
+        _bounded_read(snapshot).decode("utf-8"), object_pairs_hook=_keys, parse_int=_integer
+    )
+    if not isinstance(capture, dict) or capture.get("schema") != schema:
+        raise PreviewEvidenceError("unsupported observation schema")
+    return capture
