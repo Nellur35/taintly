@@ -38,8 +38,8 @@ _ARCHIVE_LIMIT = 3_000_000
 _MEMBER_LIMIT = 131_072
 _SCOPE = (
     "Trusted saved AWS and GitHub observations. The S3 receipt identifies the retrieved "
-    "object and one PR-bound member. An independent CodeBuild artifact digest identifies "
-    "the build's exact output. The effective upload principal, policy and later use remain "
+    "object and one PR-bound member. The exact build-to-object link requires independent "
+    "evidence for that object. The effective upload principal, policy and later use remain "
     "unverified."
 )
 _Row = dict[str, Any]
@@ -214,22 +214,18 @@ def _object(
     )
     with archive.open("rb") as stream:
         data = stream.read(_ARCHIVE_LIMIT + 1)
-    provider_digests = [
-        provider[field]
-        for field in ("sha256sum", "sha256Checksum")
-        if provider.get(field) not in (None, "")
-    ]
     _need(
         0 < len(data) <= _ARCHIVE_LIMIT
         and str(len(data)) == headers.get("Content-Length")
         and hashlib.sha256(data).hexdigest() == digest,
         "Saved ZIP differs from the observed S3 object",
     )
-    _need(
-        all(recorded == digest for recorded in provider_digests),
-        "CodeBuild's recorded artifact digest conflicts with the retrieved S3 object",
+    # This lookup identifies a directory. The provider's artifact checksum
+    # cannot authenticate an individually retrieved child of that directory.
+    provider_claims_checksum = any(
+        provider.get(field) not in (None, "") for field in ("sha256sum", "sha256Checksum")
     )
-    return data, url, digest, prefix + "/" + url.rsplit("/", 1)[1], bool(provider_digests)
+    return data, url, digest, prefix + "/" + url.rsplit("/", 1)[1], provider_claims_checksum
 
 
 def _archive_witness(raw: bytes, witness: _Row, root: Path, pr: _Row) -> dict[str, object]:
@@ -277,7 +273,7 @@ def _archive_witness(raw: bytes, witness: _Row, root: Path, pr: _Row) -> dict[st
 
 
 def codebuild_s3_observation(path: Path, root: Path, build_arn: str, origin: str) -> _Row:
-    """Verify an exact managed publication without fetching or running anything."""
+    """Corroborate one retrieved output file without fetching or running anything."""
     try:
         expected = _BUILD_ARN.fullmatch(build_arn)
         _need(
@@ -291,24 +287,39 @@ def codebuild_s3_observation(path: Path, root: Path, build_arn: str, origin: str
         )
         build = _owned_record(cap.get("build"), "id", build_id)
         logs = _owned_record(cap.get("logs"), "build", build_id)
+        artifact_config = _map(build.get("artifacts"), "primary artifact")
         _need(
             build.get("projectName") == build_id.split(":")[0]
             and build.get("buildComplete") is True
             and build.get("buildStatus") == "SUCCEEDED"
             and build.get("secondarySources") == []
             and build.get("secondaryArtifacts") == []
-            and _map(build.get("artifacts"), "primary artifact").get("type") == "S3",
+            and artifact_config.get("type") == "S3",
             "The run does not identify a completed primary S3 artifact publication profile",
+        )
+        _need(
+            artifact_config.get("packaging") in (None, "NONE"),
+            "The saved directory profile does not support packaged CodeBuild outputs",
         )
         root = root.resolve()
         identity, pr, inline = _source_identity(cap, build, root, origin)
-        raw, url, digest, object_arn, build_digest = _object(
+        raw, url, digest, object_arn, provider_claims_checksum = _object(
             _map(cap.get("artifact"), "artifact"), path.resolve().parent, build_arn, region, build
         )
         sources = _observe_plan(inline, logs, build, object_arn.rsplit("/", 1)[1])
         witness = _archive_witness(raw, _map(cap.get("witness"), "archive witness"), root, pr)
+        publication = {
+            "operation": "codebuild-managed-s3-artifact-upload",
+            "target": url,
+            "sha256": digest,
+            "object_arn": object_arn,
+            "build_object_binding": "unverified",
+            "service_role_session": "unverified",
+        }
+        if provider_claims_checksum:
+            publication["provider_checksum_scope"] = "unverified-for-child-object"
         return {
-            "state": "managed-s3-object-observed" if build_digest else "managed-s3-link-unverified",
+            "state": "managed-s3-link-unverified",
             "build": build_id,
             "build_arn": build_arn,
             "repository": identity,
@@ -317,16 +328,7 @@ def codebuild_s3_observation(path: Path, root: Path, build_arn: str, origin: str
             "source_scope": "same-repository" if pr["fork"].lower() == identity else "fork",
             "source_plan": sources,
             "influence": witness,
-            "publication": {
-                "operation": "codebuild-managed-s3-artifact-upload",
-                "target": url,
-                "sha256": digest,
-                "object_arn": object_arn,
-                "build_object_binding": (
-                    "matches-codebuild-artifact-digest" if build_digest else "unverified"
-                ),
-                "service_role_session": "unverified",
-            },
+            "publication": publication,
             "scope": _SCOPE,
         }
     except (

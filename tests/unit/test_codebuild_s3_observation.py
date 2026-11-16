@@ -37,10 +37,13 @@ def compare(monkeypatch, tmp_path):
     return witness
 
 
-@pytest.mark.parametrize(("bytes_", "kind"), [
-    (b"updated\n", "exact"),
-    (b"updated\r\n", "lf-crlf-equivalent"),
-])
+@pytest.mark.parametrize(
+    ("bytes_", "kind"),
+    [
+        (b"updated\n", "exact"),
+        (b"updated\r\n", "lf-crlf-equivalent"),
+    ],
+)
 def test_pr_member_requires_matching_bytes_or_known_newline_conversion(compare, bytes_, kind):
     assert compare(zipped("source/src/Makefile", bytes_))["comparison"] == kind
 
@@ -57,18 +60,41 @@ def test_archive_witness_rejects_base_and_ambiguous_stored_names(compare):
         compare(dup)
 
 
-def test_saved_object_digest_does_not_replace_provider_bound_artifact_digest(tmp_path, monkeypatch):
-    build_id = "project:governed-build"
+def test_artifact_directory_checksum_keeps_child_object_link_unverified(tmp_path, monkeypatch):
+    build_id = "project:01234567-89ab-cdef-0123-456789abcdef"
     arn = f"arn:aws:codebuild:us-east-1:123456789012:build/{build_id}"
     raw = zipped("source/Makefile", b"updated\n")
     digest = hashlib.sha256(raw).hexdigest()
     (tmp_path / "archive.zip").write_bytes(raw)
+    capture = tmp_path / "capture.json"
+    capture.touch()
     monkeypatch.setattr(codebuild_s3, "_phase_window", lambda *_: (0, 2))
-    provider = {"build": build_id, "s3Arn": "arn:aws:s3:::test-bucket/builds/governed-build"}
+    monkeypatch.setattr(
+        codebuild_s3,
+        "_source_identity",
+        lambda *_: (
+            "example/repo",
+            {
+                "head": "head",
+                "base": "base",
+                "fork": "other/repo",
+                "number": 1,
+            },
+            "script",
+        ),
+    )
+    monkeypatch.setattr(codebuild_s3, "_observe_plan", lambda *_: {})
+    monkeypatch.setattr(
+        codebuild_s3,
+        "_blob",
+        lambda _root, revision, _: ({"head": "updated\n", "base": "prior\n"}[revision], revision),
+    )
+    directory = "test-bucket/builds/01234567-89ab-cdef-0123-456789abcdef"
+    provider = {"build": build_id, "s3Arn": f"arn:aws:s3:::{directory}"}
     observed = {
         "build_id": build_id,
         "http_status": 200,
-        "url": "https://s3.us-east-1.amazonaws.com/test-bucket/builds/governed-build/output.zip",
+        "url": f"https://s3.us-east-1.amazonaws.com/{directory}/output.zip",
         "archive_sha256": digest,
         "headers": {
             "x-amz-meta-codebuild-buildarn": arn,
@@ -76,14 +102,47 @@ def test_saved_object_digest_does_not_replace_provider_bound_artifact_digest(tmp
             "Content-Length": str(len(raw)),
         },
     }
-    receipt = {"provider": provider, "object": observed}
+    artifacts = {"type": "S3", "packaging": "NONE"}
+    receipt = {
+        "schema": "codebuild-managed-s3-v1",
+        "build": {
+            "id": build_id,
+            "projectName": "project",
+            "buildComplete": True,
+            "buildStatus": "SUCCEEDED",
+            "secondarySources": [],
+            "secondaryArtifacts": [],
+            "artifacts": artifacts,
+        },
+        "logs": {"build": build_id},
+        "artifact": {"provider": provider, "object": observed},
+        "witness": {"source_path": "Makefile", "archive_member": "source/Makefile"},
+    }
+    monkeypatch.setattr(codebuild_s3, "_read_capture", lambda *_: receipt)
 
-    def bind():
-        return codebuild_s3._object(receipt, tmp_path, arn, "us-east-1", {"id": build_id})
+    def assess():
+        return codebuild_s3.codebuild_s3_observation(
+            capture, tmp_path, arn, "https://github.com/example/repo"
+        )
 
-    assert bind()[-1] is False
+    without_checksum = assess()
+    assert without_checksum["state"] == "managed-s3-link-unverified"
+    assert without_checksum["influence"]["comparison"] == "exact"
+    for field in ("sha256sum", "sha256Checksum"):
+        provider[field] = digest
+        result = assess()
+        assert result["publication"].pop("provider_checksum_scope") == "unverified-for-child-object"
+        assert result == without_checksum
+        del provider[field]
+
     provider["sha256sum"] = digest
-    assert bind()[-1] is True
-    provider["sha256Checksum"] = "0" * 64
-    with pytest.raises(SnapshotError, match="recorded artifact digest conflicts"):
-        bind()
+    artifacts["packaging"] = "ZIP"
+    outside_profile = assess()
+    assert outside_profile["state"] == "unresolved"
+    assert "does not support packaged CodeBuild outputs" in outside_profile["reason"]
+
+    artifacts["packaging"] = "NONE"
+    observed["archive_sha256"] = "0" * 64
+    corrupt = assess()
+    assert corrupt["state"] == "unresolved"
+    assert "Saved ZIP differs" in corrupt["reason"]
