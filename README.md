@@ -201,6 +201,41 @@ member. Published Pages content, push access to registries, protected
 variables, and authorization to play a manual job require separate
 evidence. Missing or conflicting evidence returns exit `11`.
 
+### Saved GitHub-to-CodeBuild start observations
+
+```sh
+taintly /path/to/git-checkout --format json \
+  --codebuild-start-observation observation.json https://github.com/OWNER/REPO RUN JOB
+```
+
+This offline profile reads trusted saved evidence for a GitHub
+`pull_request_target` job that uses the collaborator permission to decide
+whether to launch standalone CodeBuild runs. It reads the caller workflow,
+its launcher and selected buildspecs from the exact local Git commits.
+The start result is scoped to the named job, AWS initiator session and
+returned build IDs. An observed guard stop is scoped to automatic
+launches by that job.
+
+The `codebuild-start-v1` capture contains a GitHub `run` and its `job`
+from the attempt-scoped jobs API, a `pr` with `number` and `base` and
+`head` objects (`repo` and `sha`), `observations`, `build_responses`, and
+`build_commands`. The run uses a literal `head_repository` full name.
+`observations` are reduced log rows with `run_id`, `job_id`, `attempt`,
+`time`, `role`, and `value`. Capture the reported base checkout revision,
+assumed-role run session, PR author permission, and returned standalone
+build IDs or explicit guard stop. Preserve the step timestamps from the
+attempt-scoped job. Enter selected AWS public build responses unchanged
+in `build_responses`.
+
+Optional CodeBuild log rows in `build_commands` use the exact `build_id`,
+`time`, `kind`, and `command`. They can corroborate `running-command`
+entries from a supported buildspec. A `nix-copy-summary` row also carries
+the integer `paths` reported by the copy. The CLI keeps the configured S3
+destination, observed path count and S3 object-write evidence separate.
+The caller role cannot establish the build's own publication permission.
+Missing or incompatible start evidence returns exit `11`. The report
+retains existing CodeBuild analysis limits.
+
 ### CodeBuild project snapshots
 
 With Git installed, you can scan the configured buildspec for a single project

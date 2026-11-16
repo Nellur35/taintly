@@ -133,6 +133,15 @@ def bind_public_build(snapshot: Path, build_id: str, root: Path, origin: str) ->
     if not BUILD_ID.fullmatch(build_id):
         raise SnapshotError("A full CodeBuild build ID is required")
     response = _read_capture(snapshot, "Public build receipt")
+    return bind_public_build_response(response, build_id, root, origin)
+
+
+def bind_public_build_response(
+    response: dict[str, object], build_id: str, root: Path, origin: str
+) -> BoundBuildspec:
+    """Bind an already decoded public response using the same source constraints."""
+    if not BUILD_ID.fullmatch(build_id):
+        raise SnapshotError("A full CodeBuild build ID is required")
     build = response.get("build")
     if set(response) != {"build"} or not isinstance(build, dict):
         raise SnapshotError("Expected one public build record, with no batch or project wrapper")
@@ -199,24 +208,7 @@ def _bind_record(
     ):
         pull_request_ref = source_version
 
-    if not root.is_dir():
-        raise SnapshotError("The supplied local checkout is unavailable")
-    top = _git(root, "rev-parse", "--show-toplevel").rstrip(b"\r\n")
-    if Path(os.fsdecode(top)).resolve() != root:
-        raise SnapshotError("The supplied checkout is not the Git repository root")
-    remotes = _git(root, "config", "--local", "--no-includes", "--get-all", "remote.origin.url")
-    try:
-        urls = remotes.decode("utf-8").splitlines()
-    except UnicodeError as exc:
-        raise SnapshotError("Local checkout origin is unreadable") from exc
-    if len(urls) != 1 or _github_identity(urls[0]) != identity:
-        raise SnapshotError("Local checkout origin does not match the supplied repository identity")
-    if _git(
-        root, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"
-    ).strip() != (revision.encode("ascii")):
-        raise SnapshotError(
-            f"{subject} {revision_field} does not identify the exact local Git commit"
-        )
+    _require_git_revision(root, identity, revision, f"{subject} {revision_field}")
     oid = _regular_blob(root, revision, path)
     if oid is None:
         raise SnapshotError(
@@ -258,6 +250,25 @@ def _bind_record(
         scripts,
         pull_request_ref,
     )
+
+
+def _require_git_revision(root: Path, identity: str, revision: str, label: str) -> None:
+    if not root.is_dir():
+        raise SnapshotError("The supplied local checkout is unavailable")
+    top = _git(root, "rev-parse", "--show-toplevel").rstrip(b"\r\n")
+    if Path(os.fsdecode(top)).resolve() != root:
+        raise SnapshotError("The supplied checkout is not the Git repository root")
+    remotes = _git(root, "config", "--local", "--no-includes", "--get-all", "remote.origin.url")
+    try:
+        urls = remotes.decode("utf-8").splitlines()
+    except UnicodeError as exc:
+        raise SnapshotError("Local checkout origin is unreadable") from exc
+    if len(urls) != 1 or _github_identity(urls[0]) != identity:
+        raise SnapshotError("Local checkout origin does not match the supplied repository identity")
+    if _git(
+        root, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"
+    ).strip() != revision.encode("ascii"):
+        raise SnapshotError(f"{label} does not identify the exact local Git commit")
 
 
 def _regular_blob(root: Path, revision: str, path: str) -> str | None:
