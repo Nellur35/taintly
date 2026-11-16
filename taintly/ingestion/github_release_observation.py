@@ -140,10 +140,11 @@ def _release_plan(index: _Index, consumer: _Row, destination: str) -> dict[str, 
             "The publication credential is outside the literal secret profile"
         )
     program = _field(index, (*publish, "run"), literal_block=True)
-    clean = [row.strip(" \t") for row in str(program.value).split("\n") if row.strip(" \t")]
+    clean = [row.lstrip(" \t") for row in str(program.value).strip("\n").split("\n")]
     target_name = destination.split("/")[1]
     _require(
-        clean
+        program.value_kind == "block_literal"
+        and clean
         == [
             "gh release create \\",
             "--repo ${{ github.repository_owner }}/" + target_name + " \\",
