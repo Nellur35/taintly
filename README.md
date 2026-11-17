@@ -323,6 +323,20 @@ job, canceled pipeline and ZIP archive inventory. The result
 archive acceptance and preserves the final job status. Archive bytes,
 later availability and wider permissions require separate evidence.
 
+For a failed job in a merge-request pipeline running in the fork's own project,
+use schema `gitlab-fork-project-archive-v1` and pass the fork's project ID
+to the same command. Supply `fork`, `target`, `mr`, `pipeline`, `job`,
+`commit`, `mr_pipeline`, `source_sha256` and `log`. The project records
+use `id`, `path_with_namespace` and `web_url`. The fork's `forked_from`
+record uses the target's `id` and `path_with_namespace`. `mr_pipeline` is
+the selected entry in GitLab's target MR pipeline list. Set the fork's
+current MR head, checkout revision and source branch from provider records.
+Supply `.gitlab-ci.yml` at that exact commit. Preserve the eight runner
+rows above, with the failure upload section and its owned HTTP 201.
+The result `fork-project-archive-upload-observed` names the fork's job
+archive. Archive contents and authority in the MR target project remain
+unverified.
+
 An observed archive upload covers only the selected job and artifact
 member. Published Pages content, push access to registries, protected
 variables, and authorization to play a manual job require separate

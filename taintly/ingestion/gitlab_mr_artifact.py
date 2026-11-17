@@ -60,6 +60,14 @@ _CANCELED_SCOPE = (
     "Archive bytes, retention, content provenance, wider credential grants and download audience "
     "require separate evidence."
 )
+_FORK_ARCHIVE_SCHEMA = "gitlab-fork-project-archive-v1"
+_FORK_ARCHIVE_SCOPE = (
+    "Trusted saved GitLab MR, project, pipeline, job and runner records establish "
+    "the accepted archive request for this job in the fork project. Artifact bytes, "
+    "effective configuration, content ancestry, and authority in the MR target project "
+    "require separate evidence."
+)
+_FORK_BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
 
 
 def _need(condition: object, reason: str) -> None:
@@ -412,6 +420,38 @@ def _canceled_upload(data: _Row, job_url: str) -> _Row:
         and _SHA256.fullmatch(str(log["sha256"])),
         "saved trace and archive inventory do not identify the canceled producer job",
     )
+    reply = (
+        r'01E Uploading artifacts as "archive" to coordinator\.\.\. 201 Created +'
+        rf"correlation_id=[0-9a-f]{{32}} id={job['id']} status=201"
+    )
+    phase, response = _archive_upload_rows(log, pipeline, job, reply, "canceled-job")
+    return {
+        "state": "job-artifact-accepted-canceled-job",
+        "job_status": "canceled",
+        "upload_phase": phase,
+        "scope": _CANCELED_SCOPE,
+        "publication": _archive_receipt(job_url, log, response, archives[0]["size"]),
+    }
+
+
+def _archive_receipt(job_url: str, log: _Row, response: _Row, size: int) -> _Row:
+    return {
+        "operation": "gitlab-runner-job-archive",
+        "artifact_type": "archive",
+        "authority": "owning-job-upload",
+        "http_status": 201,
+        "reported_at": response["time"],
+        "upload_line_sha256": response["sha256"],
+        "trace_sha256": log["sha256"],
+        "target": job_url + "/artifacts/download",
+        "inventory_bytes": size,
+        "retrieval": "unverified",
+    }
+
+
+def _archive_upload_rows(
+    log: _Row, pipeline: _Row, job: _Row, reply: str, label: str
+) -> tuple[str, _Row]:
     rows = log["rows"]
     _need(
         isinstance(rows, list) and len(rows) == 8,
@@ -436,20 +476,20 @@ def _canceled_upload(data: _Row, job_url: str) -> _Row:
         start + "step_script",
         end + "step_script",
         start + phase,
-        r'01E Uploading artifacts as "archive" to coordinator\.\.\. 201 Created +'
-        rf"correlation_id=[0-9a-f]{{32}} id={job['id']} status=201",
+        reply,
         end + phase,
     )
     times = []
+    job_label = label.replace("-", " ")
     for row, pattern in zip(rows, patterns, strict=True):
         value = row["value"]
         stamp = row["time"]
-        when = _time(stamp, "canceled job trace time")
+        when = _time(stamp, f"{job_label} trace time")
         line = (
             re.fullmatch(pattern, value) if isinstance(value, str) and len(value) <= 1024 else None
         )
         if line is None or hashlib.sha256(f"{stamp} {value}".encode()).hexdigest() != row["sha256"]:
-            raise RegistryJobError("saved canceled-job line does not match its owning runner phase")
+            raise RegistryJobError(f"saved {label} line does not match its owning runner phase")
         _need(
             not line.lastindex or int(line[1]) == int(when.timestamp()),
             "runner section epoch conflicts with its trace timestamp",
@@ -457,31 +497,107 @@ def _canceled_upload(data: _Row, job_url: str) -> _Row:
         times.append(when)
     _need(
         _time(pipeline["created_at"], "owning pipeline creation")
-        <= _time(job["started_at"], "canceled job start")
+        <= _time(job["started_at"], f"{job_label} start")
         <= times[0]
         < times[-1]
-        <= _time(job["finished_at"], "canceled job end")
+        <= _time(job["finished_at"], f"{job_label} end")
         <= _time(pipeline["updated_at"], "owning pipeline last update")
         and all(a < b for a, b in pairwise(times)),
-        "saved canceled-job runner rows are outside the job or out of phase order",
+        f"saved {label} runner rows are outside the job or out of phase order",
+    )
+    return phase, rows[6]
+
+
+def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job_id: int) -> _Row:
+    target, fork, mr = data["target"], data["fork"], data["mr"]
+    pipeline, job, log = data["pipeline"], data["job"], data["log"]
+    source_path = _value(fork["path_with_namespace"], _PROJECT, "GitLab fork project path")
+    target_path = _value(target["path_with_namespace"], _PROJECT, "GitLab MR target path")
+    owner = _identifier(fork["id"], "fork project")
+    destination = _identifier(target["id"], "MR target project")
+    iid = _identifier(mr["iid"], "merge request IID")
+    revision = _value(pipeline["sha"], _SHA, "fork pipeline revision")
+    ref = _value(mr["source_branch"], _FORK_BRANCH, "MR source branch")
+    fork_url = f"https://gitlab.com/{source_path}"
+    target_url = f"https://gitlab.com/{target_path}"
+    pipeline_url = f"{fork_url}/-/pipelines/{pipeline_id}"
+    job_url = f"{fork_url}/-/jobs/{job_id}"
+    _need(
+        owner == project_id == _identifier(mr["source_project_id"], "MR source project")
+        and destination == _identifier(mr["target_project_id"], "MR target project")
+        and owner != destination
+        and source_path != target_path
+        and fork["forked_from"] == {"id": destination, "path_with_namespace": target_path}
+        and fork["web_url"] == fork_url
+        and target["web_url"] == target_url
+        and mr["web_url"] == f"{target_url}/-/merge_requests/{iid}",
+        "requested project does not own this fork job or match the recorded MR target",
+    )
+    membership = data["mr_pipeline"]
+    _need(
+        _identifier(pipeline["id"], "fork pipeline") == pipeline_id
+        and pipeline["project_id"] == owner
+        and pipeline["source"] == "merge_request_event"
+        and pipeline["status"] in {"success", "failed"}
+        and pipeline["ref"] == ref
+        and pipeline["web_url"] == pipeline_url
+        and all(
+            membership[key] == pipeline[key]
+            for key in ("id", "project_id", "sha", "ref", "web_url")
+        )
+        and revision == mr["sha"] == data["commit"]["id"]
+        and data["commit"]["web_url"] == f"{fork_url}/-/commit/{revision}",
+        "saved fork commit, current MR head or pipeline membership does not agree",
+    )
+    archives = [item for item in job["artifacts"] if item["file_type"] == "archive"]
+    _need(
+        _identifier(job["id"], "fork job") == job_id
+        and job["web_url"] == job_url
+        and job["status"] == "failed"
+        and job["failure_reason"] == "script_failure"
+        and all(
+            job["pipeline"][key] == pipeline[key]
+            for key in ("id", "project_id", "sha", "ref", "source")
+        )
+        and len(archives) == 1
+        and _identifier(archives[0]["size"], "saved archive size")
+        and archives[0]["file_format"] == "zip"
+        and _identifier(log["job"], "fork runner trace job") == job_id
+        and log["url"] == job_url + "/raw"
+        and _SHA256.fullmatch(str(log["sha256"])),
+        "saved runner trace and archive inventory do not match the fork-owned failed job",
+    )
+    source_hash = hashlib.sha256(
+        _source_bytes(root, root / ".gitlab-ci.yml", "selected fork GitLab source")
+    ).hexdigest()
+    _need(
+        source_hash == data["source_sha256"], "GitLab configuration differs from saved fork source"
+    )
+    reply = (
+        r'01E Uploading artifacts as "archive" to coordinator\.\.\. 201 Created +'
+        r"correlation_id=(?:[0-9a-f]{32}|[0-9a-f]{16}-[A-Z]{3}) "
+        rf"id={job_id} (?:status=201|responseStatus=201 Created)"
+    )
+    phase, response = _archive_upload_rows(log, pipeline, job, reply, "fork-job")
+    _need(
+        phase == "upload_artifacts_on_failure", "fork archive is outside the failure-upload phase"
     )
     return {
-        "state": "job-artifact-accepted-canceled-job",
-        "job_status": "canceled",
+        "state": "fork-project-archive-upload-observed",
+        "repository": source_path,
+        "project": owner,
+        "target_repository": target_path,
+        "target_project": destination,
+        "pipeline": pipeline_id,
+        "job": job_id,
+        "mr": iid,
+        "revision": revision,
+        "source_path": ".gitlab-ci.yml",
+        "source_sha256": source_hash,
+        "job_status": "failed",
         "upload_phase": phase,
-        "scope": _CANCELED_SCOPE,
-        "publication": {
-            "operation": "gitlab-runner-job-archive",
-            "artifact_type": "archive",
-            "authority": "owning-job-upload",
-            "http_status": 201,
-            "reported_at": rows[6]["time"],
-            "upload_line_sha256": rows[6]["sha256"],
-            "trace_sha256": log["sha256"],
-            "target": job_url + "/artifacts/download",
-            "inventory_bytes": archives[0]["size"],
-            "retrieval": "unverified",
-        },
+        "scope": _FORK_ARCHIVE_SCOPE,
+        "publication": _archive_receipt(job_url, log, response, archives[0]["size"]),
     }
 
 
@@ -951,6 +1067,10 @@ def mr_artifact_observation(
                 publisher is None, "the image observation does not assess npm publisher admission"
             )
             return branch_image_observation(data, root.resolve(), project, pipeline, job)
+        if data.get("schema") == _FORK_ARCHIVE_SCHEMA:
+            scope = _FORK_ARCHIVE_SCOPE
+            _need(publisher is None, "fork archive evidence covers its own upload only")
+            return _fork_archive(data, root.resolve(), project, pipeline, job)
         _need(
             data.get("schema") == "gitlab-mr-artifact-v1", "unsupported artifact observation schema"
         )

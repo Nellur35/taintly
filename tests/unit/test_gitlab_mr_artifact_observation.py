@@ -574,3 +574,70 @@ def test_canceled_job_requires_its_own_archive_acceptance(tmp_path, canceled_cap
     result = evaluate(tmp_path, canceled_capture)
     assert result["state"] == "unresolved"
     assert "publication" not in result
+
+
+@pytest.fixture
+def fork_upload(canceled_capture):
+    target_url, fork_url = "https://gitlab.com/team/repo", "https://gitlab.com/team/fork"
+    ref = "branch-from-fork"
+    pipeline = canceled_capture["pipeline"]
+    pipeline.update(project_id=2, ref=ref, sha=HEAD, status="success", web_url=f"{fork_url}/-/pipelines/22")
+    job = canceled_capture["job"]
+    job.update(status="failed", failure_reason="script_failure", pipeline={**pipeline}, web_url=f"{fork_url}/-/jobs/33")
+    log = canceled_capture["canceled_archive"]["log"]
+    log["url"] = job["web_url"] + "/raw"
+    log["rows"][1] = _failure_trace_row(log["rows"][1]["time"],
+        f"01O Checking out {HEAD[:8]} as detached HEAD (ref is {ref})...")
+    return {
+        "schema": "gitlab-fork-project-archive-v1",
+        "target": {"id": 1, "path_with_namespace": "team/repo", "web_url": target_url},
+        "fork": {"id": 2, "path_with_namespace": "team/fork", "web_url": fork_url,
+                 "forked_from": {"id": 1, "path_with_namespace": "team/repo"}},
+        "mr": {"iid": 9, "source_project_id": 2, "target_project_id": 1,
+               "source_branch": ref, "sha": HEAD, "web_url": f"{target_url}/-/merge_requests/9"},
+        "pipeline": pipeline,
+        "mr_pipeline": {**pipeline},
+        "commit": {"id": HEAD, "web_url": f"{fork_url}/-/commit/{HEAD}"},
+        "job": job,
+        "log": log,
+    }
+
+
+def _evaluate_fork(root, data, selected=2):
+    source = BUILDSPEC.encode()
+    (root / ".gitlab-ci.yml").write_bytes(source)
+    data["source_sha256"] = hashlib.sha256(source).hexdigest()
+    snapshot = root / "observation.json"
+    snapshot.write_text(json.dumps(data), encoding="utf-8")
+    return mr_artifact_observation(snapshot, root, selected, 22, 33)
+
+
+@pytest.mark.parametrize("suffix", ["status=201", "responseStatus=201 Created"])
+def test_fork_archive_acceptance_identifies_fork_and_parent_separately(tmp_path, fork_upload, suffix):
+    row = fork_upload["log"]["rows"][6]
+    fork_upload["log"]["rows"][6] = _failure_trace_row(row["time"],
+        f'01E Uploading artifacts as "archive" to coordinator... 201 Created  '
+        f'correlation_id=0123456789abcdef-SJC id=33 {suffix}')
+    result = _evaluate_fork(tmp_path, fork_upload)
+    assert result["state"] == "fork-project-archive-upload-observed"
+    assert (result["project"], result["target_project"]) == (2, 1)
+    assert result["publication"]["target"] == "https://gitlab.com/team/fork/-/jobs/33/artifacts/download"
+    assert result["publication"]["retrieval"] == "unverified"
+
+
+@pytest.mark.parametrize("mutation", ["canonical-target", "wrong-membership", "new-mr-head", "denied-response"])
+def test_fork_archive_refuses_contradictory_source_or_result(tmp_path, fork_upload, mutation):
+    project = 2
+    if mutation == "canonical-target":
+        project = 1
+    elif mutation == "wrong-membership":
+        fork_upload["mr_pipeline"]["id"] = 23
+    elif mutation == "new-mr-head":
+        fork_upload["mr"]["sha"] = BASE
+    else:
+        row = fork_upload["log"]["rows"][6]
+        fork_upload["log"]["rows"][6] = _failure_trace_row(row["time"],
+            row["value"].replace("201 Created", "403 Forbidden").replace("status=201", "status=403"))
+    result = _evaluate_fork(tmp_path, fork_upload, project)
+    assert result["state"] == "unresolved"
+    assert "publication" not in result
