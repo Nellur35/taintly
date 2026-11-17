@@ -47,15 +47,18 @@ def _timestamp(value: object) -> float:
     return float(value)
 
 
-def _phase_window(build: dict[str, Any], name: str) -> tuple[float, float]:
+def _phase_window(
+    build: dict[str, Any], name: str, *, status: str = "SUCCEEDED"
+) -> tuple[float, float]:
     phases = build.get("phases")
     matches = (
         [phase for phase in phases if isinstance(phase, dict) and phase.get("phaseType") == name]
         if isinstance(phases, list)
         else []
     )
-    if len(matches) != 1 or matches[0].get("phaseStatus") != "SUCCEEDED":
-        raise SnapshotError(f"The deployment receipt lacks a successful owning {name} phase")
+    if len(matches) != 1 or matches[0].get("phaseStatus") != status:
+        expected = "successful" if status == "SUCCEEDED" else "failed"
+        raise SnapshotError(f"The deployment receipt lacks a {expected} owning {name} phase")
     phase = matches[0]
     lower, upper = _timestamp(phase.get("startTime")), _timestamp(phase.get("endTime"))
     _need(

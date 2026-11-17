@@ -678,6 +678,25 @@ needed to follow up. CodeBuild-packaged archives require a different profile.
 The exact service-role session, general IAM permissions and subsequent use
 remain unverified. Inconsistent or missing evidence returns exit 11.
 
+Use the same command with a full public `BUILD_ID` (`project:uuid`) and
+`codebuild-managed-s3-empty-primary-v1` for a failed, completed PR build
+with no matching primary artifact paths. The trusted receipt contains
+`build` (including the selected revision, inline buildspec and exact phase
+records), `provider` (the selected `build` ID and build-specific `s3Arn`
+directory), and `logs` (the selected `build` ID, the inline buildspec
+`selection` row, and the ordered `upload` rows). Preserve the primary
+root archive-selector expansion rows, report auto-discovery boundary,
+terminal failed upload row and the corresponding no-paths client error.
+The local repository must contain the selected PR commit.
+
+`primary-artifact-paths-unmatched` reports the CodeBuild selection result
+and exact directory. The profile requires a failed BUILD phase followed
+by POST_BUILD and primary S3 directory output at `codebuild/project/uuid/project`
+with `NONE` packaging. The root selectors must be a plain block list.
+Automatic report discovery is separate from primary
+artifact selection. The mode retains exit 11 because effective S3 authority
+and other writes remain unverified.
+
 ### Saved CodeBuild deployment skip
 
 Use a trusted saved CodeBuild build and runner receipt with the matching Git checkout.

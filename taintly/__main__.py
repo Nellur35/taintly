@@ -206,8 +206,8 @@ def main():
     evidence_input.add_argument(
         "--codebuild-public-s3-observation",
         nargs=3,
-        metavar=("JSON", "BUILD_ARN", "GITHUB_ORIGIN"),
-        help="Corroborate a saved CodeBuild-managed S3 ZIP and its source member.",
+        metavar=("JSON", "BUILD_ARN_OR_ID", "GITHUB_ORIGIN"),
+        help="Corroborate a saved CodeBuild-managed S3 output observation.",
     )
     evidence_input.add_argument(
         "--codebuild-public-deploy-observation",
@@ -2061,6 +2061,15 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
         print(f"  Changed source in ZIP: {result['influence']['archive_member']}")
         print(result["scope"])
         print(result["next_evidence"])
+    elif result["state"] == "primary-artifact-paths-unmatched":
+        print(f"CodeBuild {result['build']} reported no matches for its primary S3 artifact paths.")
+        print(
+            f"  Selected source: {result['repository']} {result['source_ref']} ({result['head']})."
+        )
+        for selector in result["source_plan"]["artifact_selectors"]:
+            print(f"  Inline buildspec line {selector['line']}: {selector['path']}")
+        print(f"  CodeBuild-reported directory: {result['publication']['directory_arn']}")
+        print(result["scope"])
     else:
         print(f"CodeBuild S3 observation unresolved: {result['reason']}")
         print(result["scope"])
