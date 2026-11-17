@@ -101,6 +101,35 @@ def test_successful_check_does_not_replace_artifact_bytes(tmp_path, capture):
     assert evaluate(tmp_path, capture)["state"] == "unresolved"
 
 
+@pytest.mark.parametrize(
+    ("namespace", "expected"),
+    [("io/jenkins/plugins", "publication-observed"), ("io/other/plugins", "unresolved")],
+)
+def test_plugin_coordinates_allow_only_supported_namespaces(tmp_path, capture, namespace, expected):
+    original = "org/jenkins-ci/plugins"
+    capture["registry"]["path"] = capture["registry"]["path"].replace(original, namespace)
+    directory = DIRECTORY.replace(original, namespace)
+    capture["checks"][1].update(details_url=directory, summary=f"[git]({directory})")
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == expected
+    if expected == "publication-observed":
+        assert result["publication"]["object_url"] == directory + "git-1.2.hpi"
+
+
+def test_publisher_target_must_match_registry_even_if_summary_has_both_links(tmp_path, capture):
+    other = DIRECTORY.replace("/git/", "/another-plugin/")
+    capture["checks"][1].update(
+        details_url=other,
+        summary=f"[git]({DIRECTORY})\n[another plugin]({other})",
+    )
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "unresolved"
+    assert (
+        result["reason"]
+        == "publisher check, registry target and recorded write identity do not agree"
+    )
+
+
 def test_lzma_manifest_is_unresolved_before_decompression(tmp_path, capture):
     raw = package(HEAD, compression=zipfile.ZIP_LZMA)
     (tmp_path / "package.zip").write_bytes(raw)

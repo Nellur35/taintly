@@ -152,6 +152,11 @@ and `summary` from the publisher check), and the Artifactory File Info
 `registry` record. Preserve file size, path, creation time, creation and
 modification identities, and the SHA-256 checksum.
 
+For plugin HPIs, the registry path can use `org.jenkins-ci.plugins` or
+`io.jenkins.plugins` as the Maven group. The publisher check's target
+and its download link must identify the exact directory of the saved
+registry object.
+
 The report links the observed registry operation, writing identity,
 package bytes, revision and exact target. It also reports the Jenkins PR
 job whose check identifies the same revision. The publisher check does
