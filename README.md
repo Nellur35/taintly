@@ -487,6 +487,30 @@ even when GitHub reports a successful job. Missing or incompatible evidence
 returns exit 11. Exact merged workflow bytes, runtime token identity,
 the effective policy and release asset publication remain unverified.
 
+For the pinned Release Drafter v7.7.0 checkout profile, the same command
+accepts an owned job-log projection in `verified_log`. The fork trigger
+must declare the usual opened, reopened and synchronize events without
+branch or path filters. Use the workflow
+bytes from the observed synthetic PR merge. Include `run`, `job`, `attempt`,
+`log_sha256`, `merge_commit`, `base_commit`, `merge_parents`,
+`merge_record_sha256`, `annotation_list_sha256`, `action_commit`, an owned `failure_annotation` (check ID, level, and message), and the
+bounded `rows` projection. Retain these markers in order:
+
+1. The GitHub token-permissions group with `Contents: read`, then the
+   pinned action download in job setup.
+2. The checkout action group and checked-out merge commit in the checkout step.
+3. The Release Drafter step's start, config fetched from the owning PR merge
+   ref, absence of an existing draft, target, draft flag, create branch and
+   error identifying the create-release operation.
+4. The checkout post-job and runner cleanup markers.
+
+Use the same timestamp and per-line hash format described below. Supply the
+matching run, actor, check, custody hashes, job steps and fork identity. Exit 0 with
+`draft-release-create-rejection-reported` means the job log supplies the
+effective Contents grant and the action's rejection. The transport status
+is unknown and shown as `null` in JSON. An update, ambiguous permission
+group or unrelated log does not answer this question.
+
 The same command accepts a direct repository push with a single Release Drafter
 `@v7` step when the saved setup log identifies action commit
 `978bb0b30c5ee8cdd332ced253758157150d43f0`. Supply the matching job `steps`, run
