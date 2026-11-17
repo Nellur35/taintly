@@ -382,8 +382,8 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             pull["number"] == pr
             and pull["base_repository"] == repo
             and pull["head_is_fork"] is True
-            and pull["head_repository"] != repo
             and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", pull["head_repository"])
+            and pull["head_repository"].lower() != repo
             and re.fullmatch(r"[a-f0-9]{40}", head)
             and run["url"] == job
             and run["number"] == int(job.rstrip("/").rsplit("/", 1)[1])

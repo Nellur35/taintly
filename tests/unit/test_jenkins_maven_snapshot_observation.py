@@ -144,6 +144,14 @@ def test_correlates_owned_fork_command_with_stored_writer(tmp_path, capture):
     assert result["source"]["line"] == 3
 
 
+@pytest.mark.parametrize("head_repository", ["apache/example", "Apache/Example"])
+def test_same_github_repository_cannot_supply_fork_identity(tmp_path, capture, head_repository):
+    capture["pull"]["head_repository"] = head_repository
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "unresolved"
+    assert "fork PR identity" in result["reason"]
+
+
 def test_refuses_digest_from_sibling_node(tmp_path, capture):
     capture["deploy_log"]["node_id"] = "9"
     result = evaluate(tmp_path, capture)
