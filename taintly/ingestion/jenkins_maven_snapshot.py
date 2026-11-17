@@ -46,13 +46,15 @@ _SCOPE = (
 _Row = dict[str, Any]
 
 
-def _source_bytes(root: Path, data: _Row, revision: str, name: str) -> bytes:
+def _source_bytes(
+    root: Path, data: _Row, revision: str, name: str, *, path: str = "Jenkinsfile"
+) -> bytes:
     raw = _project_file(root, f"source/{name}", 50000)
     blob = hashlib.sha1(
         b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw, usedforsecurity=False
     ).hexdigest()
     _require(
-        data["path"] == "Jenkinsfile"
+        data["path"] == path
         and data["commit"] == revision
         and data["blob"] == blob
         and data["sha256"] == hashlib.sha256(raw).hexdigest(),
@@ -347,6 +349,7 @@ def _registry(
 
 def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target: str) -> _Row:
     from .jenkins_filevault import FILEVAULT_SCHEMA, FILEVAULT_SCOPE, filevault_exclusion
+    from .jenkins_matrix_snapshot import MATRIX_SCHEMA, MATRIX_SCOPE, matrix_snapshot_observation
 
     scope = _SCOPE
     try:
@@ -360,6 +363,9 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         if capture["schema"] == FILEVAULT_SCHEMA:
             scope = FILEVAULT_SCOPE
             return filevault_exclusion(root, capture, repo, pr, job, target)
+        if capture["schema"] == MATRIX_SCHEMA:
+            scope = MATRIX_SCOPE
+            return matrix_snapshot_observation(root, capture, repo, pr, job, target)
         _require(
             capture["schema"] == "jenkins-asf-maven-snapshot-v1"
             and re.fullmatch(r"apache/[a-z0-9][a-z0-9-]{0,110}", repo)
