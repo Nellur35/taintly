@@ -1,4 +1,4 @@
-"""Corroborate a CodeBuild-managed S3 ZIP and one source-bound archive member."""
+"""Corroborate source-bound observations about CodeBuild-managed S3 output."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import stat
 import zipfile
 import zlib
 from email.utils import parsedate_to_datetime
+from itertools import pairwise
 from math import ceil, floor
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,14 @@ _PATH = rf"{_SEGMENT}(?:/{_SEGMENT})*"
 _BUCKET = r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]"
 _SHA256 = re.compile(r"[a-f0-9]{64}")
 _ZIP_GLOB = re.compile(r"[A-Za-z0-9_.-]*\*\.zip")
+_ARCHIVE_GLOB = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,79}\*\.(?:zip|tgz)")
+_EMPTY_SCHEMA = "codebuild-managed-s3-empty-primary-v1"
+_EMPTY_MATCH = "no matching artifact paths found"
+_EMPTY_SCOPE = (
+    "Scope: primary S3 artifact selection in one build, based on trusted saved CodeBuild "
+    "build and runner records. S3 permissions, the service-role session, and other writes "
+    "remain unverified."
+)
 _PR_REPO = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+")
 _ARCHIVE_LIMIT = 3_000_000
 _MEMBER_LIMIT = 131_072
@@ -272,16 +281,177 @@ def _archive_witness(raw: bytes, witness: _Row, root: Path, pr: _Row) -> dict[st
     }
 
 
+def _empty_primary_selection(cap: _Row, root: Path, build_id: str, origin: str) -> _Row:
+    _need(
+        BUILD_ID.fullmatch(build_id), "The empty primary profile requires the exact public build ID"
+    )
+    build = _owned_record(cap.get("build"), "id", build_id)
+    logs = _owned_record(cap.get("logs"), "build", build_id)
+    artifact = _owned_record(cap.get("provider"), "build", build_id)
+    project, uuid = build_id.split(":", 1)
+    _need(
+        build.get("projectName") == project
+        and build.get("buildComplete") is True
+        and build.get("buildStatus") == "FAILED"
+        and build.get("secondaryArtifacts") == build.get("secondarySources") == []
+        and build.get("artifacts") == {"type": "S3", "packaging": "NONE"},
+        "Expected a failed single-source CodeBuild run using primary S3 directory output",
+    )
+    source = _map(build.get("source"), "CodeBuild source")
+    identity = _github_identity(origin)
+    head = _matches(
+        build.get("resolvedSourceVersion"), re.compile(r"[a-f0-9]{40}"), "exact PR revision"
+    )
+    ref = _matches(
+        build.get("sourceVersion"), re.compile(r"pr/[1-9][0-9]{0,9}"), "PR source reference"
+    )
+    _need(
+        source.get("type") == "GITHUB" and _github_identity(source.get("location")) == identity,
+        "The CodeBuild source does not match the supplied GitHub repository",
+    )
+    _require_git_revision(root, identity, head, "PR head")
+    prefix = _matches(
+        artifact.get("s3Arn"),
+        re.compile(rf"arn:aws:s3:::{_BUCKET}/{_PATH}"),
+        "primary S3 directory ARN",
+    )
+    _need(
+        prefix.removeprefix("arn:aws:s3:::").split("/")[1:]
+        == ["codebuild", project, uuid, project],
+        "The directory ARN does not match the supported path for the selected project and build",
+    )
+
+    inline = source.get("buildspec")
+    if not isinstance(inline, str) or "\n" not in inline or len(inline) > 32768:
+        raise SnapshotError("Expected a bounded inline buildspec")
+    issue = _buildspec_structure_limit("buildspec.yml", inline, run=True)
+    _need(issue is None, issue or "")
+    events = unambiguous_checkout_events("buildspec.yml", inline)
+    keys = [
+        event
+        for event in events
+        if event.kind is EventKind.MAP_KEY and event.path[:1] == ("artifacts",)
+    ]
+    selectors = [
+        event
+        for event in events
+        if event.kind is EventKind.LEAF_SCALAR and event.path[:2] == ("artifacts", "files")
+    ]
+    _need(
+        any(
+            event.path == ("version",) and event.value == "0.2"
+            for event in events
+            if event.kind is EventKind.LEAF_SCALAR
+        )
+        and [event.path for event in keys] == [("artifacts",), ("artifacts", "files")]
+        and 1 <= len(selectors) <= 8
+        and all(
+            event.path == ("artifacts", "files", index) and type(event.path[-1]) is int
+            for index, event in enumerate(selectors)
+        ),
+        "Expected version 0.2 with one primary root artifact file list",
+    )
+    globs = [_matches(event.value, _ARCHIVE_GLOB, "root archive selector") for event in selectors]
+    _need(len(set(globs)) == len(globs), "Primary archive selectors are ambiguous")
+    # The structural reader may omit empty sequence items. Corroborate all lines
+    # of the supported plain block list, including any additional missing value.
+    lines = inline.splitlines()
+    first_key, files_key = keys
+    block = []
+    for number, line in enumerate(lines[first_key.line :], first_key.line + 1):
+        content = line.split("#", 1)[0].rstrip()
+        if not content.strip():
+            continue
+        if not content.startswith((" ", "\t")):
+            break
+        block.append((number, content.strip()))
+    _need(
+        lines[first_key.line - 1].split("#", 1)[0].rstrip() == "artifacts:"
+        and block
+        == [
+            (files_key.line, "files:"),
+            *((event.line, f"- {glob}") for event, glob in zip(selectors, globs, strict=True)),
+        ],
+        "Primary artifact file list is outside the supported complete plain block shape",
+    )
+
+    selected, _ = _record(
+        logs.get("selection"), r"YAML location is /codebuild/readonly/buildspec\.yml"
+    )
+    dl_start, dl_end = _phase_window(build, "DOWNLOAD_SOURCE")
+    build_start, build_end = _phase_window(build, "BUILD", status="FAILED")
+    post_start, post_end = _phase_window(build, "POST_BUILD")
+    upload_start, upload_end = _phase_window(build, "UPLOAD_ARTIFACTS", status="FAILED")
+    phase = next(item for item in build["phases"] if item["phaseType"] == "UPLOAD_ARTIFACTS")
+    _need(
+        phase.get("contexts") == [{"statusCode": "CLIENT_ERROR", "message": _EMPTY_MATCH}],
+        "The owning upload phase does not report missing primary artifact paths",
+    )
+    upload = logs.get("upload")
+    patterns = [
+        *("Expanding " + re.escape(glob) for glob in globs),
+        r"Set report auto-discover timeout to [1-9][0-9]* seconds",
+        "Phase complete: UPLOAD_ARTIFACTS State: FAILED",
+        "Phase context status code: CLIENT_ERROR Message: " + _EMPTY_MATCH,
+    ]
+    if not isinstance(upload, list) or len(upload) != len(patterns):
+        raise SnapshotError("Primary selection and automatic report boundaries are incomplete")
+    times = [_record(row, pattern)[0] for row, pattern in zip(upload, patterns, strict=True)]
+    _need(
+        dl_start
+        <= selected
+        <= dl_end
+        <= build_start
+        < build_end
+        <= post_start
+        < post_end
+        <= upload_start
+        <= times[0]
+        <= times[-1]
+        <= upload_end
+        and all(left < right for left, right in pairwise(times)),
+        "The saved primary selection does not precede report discovery within the owning upload phase",
+    )
+    return {
+        "state": "primary-artifact-paths-unmatched",
+        "build": build_id,
+        "repository": identity,
+        "head": head,
+        "source_ref": ref,
+        "source_plan": {
+            "kind": "provider-inline",
+            "sha256": hashlib.sha256(inline.encode()).hexdigest(),
+            "artifact_selectors": [
+                {"path": glob, "line": event.line}
+                for glob, event in zip(globs, selectors, strict=True)
+            ],
+        },
+        "publication": {
+            "operation": "codebuild-managed-s3-artifact-upload",
+            "directory_arn": prefix,
+            "selection": "no-matching-primary-paths",
+            "authorization": "unverified",
+            "service_role_session": "unverified",
+        },
+        "scope": _EMPTY_SCOPE,
+    }
+
+
 def codebuild_s3_observation(path: Path, root: Path, build_arn: str, origin: str) -> _Row:
-    """Corroborate one retrieved output file without fetching or running anything."""
+    """Corroborate the supplied managed-output observation offline."""
+    scope = _SCOPE
     try:
+        _need(path.is_file(), "A regular saved receipt is required")
+        cap = _read_capture(path, "CodeBuild managed S3 receipt")
+        if cap.get("schema") == _EMPTY_SCHEMA:
+            scope = _EMPTY_SCOPE
+            return _empty_primary_selection(cap, root.resolve(), build_arn, origin)
         expected = _BUILD_ARN.fullmatch(build_arn)
         _need(
-            expected and path.is_file(),
-            "A full CodeBuild ARN and regular saved receipt are required",
+            expected,
+            "A full CodeBuild ARN is required for a retrieved output file",
         )
         region, build_id = expected.groups() if expected else ("", "")
-        cap = _read_capture(path, "CodeBuild managed S3 receipt")
         _need(
             cap.get("schema") == "codebuild-managed-s3-v1", "Unsupported managed S3 receipt schema"
         )
@@ -356,4 +526,4 @@ def codebuild_s3_observation(path: Path, root: Path, build_arn: str, origin: str
             if isinstance(exc, SnapshotError)
             else "Malformed or unreadable managed S3 evidence"
         )
-        return {"state": "unresolved", "reason": reason, "scope": _SCOPE}
+        return {"state": "unresolved", "reason": reason, "scope": scope}
