@@ -183,7 +183,6 @@ def _assess(data: _Row, root: Path, repository: str, number: int, check_id: int)
     )
     core = repo[1] == "jenkins"
     family = "Core" if core else "Plugins"
-    namespace = "main" if core else "plugins"
     escaped = re.escape(repo[1])
     check = _one(
         [row for row in data["checks"] if row["id"] == check_id],
@@ -214,9 +213,9 @@ def _assess(data: _Row, root: Path, repository: str, number: int, check_id: int)
     )
     _require(_id(publisher["id"]), "publisher check ID is unavailable")
     registry = data["registry"]
-    coordinate = re.fullmatch(
-        rf"/org/jenkins-ci/{namespace}/({_NAME})/({_NAME})/\1-\2\.(jar|hpi)", registry["path"]
-    )
+    registry_path = registry["path"]
+    namespace = "org/jenkins-ci/main" if core else "(?:org/jenkins-ci|io/jenkins)/plugins"
+    coordinate = re.fullmatch(rf"/{namespace}/({_NAME})/({_NAME})/\1-\2\.(jar|hpi)", registry_path)
     if coordinate is None:
         raise IncrementalsEvidenceError("registry object is outside the expected Maven coordinate")
     artifact, version, extension = coordinate.groups()
@@ -233,14 +232,18 @@ def _assess(data: _Row, root: Path, repository: str, number: int, check_id: int)
         and created.replace(microsecond=0) <= _time(publisher["completed_at"]),
         "registry creation and publication check fall outside the selected Jenkins job",
     )
-    directory = f"{_REGISTRY}org/jenkins-ci/{namespace}/{artifact}/{version}/"
+    directory = _REGISTRY + registry_path[1 : registry_path.rindex("/") + 1]
     links = re.findall(
         r"\]\((https://repo\.jenkins-ci\.org/incrementals/[^()\s]+)\)", publisher["summary"]
     )
+    # Core uploads several modules per check. Its details URL can name another
+    # module listed alongside the selected package.
+    details_url = publisher["details_url"]
+    check_target_matches = details_url in links if core else details_url == directory
     _require(
         registry["repo"] == "incrementals"
         and directory in links
-        and publisher["details_url"] in links
+        and check_target_matches
         and re.fullmatch(_NAME, registry["createdBy"])
         and registry["modifiedBy"] == registry["createdBy"],
         "publisher check, registry target and recorded write identity do not agree",
@@ -276,7 +279,7 @@ def _assess(data: _Row, root: Path, repository: str, number: int, check_id: int)
             "registry_actor": registry["createdBy"],
             "publisher_check_id": publisher["id"],
             "created": registry["created"],
-            "object_url": _REGISTRY + registry["path"][1:],
+            "object_url": _REGISTRY + registry_path[1:],
             "sha256": digest,
             "version": version,
             "manifest_revision": head,
