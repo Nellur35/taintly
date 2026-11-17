@@ -1990,6 +1990,18 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             f"  Retrieved member: {publication['target']}\n"
             f"  SHA-256: {publication['sha256']}\n{report['scope']}"
         )
+    elif state in ("registry-image-push-observed", "registry-image-push-reported"):
+        operation, source = report["operation"], report["configured"]
+        print(
+            f"GitLab runner reports pushing {operation['target']} "
+            f"at {operation['reported_digest']}.\n"
+            f"  MR !{report['mr']}, pipeline {report['pipeline']}, job {report['job']} "
+            f"({report['job_status']}), checkout {report['revision']}.\n"
+            f"  Source: {source['path']}:{source['push_line']}; "
+            f"Dockerfile: {source['dockerfile']}.\n"
+            f"  Registry digest confirmation: {operation['registry_confirmation']}.\n"
+            f"{report['scope']}"
+        )
     elif state == "manual-job-not-started":
         print(
             f"GitLab job {report['job']} remained unstarted on its manual fallback.\n"
@@ -2020,7 +2032,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             )
         else:
             print(f"Pages preview unresolved: {preview['reason']}.")
-    incomplete = state == "unresolved" or any(
+    incomplete = state in {"unresolved", "registry-image-push-reported"} or any(
         item is not None and item["state"] == "unresolved" for item in (admission, preview)
     )
     sys.exit(11 if incomplete else 0)

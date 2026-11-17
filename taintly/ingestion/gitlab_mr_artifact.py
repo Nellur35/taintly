@@ -829,8 +829,17 @@ def mr_artifact_observation(
     *,
     publisher: str | None = None,
 ) -> _Row:
+    scope = _SCOPE
     try:
         data = _load_job_receipt(snapshot)
+        from taintly.ingestion.gitlab_branch_image import SCHEMA, SCOPE, branch_image_observation
+
+        if data.get("schema") == SCHEMA:
+            scope = SCOPE
+            _need(
+                publisher is None, "the image observation does not assess npm publisher admission"
+            )
+            return branch_image_observation(data, root.resolve(), project, pipeline, job)
         _need(
             data.get("schema") == "gitlab-mr-artifact-v1", "unsupported artifact observation schema"
         )
@@ -848,4 +857,4 @@ def mr_artifact_observation(
         ValueError,
     ):
         reason = "required GitLab source, pipeline or artifact evidence is unavailable or malformed"
-    return {"state": "unresolved", "reason": reason, "scope": _SCOPE}
+    return {"state": "unresolved", "reason": reason, "scope": scope}
