@@ -230,6 +230,26 @@ matching command and workspace evidence. It leaves Nexus permissions and
 other publication paths unresolved. The review action identifies which
 Maven server binding to verify on the trusted publishing executor.
 
+For the pinned Apache Shiro matrix definition, use
+`jenkins-asf-matrix-maven-guard-v1` in `snapshot.json`. Supply the GitHub PR
+and merge-parent records, the exact loaded `.jenkins.groovy` as
+`source/pipeline.groovy` with its `source` blob record, and the trusted
+`fork` run and graph with owning stage details, controller markers and
+scoped checkout logs. The last argument is the hosted snapshots repository
+URL. This offline profile accepts saved records from a trusted collector.
+Receipt hashes help retain provenance and do not authenticate the supplied
+controller records.
+
+`remote-matrix-publisher-skipped` reports that all three recorded `Deploy`
+instances were skipped by their conditions after the recorded build and
+stash restores. It identifies the change-request guard in the exact loaded
+definition. Skips caused by an earlier build failure are unresolved for
+this profile. Stash contents, registry authority and other publication
+paths remain unresolved. If included, a `comparison` section can show an
+owned deploy invocation from the same definition on `main`. A separate
+same-window Nexus object record still leaves run-to-object attribution
+unverified.
+
 ### Saved GitLab fork MR artifact observations
 
 ```sh

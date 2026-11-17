@@ -1874,9 +1874,37 @@ def _check_jenkins_maven_snapshot(
         "snapshot-write-observed",
         "upstream-checkout-observed",
         "remote-publisher-excluded",
+        "remote-matrix-publisher-skipped",
     }
+    comparison = result.get("comparison", {})
+    registry_record = comparison.get("registry_record", {})
+    incomplete_comparison = "unresolved" in (comparison.get("state"), registry_record.get("state"))
     if args.format == "json":
         print(json.dumps({mode: result}, indent=2))
+    elif result["state"] == "remote-matrix-publisher-skipped":
+        remote = result["remote_publisher"]
+        source = result["source"]
+        stash = result["stash"]
+        print(
+            f"Jenkins PR #{result['pr']} reported {stash['reported_restores']} restores of "
+            f"stash {stash['name']} from node {stash['producer_node']}.\n"
+            f"  All {len(remote['stage_ids'])} Deploy stages were skipped by their conditions.\n"
+            f"  The loaded definition requires {remote['condition']} ({source['path']}:{source['line']}).\n"
+            f"  Candidate snapshot repository: {remote['candidate_repository']}.\n{result['scope']}"
+        )
+        if comparison.get("state") == "deploy-command-observed":
+            print(
+                f"  Main comparison: Maven deploy command observed in node {comparison['node']} at {comparison['job']}."
+            )
+        if registry_record.get("state") == "same-window-stored-record":
+            print(
+                f"  Nexus records {registry_record['recorded_writer']} for a matching module and version "
+                f"during that command's time window. Run-to-object attribution is unverified."
+            )
+        if incomplete_comparison:
+            print(
+                f"  Comparison unresolved: {registry_record.get('reason') or comparison['reason']}."
+            )
     elif result["state"] == "remote-publisher-excluded":
         remote = result["remote_publisher"]
         print(
@@ -1912,7 +1940,7 @@ def _check_jenkins_maven_snapshot(
         )
     else:
         print(f"Maven snapshot write unresolved: {result['reason']}.\n{result['scope']}")
-    sys.exit(0 if resolved else 11)
+    sys.exit(0 if resolved and not incomplete_comparison else 11)
 
 
 def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
