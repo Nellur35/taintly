@@ -153,9 +153,9 @@ and `summary` from the publisher check), and the Artifactory File Info
 modification identities, and the SHA-256 checksum.
 
 For plugin HPIs, the registry path can use `org.jenkins-ci.plugins` or
-`io.jenkins.plugins` as the Maven group. The publisher check's target
-and its download link must identify the exact directory of the saved
-registry object.
+`io.jenkins.plugins` as the Maven group. The plugin publisher check's
+target and its download link must identify the exact directory of the
+saved registry object. A Jenkins Core check can list several modules.
 
 The report links the observed registry operation, writing identity,
 package bytes, revision and exact target. It also reports the Jenkins PR

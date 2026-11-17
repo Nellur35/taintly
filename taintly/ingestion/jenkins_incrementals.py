@@ -236,10 +236,14 @@ def _assess(data: _Row, root: Path, repository: str, number: int, check_id: int)
     links = re.findall(
         r"\]\((https://repo\.jenkins-ci\.org/incrementals/[^()\s]+)\)", publisher["summary"]
     )
+    # Core uploads several modules per check. Its details URL can name another
+    # module listed alongside the selected package.
+    details_url = publisher["details_url"]
+    check_target_matches = details_url in links if core else details_url == directory
     _require(
         registry["repo"] == "incrementals"
         and directory in links
-        and publisher["details_url"] == directory
+        and check_target_matches
         and re.fullmatch(_NAME, registry["createdBy"])
         and registry["modifiedBy"] == registry["createdBy"],
         "publisher check, registry target and recorded write identity do not agree",

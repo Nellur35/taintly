@@ -130,6 +130,32 @@ def test_publisher_target_must_match_registry_even_if_summary_has_both_links(tmp
     )
 
 
+def test_core_multi_module_publisher_can_link_to_another_listed_module(tmp_path, capture):
+    source = b"infra.maybePublishIncrementals()\n"
+    blob = hashlib.sha1(
+        b"blob " + str(len(source)).encode("ascii") + b"\0" + source, usedforsecurity=False
+    ).hexdigest()
+    for filename in ("Jenkinsfile", "base.Jenkinsfile"):
+        (tmp_path / filename).write_bytes(source)
+    for entry in capture["source"].values():
+        entry.update(sha256=hashlib.sha256(source).hexdigest(), blob=blob)
+    capture["repository"] = "jenkinsci/jenkins"
+    capture["checks"][0].update(
+        external_id="Core/jenkins/PR-7#2",
+        details_url="https://ci.jenkins.io/job/Core/job/jenkins/job/PR-7/2/display/redirect",
+    )
+    path = "org/jenkins-ci/main"
+    capture["registry"]["path"] = f"/{path}/websocket-spi/1.2/websocket-spi-1.2.jar"
+    war = f"https://repo.jenkins-ci.org/incrementals/{path}/jenkins-war/1.2/"
+    selected = f"https://repo.jenkins-ci.org/incrementals/{path}/websocket-spi/1.2/"
+    capture["checks"][1].update(details_url=war, summary=f"[war]({war})\n[spi]({selected})")
+    receipt = tmp_path / "observation.json"
+    receipt.write_text(json.dumps(capture), encoding="utf-8")
+    result = incrementals_observation(receipt, tmp_path, "jenkinsci/jenkins", 7, 11)
+    assert result["state"] == "publication-observed"
+    assert result["publication"]["object_url"] == selected + "websocket-spi-1.2.jar"
+
+
 def test_lzma_manifest_is_unresolved_before_decompression(tmp_path, capture):
     raw = package(HEAD, compression=zipfile.ZIP_LZMA)
     (tmp_path / "package.zip").write_bytes(raw)
