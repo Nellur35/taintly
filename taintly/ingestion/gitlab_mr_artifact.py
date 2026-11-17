@@ -54,6 +54,14 @@ _FAILED_SCOPE = (
 )
 
 
+_CANCELED_SCOPE = (
+    "Trusted saved GitLab train, job and runner records describe the accepted archive request. "
+    "The selected source checkout and final canceled status describe the same job. "
+    "Archive bytes, retention, content provenance, wider credential grants and download audience "
+    "require separate evidence."
+)
+
+
 def _need(condition: object, reason: str) -> None:
     if not condition:
         raise RegistryJobError(reason)
@@ -268,8 +276,11 @@ def _successful(
     }
 
 
-def _historical_head(data: _Row, path: str, project: int, pipeline: int, iid: int) -> str:
-    captured = data["failed_archive"]
+def _historical_head(
+    data: _Row, path: str, project: int, pipeline: int, iid: int, profile: str
+) -> str:
+    captured = data[profile]
+    event = "merge_train" if profile == "canceled_archive" else "merged_result"
     view, fork = captured["historical_pipeline"], captured["fork_commit"]
     head = _value(view["source_sha"], _SHA, "saved pipeline fork head")
     target = _value(view["target_sha"], _SHA, "saved pipeline target head")
@@ -278,7 +289,7 @@ def _historical_head(data: _Row, path: str, project: int, pipeline: int, iid: in
         and _identifier(view["project"], "saved project") == project
         and _identifier(view["pipeline"], "saved pipeline") == pipeline
         and _identifier(view["mr"], "saved MR") == iid
-        and view["event"] == "merged_result"
+        and view["event"] == event
         and view["revision"] == data["pipeline"]["sha"]
         and data["merge"]["parent_ids"] == [target, head]
         and _identifier(fork["project"], "saved fork project") == data["mr"]["source_project_id"]
@@ -382,6 +393,94 @@ def _failed_upload(data: _Row, root: Path, job_url: str) -> _Row:
             "upload_at": rows[8]["time"],
             "upload_line_sha256": rows[8]["sha256"],
             "trace_sha256": log["sha256"],
+        },
+    }
+
+
+def _canceled_upload(data: _Row, job_url: str) -> _Row:
+    job, pipeline = data["job"], data["pipeline"]
+    log = data["canceled_archive"]["log"]
+    archives = [item for item in job["artifacts"] if item["file_type"] == "archive"]
+    _need(
+        job["status"] == pipeline["status"] == "canceled"
+        and len(archives) == 1
+        and _identifier(archives[0]["size"], "saved archive size")
+        and archives[0]["file_format"] == "zip"
+        and all(job["pipeline"][key] == pipeline[key] for key in ("created_at", "updated_at"))
+        and _identifier(log["job"], "runner trace job") == job["id"]
+        and log["url"] == job_url + "/raw"
+        and _SHA256.fullmatch(str(log["sha256"])),
+        "saved trace and archive inventory do not identify the canceled producer job",
+    )
+    rows = log["rows"]
+    _need(
+        isinstance(rows, list) and len(rows) == 8,
+        "saved runner trace lacks the complete checkout, script and archive phase sequence",
+    )
+    upload_phase = re.fullmatch(
+        r"00O\+section_start:[0-9]{1,12}:(upload_artifacts_on_(?:success|failure))",
+        str(rows[5]["value"]),
+    )
+    if upload_phase is None:
+        raise RegistryJobError("the saved result is outside a supported runner upload phase")
+    phase = upload_phase[1]
+    start = r"00O\+section_start:([0-9]{1,12}):"
+    end = r"00O section_end:([0-9]{1,12}):"
+    checkout = (
+        f"01O Checking out {pipeline['sha'][:8]} as detached HEAD (ref is {pipeline['ref']})..."
+    )
+    patterns = (
+        start + "get_sources",
+        re.escape(checkout),
+        end + "get_sources",
+        start + "step_script",
+        end + "step_script",
+        start + phase,
+        r'01E Uploading artifacts as "archive" to coordinator\.\.\. 201 Created +'
+        rf"correlation_id=[0-9a-f]{{32}} id={job['id']} status=201",
+        end + phase,
+    )
+    times = []
+    for row, pattern in zip(rows, patterns, strict=True):
+        value = row["value"]
+        stamp = row["time"]
+        when = _time(stamp, "canceled job trace time")
+        line = (
+            re.fullmatch(pattern, value) if isinstance(value, str) and len(value) <= 1024 else None
+        )
+        if line is None or hashlib.sha256(f"{stamp} {value}".encode()).hexdigest() != row["sha256"]:
+            raise RegistryJobError("saved canceled-job line does not match its owning runner phase")
+        _need(
+            not line.lastindex or int(line[1]) == int(when.timestamp()),
+            "runner section epoch conflicts with its trace timestamp",
+        )
+        times.append(when)
+    _need(
+        _time(pipeline["created_at"], "owning pipeline creation")
+        <= _time(job["started_at"], "canceled job start")
+        <= times[0]
+        < times[-1]
+        <= _time(job["finished_at"], "canceled job end")
+        <= _time(pipeline["updated_at"], "owning pipeline last update")
+        and all(a < b for a, b in pairwise(times)),
+        "saved canceled-job runner rows are outside the job or out of phase order",
+    )
+    return {
+        "state": "job-artifact-accepted-canceled-job",
+        "job_status": "canceled",
+        "upload_phase": phase,
+        "scope": _CANCELED_SCOPE,
+        "publication": {
+            "operation": "gitlab-runner-job-archive",
+            "artifact_type": "archive",
+            "authority": "owning-job-upload",
+            "http_status": 201,
+            "reported_at": rows[6]["time"],
+            "upload_line_sha256": rows[6]["sha256"],
+            "trace_sha256": log["sha256"],
+            "target": job_url + "/artifacts/download",
+            "inventory_bytes": archives[0]["size"],
+            "retrieval": "unverified",
         },
     }
 
@@ -747,9 +846,13 @@ def _assess(
     path = _value(project["path"], _PROJECT, "GitLab target project path")
     iid = _identifier(pr["iid"], "merge request IID")
     failed_archive = "failed_archive" in data
+    canceled_archive = "canceled_archive" in data
+    _need(not (failed_archive and canceled_archive), "conflicting archive observation profiles")
+    profile = "canceled_archive" if canceled_archive else "failed_archive"
+    ref_suffix = "train" if canceled_archive else "merge"
     head = (
-        _historical_head(data, path, project_id, pipeline_id, iid)
-        if failed_archive
+        _historical_head(data, path, project_id, pipeline_id, iid, profile)
+        if failed_archive or canceled_archive
         else _value(pr["sha"], _SHA, "fork head")
     )
     revision = _value(pipe["sha"], _SHA, "selected revision")
@@ -765,7 +868,7 @@ def _assess(
         )
         and pr["source_project_id"] != project_id
         and pipe["source"] == "merge_request_event"
-        and pipe["ref"] == f"refs/merge-requests/{iid}/merge"
+        and pipe["ref"] == f"refs/merge-requests/{iid}/{ref_suffix}"
         and merge["id"] == revision
         and isinstance(merge["parent_ids"], list)
         and len(merge["parent_ids"]) == 2
@@ -773,13 +876,21 @@ def _assess(
         and _SHA.fullmatch(str(merge["parent_ids"][0])),
         "MR, fork head, target project, pipeline, job or merged-result commit do not agree",
     )
-    name = _value(job["name"], _FAILED_JOB if failed_archive else _JOB, "job name")
+    name = _value(
+        job["name"], _FAILED_JOB if failed_archive or canceled_archive else _JOB, "job name"
+    )
     raw = _source_bytes(root, root / ".gitlab-ci.yml", "selected GitLab source")
     _need(
         hashlib.sha256(raw).hexdigest() == data["source_sha256"],
         "GitLab configuration differs from saved pipeline source",
     )
-    if failed_archive:
+    if canceled_archive:
+        _need(
+            publisher is None and "pages_preview" not in data,
+            "canceled archive evidence covers its own upload only",
+        )
+        detail = _canceled_upload(data, job_url)
+    elif failed_archive:
         detail = _failed_upload(data, root, job_url)
         if publisher is not None:
             detail["publication_admission"] = {

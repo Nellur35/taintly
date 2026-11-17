@@ -311,6 +311,18 @@ the coordinator and a member retrieved for that job. The command comes
 from the owned runner script section. Effective configuration and the
 effect of the fork code on the member's bytes remain unverified.
 
+For a canceled fork merge-train job, use `canceled_archive` instead of
+`failed_archive`. Supply the same historical pipeline and fork commit
+fields with `event` set to `merge_train`. Retain eight ordered runner
+rows in `log`: source section start, detached checkout, source section
+end, script section start and end, the start of the success or failure
+upload section, the job's archive HTTP 201 response with its correlation
+ID, and the matching upload section end. Use the provider's canceled
+job, canceled pipeline and ZIP archive inventory. The result
+`job-artifact-accepted-canceled-job` establishes the runner-reported
+archive acceptance and preserves the final job status. Archive bytes,
+later availability and wider permissions require separate evidence.
+
 An observed archive upload covers only the selected job and artifact
 member. Published Pages content, push access to registries, protected
 variables, and authorization to play a manual job require separate
