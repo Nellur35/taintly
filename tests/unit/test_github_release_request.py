@@ -156,3 +156,127 @@ def test_source_with_intervening_command_has_no_unique_action_binding(capture):
     cap, bind, assess = capture
     cap["source"] = bind(SOURCE.replace("    steps:\n", "    steps:\n      - run: echo other\n"))
     assert assess()["state"] == "unresolved"
+
+
+@pytest.fixture
+def push_capture(capture):
+    cap, bind, assess = capture
+    action = "release-drafter/release-drafter@v7"
+    source = SOURCE.replace("pull_request:\n    types: [synchronize]", "push:\n    branches: [master]")
+    cap["source"] = bind(source.replace("@v6", "@v7"))
+    cap["run"].update(event="push", head_repository=REPO, head_branch="master")
+    del cap["denial"]
+    timings = [
+        ("Set up job", 16, 17),
+        (f"Run {action}", 18, 22),
+        ("Complete job", 22, 23),
+    ]
+    cap["job"]["steps"] = [
+        {
+            "name": name,
+            "number": number,
+            "started_at": f"2026-05-13T00:23:{start}Z",
+            "completed_at": f"2026-05-13T00:23:{end}Z",
+            "conclusion": "success",
+        }
+        for number, (name, start, end) in enumerate(timings, 1)
+    ]
+    action_commit = "978bb0b30c5ee8cdd332ced253758157150d43f0"
+    rows = []
+    for second, value in (
+        ("16.100", f"Download action repository '{action}' (SHA:{action_commit})"),
+        ("18.100", f"##[group]Run {action}"),
+        ("20.100", "  tag:    2.3.4"),
+        ("20.200", "  targetCommitish: master"),
+        ("20.300", "  draft:  true"),
+        ("20.400", "Creating new release..."),
+        ("20.800", "Release created!"),
+        ("22.150", "Cleaning up orphan processes"),
+    ):
+        time = f"2026-05-13T00:23:{second}Z"
+        rows.append({"time": time, "value": value, "sha256": hashlib.sha256(f"{time} {value}".encode()).hexdigest()})
+    cap["creation"] = {"run": 10, "job": 20, "attempt": 1, "log_sha256": "a" * 64, "rows": rows}
+    return cap, source, bind, assess
+
+
+def test_success_is_scoped_to_owned_draft_create(push_capture):
+    _, _, _, assess = push_capture
+    result = assess()
+    assert result["state"] == "draft-release-create-reported"
+    assert result["source_role"] == "repository-push"
+    op = result["operation"]
+    assert op["url"] == f"https://api.github.com/repos/{REPO}/releases"
+    assert (op["method"], op["draft"], op["requested_tag"], op["target_commitish"]) == (
+        "POST", True, "2.3.4", "master",
+    )
+    assert "status" not in op and "publication" not in result
+
+
+@pytest.mark.parametrize(
+    ("record", "key", "wrong"),
+    [
+        ("run", "event", "pull_request"),
+        ("run", "head_repository", "fork/project"),
+        ("run", "head_branch", "main"),
+        ("job", "run_attempt", True),
+        ("creation", "job", 21),
+        ("creation", "attempt", True),
+    ],
+)
+def test_push_creation_does_not_cross_an_invocation(push_capture, record, key, wrong):
+    cap, _, _, assess = push_capture
+    cap[record][key] = wrong
+    assert assess()["state"] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    ("row_index", "field", "wrong"),
+    [
+        (0, "value", "Download action repository 'other/action@v7' (SHA:" + "a" * 40 + ")"),
+        (3, "value", "  targetCommitish: main"),
+        (4, "value", "  draft:  false"),
+        (5, "value", "[dry-run] Would create release"),
+        (6, "value", "Updating existing release..."),
+        (6, "time", "2026-05-13T00:23:17.900Z"),
+        (6, "time", "2026-05-13T00:23:20.350Z"),
+        (6, "time", "2026-05-13T00:23:22.200Z"),
+    ],
+)
+def test_owned_log_must_affirm_the_exact_operation(push_capture, row_index, field, wrong):
+    cap, _, _, assess = push_capture
+    row = cap["creation"]["rows"][row_index]
+    row[field] = wrong
+    row["sha256"] = hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+    assert assess()["state"] == "unresolved"
+
+
+def test_draft_creation_does_not_infer_success_or_accept_unverified_rows(push_capture):
+    cap, _, _, assess = push_capture
+    rows = cap["creation"]["rows"]
+    completion = rows.pop(-2)
+    assert assess()["state"] == "unresolved"
+    rows.insert(-1, {**completion, "sha256": "e" * 64})
+    assert assess()["state"] == "unresolved"
+
+
+def test_nondefault_action_inputs_are_outside_the_push_profile(push_capture):
+    cap, source, bind, assess = push_capture
+    cap["source"] = bind(source.replace("@v6\n", "@v7\n        with:\n          dry-run: true\n"))
+    assert assess()["state"] == "unresolved"
+
+
+def test_branch_exclusions_are_outside_the_literal_push_profile(push_capture):
+    cap, source, bind, assess = push_capture
+    source = source.replace("@v6", "@v7").replace("[master]", "[master, '!master']")
+    cap["source"] = bind(source)
+    assert assess()["state"] == "unresolved"
+
+
+@pytest.mark.parametrize("extra", ["- []", "- {}", "-", "- [elsewhere]", "- master: foo"])
+def test_literal_push_list_checks_invisible_and_nested_items(push_capture, extra):
+    cap, source, bind, assess = push_capture
+    block = source.replace("@v6", "@v7").replace("[master]", "\n      - main\n      - master")
+    cap["source"] = bind(block)
+    assert assess()["state"] == "draft-release-create-reported"
+    cap["source"] = bind(block.replace("      - master", f"      - master\n      {extra}"))
+    assert assess()["state"] == "unresolved"

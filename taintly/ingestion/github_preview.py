@@ -89,6 +89,10 @@ def _source(root: Path, run: _Row, source: _Row, revision: str) -> tuple[_Index,
     path = run["path"]
     _require(_matches(path, _WORKFLOW), "run lacks a supported workflow path")
     raw, identity = _source_bytes(root, source, path, revision)
+    return _workflow_source_index(path, raw), identity
+
+
+def _workflow_source_index(path: str, raw: bytes) -> _Index:
     text = raw.decode("utf-8").replace("\r\n", "\n")
     _require(
         "\r" not in text
@@ -112,7 +116,7 @@ def _source(root: Path, run: _Row, source: _Row, revision: str) -> tuple[_Index,
         index.error is None and len(index.keys.get(("on",), ())) == 1,
         "workflow structure is incomplete or ambiguous",
     )
-    return index, identity
+    return index
 
 
 def _source_bytes(root: Path, source: _Row, path: str, revision: str) -> tuple[bytes, _Row]:
