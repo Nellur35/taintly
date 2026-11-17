@@ -13,6 +13,7 @@ from typing import Any
 from taintly.ingestion.gitlab_registry_job import (
     _PROJECT,
     _SHA,
+    _SHA256,
     RegistryJobError,
     _identifier,
     _load_job_receipt,
@@ -36,6 +37,11 @@ _SCOPE = (
     "Trusted saved GitLab project, job, runner and public artifact records. The reported "
     "authority covers the job-scoped archive upload only. Protected credentials, registry "
     "push, live Pages deployment and arbitrary content provenance remain separate questions."
+)
+_PAGES_SCOPE = (
+    "This observation covers the deployment reported in the owning GitLab environment record "
+    "for this Pages preview job. Serving the archive bytes at that URL, live access policy, "
+    "other previews and production deployment remain unverified."
 )
 
 
@@ -244,6 +250,127 @@ def _successful(
             "sha256": digest,
         },
     }
+
+
+def _recorded_pages_preview(
+    data: _Row, cfg: _Config, detail: _Row, path: str, job_url: str
+) -> _Row:
+    saved, job, pipe = data["pages_preview"], data["job"], data["pipeline"]
+    name = job["name"]
+    pages, env = (name, "pages"), (name, "environment")
+    cfg.owner(pages)
+    cfg.owner(env)
+    env_fields = {key[-1] for key in cfg.keys if key[:-1] == env}
+    _need(
+        {"name", "url"} <= env_fields <= {"name", "url", "action", "auto_stop_in"}
+        and ("action" not in env_fields or cfg.scalar((*env, "action")).value == "start"),
+        "source does not declare a supported start environment for the Pages preview",
+    )
+    variable_owners = {name, "workflow"}
+    if cfg.keys[(name, "extends")]:
+        parent = _value(cfg.scalar((name, "extends")).value, _JOB, "local preview job template")
+        cfg.owner((parent,))
+        _need(
+            parent != name
+            and not any(cfg.keys[(parent, field)] for field in ("extends", "environment", "pages")),
+            "job inherits unsupported Pages or environment settings",
+        )
+        variable_owners.add(parent)
+    _need(
+        not any(
+            key[-2:] == ("variables", "CI_COMMIT_REF_SLUG")
+            and (len(key) == 2 or key[0] in variable_owners)
+            for key in cfg.keys
+        ),
+        "source overrides the supported Pages preview slug variable",
+    )
+    _need(
+        detail["state"] == "job-artifact-observed"
+        and detail["publication"]["member_path"] == "public/index.html"
+        and {key[-1] for key in cfg.keys if key[:-1] == pages} == {"path_prefix", "expire_in"}
+        and cfg.scalar((*pages, "path_prefix")).value == "$CI_COMMIT_REF_SLUG"
+        and cfg.scalar((*env, "url")).value == "$CI_PAGES_URL",
+        "source is outside the supported default-directory Pages preview profile",
+    )
+    environment_name = cfg.scalar((*env, "name"))
+    literal = re.fullmatch(
+        r"([a-z][a-z0-9_-]{0,40})/\$CI_COMMIT_REF_SLUG", str(environment_name.value)
+    )
+    if literal is None:
+        raise RegistryJobError("source does not declare the supported Pages preview environment")
+    _need(
+        saved["job_id"] == job["id"]
+        and type(saved["job_id"]) is int
+        and saved["job_name"] == name
+        and saved["url"] == f"{job_url}.json"
+        and _SHA256.fullmatch(str(saved["sha256"]))
+        and saved["action"] == "start",
+        "saved GitLab job view does not identify the selected Pages preview job",
+    )
+    environment = saved["environment"]
+    current = environment["last_deployment"]
+    environment_id = _identifier(environment["id"], "Pages environment ID")
+    deployment = _identifier(current["id"], "Pages deployment ID")
+    iid = _identifier(current["iid"], "Pages deployment IID")
+    prefix = str(environment["name"]).removeprefix(f"{literal[1]}/")
+    namespace, project_path = path.split("/", 1)
+    target = f"https://{namespace}.gitlab.io/{project_path}/{prefix}"
+    _need(
+        re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?", prefix)
+        and environment["name"] == f"{literal[1]}/{prefix}"
+        and environment["external_url"] == target
+        and environment["state"] in {"available", "stopped"},
+        "saved environment does not identify the exact supported Pages preview target",
+    )
+    _need(
+        saved["status"] == "last"
+        and current["is_last"] is True
+        and current["status"] == "success"
+        and current["sha"] == pipe["sha"]
+        and current["ref"] == pipe["ref"]
+        and current["web_path"] == f"/{path}/-/environments/{environment_id}/deployments/{iid}"
+        and current["deployable"]
+        == {
+            "name": name,
+            "build_path": job_url.removeprefix("https://gitlab.com"),
+        },
+        "latest Pages preview deployment does not belong to the selected job and revision",
+    )
+    completed = _time(current["deployed_at"], "preview deployment time")
+    _need(
+        _time(job["pipeline"]["created_at"], "preview pipeline creation")
+        <= _time(current["created_at"], "preview deployment creation")
+        <= _time(job["started_at"], "preview job start")
+        <= _time(job["finished_at"], "preview job end")
+        <= completed
+        <= _time(job["pipeline"]["updated_at"], "preview pipeline last update")
+        <= _time(saved["observed_at"], "preview record observation"),
+        "Pages deployment timestamps are inconsistent with the selected pipeline and job",
+    )
+    return {
+        "state": "pages-preview-deployment-recorded",
+        "operation": "gitlab-pages-preview-environment-deployment",
+        "environment_id": environment_id,
+        "deployment_id": deployment,
+        "environment_state": environment["state"],
+        "target": target,
+        "deployed_at": current["deployed_at"],
+        "availability": "unverified",
+        "source_line": environment_name.line,
+        "evidence_url": saved["url"],
+        "evidence_sha256": saved["sha256"],
+        "scope": _PAGES_SCOPE,
+    }
+
+
+def _pages_preview(data: _Row, cfg: _Config, detail: _Row, path: str, job_url: str) -> _Row:
+    try:
+        return _recorded_pages_preview(data, cfg, detail, path, job_url)
+    except RegistryJobError as exc:
+        reason = str(exc)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        reason = "required Pages source or deployment evidence is unavailable or malformed"
+    return {"state": "unresolved", "reason": reason, "scope": _PAGES_SCOPE}
 
 
 def _npm_gate(cfg: _Config, name: str) -> tuple[str, str, int, list[int]]:
@@ -522,6 +649,8 @@ def _assess(
     )
     if publisher is not None:
         detail["publication_admission"] = _npm_admission(data, cfg, path, publisher)
+    if "pages_preview" in data:
+        detail["pages_preview"] = _pages_preview(data, cfg, detail, path, job_url)
     return {
         "repository": path,
         "project": project_id,

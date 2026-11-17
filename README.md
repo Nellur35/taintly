@@ -272,6 +272,27 @@ variables, and authorization to play a manual job require separate
 evidence. The review action identifies archive audience and downstream
 deployment checks. Missing or conflicting evidence returns exit `11`.
 
+To correlate an observed archive with a parallel Pages preview, add
+`pages_preview` from the same job's GitLab `/-/jobs/JOB.json` view.
+Supply `url`, response `sha256`, `observed_at`, `job_id`, `job_name`,
+and `action`, `status`, and `environment` from `deployment_status`.
+Keep the environment's `id`, `name`, `state`, `external_url` and
+`last_deployment`. The last deployment retains `id`, `iid`, `sha`,
+`ref` (the ref name), `status`, `created_at`, `deployed_at`, `is_last`,
+`web_path`, and `deployable` (`name` and `build_path`). Omit user and
+credential data.
+
+The supported source declares a default-directory Pages preview with
+`$CI_COMMIT_REF_SLUG` and an environment URL of `$CI_PAGES_URL`. The
+environment starts by default or explicitly. A local parent may supply
+the build and archive, with Pages and environment settings owned by the
+job. The selected index member is `public/index.html`. The job view must bind
+the successful deployment to the same job and merged-result revision.
+The result retains the environment state recorded at capture, including
+a stopped preview. Serving the file at that URL and access policy require
+separate evidence. When the preview evidence is unresolved, exit `11`
+preserves the independently corroborated archive result.
+
 For the supported npm profile, add `--gitlab-mr-publish-job JOB_NAME`
 to check whether the named npm publication job was absent from that
 same completed fork pipeline. The scanner binds the job's local rules,
