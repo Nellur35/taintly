@@ -128,6 +128,15 @@ def test_artifact_directory_checksum_keeps_child_object_link_unverified(tmp_path
     without_checksum = assess()
     assert without_checksum["state"] == "managed-s3-link-unverified"
     assert without_checksum["influence"]["comparison"] == "exact"
+    receipt["build"]["arn"] = arn
+    assert assess() == without_checksum
+    for conflicting in (None, arn.replace("us-east-1", "us-west-2")):
+        receipt["build"]["arn"] = conflicting
+        rejected = assess()
+        assert rejected["state"] == "unresolved"
+        assert "ARN conflicts" in rejected["reason"]
+        assert "publication" not in rejected
+    del receipt["build"]["arn"]
     for field in ("sha256sum", "sha256Checksum"):
         provider[field] = digest
         result = assess()

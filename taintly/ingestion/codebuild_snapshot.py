@@ -271,10 +271,11 @@ def _require_git_revision(root: Path, identity: str, revision: str, label: str) 
         raise SnapshotError(f"{label} does not identify the exact local Git commit")
 
 
-def _regular_blob(root: Path, revision: str, path: str) -> str | None:
+def _regular_blob(root: Path, revision: str, path: str, *, executable: bool = False) -> str | None:
     entry = _git(root, "ls-tree", "--full-tree", "-z", revision, "--", path)
+    mode = b"100755" if executable else rb"(?:100644|100755)"
     match = re.fullmatch(
-        rb"(?:100644|100755) blob ([0-9a-f]{40})\t" + re.escape(path.encode("ascii")) + rb"\0",
+        mode + rb" blob ([0-9a-f]{40})\t" + re.escape(path.encode("ascii")) + rb"\0",
         entry,
     )
     return match[1].decode("ascii") if match else None
