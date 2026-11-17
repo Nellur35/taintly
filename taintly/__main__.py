@@ -262,6 +262,12 @@ def main():
         help="Corroborate a saved GitHub workflow_run publication and its recorded uploader.",
     )
     evidence_input.add_argument(
+        "--github-release-request-observation",
+        nargs=4,
+        metavar=("JSON", "OWNER/REPO", "RUN", "JOB"),
+        help="Check a saved GitHub draft-release creation denial offline.",
+    )
+    evidence_input.add_argument(
         "--github-preview-observation",
         nargs=4,
         metavar=("JSON", "OWNER/REPO", "PRODUCER_RUN", "CONSUMER_RUN"),
@@ -694,6 +700,7 @@ def main():
         args.github_preview_observation
         or args.github_version_upload_observation
         or args.github_release_observation
+        or args.github_release_request_observation
     ):
         _check_github_observation(parser, args)
         return
@@ -2119,6 +2126,7 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             "github_preview_observation",
             "github_version_upload_observation",
             "github_release_observation",
+            "github_release_request_observation",
         )
         if getattr(args, name)
     )
@@ -2138,6 +2146,10 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
         from .ingestion.github_release_observation import release_observation
 
         result = release_observation(*inputs)
+    elif mode == "github_release_request_observation":
+        from .ingestion.github_release_request import release_request_observation
+
+        result = release_request_observation(*inputs)
     elif mode == "github_version_upload_observation":
         from .ingestion.github_version_upload import version_upload_observation
 
@@ -2147,6 +2159,20 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
     state = result["state"]
     if args.format == "json":
         print(json.dumps({mode: result}, indent=2))
+    elif state == "draft-release-create-denied":
+        operation = result["operation"]
+        configured = result["configured"]
+        print(
+            f"The saved GitHub check annotation reports HTTP {operation['status']} "
+            f"for {operation['method']} "
+            f"{operation['url']} targeting {operation['target_commitish']}.\n"
+            f"  Run {result['run']}, job {result['job']}, attempt {result['attempt']}. "
+            f"Job conclusion: {result['job_conclusion']}.\n"
+            f"  Fork-head source requests {configured['requested_permission']} and configures "
+            f"{configured['credential_binding']} "
+            f"({result['source']['path']}:{configured['credential_line']}).\n"
+            f"{result['scope']}"
+        )
     elif state == "release-asset-observed":
         publication = result["publication"]
         configured = result["configured_publish"]
