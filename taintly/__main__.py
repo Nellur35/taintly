@@ -1989,6 +1989,15 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             f"checkout {report['revision']}.\n"
             f"  Job archive target: {publication['target']}\n{report['scope']}"
         )
+    elif state == "fork-project-archive-upload-observed":
+        publication = report["publication"]
+        print(
+            f"GitLab accepted the failure-path archive for job {report['job']} "
+            f"in fork {report['repository']} (HTTP 201).\n"
+            f"  MR !{report['mr']} targets {report['target_repository']}. "
+            f"Fork pipeline {report['pipeline']} checked out {report['revision']}.\n"
+            f"  Fork job archive target: {publication['target']}\n{report['scope']}"
+        )
     elif state == "job-artifact-uploaded-after-failure":
         publication = report["publication"]
         print(
