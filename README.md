@@ -453,6 +453,9 @@ Optional CodeBuild log rows in `build_commands` use the exact `build_id`,
 entries from a supported buildspec. A `nix-copy-summary` row also carries
 the integer `paths` reported by the copy. The CLI keeps the configured S3
 destination, observed path count and S3 object-write evidence separate.
+If cache-copy text appears in a mapping under `commands`, the build reports
+`publication_analysis_limit` and omits the unsupported destination. The saved
+launch result still applies to the reported start.
 The caller role cannot establish the build's own publication permission.
 Missing or incompatible start evidence returns exit `11`. The report
 retains existing CodeBuild analysis limits.

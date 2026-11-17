@@ -348,14 +348,15 @@ def _command_evidence(
 
 def _configured_copy(
     selection: BoundBuildspec, records: list[_Row], phases: list[_Row]
-) -> list[_Row]:
+) -> tuple[list[_Row], str | None]:
     if selection.pull_request_ref is None or not selection.checkout_scripts:
-        return []
+        return [], None
     events = list(walk_workflow(selection.path, content=selection.content, include_keys=True))
     if any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
-        return []
+        return [], None
     values = {event.path: event for event in events if event.kind is EventKind.LEAF_SCALAR}
     result = []
+    limit = None
     for key, event in values.items():
         if (
             len(key) != 4
@@ -365,6 +366,9 @@ def _configured_copy(
             continue
         match = _COPY.fullmatch(str(event.value))
         if match is None:
+            continue
+        if type(key[3]) is not int:
+            limit = "Cache copy text is in a mapping rather than the CodeBuild command list."
             continue
         target = values.get(("env", "variables", match[1]))
         bucket = _BUCKET.fullmatch(str(target.value)) if target is not None else None
@@ -403,7 +407,7 @@ def _configured_copy(
                     "object_write": "unverified",
                 }
             )
-    return result
+    return result, limit
 
 
 def _build_result(
@@ -442,7 +446,8 @@ def _build_result(
         if row["build_id"] == build_id
         and record["startTime"] <= _time(row["time"]).timestamp() <= record["endTime"]
     ]
-    return {
+    publication, publication_limit = _configured_copy(selection, exact_commands, record["phases"])
+    result = {
         "build_id": build_id,
         "start_request": start_request,
         "provider_build_arn": record.get("arn"),
@@ -456,9 +461,12 @@ def _build_result(
         "reported_checkout_commands": _command_evidence(
             selection, exact_commands, record["phases"]
         ),
-        "configured_publication": _configured_copy(selection, exact_commands, record["phases"]),
+        "configured_publication": publication,
         "analysis_limit": selection.analysis_limit,
     }
+    if publication_limit is not None:
+        result["publication_analysis_limit"] = publication_limit
+    return result
 
 
 def _assess(data: _Row, root: Path, origin: str, run_id: int, job_id: int) -> _Row:
