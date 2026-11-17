@@ -2080,6 +2080,14 @@ def _assess_codebuild_start(parser: argparse.ArgumentParser, args: argparse.Name
         )
         for build in result["builds"]:
             print(f"  {build['build_id']} selected {build['revision']} using {build['buildspec']}.")
+            request = build["start_request"]
+            print(
+                f"    Launcher requests {request['project']} in {request['region']} for "
+                f"{request['source_version']} ({result['caller']['launcher']['path']}:"
+                f"{request['launcher_line']})."
+            )
+            if build["provider_build_arn"] is None:
+                print("    The saved provider response did not include a build ARN.")
             for copy in build["configured_publication"]:
                 print(
                     f"    Configured Nix cache copy to {copy['bucket']}: object write unverified."

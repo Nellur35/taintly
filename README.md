@@ -315,6 +315,13 @@ build IDs or explicit guard stop. Preserve the step timestamps from the
 attempt-scoped job. Enter selected AWS public build responses unchanged
 in `build_responses`.
 
+For a reported start, the reviewed launcher must explicitly select the
+standalone project and region and pass the supplied PR ref to the AWS CLI.
+The report identifies this request from the pinned executable source.
+A saved provider build ARN, when present, must agree with the request
+and configured caller account. Public responses without that ARN leave
+the provider-side account and region unverified.
+
 Optional CodeBuild log rows in `build_commands` use the exact `build_id`,
 `time`, `kind`, and `command`. They can corroborate `running-command`
 entries from a supported buildspec. A `nix-copy-summary` row also carries

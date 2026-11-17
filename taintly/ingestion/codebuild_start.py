@@ -29,6 +29,10 @@ _PART = r"\.?[A-Za-z0-9_][A-Za-z0-9_.-]*"
 _PATH = rf"{_PART}(?:/{_PART})*"
 _ROLE = re.compile(r"arn:aws:iam::[0-9]{12}:role/([A-Za-z0-9_+=,.@-]{1,64})")
 _REGION = r"[a-z]{2}-[a-z0-9-]+-[0-9]"
+_LAUNCH_ENTRY = re.compile(
+    rf'[ \t]+"([A-Za-z0-9][A-Za-z0-9_-]{{1,149}})(?: ({_REGION}) no-batch)?"'
+)
+_LAUNCH_PROGRAM = "c3496e1609dbeec883cbcdc6fc2828beef3990984f2e73bcc54609af8a7d7ec1"
 _GUARD_OPEN = 'if [[ "$permission" == "admin" || "$permission" == "write" ]]; then'
 _COPY = re.compile(r"nix copy --to \$([A-Za-z_][A-Za-z0-9_]*) (\.#[A-Za-z0-9_.-]+)")
 _BUCKET = re.compile(rf"s3://([a-z0-9][a-z0-9.-]{{1,61}}[a-z0-9])\?region=({_REGION})")
@@ -128,7 +132,43 @@ def _guard_launcher(body: str, permission_step: str) -> str:
     return command[1]
 
 
-def _caller_source(root: Path, repo: str, revision: str, path: str, job: _Row) -> _Row:
+def _start_targets(launcher: str, repo: str) -> tuple[dict[str, str], int]:
+    """Read the targets of the reviewed Bash launcher without evaluating Shell."""
+    lines = launcher.split("\n")
+    message = "The pinned launcher does not implement the reviewed source-bound StartBuild command"
+    _need(
+        re.fullmatch(r"[\x20-\x7e\t\n]+", launcher)
+        and lines[0] == "#!/bin/bash"
+        and "BUILDS=(" in lines,
+        message,
+    )
+    opening = lines.index("BUILDS=(")
+    _need(")" in lines[opening + 1 :], message)
+    closing = lines.index(")", opening + 1)
+    preamble = [line for line in lines[:opening] if line.strip(" \t") and not line.startswith("#")]
+    suffix = lines[closing + 1 :]
+    default_repo = "REPO=${2:-" + repo + "}"
+    _need(preamble == ["set -e"] and suffix.count(default_repo) == 1, message)
+    # Preserve physical lines and whitespace in the executable recipe, including
+    # the backslash-newline continuations of the AWS command.
+    normalized = "\n".join(
+        "REPO=<checked default repository>" if line == default_repo else line for line in suffix
+    )
+    _need(hashlib.sha256(normalized.encode()).hexdigest() == _LAUNCH_PROGRAM, message)
+    seen, singles = set(), {}
+    for line in lines[opening + 1 : closing]:
+        entry = _LAUNCH_ENTRY.fullmatch(line)
+        if entry is None or entry[1] in seen:
+            raise SnapshotError("The pinned launcher target list is unsupported or ambiguous")
+        project, region = entry.groups()
+        seen.add(project)
+        if region is not None:
+            singles[project] = region
+    offset = next(i for i, line in enumerate(suffix) if line.startswith("    aws --region "))
+    return singles, closing + offset + 2
+
+
+def _caller_source(root: Path, repo: str, revision: str, path: str, job: _Row) -> tuple[_Row, str]:
     _require_git_revision(root, repo, revision, "Caller checkout")
     _need(
         re.fullmatch(r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml", path),
@@ -153,8 +193,7 @@ def _caller_source(root: Path, repo: str, revision: str, path: str, job: _Row) -
     checkout = (*owner, 0)
     _need(
         _field(index, (*checkout, "uses")).value == "actions/checkout@v7"
-        and (*checkout, "with") not in index.keys
-        and (*checkout, "run") not in index.keys,
+        and {key[-1] for key in index.keys if key[:-1] == checkout} == {"uses"},
         "caller does not use the supported default base checkout",
     )
     permission = _step(index, owner, "Get permissions")
@@ -173,11 +212,24 @@ def _caller_source(root: Path, repo: str, revision: str, path: str, job: _Row) -
         == "GET /repos/{repo}/collaborators/{author}/permission"
         and _field(index, (*role_step, "uses")).value
         == "aws-actions/configure-aws-credentials@v6.3.0"
+        and {key[-1] for key in index.keys if key[:-1] == role_step} == {"name", "uses", "with"}
         and _field(index, (*owner[:2], "env", "source_pr")).value
         == "pr/${{ github.event.pull_request.number }}"
         and (*launcher, "env") not in index.keys
         and (*launcher, "working-directory") not in index.keys,
         "caller permission, credentials or PR source binding is unsupported",
+    )
+    environment = (*owner[:2], "env")
+    permission_env = (*permission, "env")
+    _need(
+        ("env",) not in index.keys
+        and len(index.keys.get(environment, ())) == 1
+        and {key[-1] for key in index.keys if key[:-1] == environment}
+        == {"source_pr", "source_sha", "pr_author"}
+        and len(index.keys.get(permission_env, ())) == 1
+        and {key[-1] for key in index.keys if key[:-1] == permission_env} == {"GITHUB_TOKEN"}
+        and _field(index, (*permission_env, "GITHUB_TOKEN")).value == "${{ secrets.GITHUB_TOKEN }}",
+        "caller workflow supplies an unsupported environment override",
     )
     _field_path(index, (*permission, "with", "repo"), "github.repository")
     _field_path(index, (*permission, "with", "author"), "github.event.pull_request.user.login")
@@ -196,7 +248,15 @@ def _caller_source(root: Path, repo: str, revision: str, path: str, job: _Row) -
     )
     body = _field(index, (*launcher, "run"))
     helper = _guard_launcher(str(body.value), step_id)
-    _, script = _blob(root, revision, helper)
+    non_pr = (*owner, 3)
+    _need(
+        {key[-1] for key in index.keys if key[:-1] == non_pr} == {"name", "if", "run"}
+        and _field(index, (*non_pr, "name")).value == "Start Codebuild for SHA"
+        and _field(index, (*non_pr, "if")).value == "github.event_name != 'pull_request_target'"
+        and _field(index, (*non_pr, "run")).value == f"./{helper} $source_sha",
+        "pinned caller's separate non-PR launcher does not match the skipped step",
+    )
+    launcher_text, script = _blob(root, revision, helper)
     role = _field(index, (*role_step, "with", "role-to-assume"))
     region = _field(index, (*role_step, "with", "aws-region"))
     match = _ROLE.fullmatch(str(role.value))
@@ -210,7 +270,7 @@ def _caller_source(root: Path, repo: str, revision: str, path: str, job: _Row) -
         "role_line": role.line,
         "role_name": match[1],
         "configured_region": region.value,
-    }
+    }, launcher_text
 
 
 def _time(value: str) -> datetime:
@@ -239,6 +299,7 @@ def _receipts(trace: list[_Row], job: _Row, kind: str, step: str) -> list[_Row]:
         record
         for record in trace
         if record["role"] == kind
+        and all(type(record[key]) is int for key in ("job_id", "run_id", "attempt"))
         and record["job_id"] == job["id"]
         and record["run_id"] == job["run_id"]
         and record["attempt"] == job["run_attempt"]
@@ -353,11 +414,18 @@ def _build_result(
     caller: _Row,
     start: _Row,
     permission: _Row,
-    ref: str,
+    start_request: _Row,
     head: str,
     commands: list[_Row],
 ) -> _Row:
     record = response["build"]
+    ref = start_request["source_version"]
+    account = caller["configured_role"].split(":")[4]
+    expected_arn = f"arn:aws:codebuild:{start_request['region']}:{account}:build/{build_id}"
+    _need(
+        "arn" not in record or record["arn"] == expected_arn,
+        "Returned AWS build ARN conflicts with the selected request or configured role",
+    )
     _need(
         record["initiator"] == f"{caller['role_name']}/{start['run_id']}"
         and record["sourceVersion"] == ref
@@ -376,6 +444,8 @@ def _build_result(
     ]
     return {
         "build_id": build_id,
+        "start_request": start_request,
+        "provider_build_arn": record.get("arn"),
         "project": record["projectName"],
         "source_ref": ref,
         "revision": selection.commit,
@@ -401,6 +471,7 @@ def _assess(data: _Row, root: Path, origin: str, run_id: int, job_id: int) -> _R
         and job["id"] == job_id
         and type(run["run_attempt"]) is int
         and run["run_attempt"] > 0
+        and type(job["run_attempt"]) is int
         and job["run_attempt"] == run["run_attempt"]
         and run["html_url"] == f"https://github.com/{repo}/actions/runs/{run_id}"
         and run["event"] == "pull_request_target"
@@ -427,15 +498,16 @@ def _assess(data: _Row, root: Path, origin: str, run_id: int, job_id: int) -> _R
         and _time(checkout["time"]) < _time(role["time"]) < _time(permission["time"]),
         "base checkout, role-session identity or receipt order is unresolved",
     )
-    caller = _caller_source(root, repo, checkout["value"], run["path"], job)
+    caller, launcher_text = _caller_source(root, repo, checkout["value"], run["path"], job)
     caller["reported_role_session"] = role["value"]
     _step_window(job, "Get permissions")
-    skipped_sha = [
-        step
-        for step in job["steps"]
-        if step["name"] == "Start Codebuild for SHA" and step["conclusion"] == "skipped"
-    ]
-    _need(len(skipped_sha) == 1, "the separate non-PR launcher was not recorded as skipped")
+    skipped_sha = [step for step in job["steps"] if step["name"] == "Start Codebuild for SHA"]
+    _need(
+        len(skipped_sha) == 1
+        and skipped_sha[0]["conclusion"] == "skipped"
+        and skipped_sha[0]["number"] == 5,
+        "the separate non-PR launcher was not recorded as skipped at its expected position",
+    )
     ref = f"pr/{pr['number']}"
     calls = _receipts(trace, job, "CodeBuild returned build id", "Start Codebuild for PR")
     stops = _receipts(trace, job, "no start when author lacks write", "Start Codebuild for PR")
@@ -476,6 +548,28 @@ def _assess(data: _Row, root: Path, origin: str, run_id: int, job_id: int) -> _R
         ),
         "CodeBuild response IDs do not match exactly the selected returned IDs",
     )
+    launcher_path = caller["launcher"]["path"]
+    _need(
+        _regular_blob(root, checkout["value"], launcher_path, executable=True)
+        == caller["launcher"]["git_blob"],
+        "The pinned launcher does not implement a supported executable checkout",
+    )
+    projects, launcher_line = _start_targets(launcher_text, repo)
+    requested = {}
+    for build_id in returned:
+        project = build_id.split(":", 1)[0]
+        _need(project in projects, "Returned build targets a project not selected by the launcher")
+        region = projects[project]
+        _need(
+            region == caller["configured_region"],
+            "Launcher request region differs from the proven caller's supported region",
+        )
+        requested[build_id] = {
+            "project": project,
+            "region": region,
+            "source_version": ref,
+            "launcher_line": launcher_line,
+        }
     return {
         **result,
         "state": "starts-observed",
@@ -490,7 +584,7 @@ def _assess(data: _Row, root: Path, origin: str, run_id: int, job_id: int) -> _R
                 caller,
                 receipt,
                 permission,
-                ref,
+                requested[build_id],
                 run["head_sha"],
                 commands,
             )

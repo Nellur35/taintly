@@ -1,9 +1,11 @@
 """Authored boundaries for CodeBuild delegation and cache evidence."""
 
+import hashlib
 from pathlib import Path
 
 import pytest
 
+from taintly.ingestion import codebuild_start
 from taintly.ingestion.codebuild_checkout import CheckoutScriptReference
 from taintly.ingestion.codebuild_snapshot import BoundBuildspec, BoundScriptReference, SnapshotError
 from taintly.ingestion.codebuild_start import (
@@ -72,6 +74,26 @@ def test_guard_does_not_confuse_denial_message_for_a_guard():
     invalid = GUARD.replace('echo "No launch"', "./ci/start.sh $source_pr")
     with pytest.raises(SnapshotError, match="unmodeled commands"):
         _guard_launcher(invalid, "permissions")
+
+
+def test_launcher_checks_exact_command_and_selected_targets(monkeypatch):
+    # A miniature authored recipe isolates source matching and target extraction.
+    suffix = "REPO=${2:-team/example}\n    aws --region $REGION codebuild start-build\n"
+    normalized = suffix.replace("REPO=${2:-team/example}", "REPO=<checked default repository>")
+    monkeypatch.setattr(
+        codebuild_start, "_LAUNCH_PROGRAM", hashlib.sha256(normalized.encode()).hexdigest()
+    )
+    launcher = (
+        '#!/bin/bash\nset -e\nBUILDS=(\n  "Batch"\n  "Single us-west-2 no-batch"\n)\n' + suffix
+    )
+    assert codebuild_start._start_targets(launcher, "team/example") == ({"Single": "us-west-2"}, 8)
+    for altered in (
+        launcher.replace("start-build", "list-builds"),
+        launcher.replace("team/example", "other/example"),
+        launcher.replace("set -e", "\f\nset -e"),
+    ):
+        with pytest.raises(SnapshotError, match="reviewed source-bound StartBuild command"):
+            codebuild_start._start_targets(altered, "team/example")
 
 
 def test_reported_zero_paths_does_not_establish_object_outcome():

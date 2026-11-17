@@ -286,6 +286,10 @@ def codebuild_s3_observation(path: Path, root: Path, build_arn: str, origin: str
             cap.get("schema") == "codebuild-managed-s3-v1", "Unsupported managed S3 receipt schema"
         )
         build = _owned_record(cap.get("build"), "id", build_id)
+        _need(
+            "arn" not in build or build["arn"] == build_arn,
+            "Saved provider build ARN conflicts with the selected CodeBuild run",
+        )
         logs = _owned_record(cap.get("logs"), "build", build_id)
         artifact_config = _map(build.get("artifacts"), "primary artifact")
         _need(
