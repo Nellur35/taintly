@@ -91,6 +91,102 @@ def test_explicit_artifact_and_job_authority_are_scoped(tmp_path, capture):
     assert result["source_project"] == 2
 
 
+PAGES = (
+    BUILDSPEC.replace("[output]", "[public]")
+    + """\
+  pages:
+    path_prefix: "$CI_COMMIT_REF_SLUG"
+    expire_in: 1 week
+  environment:
+    name: "preview/$CI_COMMIT_REF_SLUG"
+    url: "$CI_PAGES_URL"
+    auto_stop_in: 1 week
+"""
+)
+
+
+@pytest.fixture
+def pages_capture(capture):
+    capture["artifact"].update(
+        path="public/index.html", url=JOB + "/artifacts/raw/public/index.html"
+    )
+    capture["pages_preview"] = {
+        "url": JOB + ".json",
+        "sha256": "f" * 64,
+        "observed_at": time(12),
+        "job_id": 33,
+        "job_name": "package",
+        "action": "start",
+        "status": "last",
+        "environment": {
+            "id": 11,
+            "name": "preview/branch",
+            "state": "stopped",
+            "external_url": "https://team.gitlab.io/repo/branch",
+            "last_deployment": {
+                "id": 55,
+                "iid": 9,
+                "sha": MERGE,
+                "ref": capture["pipeline"]["ref"],
+                "status": "success",
+                "created_at": time(1),
+                "deployed_at": time(6),
+                "is_last": True,
+                "web_path": "/team/repo/-/environments/11/deployments/9",
+                "deployable": {"name": "package", "build_path": "/team/repo/-/jobs/33"},
+            },
+        },
+    }
+    return capture
+
+
+def test_pages_deployment_preserves_later_stopped_state(tmp_path, pages_capture):
+    result = evaluate(tmp_path, pages_capture, PAGES)
+    assert result["state"] == "job-artifact-observed"
+    preview = result["pages_preview"]
+    assert preview["state"] == "pages-preview-deployment-recorded"
+    assert preview["environment_state"] == "stopped"
+    assert preview["deployment_id"] == 55
+    assert preview["availability"] == "unverified"
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong"),
+    [
+        ("sha", BASE),
+        ("deployable", {"name": "package", "build_path": "/team/repo/-/jobs/34"}),
+        ("deployed_at", time(4)),
+    ],
+)
+def test_wrong_preview_does_not_erase_owned_archive(tmp_path, pages_capture, field, wrong):
+    pages_capture["pages_preview"]["environment"]["last_deployment"][field] = wrong
+    result = evaluate(tmp_path, pages_capture, PAGES)
+    assert result["state"] == "job-artifact-observed"
+    assert result["pages_preview"]["state"] == "unresolved"
+    assert "target" not in result["pages_preview"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        PAGES + "    action: stop\n",
+        ".base:\n  environment:\n    action: stop\n"
+        + PAGES.replace("package:\n", "package:\n  extends: .base\n", 1),
+    ],
+)
+def test_pages_cannot_borrow_start_for_stop_source(tmp_path, pages_capture, source):
+    result = evaluate(tmp_path, pages_capture, source)
+    assert result["state"] == "job-artifact-observed"
+    assert result["pages_preview"]["state"] == "unresolved"
+
+
+def test_pages_cannot_borrow_prefix_when_source_overrides_the_slug(tmp_path, pages_capture):
+    source = PAGES.replace("  script:", "  variables:\n    CI_COMMIT_REF_SLUG: other\n  script:")
+    result = evaluate(tmp_path, pages_capture, source)
+    assert result["state"] == "job-artifact-observed"
+    assert "overrides the supported" in result["pages_preview"]["reason"]
+
+
 def test_wrong_parent_cannot_supply_fork_source(tmp_path, capture):
     capture["merge"]["parent_ids"] = [BASE, "0" * 40]
     assert evaluate(tmp_path, capture)["state"] == "unresolved"

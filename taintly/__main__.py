@@ -1941,6 +1941,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     )
     state = report["state"]
     admission = report.get("publication_admission")
+    preview = report.get("pages_preview")
     if args.format == "json":
         print(json.dumps({mode: report}, indent=2))
     elif state == "job-artifact-observed":
@@ -1971,8 +1972,18 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             )
         else:
             print(f"npm job admission unresolved: {admission['reason']}.")
-    incomplete = state == "unresolved" or (
-        admission is not None and admission["state"] == "unresolved"
+    if preview is not None and args.format == "text":
+        if preview["state"] == "pages-preview-deployment-recorded":
+            print(
+                f"GitLab records preview deployment {preview['deployment_id']} "
+                f"for the selected job at {preview['target']}.\n"
+                f"  Environment {preview['environment_id']}: {preview['environment_state']}. "
+                f"Source: {report['source_path']}:{preview['source_line']}.\n{preview['scope']}"
+            )
+        else:
+            print(f"Pages preview unresolved: {preview['reason']}.")
+    incomplete = state == "unresolved" or any(
+        item is not None and item["state"] == "unresolved" for item in (admission, preview)
     )
     sys.exit(11 if incomplete else 0)
 
