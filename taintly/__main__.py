@@ -2231,6 +2231,20 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             f"({result['source']['path']}:{configured['credential_line']}).\n"
             f"{result['scope']}"
         )
+    elif state == "draft-release-create-rejection-reported":
+        operation = result["operation"]
+        configured = result["configured"]
+        grant = result["effective_permission"]
+        print(
+            f"The saved GitHub job reports rejection of {operation['method']} "
+            f"{operation['url']} for a draft targeting {operation['target_commitish']}.\n"
+            f"  Run {result['run']}, job {result['job']}, attempt {result['attempt']}. "
+            f"Job conclusion: {result['job_conclusion']}.\n"
+            f"  Workflow requests {configured['requested_permission']} "
+            f"({result['source']['path']}:{configured['permission_line']}). "
+            f"Job setup reports {grant['credential']} Contents: {grant['contents']}.\n"
+            f"{result['scope']}"
+        )
     elif state == "draft-release-create-reported":
         operation = result["operation"]
         configured = result["configured"]

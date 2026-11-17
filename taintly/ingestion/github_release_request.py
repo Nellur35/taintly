@@ -9,6 +9,7 @@ from taintly.ingestion.github_preview import (
     _DIGEST,
     _NAME,
     _REPOSITORY,
+    _SHA,
     _WORKFLOW,
     PreviewEvidenceError,
     _field,
@@ -31,6 +32,14 @@ _SCHEMA = "github-draft-release-request-v1"
 _ACTION = "release-drafter/release-drafter@v6"
 _PUSH_ACTION = "release-drafter/release-drafter@v7"
 _VERIFIED_ACTION = "978bb0b30c5ee8cdd332ced253758157150d43f0"
+_CHECKOUT = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
+_LOGGED_ACTION_SHA = "34d80673e067bdc0c24568d3af899c216adcfaa9"
+_LOGGED_ACTION = f"release-drafter/release-drafter@{_LOGGED_ACTION_SHA}"
+_LOGGED_ACTOR_GUARD = "github.actor != 'dependabot[bot]' && github.actor != 'github-actions[bot]'"
+_LOGGED_CREATE_ERROR = (
+    "Resource not accessible by integration - "
+    "https://docs.github.com/rest/releases/releases#create-a-release"
+)
 _PUSH_BRANCH = r"(?:main|master|'(?:main|master)'|\"(?:main|master)\")"
 _DENIAL = "Resource not accessible by integration"
 _SCOPE = (
@@ -44,6 +53,14 @@ _PUSH_SCOPE = (
     "after the create call returns. The exact HTTP status, response fields, runtime token "
     "identity and wider permissions are unverified. The selected job ran on push to the base "
     "repository. Fork write access, public release and asset publication remain unverified."
+)
+
+
+_LOGGED_SCOPE = (
+    "Trusted saved GitHub Actions job and log records. The setup log reports "
+    "the job token's Contents grant. The pinned action reports a rejected draft-create "
+    "attempt. The exact HTTP status, request ID, policy behind the grant, other "
+    "requests and artifact publication are unverified."
 )
 
 
@@ -222,6 +239,205 @@ def _literal_push_branch(index: _Index, raw: bytes, branch: str) -> bool:
     )
 
 
+def _logged_source_plan(index: _Index, job_name: str) -> _Row:
+    owner = ("jobs", job_name)
+    trigger = ("on", "pull_request")
+    trigger_types = {
+        key: rows for key, rows in index.values.items() if key[: len(trigger)] == trigger
+    }
+    steps = (*owner, "steps")
+    checkout, drafter, summary = ((*steps, number) for number in range(3))
+    env, inputs = (*drafter, "env"), (*drafter, "with")
+    expected_children = {
+        trigger: {"types"},
+        owner: {"runs-on", "permissions", "if", "steps"},
+        checkout: {"name", "uses"},
+        drafter: {"name", "uses", "env", "with"},
+        summary: {"name", "run"},
+        env: {"GITHUB_TOKEN"},
+        inputs: {"config-name", "commitish", "disable-autolabeler"},
+    }
+    _require(
+        all(
+            {key[-1] for key in index.keys if key[:-1] == parent} == children
+            and all(len(index.keys[(*parent, child)]) == 1 for child in children)
+            for parent, children in expected_children.items()
+        )
+        and {key[len(steps)] for key in index.keys if key[: len(steps)] == steps and key != steps}
+        == {0, 1, 2}
+        and len(index.keys.get(trigger, ())) == 1
+        and len(index.keys.get(owner, ())) == 1
+        and set(trigger_types) == {(*trigger, "types", number) for number in range(3)}
+        and all(len(rows) == 1 for rows in trigger_types.values())
+        and {rows[0].value for rows in trigger_types.values()}
+        == {"opened", "reopened", "synchronize"}
+        and not any((key,) in index.keys for key in ("env", "defaults")),
+        "Workflow source is outside the supported checkout and pinned draft profile",
+    )
+    action = _field(index, (*drafter, "uses"))
+    token = _field(index, (*env, "GITHUB_TOKEN"))
+    permission = _field(index, (*owner, "permissions", "contents"))
+    target = _field(index, (*inputs, "commitish"))
+    _require(
+        _field(index, (*checkout, "name")).value == "Checkout code"
+        and _field(index, (*checkout, "uses")).value == _CHECKOUT
+        and _field(index, (*owner, "if")).value == _LOGGED_ACTOR_GUARD
+        and _field(index, (*drafter, "name")).value == "Release Drafter"
+        and action.value == _LOGGED_ACTION
+        and _field(index, (*inputs, "config-name")).value == "release-drafter.yml"
+        and str(_field(index, (*inputs, "disable-autolabeler")).value).lower() == "false"
+        and _field(index, (*summary, "name")).value == "Summary"
+        and _is_exact_identifier_expression(str(token.value), "secrets.GITHUB_TOKEN")
+        and permission.value == "write"
+        and _matches(target.value, r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}"),
+        "Workflow does not bind the pinned checkout, draft action and configured job token",
+    )
+    return {
+        "action": action.value,
+        "action_line": action.line,
+        "credential_binding": "GITHUB_TOKEN",
+        "credential_line": token.line,
+        "requested_permission": "contents: write",
+        "permission_line": permission.line,
+        "target_commitish": target.value,
+    }
+
+
+def _logged_denial(cap: _Row, root: Path, repo: str) -> _Row:
+    run, job, pr, observation = cap["run"], cap["job"], cap["pr"], cap["verified_log"]
+    merge, base = observation["merge_commit"], observation["base_commit"]
+    custody, annotation = cap["custody"], observation["failure_annotation"]
+    _require(
+        all(
+            _id(observation[key]) and observation[key] == identity
+            for key, identity in (
+                ("run", run["id"]),
+                ("job", job["id"]),
+                ("attempt", run["run_attempt"]),
+            )
+        )
+        and all(
+            _matches(observation[key], _DIGEST)
+            for key in ("log_sha256", "merge_record_sha256", "annotation_list_sha256")
+        )
+        and _matches(merge, _SHA)
+        and _matches(base, _SHA)
+        and len({merge, base, run["head_sha"]}) == 3
+        and observation["merge_parents"] == [base, run["head_sha"]]
+        and observation["action_commit"] == _LOGGED_ACTION_SHA
+        and _matches(run["actor"], r"[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?")
+        and run["actor"].lower() not in {"dependabot[bot]", "github-actions[bot]"}
+        and custody["log_sha256"] == observation["log_sha256"]
+        and custody["annotation_list_sha256"] == observation["annotation_list_sha256"]
+        and _id(annotation["check_run"])
+        and annotation["check_run"] == cap["check_run"]["id"]
+        and annotation["level"] == "failure"
+        and annotation["message"] == _LOGGED_CREATE_ERROR
+        and run["conclusion"] == job["conclusion"] == "failure",
+        "Saved log or merged revision does not belong to the selected failed fork job",
+    )
+    index, source = _source(root, run, cap["source"], merge)
+    configured = _logged_source_plan(index, job["name"])
+    setup = _observed_step(job, "Set up job", number=1)
+    checkout = _observed_step(job, "Checkout code", number=2)
+    cleanup = _observed_step(job, "Post Checkout code", number=8)
+    finish = _observed_step(job, "Complete job", number=9)
+    steps = job["steps"]
+    drafter, summary = steps[2:4]
+    _require(
+        [(step["number"], step["name"]) for step in steps]
+        == [
+            (1, "Set up job"),
+            (2, "Checkout code"),
+            (3, "Release Drafter"),
+            (4, "Summary"),
+            (8, "Post Checkout code"),
+            (9, "Complete job"),
+        ]
+        and all(_id(step["number"]) for step in steps)
+        and drafter["conclusion"] == "failure"
+        and summary["conclusion"] == "skipped"
+        and _time(setup["completed_at"]) <= _time(checkout["started_at"])
+        and _time(checkout["completed_at"])
+        <= _time(drafter["started_at"])
+        <= _time(drafter["completed_at"])
+        <= _time(summary["started_at"])
+        <= _time(job["completed_at"]),
+        "Saved steps do not place the failed draft action immediately after the owned checkout",
+    )
+    config_ref = f"refs/pull/{pr['number']}/merge"
+    target = configured["target_commitish"]
+    patterns = (
+        re.escape("##[group]GITHUB_TOKEN Permissions"),
+        r"Contents: read",
+        re.escape("##[endgroup]"),
+        re.escape(f"Download action repository '{_LOGGED_ACTION}' (SHA:{_LOGGED_ACTION_SHA})"),
+        re.escape(f"##[group]Run {_CHECKOUT}"),
+        re.escape(merge),
+        re.escape(f"##[group]Run {_LOGGED_ACTION}"),
+        re.escape(f'Config fetched from "{repo}/.github/release-drafter.yml@{config_ref}".'),
+        r"No draft release found",
+        r" +targetCommitish: +" + re.escape(target),
+        r" +draft: +true",
+        re.escape("Creating new release..."),
+        re.escape(f"##[error]{_LOGGED_CREATE_ERROR}"),
+        re.escape("Post job cleanup."),
+        re.escape("Cleaning up orphan processes"),
+    )
+    rows = observation["rows"]
+    _require(
+        isinstance(rows, list) and len(rows) == len(patterns),
+        "Saved log lacks the complete owned grant and draft-create sequence",
+    )
+    owners = (setup,) * 4 + (checkout,) * 2 + (drafter,) * 7 + (cleanup, finish)
+    times = []
+    for row, pattern, step in zip(rows, patterns, owners, strict=True):
+        when = _time(row["time"])
+        _require(
+            _matches(row["value"], pattern)
+            and _time(step["started_at"])
+            <= when.replace(microsecond=0)
+            <= _time(step["completed_at"])
+            and hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+            == row["sha256"],
+            "Saved log row does not match its evidence, owning step or recorded draft action",
+        )
+        times.append(when)
+    _require(all(a < b for a, b in pairwise(times)), "Grant and rejection log order is ambiguous")
+    rejection = rows[-3]
+    return {
+        "state": "draft-release-create-rejection-reported",
+        "repository": repo,
+        "run": run["id"],
+        "job": job["id"],
+        "attempt": run["run_attempt"],
+        "job_conclusion": job["conclusion"],
+        "pr": {key: pr[key] for key in ("number", "head_repository", "head_sha")},
+        "source": source,
+        "source_role": "pull-request-merge",
+        "configured": configured,
+        "effective_permission": {
+            "credential": "GITHUB_TOKEN",
+            "contents": "read",
+            "time": rows[1]["time"],
+            "line_sha256": rows[1]["sha256"],
+        },
+        "operation": {
+            "method": "POST",
+            "url": f"https://api.github.com/repos/{repo}/releases",
+            "draft": True,
+            "target_commitish": target,
+            "status": None,
+            "message": _DENIAL,
+            "time": rejection["time"],
+            "log_sha256": observation["log_sha256"],
+            "failure_line_sha256": rejection["sha256"],
+            "action_commit": _LOGGED_ACTION_SHA,
+        },
+        "scope": _LOGGED_SCOPE,
+    }
+
+
 def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) -> _Row:
     run, job, check = cap["run"], cap["job"], cap["check_run"]
     _run_identity(run, job, repo, run_id, "pull_request")
@@ -256,6 +472,9 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
         and run["head_sha"] == pr["head_sha"],
         "Saved pull request does not match the selected fork invocation",
     )
+    if "verified_log" in cap:
+        _require("denial" not in cap, "Receipt combines different draft observation profiles")
+        return _logged_denial(cap, root, repo)
     request = cap.get("denial")
     if not isinstance(request, dict):
         raise PreviewEvidenceError("No owned draft-create API denial was supplied")
@@ -328,8 +547,13 @@ def release_request_observation(
         cap = _observation_capture(snapshot, _SCHEMA)
         _require(cap["repository"] == repository, "Receipt belongs to another repository")
         if "creation" in cap:
+            _require(
+                "verified_log" not in cap, "Receipt combines different draft observation profiles"
+            )
             scope = _PUSH_SCOPE
             return _draft_creation(cap, root.resolve(), repository, run_id, job_id)
+        if "verified_log" in cap:
+            scope = _LOGGED_SCOPE
         return _draft_denial(cap, root.resolve(), repository, run_id, job_id)
     except PreviewEvidenceError as exc:
         reason = str(exc)

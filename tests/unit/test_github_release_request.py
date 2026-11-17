@@ -280,3 +280,172 @@ def test_literal_push_list_checks_invisible_and_nested_items(push_capture, extra
     assert assess()["state"] == "draft-release-create-reported"
     cap["source"] = bind(block.replace("      - master", f"      - master\n      {extra}"))
     assert assess()["state"] == "unresolved"
+
+
+@pytest.fixture
+def logged_fork_capture(capture):
+    cap, bind, assess = capture
+    action_pin = "34d80673e067bdc0c24568d3af899c216adcfaa9"
+    checkout_pin = "11bd71901bbe5b1630ceea73d27597364c9af683"
+    action = f"release-drafter/release-drafter@{action_pin}"
+    merge, base = "d" * 40, "b" * 40
+    workflow = f"""\
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: github.actor != 'dependabot[bot]' && github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@{checkout_pin}
+      - name: Release Drafter
+        uses: {action}
+        env:
+          GITHUB_TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}
+        with:
+          config-name: release-drafter.yml
+          commitish: develop
+          disable-autolabeler: false
+      - name: Summary
+        run: echo summary
+"""
+
+    def bind_merged(text):
+        cap["source"] = {**bind(text), "revision": merge}
+
+    del cap["denial"]
+    bind_merged(workflow)
+    for record in ("run", "job", "check_run"):
+        cap[record]["conclusion"] = "failure"
+    cap["run"]["actor"] = "maintainer"
+    cap["job"]["steps"] = [
+        {"name": name, "number": number, "started_at": f"2026-05-13T00:23:{start}Z",
+         "completed_at": f"2026-05-13T00:23:{end}Z", "conclusion": conclusion}
+        for number, name, start, end, conclusion in (
+            (1, "Set up job", 16, 17, "success"),
+            (2, "Checkout code", 18, 19, "success"),
+            (3, "Release Drafter", 20, 22, "failure"),
+            (4, "Summary", 22, 22, "skipped"),
+            (8, "Post Checkout code", 22, 22, "success"),
+            (9, "Complete job", 22, 23, "success"),
+        )
+    ]
+    entries = (
+        ("16.100", "##[group]GITHUB_TOKEN Permissions"),
+        ("16.200", "Contents: read"),
+        ("16.300", "##[endgroup]"),
+        ("17.100", f"Download action repository '{action}' (SHA:{action_pin})"),
+        ("18.150", f"##[group]Run actions/checkout@{checkout_pin}"),
+        ("19.500", merge),
+        ("20.100", f"##[group]Run {action}"),
+        ("20.200", f'Config fetched from "{REPO}/.github/release-drafter.yml@refs/pull/40/merge".'),
+        ("20.300", "No draft release found"),
+        ("21.100", "  targetCommitish: develop"),
+        ("21.200", "  draft: true"),
+        ("21.300", "Creating new release..."),
+        ("21.400", "##[error]Resource not accessible by integration - "
+                   "https://docs.github.com/rest/releases/releases#create-a-release"),
+        ("22.000", "Post job cleanup."),
+        ("22.200", "Cleaning up orphan processes"),
+    )
+    rows = []
+    for stamp, value in entries:
+        time = f"2026-05-13T00:23:{stamp}Z"
+        rows.append({"time": time, "value": value, "sha256": hashlib.sha256(f"{time} {value}".encode()).hexdigest()})
+    cap["custody"] = {"log_sha256": "c" * 64, "annotation_list_sha256": "e" * 64}
+    cap["verified_log"] = {
+        "run": 10, "job": 20, "attempt": 1,
+        "log_sha256": "c" * 64, "merge_record_sha256": "d" * 64, "annotation_list_sha256": "e" * 64,
+        "merge_commit": merge, "base_commit": base, "merge_parents": [base, HEAD],
+        "action_commit": action_pin, "rows": rows,
+        "failure_annotation": {
+            "check_run": 20,
+            "level": "failure",
+            "message": "Resource not accessible by integration - "
+                       "https://docs.github.com/rest/releases/releases#create-a-release",
+        },
+    }
+    return cap, workflow, bind_merged, assess
+
+
+def test_owned_fork_grant_and_rejection_preserve_unknown_http_status(logged_fork_capture):
+    cap, _, _, assess = logged_fork_capture
+    result = assess()
+    assert result["state"] == "draft-release-create-rejection-reported"
+    assert result["effective_permission"]["contents"] == "read"
+    assert result["configured"]["requested_permission"] == "contents: write"
+    assert result["source"]["revision"] == cap["verified_log"]["merge_commit"]
+    assert result["operation"]["status"] is None
+    assert result["operation"]["url"] == f"https://api.github.com/repos/{REPO}/releases"
+    assert result["operation"]["target_commitish"] == "develop"
+    assert "publication" not in result
+
+
+@pytest.mark.parametrize(
+    ("index", "field", "wrong"),
+    [
+        (1, "value", "Contents: write"),
+        (1, "time", "2026-05-13T00:23:19.150Z"),
+        (5, "value", HEAD),
+        (7, "value", f'Config fetched from "{REPO}/.github/release-drafter.yml@refs/heads/develop".'),
+        (9, "value", "  targetCommitish: main"),
+        (10, "value", "  draft: false"),
+        (11, "value", "Updating existing release..."),
+        (12, "value", "##[error]Resource not accessible by integration"),
+    ],
+)
+def test_fork_log_must_describe_the_exact_grant_and_operation(logged_fork_capture, index, field, wrong):
+    cap, _, _, assess = logged_fork_capture
+    row = cap["verified_log"]["rows"][index]
+    row[field] = wrong
+    row["sha256"] = hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+    assert assess()["state"] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    ("key", "wrong"), [("job", 99), ("attempt", True), ("merge_parents", [HEAD, "b" * 40])]
+)
+def test_fork_grant_does_not_cross_job_attempt_or_merge(logged_fork_capture, key, wrong):
+    cap, _, _, assess = logged_fork_capture
+    cap["verified_log"][key] = wrong
+    assert assess()["state"] == "unresolved"
+
+
+def test_fork_checkout_override_disables_the_profile(logged_fork_capture):
+    _, workflow, bind, assess = logged_fork_capture
+    bind(workflow.replace("      - name: Release Drafter", "        with:\n          ref: develop\n      - name: Release Drafter"))
+    assert assess()["state"] == "unresolved"
+
+
+def test_logged_fork_rejects_contradictory_job_guard(logged_fork_capture):
+    _, workflow, bind, assess = logged_fork_capture
+    bind(workflow.replace("    if: github.actor != 'dependabot[bot]' && github.actor != 'github-actions[bot]'", "    if: false"))
+    assert assess()["state"] == "unresolved"
+
+
+def test_logged_fork_rejects_conflicting_log_provenance(logged_fork_capture):
+    cap, _, _, assess = logged_fork_capture
+    cap["custody"]["log_sha256"] = "8" * 64
+    assert assess()["state"] == "unresolved"
+
+
+def test_logged_fork_rejects_response_after_cleanup_within_same_second(logged_fork_capture):
+    cap, _, _, assess = logged_fork_capture
+    rows = cap["verified_log"]["rows"]
+    for row, stamp in zip(rows[-3:], ("22.900", "22.100", "22.300"), strict=True):
+        row["time"] = f"2026-05-13T00:23:{stamp}Z"
+        row["sha256"] = hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+    assert assess()["state"] == "unresolved"
+
+@pytest.mark.parametrize("filter_line", ["    branches: [main]\n", "    paths-ignore: ['**']\n"])
+def test_logged_fork_rejects_unmodeled_trigger_filters(logged_fork_capture, filter_line):
+    _, workflow, bind, assess = logged_fork_capture
+    bind(workflow.replace("    types:\n", filter_line + "    types:\n"))
+    assert assess()["state"] == "unresolved"
