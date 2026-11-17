@@ -384,6 +384,39 @@ target, the recorded uploader, and agreement across the three digest
 records. APK bytes, signature validity, signing approval and broader
 App permissions require separate evidence.
 
+### Saved GitHub draft-release request
+
+```bash
+python -m taintly ./saved-source --format json --github-release-request-observation \
+  observation.json owner/repo RUN JOB
+```
+
+Use a trusted offline `github-draft-release-request-v1` receipt and the
+workflow from the recorded fork head at its original relative path.
+Supply the `repository`, attempt-specific `run`, `job`, `check_run`,
+and a `pr` containing `number`, `base_repository`, `head_repository`
+and `head_sha`. Save repository names as full names in `run.head_repository`
+and the PR fields. Use `check_run.app` for the GitHub App slug and
+`check_run.check_suite_id` for the run's check suite ID. The `source`
+record holds the workflow `path`, fork-head `revision` and `sha256`.
+
+Use the owning check run's request/response annotation to build the
+`denial` record. Include `check_run`, `run`, `attempt`, `action`,
+`annotation_sha256`, `action_annotation_sha256`, `method`, `url`, `target_commitish`, `draft`,
+`status`, `message`, `request_id`, `response_at` and `accepted_permissions`.
+Use the action annotation from the same check to corroborate the action
+identity and record its message hash.
+Keep the response timestamp in ISO 8601 with its offset and retain the
+GitHub permissions header exactly. Omit credentials, request authorization
+headers and unrelated event data.
+
+The supported profile uses one Release Drafter v6 step with a configured
+job token in a direct fork PR run. Exit 0 with `draft-release-create-denied`
+means the saved GitHub response corroborates a 403 for that draft request,
+even when GitHub reports a successful job. Missing or incompatible evidence
+returns exit 11. Exact merged workflow bytes, runtime token identity,
+the effective policy and release asset publication remain unverified.
+
 ### Saved GitHub Preview observations
 
 When reviewing a completed fork build, use the named operation and both
