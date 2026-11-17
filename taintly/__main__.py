@@ -1952,6 +1952,16 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             f"  Managed artifact: {publication['target']}\n"
             f"  SHA-256: {publication['sha256']}\n{report['scope']}\n{report['review_action']}"
         )
+    elif state == "job-artifact-uploaded-after-failure":
+        publication = report["publication"]
+        print(
+            f"GitLab job {report['job']} checked out merged-result revision {report['revision']} "
+            f"for fork MR !{report['mr']}.\n"
+            f"  The runner logged {report['command']} in the failed job. "
+            f"The coordinator accepted its failure-path archive (HTTP 201).\n"
+            f"  Retrieved member: {publication['target']}\n"
+            f"  SHA-256: {publication['sha256']}\n{report['scope']}"
+        )
     elif state == "manual-job-not-started":
         print(
             f"GitLab job {report['job']} remained unstarted on its manual fallback.\n"

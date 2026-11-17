@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import Counter
+from datetime import datetime
 from fnmatch import fnmatchcase
 from itertools import pairwise
 from pathlib import Path
@@ -27,8 +28,10 @@ from taintly.rules.gitlab.mr_publish import command_text
 
 _Row = dict[str, Any]
 _JOB = re.compile(r"[A-Za-z0-9_.-]{1,100}(?::[A-Za-z0-9_.-]{1,100})?")
+_FAILED_JOB = re.compile(r"[A-Za-z0-9_.-][A-Za-z0-9_.: -]{0,99}")
 _PART = r"[A-Za-z0-9_][A-Za-z0-9_.-]*"
 _PATH = re.compile(rf"{_PART}(?:/{_PART})*")
+_FAILED_COMMAND = r"(?:\./gradlew :[A-Za-z0-9:_-]{1,128}|yarn [A-Za-z0-9:_-]{1,128})"
 _BUILD = re.compile(r"(?:bun|yarn) run build(?::[a-z0-9:_-]+)?")
 _MOVE = re.compile(rf"mv ({_PART}(?:/{_PART})*) ({_PART}(?:/{_PART})*)")
 _EVENT = "$CI_PIPELINE_SOURCE == 'merge_request_event'"
@@ -42,6 +45,12 @@ _PAGES_SCOPE = (
     "This observation covers the deployment reported in the owning GitLab environment record "
     "for this Pages preview job. Serving the archive bytes at that URL, live access policy, "
     "other previews and production deployment remain unverified."
+)
+_FAILED_SCOPE = (
+    "Trusted saved runner records report a job-scoped archive upload after script failure. "
+    "The checkout and logged command identify the invocation. Effective configuration, "
+    "the effect of PR code on the retrieved member, protected credentials and other "
+    "destinations remain unverified."
 )
 
 
@@ -154,6 +163,34 @@ def _artifact_owner(cfg: _Config, name: str) -> str:
     return parent
 
 
+def _archived_member(
+    data: _Row, root: Path, job_url: str, end: datetime, selector: str | None = None
+) -> _Row:
+    artifact = data["artifact"]
+    path = _value(artifact["path"], _PATH, "archive member path")
+    url = f"{job_url}/artifacts/raw/{path}"
+    _need(
+        (selector is None or path.startswith(selector + "/"))
+        and artifact["url"] == url
+        and artifact["http_status"] == 200
+        and _time(artifact["observed_at"], "artifact retrieval time") >= end,
+        "retrieved artifact does not belong to the selected job and directory",
+    )
+    raw = _source_bytes(root, root / "published-file.bin", "selected artifact member")
+    digest = hashlib.sha256(raw).hexdigest()
+    _need(
+        0 < len(raw) <= 131072 and len(raw) == artifact["size"] and digest == artifact["sha256"],
+        "saved artifact member differs from public retrieval size or digest",
+    )
+    return {
+        "operation": "gitlab-job-artifact-upload",
+        "authority": "gitlab-runner-job-scoped-upload",
+        "target": url,
+        "member_path": path,
+        "sha256": digest,
+    }
+
+
 def _successful(
     data: _Row, root: Path, cfg: _Config, pipeline: _Row, name: str, job_url: str
 ) -> _Row:
@@ -215,22 +252,7 @@ def _successful(
             receipt[2]["command"] == move and event.line > build.line,
             "archive directory move is not owned by the supported command sequence",
         )
-    artifact = data["artifact"]
-    path = _value(artifact["path"], _PATH, "archive member path")
-    url = f"{job_url}/artifacts/raw/{path}"
-    _need(
-        path.startswith(selector + "/")
-        and artifact["url"] == url
-        and artifact["http_status"] == 200
-        and _time(artifact["observed_at"], "artifact retrieval time") >= end,
-        "retrieved artifact does not belong to the selected job and directory",
-    )
-    raw = _source_bytes(root, root / "published-file.bin", "selected artifact member")
-    digest = hashlib.sha256(raw).hexdigest()
-    _need(
-        0 < len(raw) <= 131072 and len(raw) == artifact["size"] and digest == artifact["sha256"],
-        "saved artifact member differs from public retrieval size or digest",
-    )
+    publication = _archived_member(data, root, job_url, end, selector)
     return {
         "state": "job-artifact-observed",
         "command": cmd,
@@ -242,12 +264,124 @@ def _successful(
             "verify the approved producer and revision, and compare the consumed member with "
             "an independently approved digest."
         ),
+        "publication": publication,
+    }
+
+
+def _historical_head(data: _Row, path: str, project: int, pipeline: int, iid: int) -> str:
+    captured = data["failed_archive"]
+    view, fork = captured["historical_pipeline"], captured["fork_commit"]
+    head = _value(view["source_sha"], _SHA, "saved pipeline fork head")
+    target = _value(view["target_sha"], _SHA, "saved pipeline target head")
+    _need(
+        view["url"] == f"https://gitlab.com/{path}/-/pipelines/{pipeline}.json"
+        and _identifier(view["project"], "saved project") == project
+        and _identifier(view["pipeline"], "saved pipeline") == pipeline
+        and _identifier(view["mr"], "saved MR") == iid
+        and view["event"] == "merged_result"
+        and view["revision"] == data["pipeline"]["sha"]
+        and data["merge"]["parent_ids"] == [target, head]
+        and _identifier(fork["project"], "saved fork project") == data["mr"]["source_project_id"]
+        and fork["sha"] == head
+        and _SHA256.fullmatch(str(view["sha256"]))
+        and _SHA256.fullmatch(str(fork["receipt_sha256"])),
+        "saved historical pipeline or fork revision does not match the selected MR",
+    )
+    return head
+
+
+def _failed_upload(data: _Row, root: Path, job_url: str) -> _Row:
+    job, pipeline = data["job"], data["pipeline"]
+    log = data["failed_archive"]["log"]
+    archives = [part for part in job["artifacts"] if part["file_type"] == "archive"]
+    _need(
+        job["status"] == "failed"
+        and job["failure_reason"] == "script_failure"
+        and len(archives) == 1
+        and _identifier(archives[0]["size"], "saved archive size")
+        and archives[0]["file_format"] == "zip"
+        and all(job["pipeline"][key] == pipeline[key] for key in ("created_at", "updated_at"))
+        and _identifier(log["job"], "runner trace job") == job["id"]
+        and log["url"] == job_url + "/raw"
+        and _SHA256.fullmatch(str(log["sha256"])),
+        "saved trace and archive inventory do not identify a failed producer job",
+    )
+    start = _time(job["started_at"], "failed job start")
+    end = _time(job["finished_at"], "failed job end")
+    _need(
+        _time(pipeline["created_at"], "owning pipeline creation")
+        <= start
+        <= end
+        <= _time(pipeline["updated_at"], "owning pipeline last update"),
+        "selected failed job is outside the recorded pipeline window",
+    )
+    section_start = r"00O\+section_start:([0-9]{1,12}):"
+    section_end = r"00O section_end:([0-9]{1,12}):"
+    checkout = (
+        f"01O Checking out {pipeline['sha'][:8]} as detached HEAD (ref is {pipeline['ref']})..."
+    )
+    patterns = (
+        section_start + "get_sources",
+        re.escape(checkout),
+        section_end + "get_sources",
+        section_start + "step_script",
+        rf"01O \$ ({_FAILED_COMMAND})",
+        section_end + "step_script",
+        section_start + "upload_artifacts_on_failure",
+        rf"01E ({_PART}(?:/{_PART})*/?): found [1-9][0-9]* matching artifact files and directories",
+        r'01E Uploading artifacts as "archive" to coordinator\.\.\. 201 Created +'
+        rf"(?:correlation_id=[0-9a-f]+ +)?id={job['id']} (?:responseStatus=201 Created )?status=201(?: Created)?",
+        section_end + "upload_artifacts_on_failure",
+        r"00O ERROR: Job failed: exit code [1-9][0-9]{0,2}",
+    )
+    rows = log["rows"]
+    _need(
+        isinstance(rows, list) and len(rows) == len(patterns),
+        "saved runner log is missing the complete failure-upload sequence",
+    )
+    times, markers = [], []
+    for row, pattern in zip(rows, patterns, strict=True):
+        time, value = row["time"], row["value"]
+        when = _time(time, "failed job trace time")
+        marker = (
+            re.fullmatch(pattern, value) if isinstance(value, str) and len(value) <= 1024 else None
+        )
+        if not marker or hashlib.sha256(f"{time} {value}".encode()).hexdigest() != row["sha256"]:
+            raise RegistryJobError("saved failure-upload line does not match its evidence or phase")
+        _need(
+            not pattern.startswith((section_start, section_end))
+            or int(marker[1]) == int(when.timestamp()),
+            "runner section epoch conflicts with its trace timestamp",
+        )
+        times.append(when)
+        markers.append(marker)
+    _need(
+        start <= times[0] and times[-1] <= end and all(a < b for a, b in pairwise(times)),
+        "saved failure-upload lines are outside the job or out of phase order",
+    )
+    member = _archived_member(data, root, job_url, end)
+    selection = markers[7][1]
+    _need(
+        member["member_path"].startswith(selection)
+        if selection.endswith("/")
+        else member["member_path"] == selection,
+        "retrieved member is outside the runner-reported artifact selection",
+    )
+    return {
+        "state": "job-artifact-uploaded-after-failure",
+        "command": markers[4][1],
+        "command_basis": "runner-step-script",
+        "job_status": "failed",
+        "runner_selection": selection,
+        "effective_configuration": "unverified",
+        "member_origin": "unverified",
+        "scope": _FAILED_SCOPE,
         "publication": {
-            "operation": "gitlab-job-artifact-upload",
-            "authority": "gitlab-runner-job-scoped-upload",
-            "target": url,
-            "member_path": path,
-            "sha256": digest,
+            **member,
+            "http_status": 201,
+            "upload_at": rows[8]["time"],
+            "upload_line_sha256": rows[8]["sha256"],
+            "trace_sha256": log["sha256"],
         },
     }
 
@@ -612,7 +746,12 @@ def _assess(
         _identifier(value, label)
     path = _value(project["path"], _PROJECT, "GitLab target project path")
     iid = _identifier(pr["iid"], "merge request IID")
-    head = _value(pr["sha"], _SHA, "fork head")
+    failed_archive = "failed_archive" in data
+    head = (
+        _historical_head(data, path, project_id, pipeline_id, iid)
+        if failed_archive
+        else _value(pr["sha"], _SHA, "fork head")
+    )
     revision = _value(pipe["sha"], _SHA, "selected revision")
     job_url = f"https://gitlab.com/{path}/-/jobs/{job_id}"
     _need(
@@ -634,23 +773,36 @@ def _assess(
         and _SHA.fullmatch(str(merge["parent_ids"][0])),
         "MR, fork head, target project, pipeline, job or merged-result commit do not agree",
     )
-    name = _value(job["name"], _JOB, "job name")
+    name = _value(job["name"], _FAILED_JOB if failed_archive else _JOB, "job name")
     raw = _source_bytes(root, root / ".gitlab-ci.yml", "selected GitLab source")
     _need(
         hashlib.sha256(raw).hexdigest() == data["source_sha256"],
         "GitLab configuration differs from saved pipeline source",
     )
-    cfg = _Config(raw.decode("utf-8"))
-    cfg.owner((name,))
-    detail = (
-        _manual(data, cfg, name)
-        if job["status"] == "manual"
-        else _successful(data, root, cfg, pipe, name, job_url)
-    )
-    if publisher is not None:
-        detail["publication_admission"] = _npm_admission(data, cfg, path, publisher)
-    if "pages_preview" in data:
-        detail["pages_preview"] = _pages_preview(data, cfg, detail, path, job_url)
+    if failed_archive:
+        detail = _failed_upload(data, root, job_url)
+        if publisher is not None:
+            detail["publication_admission"] = {
+                "state": "unresolved",
+                "reason": "the runner response does not establish npm publisher admission",
+            }
+        if "pages_preview" in data:
+            detail["pages_preview"] = {
+                "state": "unresolved",
+                "reason": "the failure-upload profile does not establish a Pages deployment",
+            }
+    else:
+        cfg = _Config(raw.decode("utf-8"))
+        cfg.owner((name,))
+        detail = (
+            _manual(data, cfg, name)
+            if job["status"] == "manual"
+            else _successful(data, root, cfg, pipe, name, job_url)
+        )
+        if publisher is not None:
+            detail["publication_admission"] = _npm_admission(data, cfg, path, publisher)
+        if "pages_preview" in data:
+            detail["pages_preview"] = _pages_preview(data, cfg, detail, path, job_url)
     return {
         "repository": path,
         "project": project_id,

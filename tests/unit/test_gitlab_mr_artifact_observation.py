@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import re
+from datetime import datetime
 
 import pytest
 
@@ -202,6 +204,125 @@ def test_pipeline_cannot_begin_after_the_selected_job(tmp_path, capture):
     result = evaluate(tmp_path, capture)
     assert result["state"] == "unresolved"
     assert result["reason"] == "selected job is outside the recorded pipeline window"
+
+
+def _failure_trace_row(stamp, message):
+    return {"time": stamp, "value": message,
+            "sha256": hashlib.sha256(f"{stamp} {message}".encode()).hexdigest()}
+
+
+@pytest.fixture
+def failed_capture(capture):
+    capture["pipeline"].update(created_at=time(0), updated_at=time(18))
+    capture["job"].update(
+        status="failed", failure_reason="script_failure", name="test artifacts",
+        finished_at=time(15),
+        pipeline={**capture["pipeline"]},
+        artifacts=[{"file_type": "archive", "file_format": "zip", "size": 123}],
+    )
+    capture["mr"]["sha"] = "d" * 40
+    capture["artifact"]["observed_at"] = time(17)
+    messages = [
+        "00O+section_start:123:get_sources",
+        f"01O Checking out {MERGE[:8]} as detached HEAD (ref is refs/merge-requests/9/merge)...",
+        "00O section_end:124:get_sources",
+        "00O+section_start:125:step_script",
+        "01O $ yarn test:integration",
+        "00O section_end:126:step_script",
+        "00O+section_start:127:upload_artifacts_on_failure",
+        "01E output/: found 1 matching artifact files and directories",
+        '01E Uploading artifacts as "archive" to coordinator... 201 Created  id=33 status=201',
+        "00O section_end:128:upload_artifacts_on_failure",
+        "00O ERROR: Job failed: exit code 1",
+    ]
+    rows = []
+    for i, value in enumerate(messages, 2):
+        stamp = time(i)
+        epoch = int(datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp())
+        value = re.sub(r"(section_(?:start|end):)[0-9]+:", rf"\g<1>{epoch}:", value)
+        rows.append(_failure_trace_row(stamp, value))
+    capture["failed_archive"] = {
+        "historical_pipeline": {
+            "url": "https://gitlab.com/team/repo/-/pipelines/22.json", "project": 1, "pipeline": 22,
+            "mr": 9, "revision": MERGE, "source_sha": HEAD, "target_sha": BASE,
+            "event": "merged_result", "sha256": "e" * 64,
+        },
+        "fork_commit": {"project": 2, "sha": HEAD, "receipt_sha256": "f" * 64},
+        "log": {"job": 33, "url": JOB + "/raw", "sha256": "a" * 64, "rows": rows},
+    }
+    return capture
+
+
+def test_failed_job_has_an_observed_upload_independent_of_config_analysis(tmp_path, failed_capture):
+    result = evaluate(tmp_path, failed_capture, publisher="deploy")
+    assert result["state"] == "job-artifact-uploaded-after-failure"
+    assert result["fork_head"] == HEAD and result["job_status"] == "failed"
+    assert result["publication"]["http_status"] == 201
+    assert result["publication"]["member_path"] == "output/index.html"
+    assert result["command"] == "yarn test:integration"
+    assert result["member_origin"] == result["effective_configuration"] == "unverified"
+    assert result["publication_admission"]["state"] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    ("record", "key", "wrong"),
+    [
+        ("historical_pipeline", "pipeline", 23),
+        ("historical_pipeline", "source_sha", "d" * 40),
+        ("historical_pipeline", "url", "https://gitlab.com/team/fork/-/pipelines/22.json"),
+        ("historical_pipeline", "event", "merge_train"),
+        ("fork_commit", "project", 3),
+        ("log", "job", 34),
+        ("log", "url", JOB + "/trace"),
+    ],
+)
+def test_failed_upload_refuses_foreign_evidence(tmp_path, failed_capture, record, key, wrong):
+    failed_capture["failed_archive"][record][key] = wrong
+    result = evaluate(tmp_path, failed_capture)
+    assert result["state"] == "unresolved" and "publication" not in result
+
+
+@pytest.mark.parametrize(
+    ("slot", "replacement"),
+    [
+        (4, "01O $ echo yarn test:integration"),
+        (6, "00O+section_start:127:step_script"),
+        (7, "01E output: found 1 matching artifact files and directories"),
+        (8, '01E Uploading artifacts as "archive" to coordinator... 201 Created  id=34 status=201'),
+        (8, '01O Uploading artifacts as "archive" to coordinator... 201 Created  id=33 status=201'),
+        (8, '01E Uploading artifacts as "archive" to coordinator... 403 Forbidden  id=33 status=403'),
+        (9, "00O section_end:128:upload_artifacts_on_success"),
+    ],
+)
+def test_failed_upload_refuses_wrong_command_phase_or_operation(tmp_path, failed_capture, slot, replacement):
+    rows = failed_capture["failed_archive"]["log"]["rows"]
+    rows[slot] = _failure_trace_row(rows[slot]["time"], replacement)
+    assert evaluate(tmp_path, failed_capture)["state"] == "unresolved"
+
+
+def test_failed_upload_refuses_member_from_sibling_job(tmp_path, failed_capture):
+    failed_capture["artifact"]["url"] = JOB.replace("/33", "/34") + "/artifacts/raw/output/index.html"
+    assert evaluate(tmp_path, failed_capture)["state"] == "unresolved"
+
+
+def test_failed_upload_cannot_be_inferred_within_script_or_without_its_receipt(tmp_path, failed_capture):
+    rows = failed_capture["failed_archive"]["log"]["rows"]
+    upload = rows[8]
+    rows[8] = _failure_trace_row(time(6), upload["value"])
+    assert evaluate(tmp_path, failed_capture)["state"] == "unresolved"
+    del rows[8]
+    assert evaluate(tmp_path, failed_capture)["state"] == "unresolved"
+
+
+def test_failure_upload_requires_consistent_section_clock(tmp_path, failed_capture):
+    rows = failed_capture["failed_archive"]["log"]["rows"]
+    rows[6] = _failure_trace_row(rows[6]["time"], "00O+section_start:1:upload_artifacts_on_failure")
+    assert evaluate(tmp_path, failed_capture)["state"] == "unresolved"
+
+
+def test_failure_upload_requires_consistent_pipeline_windows(tmp_path, failed_capture):
+    failed_capture["job"]["pipeline"]["updated_at"] = time(0)
+    assert evaluate(tmp_path, failed_capture)["state"] == "unresolved"
 
 
 @pytest.mark.parametrize(

@@ -237,7 +237,7 @@ taintly ./saved-gitlab-source --format json \
   --gitlab-mr-artifact-observation observation.json PROJECT PIPELINE JOB
 ```
 
-This offline profile verifies one successful job artifact upload or one
+This offline profile verifies one observed job artifact upload or one
 unstarted manual job in a target-project merged-result pipeline for a fork
 MR. Use trusted reduced GitLab API and runner records. Supply the selected
 commit's original `.gitlab-ci.yml` and, for an upload, the original
@@ -265,6 +265,31 @@ case use empty `trace` and null `artifact`.
 For a successful archive observation, include the provider's pipeline
 `created_at` and `updated_at` in `job.pipeline`. The recorded job and
 its runner events must fit the pipeline and job windows.
+
+For an archive uploaded after script failure, supply `failed_archive`
+alongside the same source file, downloaded member and `artifact` record.
+Use matching `created_at` and `updated_at` values in `pipeline` and
+`job.pipeline`. Include `failure_reason` in `job` and the archive's
+`file_format`. The `failed_archive` object contains:
+
+- `historical_pipeline` with the pipeline JSON `url`, `project`, `pipeline`,
+  `mr`, `revision`, `source_sha`, `target_sha`, `event` (`merged_result`), and
+  `sha256` of the response. Use the historical fork head the pipeline recorded.
+- `fork_commit` with the source `project`, commit `sha` and `receipt_sha256`
+  from its repository commit response.
+- `log` with `job`, the owning job `/raw` URL, full log `sha256`, and `rows`.
+  Retain the source section start, detached checkout, source section end,
+  script start, one supported literal `yarn` or Gradle command, script end,
+  failure-upload start, the runner's file or directory match, archive HTTP
+  201, failure-upload end, and final job failure, in order. Every row keeps
+  `time`, redacted `value`, and the SHA-256 of `time`, one space, and `value`.
+  Strip terminal escapes and omit token fields. Keep the runner's stream prefixes.
+  Each runner section epoch must match the second recorded in its line timestamp.
+
+`job-artifact-uploaded-after-failure` identifies an archive accepted by
+the coordinator and a member retrieved for that job. The command comes
+from the owned runner script section. Effective configuration and the
+effect of the fork code on the member's bytes remain unverified.
 
 An observed archive upload covers only the selected job and artifact
 member. Published Pages content, push access to registries, protected
