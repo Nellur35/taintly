@@ -95,7 +95,7 @@ def _reject_constant(_value: str) -> None:
     raise EvidenceError("saved capture contains a nonfinite JSON value")
 
 
-def _upstream_branch(data: _Row, nodes: list[_Row], pr: int, repo: str, head: str) -> str:
+def _upstream_branch(data: _Row, repo: str, head: str) -> str:
     revision = data["pull"]["base"]
     if not isinstance(revision, str):
         raise EvidenceError("upstream checkout revision is unavailable")
@@ -113,14 +113,17 @@ def _upstream_branch(data: _Row, nodes: list[_Row], pr: int, repo: str, head: st
         and compare["behind_by"] == 0,
         "no pinned upstream-to-fork ancestry for the checkout",
     )
-    # An upstream checkout may merely initialize a workspace. Limit the interval
-    # to the observed build, Sonar submission and POM read; a later PR fetch can
-    # make an initially correct upstream checkout irrelevant to publication.
+    return revision
+
+
+def _review_maven_preparation(nodes: list[_Row], pr: int) -> None:
+    # A checkout can initialize a workspace that a later command replaces.
+    # Recognize only the visible preparation in the selected Maven profile.
     expected_names = ("Shell Script", "Print Message", "Shell Script", "Read a maven project file.")
     _require(
         tuple(node.get("name") for node in nodes) == expected_names
         and all(node["status"] == "SUCCESS" for node in nodes),
-        "unsupported operation between upstream checkout and Maven deployment",
+        "unsupported operation between checkout and Maven deployment",
     )
     package, message, sonar, pom = (node.get("parameterDescription") for node in nodes)
     _require(
@@ -134,24 +137,33 @@ def _upstream_branch(data: _Row, nodes: list[_Row], pr: int, repo: str, head: st
             sonar,
         )
         and pom == "pom.xml",
-        "unsupported command between upstream checkout and Maven deployment",
+        "unsupported command between checkout and Maven deployment",
     )
-    return revision
 
 
 def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row, str, str]:
     base = owner.removeprefix(_CONTROLLER)
-    stage = data["stage"]
+    flow, stage = data["flow"], data["stage"]
     stage_ref = f"{base}execution/node/{stage['id']}/wfapi/describe"
     _require(
-        data["flow"]["_links"]["self"]["href"] == base + "wfapi/describe"
+        flow["_links"]["self"]["href"] == base + "wfapi/describe"
         and stage["_links"]["self"]["href"] == stage_ref
-        and stage["status"] == "SUCCESS"
-        and any(
-            row["id"] == stage["id"] and row["_links"]["self"]["href"] == stage_ref
-            for row in data["flow"]["stages"]
-        ),
+        and stage["status"] == "SUCCESS",
         "provided stage does not belong to the selected Jenkins run",
+    )
+    summary = _one(
+        [row for row in flow["stages"] if row["id"] == stage["id"]],
+        "selected deployment stage is not unique in its parent run",
+    )
+    fields = ("name", "status", "startTimeMillis", "durationMillis", "_links")
+    flow_start, flow_end = _interval(flow)
+    stage_start, stage_end = _interval(stage)
+    _require(
+        flow["id"] == str(data["run"]["number"])
+        and flow["status"] == "SUCCESS"
+        and flow_start <= stage_start <= stage_end <= flow_end
+        and all(summary[field] == stage[field] for field in fields),
+        "deployment stage conflicts with its parent run",
     )
     nodes = stage["stageFlowNodes"]
     command = _one(
@@ -162,7 +174,6 @@ def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row,
         ],
         "no unique Maven deployment command in the selected stage",
     )
-    stage_start, stage_end = _interval(stage)
     command_start, _ = _interval(command)
     checkouts = [
         node
@@ -174,26 +185,24 @@ def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row,
     _require(
         _interval(checkout)[1] <= command_start, "checkout overlaps the selected deployment command"
     )
-    between = nodes[nodes.index(checkout) + 1 : nodes.index(command)]
+    first, last = nodes.index(checkout), nodes.index(command)
+    _require(first < last, "checkout is out of order in the deployment stage")
+    between = nodes[first + 1 : last]
     upstream = checkout["name"] == "Git"
-    revision = _upstream_branch(data, between, pr, repo, head) if upstream else head
-    owned_nodes = nodes if upstream else [checkout, command]
+    revision = _upstream_branch(data, repo, head) if upstream else head
+    if upstream or between:
+        _review_maven_preparation(between, pr)
+    owned_nodes = nodes if upstream else nodes[first : last + 1]
+    _require(
+        len({node["id"] for node in nodes}) == len(nodes)
+        and all(_interval(a)[1] <= _interval(b)[0] for a, b in pairwise(nodes)),
+        "checkout, preparation or deployment nodes have ambiguous order or identity",
+    )
     if upstream:
-        flow = data["flow"]
-        flow_start, flow_end = _interval(flow)
-        fields = ("id", "name", "status", "startTimeMillis", "durationMillis", "_links")
-        _require(
-            flow["id"] == str(data["run"]["number"])
-            and flow["status"] == "SUCCESS"
-            and flow_start <= stage_start <= stage_end <= flow_end
-            and sum(all(s.get(k) == stage.get(k) for k in fields) for s in flow["stages"]) == 1,
-            "upstream deployment stage conflicts with its parent run",
-        )
         _require(
             nodes[0]["name"] == "Delete workspace when build is done"
             and nodes[1] is checkout
-            and nodes[-1] is command
-            and all(_interval(a)[1] <= _interval(b)[0] for a, b in pairwise(nodes)),
+            and nodes[-1] is command,
             "upstream deployment stage has unsupported steps or ordering",
         )
     for node in owned_nodes:
@@ -215,27 +224,41 @@ def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row,
     lines = checkout_log["text"].splitlines()
     url = f"https://github.com/{repo}" + ("" if upstream else ".git")
     branch = "refs/remotes/origin/master" if upstream else f"PR-{pr}"
+    revisions = [line for line in lines if line.lstrip().startswith("Checking out Revision")]
+    _require(
+        revisions == [f"Checking out Revision {revision} ({branch})"],
+        "selected Git node has ambiguous upstream repository or revision evidence"
+        if upstream
+        else "selected checkout node has ambiguous repository or revision evidence",
+    )
     if upstream:
         clones = [line for line in lines if line.lstrip().startswith("Cloning repository")]
-        revisions = [line for line in lines if line.lstrip().startswith("Checking out Revision")]
         _require(
-            clones == [f"Cloning repository <a href='{url}'>{url}</a>"]
-            and revisions == [f"Checking out Revision {revision} ({branch})"],
+            clones == [f"Cloning repository <a href='{url}'>{url}</a>"],
             "selected Git node has ambiguous upstream repository or revision evidence",
         )
+    else:
+        # A checkout plugin may fetch from the same origin more than once.
+        fetches = {
+            line for line in lines if line.lstrip().startswith("Fetching upstream changes from")
+        }
+        _require(
+            fetches == {f"Fetching upstream changes from <a href='{url}'>{url}</a>"},
+            "selected checkout node has ambiguous fork repository evidence",
+        )
+    selected_action = _one(
+        [row for row in data["run"]["actions"] if url in row.get("remoteUrls", ())],
+        "missing or ambiguous checkout record for the selected repository",
+    )
+    saved_checkout = selected_action["lastBuiltRevision"]
     _require(
         checkout_log["nodeId"] == checkout["id"]
         and checkout_log["nodeStatus"] == "SUCCESS"
         and checkout_log["hasMore"] is False
         and checkout_log["consoleUrl"] == f"{base}execution/node/{checkout['id']}/log"
-        and f"Checking out Revision {revision} ({branch})" in lines
-        and url in checkout_log["text"]
-        and any(
-            row.get("remoteUrls") == [url]
-            and row.get("lastBuiltRevision", {}).get("SHA1") == revision
-            and (not upstream or row["lastBuiltRevision"].get("branch") == [{"name": branch}])
-            for row in data["run"]["actions"]
-        ),
+        and selected_action["remoteUrls"] == [url]
+        and saved_checkout["SHA1"] == revision
+        and saved_checkout["branch"] == [{"name": branch}],
         "selected upstream checkout node cannot establish the exact base revision and repository"
         if upstream
         else "selected checkout node cannot establish the exact fork revision and repository",

@@ -62,11 +62,18 @@ def capture(tmp_path):
             "actions": [
                 {
                     "remoteUrls": [f"https://github.com/{REPO}.git"],
-                    "lastBuiltRevision": {"SHA1": HEAD},
+                    "lastBuiltRevision": {"SHA1": HEAD, "branch": [{"name": "PR-7"}]},
                 }
             ],
         },
-        "flow": {"_links": {"self": {"href": JOB_PATH + "wfapi/describe"}}, "stages": [stage]},
+        "flow": {
+            "id": "3",
+            "status": "SUCCESS",
+            "startTimeMillis": START - 6000,
+            "durationMillis": 8000,
+            "_links": {"self": {"href": JOB_PATH + "wfapi/describe"}},
+            "stages": [stage],
+        },
         "stage": {**stage, "stageFlowNodes": [checkout, command]},
         "archive_path": ARTIFACT,
         "archive_url": JOB + "artifact/" + ARTIFACT,
@@ -84,7 +91,9 @@ def capture(tmp_path):
             "nodeStatus": "SUCCESS",
             "hasMore": False,
             "consoleUrl": JOB_PATH + "execution/node/6/log",
-            "text": f" &gt; git init /ci/workspace/example # timeout=10\nFetching https://github.com/{REPO}.git\n"
+            "text": f" &gt; git init /ci/workspace/example # timeout=10\n"
+            f"Fetching upstream changes from <a href='https://github.com/{REPO}.git'>"
+            f"https://github.com/{REPO}.git</a>\n"
             f"Checking out Revision {HEAD} (PR-7)",
         },
         "deploy_log": {
@@ -172,6 +181,29 @@ def test_refuses_different_workspace(tmp_path, capture):
         "/ci/workspace/", "/different/workspace/"
     )
     assert "differs from the checkout workspace" in evaluate(tmp_path, capture)["reason"]
+
+
+def test_fork_checkout_requires_the_reviewed_interval_before_the_writer(tmp_path, capture):
+    checkout, publisher = capture["stage"]["stageFlowNodes"]
+    intermediate = {
+        **checkout,
+        "id": "9",
+        "name": "Shell Script",
+        "parameterDescription": "git reset --hard " + "b" * 40,
+        "startTimeMillis": START - 3000,
+        "_links": {"self": {"href": JOB_PATH + "execution/node/9/wfapi/describe"}},
+    }
+    capture["stage"]["stageFlowNodes"] = [checkout, intermediate, publisher]
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "unresolved" and "publication" not in result
+    assert "unsupported operation between checkout and Maven deployment" in result["reason"]
+
+
+def test_fork_checkout_requires_one_owned_revision(tmp_path, capture):
+    capture["checkout_log"]["text"] += "\nChecking out Revision " + "b" * 40 + " (master)"
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "unresolved" and "publication" not in result
+    assert "ambiguous repository or revision" in result["reason"]
 
 
 @pytest.fixture

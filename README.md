@@ -191,6 +191,10 @@ separately from the account that retrieved the evidence.
 The result reports the selected historical run, source line, Maven
 operation, exact JAR and recorded Nexus writer. It keeps wider
 permissions, production promotion and future fork admission unresolved.
+The selected checkout and deploy nodes must be adjacent or connected by
+the reviewed Maven preparation sequence within the same recorded stage.
+Conflicting revisions and unsupported intervening steps leave this
+source-to-publication relationship unresolved.
 Missing or incompatible evidence returns exit `11`.
 
 For the supported explicit upstream Git checkout variant, also supply
