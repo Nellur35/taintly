@@ -359,6 +359,50 @@ artifact observation if the requested check returns `unresolved` and
 exit `11`. Historical includes, registry authorization, and other
 publication routes remain unverified.
 
+### Saved GitLab merge-request image pushes
+
+The same `--gitlab-mr-artifact-observation` command also reads
+`gitlab-mr-branch-image-v1` receipts. This profile covers a same-project
+merge train or merged-result pipeline with a job-local Dockerfile and
+an image tag derived from `CI_COMMIT_REF_NAME`. Supply the original
+`.gitlab-ci.yml` and configured Dockerfile from the exact checkout.
+The source must have an owned plain three-command script and a job rule
+sequence. A definite local exclusion is incompatible with the saved run.
+
+- Use the same `project`, `mr`, `pipeline`, `job` and `merge` identities
+  as the artifact mode. Include the MR `source_branch` and the job's
+  ref, commit ID, start, finish and terminal status. Preserve
+  `created_at` and `updated_at` in the pipeline and job's pipeline record.
+  The `historical_view` includes its owning pipeline JSON URL, response
+  status and SHA-256, pipeline ID, source, event type, ref, revision,
+  source SHA and target SHA.
+- Provide source snapshots under `executed`, `base`, `merge_input`
+  and `mr_historical_head`. Each records its `revision` and `files` records
+  for the workflow and Dockerfile, including raw API URL, status and
+  SHA-256 for retrieved bytes. A recorded base Dockerfile 404 can
+  establish a newly introduced Dockerfile if the base workflow is available.
+- Retain the runner log URL, response status and SHA-256, job ID,
+  source/script/cleanup
+  section boundaries, and the eight ordered checkout, login, build,
+  push and completion rows. Sections contain `line`, epoch `seconds`,
+  `stage` and `event` (`start` or `end`). Rows contain `line`, `row`
+  (runner text with terminal color escapes stripped), and its `sha256`.
+  Supply every logged shell command in the script section under
+  `script_commands`. Omit credentials and unrelated log rows.
+- To corroborate the push, provide registry `tag` and `digest` manifest
+  reads from the exact repository. Each includes `url`, `reference`,
+  `status`, `time`, `server_digest`, `calculated_digest`,
+  `digest_matches` and `bytes`. Save the original response bytes
+  as `image-manifest.json`.
+
+Exit 0 with `registry-image-push-observed` means the selected job reported
+a push and both saved manifest reads and the local manifest bytes match
+its digest. `registry-image-push-reported` (exit 11) retains the push
+reported by the runner when the registry match remains unverified.
+The terminal job state is reported separately. This evidence does not
+establish an exclusive writer, the exact runtime token or wider grants.
+Ordinary source scans continue to use their source-only evidence.
+
 ### Saved GitHub-to-CodeBuild start observations
 
 ```sh
