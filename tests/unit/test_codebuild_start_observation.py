@@ -97,21 +97,33 @@ def test_launcher_checks_exact_command_and_selected_targets(monkeypatch):
 
 
 def test_reported_zero_paths_does_not_establish_object_outcome():
-    rows = _configured_copy(selection(COPY), [RECORD], [PHASE])
+    rows, limit = _configured_copy(selection(COPY), [RECORD], [PHASE])
     assert rows[0]["bucket"] == "example-test-cache"
     assert rows[0]["reported_nix_paths"] == 0
     assert rows[0]["object_write"] == "unverified"
+    assert limit is None
 
 
 @pytest.mark.parametrize(
     "records", [[], [{**RECORD, "time": "2026-05-28T20:26:43Z"}], [RECORD, RECORD]]
 )
 def test_copy_without_owned_unique_count_keeps_uncertainty(records):
-    assert _configured_copy(selection(COPY), records, [PHASE])[0]["reported_nix_paths"] is None
+    rows, _ = _configured_copy(selection(COPY), records, [PHASE])
+    assert rows[0]["reported_nix_paths"] is None
 
 
 def test_cache_read_does_not_become_configured_publication():
-    assert _configured_copy(selection(COPY.replace("--to", "--from")), [RECORD], [PHASE]) == []
+    assert _configured_copy(selection(COPY.replace("--to", "--from")), [RECORD], [PHASE]) == (
+        [],
+        None,
+    )
+
+
+def test_mapping_value_does_not_configure_a_codebuild_command():
+    malformed = COPY.replace("- nix copy", "example: nix copy")
+    rows, limit = _configured_copy(selection(malformed), [RECORD], [PHASE])
+    assert rows == []
+    assert limit is not None and "command list" in limit
 
 
 def test_missing_capture_remains_unresolved(tmp_path: Path):

@@ -2182,6 +2182,8 @@ def _assess_codebuild_start(parser: argparse.ArgumentParser, args: argparse.Name
                     print(
                         f"    The saved command output reports {copy['reported_nix_paths']} Nix paths to copy."
                     )
+            if publication_limit := build.get("publication_analysis_limit"):
+                print(f"    Publication unresolved. {publication_limit}")
         print(result["scope"])
         print(result["review"])
     elif state == "automatic-start-blocked":
