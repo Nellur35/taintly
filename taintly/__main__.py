@@ -1980,6 +1980,15 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             f"  Managed artifact: {publication['target']}\n"
             f"  SHA-256: {publication['sha256']}\n{report['scope']}\n{report['review_action']}"
         )
+    elif state == "job-artifact-accepted-canceled-job":
+        publication = report["publication"]
+        print(
+            f"GitLab job {report['job']} is recorded as canceled. "
+            f"The coordinator accepted its archive in {report['upload_phase']} (HTTP 201).\n"
+            f"  Fork MR !{report['mr']}, pipeline {report['pipeline']}, "
+            f"checkout {report['revision']}.\n"
+            f"  Job archive target: {publication['target']}\n{report['scope']}"
+        )
     elif state == "job-artifact-uploaded-after-failure":
         publication = report["publication"]
         print(

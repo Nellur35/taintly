@@ -533,3 +533,44 @@ def test_extra_unowned_needs_entry_prevents_local_producer_claim(tmp_path, npm_c
     source = NPM_SOURCE.replace("      artifacts: true", "      artifacts: true\n    - unknown-job")
     result = evaluate(tmp_path, npm_capture, source, publisher="publish")
     assert result["publication_admission"]["state"] == "unresolved"
+
+@pytest.fixture
+def canceled_capture(failed_capture):
+    data = failed_capture
+    data.pop("artifact")
+    evidence = data.pop("failed_archive")
+    evidence["historical_pipeline"]["event"] = "merge_train"
+    data["canceled_archive"] = evidence
+    data["pipeline"].update(status="canceled", ref="refs/merge-requests/9/train")
+    data["job"].update(status="canceled", failure_reason=None, pipeline={**data["pipeline"]})
+    rows = evidence["log"]["rows"]
+    rows[1] = _failure_trace_row(rows[1]["time"], rows[1]["value"].replace("/merge)", "/train)"))
+    rows[8] = _failure_trace_row(
+        rows[8]["time"], '01E Uploading artifacts as "archive" to coordinator... '
+        '201 Created  correlation_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa id=33 status=201'
+    )
+    evidence["log"]["rows"] = [rows[index] for index in (0, 1, 2, 3, 5, 6, 8, 9)]
+    return data
+
+
+def test_canceled_job_retains_archive_acceptance(tmp_path, canceled_capture):
+    result = evaluate(tmp_path, canceled_capture)
+    assert result["state"] == "job-artifact-accepted-canceled-job"
+    assert result["job_status"] == "canceled"
+    assert result["fork_head"] == HEAD
+    assert result["publication"]["http_status"] == 201
+    assert result["publication"]["retrieval"] == "unverified"
+
+
+@pytest.mark.parametrize("bad_receipt", (
+    '01E Uploading artifacts as "archive" to coordinator... '
+    '403 Forbidden  correlation_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa id=33 status=403',
+    '01E Uploading artifacts as "archive" to coordinator... '
+    '201 Created  correlation_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa id=34 status=201',
+))
+def test_canceled_job_requires_its_own_archive_acceptance(tmp_path, canceled_capture, bad_receipt):
+    rows = canceled_capture["canceled_archive"]["log"]["rows"]
+    rows[6] = _failure_trace_row(rows[6]["time"], bad_receipt)
+    result = evaluate(tmp_path, canceled_capture)
+    assert result["state"] == "unresolved"
+    assert "publication" not in result
