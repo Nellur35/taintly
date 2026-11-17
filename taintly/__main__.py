@@ -265,7 +265,7 @@ def main():
         "--github-release-request-observation",
         nargs=4,
         metavar=("JSON", "OWNER/REPO", "RUN", "JOB"),
-        help="Check a saved GitHub draft-release creation denial offline.",
+        help="Check a saved GitHub draft-release creation outcome offline.",
     )
     evidence_input.add_argument(
         "--github-preview-observation",
@@ -2180,6 +2180,18 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             f"  Run {result['run']}, job {result['job']}, attempt {result['attempt']}. "
             f"Job conclusion: {result['job_conclusion']}.\n"
             f"  Fork-head source requests {configured['requested_permission']} and configures "
+            f"{configured['credential_binding']} "
+            f"({result['source']['path']}:{configured['credential_line']}).\n"
+            f"{result['scope']}"
+        )
+    elif state == "draft-release-create-reported":
+        operation = result["operation"]
+        configured = result["configured"]
+        print(
+            f"The saved Release Drafter log reports draft creation for {operation['requested_tag']} "
+            f"via {operation['method']} {operation['url']} targeting {operation['target_commitish']}.\n"
+            f"  Run {result['run']}, job {result['job']}, attempt {result['attempt']}.\n"
+            f"  Push workflow requests {configured['requested_permission']} and configures "
             f"{configured['credential_binding']} "
             f"({result['source']['path']}:{configured['credential_line']}).\n"
             f"{result['scope']}"

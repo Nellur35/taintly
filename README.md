@@ -442,6 +442,25 @@ even when GitHub reports a successful job. Missing or incompatible evidence
 returns exit 11. Exact merged workflow bytes, runtime token identity,
 the effective policy and release asset publication remain unverified.
 
+The same command accepts a direct repository push with a single Release Drafter
+`@v7` step when the saved setup log identifies action commit
+`978bb0b30c5ee8cdd332ced253758157150d43f0`. Supply the matching job `steps`, run
+`head_branch`, the workflow from the push revision, and a `creation` record
+with `run`, `job`, `attempt`, `log_sha256`, and `rows`. Keep the action download
+line from setup, the action's `##[group]Run` marker, the logged tag, target
+branch, `draft: true`, `Creating new release...` and `Release created!` lines,
+and the runner's `Cleaning up orphan processes` marker, in that order.
+Each row contains `time`, `value`, and the `sha256` of the original line
+without its newline. Preserve the spaces between the timestamp and message
+and within the message when calculating the hash.
+
+Exit 0 with `draft-release-create-reported` means that the saved action log
+reports completion after the create call returned for the requested draft.
+The raw HTTP status, returned release ID, effective token identity, later
+publication and any fork's ability to write remain unverified. A successful
+job with an update, dry run or missing completion stays unresolved for this
+creation question.
+
 ### Saved GitHub Preview observations
 
 When reviewing a completed fork build, use the named operation and both
