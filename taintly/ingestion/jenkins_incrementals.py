@@ -11,6 +11,7 @@ import zlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from xml.parsers import expat
 
 from taintly.parsers.jenkinsfile.groovy_lex import TokKind, tokenize
 
@@ -18,6 +19,9 @@ _REGISTRY = "https://repo.jenkins-ci.org/incrementals/"
 _CONTROLLER = "https://ci.jenkins.io/"
 _SHA = r"[0-9a-f]{40}"
 _NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"
+_MAVEN_PART = r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}"
+_MAVEN_GROUP = rf"{_MAVEN_PART}(?:\.{_MAVEN_PART}){{0,7}}"
+_MAVEN_XML = "http://maven.apache.org/POM/4.0.0}"
 _MAX_ARCHIVE = 2 * 1024 * 1024
 _SCOPE = (
     "Trusted saved GitHub and registry records. The publication is bound to the PR revision "
@@ -80,13 +84,16 @@ def _id(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 0 < value < 10**19
 
 
+def _git_blob(raw: bytes) -> str:
+    prefix = b"blob " + str(len(raw)).encode("ascii") + b"\0"
+    return hashlib.sha1(prefix + raw, usedforsecurity=False).hexdigest()
+
+
 def _source(root: Path, source: _Row, head: str, base: str, core: bool) -> _Row:
     raw = _project_file(root, "Jenkinsfile", 50_000)
     base_raw = _project_file(root, "base.Jenkinsfile", 50_000)
     digest = hashlib.sha256(raw).hexdigest()
-    blob = hashlib.sha1(
-        b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw, usedforsecurity=False
-    ).hexdigest()
+    blob = _git_blob(raw)
     _require(
         raw == base_raw
         and source["head"]["commit"] == head
@@ -119,6 +126,97 @@ def _source(root: Path, source: _Row, head: str, base: str, core: bool) -> _Row:
         "sha256": digest,
         "configured_call": "infra.maybePublishIncrementals" if core else "buildPlugin",
         "line": positions[0],
+    }
+
+
+def _pom_fields(raw: bytes) -> dict[str, str]:
+    paths = {
+        ("project", "groupId"): "group",
+        ("project", "parent", "groupId"): "parent_group",
+        ("project", "artifactId"): "artifact",
+        ("project", "packaging"): "packaging",
+    }
+    stack: list[str] = []
+    fields: dict[str, list[str]] = {}
+    active: str | None = None
+    parent_seen = False
+
+    def start(name: str, _attributes: dict[str, str]) -> None:
+        nonlocal active, parent_seen
+        _require(active is None, "The saved POM has a nonliteral Maven field")
+        _require(len(stack) < 64, "The saved POM exceeds the XML nesting limit")
+        _require(
+            stack or name == _MAVEN_XML + "project",
+            "The saved POM is outside the Maven XML profile",
+        )
+        maven_name = name.startswith(_MAVEN_XML)
+        if not maven_name and tuple(stack) in (("project",), ("project", "parent")):
+            raise IncrementalsEvidenceError("The saved POM has a foreign project or parent field")
+        stack.append(name.removeprefix(_MAVEN_XML) if maven_name else "")
+        if stack == ["project", "parent"]:
+            _require(not parent_seen, "The saved POM has ambiguous Maven parents")
+            parent_seen = True
+        active = paths.get(tuple(stack))
+        if active is not None:
+            _require(active not in fields, "The saved POM has ambiguous Maven coordinates")
+            fields[active] = []
+
+    def end(_name: str) -> None:
+        nonlocal active
+        stack.pop()
+        active = None
+
+    def characters(value: str) -> None:
+        if active is not None:
+            fields[active].append(value)
+
+    def reject_dtd(*_declaration: object) -> None:
+        raise IncrementalsEvidenceError("The saved POM declares a DTD")
+
+    parser = expat.ParserCreate(namespace_separator="}")
+    parser.StartDoctypeDeclHandler = reject_dtd
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.CharacterDataHandler = characters
+    try:
+        parser.Parse(raw.decode("utf-8"), True)
+    except expat.ExpatError as exc:
+        raise IncrementalsEvidenceError("The saved POM is malformed XML") from exc
+    return {name: "".join(chunks).strip() for name, chunks in fields.items()}
+
+
+def _pom_coordinate(root: Path, evidence: _Row, repository: str, pr: _Row) -> _Row:
+    raw = _project_file(root, "pom.xml", 50_000)
+    base_raw = _project_file(root, "base.pom.xml", 50_000)
+    digest = hashlib.sha256(raw).hexdigest()
+    blob = _git_blob(raw)
+    _require(raw == base_raw, "The PR and base POM bytes differ")
+    for side, owner in (("head", pr["head_repo"]), ("base", repository)):
+        record = evidence[side]
+        _require(
+            record["commit"] == pr[side]
+            and record["url"] == f"https://github.com/{owner}/blob/{pr[side]}/pom.xml"
+            and record["sha256"] == digest
+            and record["blob"] == blob,
+            "Saved POM bytes, Git revision and repository identity do not agree",
+        )
+    fields = _pom_fields(raw)
+    group = fields.get("group", fields.get("parent_group"))
+    artifact_id = fields.get("artifact")
+    _require(
+        group is not None
+        and re.fullmatch(_MAVEN_GROUP, group)
+        and artifact_id is not None
+        and re.fullmatch(_NAME, artifact_id)
+        and fields.get("packaging") == "hpi",
+        "The saved POM lacks literal Maven group, artifact and HPI packaging",
+    )
+    return {
+        "path": "pom.xml",
+        "group": group,
+        "artifact": artifact_id,
+        "sha256": digest,
+        "blob": blob,
     }
 
 
@@ -219,12 +317,17 @@ def _assess(data: _Row, root: Path, repository: str, number: int, check_id: int)
         if core
         else "(?:org/jenkins-ci/plugins(?:/workflow)?|io/jenkins/plugins)"
     )
+    pom = None
+    if not core and "coordinate_source" in data:
+        pom = _pom_coordinate(root, data["coordinate_source"], repository, pr)
+        namespace = re.escape(pom["group"].replace(".", "/"))
     coordinate = re.fullmatch(rf"/{namespace}/({_NAME})/({_NAME})/\1-\2\.(jar|hpi)", registry_path)
     if coordinate is None:
         raise IncrementalsEvidenceError("registry object is outside the expected Maven coordinate")
     artifact, version, extension = coordinate.groups()
     _require(
-        (core and extension == "jar") or (artifact == repo[2] and extension == "hpi"),
+        (core and extension == "jar")
+        or (artifact == (pom["artifact"] if pom else repo[2]) and extension == "hpi"),
         "registry artifact belongs to a different project profile",
     )
     created = _time(registry["created"])
@@ -271,6 +374,13 @@ def _assess(data: _Row, root: Path, repository: str, number: int, check_id: int)
         and fields.get("implementation-version") == version,
         "published package manifest differs from the exact PR revision or version",
     )
+    if pom is not None:
+        _require(
+            fields.get("group-id") == pom["group"]
+            and fields.get("artifact-id") == fields.get("short-name") == pom["artifact"],
+            "Published HPI manifest does not match the selected Maven group and artifact",
+        )
+        source["maven_coordinate"] = pom
     return {
         "state": "publication-observed",
         "repository": repository,
