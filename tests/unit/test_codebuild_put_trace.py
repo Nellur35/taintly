@@ -13,11 +13,57 @@ from taintly.ingestion.codebuild_put import (
     _bound_launch,
     _bound_s3_input,
     _denial_reason,
+    _pinned_github_source,
     _request_transport,
     _trace,
     _workspace_identity,
 )
 from taintly.ingestion.codebuild_snapshot import SnapshotError
+
+
+@pytest.mark.parametrize(
+    ("conflict", "error"),
+    [
+        (None, None),
+        ("missing-pr", "GitHub pull request evidence"),
+        ("wrong-number", "pinned external fork head"),
+        ("wrong-base-repo", "pinned external fork head"),
+        ("same-owner-fork", "pinned external fork head"),
+        ("wrong-head", "pinned external fork head"),
+        ("same-base-and-head", "pinned external fork head"),
+        ("wrong-pin", "pinned GitHub branch or PR head"),
+        ("merge-ref", "pinned GitHub branch or PR head"),
+    ],
+)
+def test_pinned_external_pr_requires_independent_matching_identity(conflict, error):
+    head, base = "a" * 40, "b" * 40
+    selector = f"refs/pull/11/head^{{{head}}}"
+    source = {"type": "GITHUB", "location": "https://github.com/owner/repo", "insecureSsl": False}
+    build = {"resolvedSourceVersion": head}
+    pr = {"number": 11, "repository": "owner/repo", "fork": "contributor/repo", "head": head, "base": base}
+    if conflict == "missing-pr":
+        pr = None
+    elif conflict == "wrong-number":
+        pr["number"] = 12
+    elif conflict == "wrong-base-repo":
+        pr["repository"] = "owner/another-repo"
+    elif conflict == "same-owner-fork":
+        pr["fork"] = "owner/another-repo"
+    elif conflict == "wrong-head":
+        pr["head"] = "c" * 40
+    elif conflict == "same-base-and-head":
+        pr["base"] = head
+    elif conflict == "wrong-pin":
+        selector = f"refs/pull/11/head^{{{base}}}"
+    elif conflict == "merge-ref":
+        selector = selector.replace("/head^", "/merge^")
+    if error:
+        with pytest.raises(SnapshotError, match=error):
+            _pinned_github_source(build, source, selector, "owner/repo", pr)
+        return
+    assert _pinned_github_source(build, source, selector, "owner/repo", pr) == (
+        head, {"number": 11, "head_repository": "contributor/repo", "base": base},
+    )
 
 
 @pytest.mark.parametrize("conflict", [None, "other-issuer", "early-event", "other-session"])

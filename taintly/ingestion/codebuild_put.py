@@ -17,6 +17,7 @@ from taintly.ingestion.codebuild_snapshot import (
     BUILD_ID,
     SnapshotError,
     _github_identity,
+    _regular_blob,
     _require_git_revision,
 )
 from taintly.ingestion.codebuild_start import _blob, _need, _sha
@@ -30,6 +31,7 @@ _ARN = re.compile(
 )
 _PATH = r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*"
 _REF = rf"refs/heads/{_PATH}"
+_PR_HEAD_REF = r"refs/pull/([1-9][0-9]{0,9})/head"
 _BUCKET = r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]"
 _ROLE = r"[A-Za-z0-9_+=,.@-]{1,64}"
 _VERSION = r"[A-Za-z0-9._~+=/-]{1,1024}"
@@ -456,6 +458,44 @@ def _bound_s3_input(
     }
 
 
+def _pinned_github_source(
+    build: _Row, source: _Row, selector: str, identity: str, pr_record: object
+) -> tuple[str, _Row | None]:
+    head = _text(build.get("resolvedSourceVersion"), "resolved GitHub revision")
+    _need(
+        _sha(head)
+        and len(selector) <= 500
+        and source.get("type") == "GITHUB"
+        and source.get("gitSubmodulesConfig") in (None, {"fetchSubmodules": False})
+        and source.get("insecureSsl") is False
+        and _github_identity(source.get("location")) == identity,
+        "Saved source lacks the exact selected GitHub repository and commit",
+    )
+    if re.fullmatch(rf"{_REF}\^{{{head}}}", selector):
+        return head, None
+
+    ref = re.fullmatch(rf"{_PR_HEAD_REF}\^{{{head}}}", selector)
+    if ref is None:
+        raise SnapshotError("Saved source lacks a pinned GitHub branch or PR head")
+    pr = _map(pr_record, "GitHub pull request evidence")
+    number = pr.get("number")
+    repository = _github_identity(
+        f"https://github.com/{_text(pr.get('repository'), 'PR base repository')}"
+    )
+    fork = _github_identity(f"https://github.com/{_text(pr.get('fork'), 'PR head repository')}")
+    _need(
+        type(number) is int
+        and number == int(ref[1])
+        and repository == identity
+        and fork.split("/", 1)[0] != identity.split("/", 1)[0]
+        and pr.get("head") == head
+        and _sha(pr.get("base"))
+        and pr["base"] != head,
+        "GitHub PR evidence does not match the pinned external fork head",
+    )
+    return head, {"number": number, "head_repository": fork, "base": pr["base"]}
+
+
 def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Row:
     build = _map(capture.get("build"), "CodeBuild response")
     match = _ARN.fullmatch(build_arn)
@@ -485,6 +525,7 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
     source = _map(build.get("source"), "CodeBuild source")
     selector = _text(build.get("sourceVersion"), "CodeBuild source selector")
     s3_input = None
+    fork_pr = None
     if source.get("type") == "S3":
         s3_input = _map(capture.get("s3_input"), "versioned input ZIP evidence")
         head = _text(s3_input.get("operator_selected_head"), "operator-selected Git revision")
@@ -495,18 +536,10 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
             "Git materialization does not match the supported primary S3 input profile",
         )
     else:
-        head = _text(build.get("resolvedSourceVersion"), "resolved GitHub revision")
         _need(
-            "s3_input" not in capture
-            and _sha(head)
-            and len(selector) <= 500
-            and re.fullmatch(rf"{_REF}\^{{{head}}}", selector)
-            and source.get("type") == "GITHUB"
-            and source.get("gitSubmodulesConfig") in (None, {"fetchSubmodules": False})
-            and source.get("insecureSsl") is False
-            and _github_identity(source.get("location")) == identity,
-            "Saved source lacks the exact selected GitHub branch and commit",
+            "s3_input" not in capture, "The native GitHub source conflicts with supplied S3 input"
         )
+        head, fork_pr = _pinned_github_source(build, source, selector, identity, capture.get("pr"))
     _require_git_revision(root, identity, head, "Pinned GitHub source")
     inline = _text(source.get("buildspec"), "inline buildspec")
     _need(
@@ -526,6 +559,12 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
     data, witness = _blob(root, head, file)
     content = data.encode("utf-8")
     _need(len(content) <= 128, "The pinned file exceeds the supported marker size")
+    if fork_pr is not None:
+        _require_git_revision(root, identity, fork_pr["base"], "PR base")
+        _need(
+            _regular_blob(root, fork_pr["base"], file) != witness["git_blob"],
+            "The selected file has the same Git blob at the PR base and at the fork head",
+        )
     digest = base64.b64encode(bytes.fromhex(witness["sha256"])).decode("ascii")
     input_object = (
         _bound_s3_input(s3_input, source, selector, file, content) if s3_input is not None else None
@@ -695,6 +734,13 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
     }
     if request_id is None:
         result["reported_sts_session"] = session
+    if fork_pr is not None:
+        result.update(
+            source_scope="matches-supplied-fork-pr-head",
+            pull_request=fork_pr["number"],
+            head_repository=fork_pr["head_repository"],
+            pr_base=fork_pr["base"],
+        )
     if input_object is not None:
         del result["head"]
         del result["source_ref"]
