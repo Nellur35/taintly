@@ -394,3 +394,20 @@ def test_failed_run_needs_an_owned_successful_command_and_exact_archive(
     assert result["state"] == "unresolved"
     assert "checkout" not in result
     assert "publication" not in result
+
+
+@pytest.mark.parametrize("base", [None, "b" * 40])
+def test_failed_run_retains_the_maven_nodes_fork_checkout(tmp_path, capture, base):
+    if base is not None:
+        capture["pull"]["base"] = base
+    capture["run"]["result"] = "FAILURE"
+    capture["flow"]["status"] = "FAILED"
+    capture["registry"] = None
+    alias = REGISTRY + "/content/repositories/snapshots/" + ARTIFACT
+    result = evaluate(tmp_path, capture, alias)
+    assert result["state"] == result["authority"] == "unresolved"
+    assert result["checkout"] == {"repository": REPO, "ref": "PR-7", "revision": HEAD}
+    assert result["jenkins_run_result"] == "FAILURE"
+    assert "reported fork checkout" in result["scope"]
+    assert "publication" not in result
+    assert "snapshot_evidence" not in result
