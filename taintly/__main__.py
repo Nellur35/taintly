@@ -1875,6 +1875,7 @@ def _check_jenkins_maven_snapshot(
         "upstream-checkout-observed",
         "remote-publisher-excluded",
         "remote-matrix-publisher-skipped",
+        "remote-shared-library-publisher-excluded",
     }
     comparison = result.get("comparison", {})
     registry_record = comparison.get("registry_record", {})
@@ -1905,6 +1906,18 @@ def _check_jenkins_maven_snapshot(
             print(
                 f"  Comparison unresolved: {registry_record.get('reason') or comparison['reason']}."
             )
+    elif result["state"] == "remote-shared-library-publisher-excluded":
+        remote = result["remote_publisher"]
+        library = result["library"]
+        print(
+            f"Jenkins PR #{result['pr']} checked out {result['checkout']} and ran Maven verify "
+            f"(node {result['node']}).\n"
+            f"  The remote publisher requires {remote['required_branch']}. "
+            f"The selected {result['branch']} run has no {remote['stage']} stage.\n"
+            f"  Guard: {library['repository']}@{library['revision']} "
+            f"{library['path']}:{library['line']}.\n"
+            f"  Configured destination: {remote['target']}.\n{result['scope']}"
+        )
     elif result["state"] == "remote-publisher-excluded":
         remote = result["remote_publisher"]
         print(

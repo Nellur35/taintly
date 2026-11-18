@@ -355,6 +355,7 @@ def _registry(
 def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target: str) -> _Row:
     from .jenkins_filevault import FILEVAULT_SCHEMA, FILEVAULT_SCOPE, filevault_exclusion
     from .jenkins_matrix_snapshot import MATRIX_SCHEMA, MATRIX_SCOPE, matrix_snapshot_observation
+    from .jenkins_sling_guard import SLING_SCHEMA, SLING_SCOPE, sling_exclusion
 
     scope = _SCOPE
     try:
@@ -368,6 +369,9 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         if capture["schema"] == FILEVAULT_SCHEMA:
             scope = FILEVAULT_SCOPE
             return filevault_exclusion(root, capture, repo, pr, job, target)
+        if capture["schema"] == SLING_SCHEMA:
+            scope = SLING_SCOPE
+            return sling_exclusion(root, capture, repo, pr, job, target)
         if capture["schema"] == MATRIX_SCHEMA:
             scope = MATRIX_SCOPE
             return matrix_snapshot_observation(root, capture, repo, pr, job, target)
