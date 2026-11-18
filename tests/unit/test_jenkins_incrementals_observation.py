@@ -137,6 +137,92 @@ def test_plugin_coordinates_allow_only_supported_namespaces(tmp_path, capture, n
         assert result["publication"]["object_url"] == directory + "git-1.2.hpi"
 
 
+def save_pom_coordinate(tmp_path, capture, pom):
+    evidence = {}
+    for side, name, owner in (
+        ("head", "pom.xml", "example/git-plugin"),
+        ("base", "base.pom.xml", "jenkinsci/git-plugin"),
+    ):
+        revision = capture["pr"][side]
+        (tmp_path / name).write_bytes(pom)
+        evidence[side] = {
+            "commit": revision,
+            "url": f"https://github.com/{owner}/blob/{revision}/pom.xml",
+            "sha256": hashlib.sha256(pom).hexdigest(),
+            "blob": hashlib.sha1(
+                f"blob {len(pom)}\0".encode() + pom, usedforsecurity=False
+            ).hexdigest(),
+        }
+    capture["coordinate_source"] = evidence
+
+
+@pytest.fixture
+def pom_coordinate(tmp_path, capture):
+    pom = (
+        b'<project xmlns="http://maven.apache.org/POM/4.0.0">'
+        b"<groupId>example.plugin</groupId><artifactId>git_alias</artifactId>"
+        b"<packaging>hpi</packaging></project>"
+    )
+    save_pom_coordinate(tmp_path, capture, pom)
+    directory = "https://repo.jenkins-ci.org/incrementals/example/plugin/git_alias/1.2/"
+    capture["checks"][1].update(details_url=directory, summary=f"[git_alias]({directory})")
+    raw = package(
+        HEAD, extra="Group-Id: example.plugin\r\nArtifact-Id: git_alias\r\nShort-Name: git_alias\r\n"
+    )
+    (tmp_path / "package.zip").write_bytes(raw)
+    capture["registry"].update(
+        path="/example/plugin/git_alias/1.2/git_alias-1.2.hpi",
+        size=str(len(raw)),
+        checksums={"sha256": hashlib.sha256(raw).hexdigest()},
+    )
+    return capture
+
+
+def test_same_coordinate_in_pr_base_and_manifest_binds_alias(tmp_path, pom_coordinate):
+    result = evaluate(tmp_path, pom_coordinate)
+    assert result["state"] == "publication-observed", result
+    assert result["source"]["maven_coordinate"]["artifact"] == "git_alias"
+    assert result["source"]["maven_coordinate"]["group"] == "example.plugin"
+    assert result["jenkins"]["publisher_handoff"] == "unverified"
+
+
+@pytest.mark.parametrize(
+    "changed",
+    ["base", "source_repo", "short_name", "artifact_id", "missing", "xml", "expression", "namespace"],
+)
+def test_alias_requires_the_same_pinned_project_coordinate(tmp_path, pom_coordinate, changed):
+    if changed == "base":
+        base = tmp_path / "base.pom.xml"
+        base.write_bytes(base.read_bytes().replace(b"git_alias", b"other"))
+    elif changed == "source_repo":
+        entry = pom_coordinate["coordinate_source"]["head"]
+        entry["url"] = entry["url"].replace("example/git-plugin", "other/git-plugin")
+    elif changed in {"short_name", "artifact_id"}:
+        artifact = "other" if changed == "artifact_id" else "git_alias"
+        short_name = "other" if changed == "short_name" else "git_alias"
+        raw = package(
+            HEAD,
+            extra=f"Group-Id: example.plugin\r\nArtifact-Id: {artifact}\r\nShort-Name: {short_name}\r\n",
+        )
+        (tmp_path / "package.zip").write_bytes(raw)
+        pom_coordinate["registry"].update(
+            size=str(len(raw)), checksums={"sha256": hashlib.sha256(raw).hexdigest()}
+        )
+    elif changed == "missing":
+        del pom_coordinate["coordinate_source"]
+    else:
+        pom = (tmp_path / "pom.xml").read_bytes()
+        variants = {
+            "xml": b'<!DOCTYPE project [<!ENTITY group "example.plugin">]>' + pom,
+            "expression": pom.replace(b"example.plugin", b"${project.group}"),
+            "namespace": pom.replace(b"<groupId>", b'<groupId xmlns="">'),
+        }
+        save_pom_coordinate(tmp_path, pom_coordinate, variants[changed])
+    result = evaluate(tmp_path, pom_coordinate)
+    assert result["state"] == "unresolved", result
+    assert "publication" not in result
+
+
 def test_publisher_target_must_match_registry_even_if_summary_has_both_links(tmp_path, capture):
     other = DIRECTORY.replace("/git/", "/another-plugin/")
     capture["checks"][1].update(
