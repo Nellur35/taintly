@@ -534,6 +534,8 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
         "requested project does not own this fork job or match the recorded MR target",
     )
     membership = data["mr_pipeline"]
+    current_head = _value(mr["sha"], _SHA, "current MR head")
+    history = data.get("historical_pipeline")
     _need(
         _identifier(pipeline["id"], "fork pipeline") == pipeline_id
         and pipeline["project_id"] == owner
@@ -545,10 +547,26 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
             membership[key] == pipeline[key]
             for key in ("id", "project_id", "sha", "ref", "web_url")
         )
-        and revision == mr["sha"] == data["commit"]["id"]
+        and revision == data["commit"]["id"]
+        and (revision == current_head or isinstance(history, dict))
         and data["commit"]["web_url"] == f"{fork_url}/-/commit/{revision}",
         "saved fork commit, current MR head or pipeline membership does not agree",
     )
+    if "historical_pipeline" in data:
+        _need(
+            isinstance(history, dict)
+            and history["url"] == pipeline_url + ".json"
+            and _identifier(history["project"], "saved pipeline owner") == owner
+            and _identifier(history["pipeline"], "saved detached pipeline") == pipeline_id
+            and history["mr_url"] == mr["web_url"]
+            and history["event"] == "detached"
+            and history["source"] == pipeline["source"]
+            and history["revision"] == revision
+            and history["ref"] == ref
+            and history["created_at"] == pipeline["created_at"]
+            and _SHA256.fullmatch(str(history["sha256"])),
+            "saved detached pipeline does not match the selected fork, MR or checkout",
+        )
     archives = [item for item in job["artifacts"] if item["file_type"] == "archive"]
     _need(
         _identifier(job["id"], "fork job") == job_id
@@ -582,7 +600,7 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
     _need(
         phase == "upload_artifacts_on_failure", "fork archive is outside the failure-upload phase"
     )
-    return {
+    result = {
         "state": "fork-project-archive-upload-observed",
         "repository": source_path,
         "project": owner,
@@ -599,6 +617,13 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
         "scope": _FORK_ARCHIVE_SCOPE,
         "publication": _archive_receipt(job_url, log, response, archives[0]["size"]),
     }
+    if isinstance(history, dict):
+        result["historical_pipeline"] = {
+            "url": history["url"],
+            "sha256": history["sha256"],
+            "current_mr_head": current_head,
+        }
+    return result
 
 
 def _recorded_pages_preview(

@@ -612,6 +612,43 @@ def _evaluate_fork(root, data, selected=2):
     return mr_artifact_observation(snapshot, root, selected, 22, 33)
 
 
+@pytest.mark.parametrize("mutation", [None, "repository", "mr", "commit", "event", "time"])
+def test_advanced_mr_head_requires_exact_detached_pipeline_view(tmp_path, fork_upload, mutation):
+    fork_upload["mr"]["sha"] = BASE
+    pipeline = fork_upload["pipeline"]
+    view = {
+        "url": pipeline["web_url"] + ".json",
+        "sha256": "a" * 64,
+        "project": 2,
+        "pipeline": 22,
+        "mr_url": fork_upload["mr"]["web_url"],
+        "event": "detached",
+        "source": pipeline["source"],
+        "ref": pipeline["ref"],
+        "revision": HEAD,
+        "created_at": pipeline["created_at"],
+    }
+    incorrect = {
+        "repository": ("project", 1),
+        "mr": ("mr_url", fork_upload["mr"]["web_url"] + "0"),
+        "commit": ("revision", BASE),
+        "event": ("event", "merged_result"),
+        "time": ("created_at", pipeline["updated_at"]),
+    }
+    if mutation is not None:
+        key, value = incorrect[mutation]
+        view[key] = value
+    fork_upload["historical_pipeline"] = view
+    result = _evaluate_fork(tmp_path, fork_upload)
+    if mutation is not None:
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+    else:
+        assert result["state"] == "fork-project-archive-upload-observed"
+        assert result["revision"] == HEAD
+        assert result["historical_pipeline"]["current_mr_head"] == BASE
+
+
 @pytest.mark.parametrize("suffix", ["status=201", "responseStatus=201 Created"])
 def test_fork_archive_acceptance_identifies_fork_and_parent_separately(tmp_path, fork_upload, suffix):
     row = fork_upload["log"]["rows"][6]
