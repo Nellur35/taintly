@@ -874,8 +874,10 @@ and one primary archive selector. The record contains:
 The local repository must contain the exact PR commit. The
 `managed-s3-zip-reported` state records the successful upload phase and
 the provider-reported object and checksum, including after a failed BUILD
-phase. It retains exit 11 pending verification of the archive and writer.
-A reported selector match does not establish the contents of each member.
+phase. The selected commit matches the supplied PR head. The evidence
+needed to identify the triggering event is separate. The mode retains exit
+11 pending verification of the archive and writer. A reported selector
+match does not establish the contents of each member.
 
 ### Saved CodeBuild deployment skip
 

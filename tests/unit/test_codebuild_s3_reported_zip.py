@@ -102,6 +102,8 @@ def test_reported_zip_binds_source_bytes_and_keeps_authority_unknown(
     receipt["build"]["buildStatus"] = receipt["build"]["phases"][1]["phaseStatus"] = build_status
     result = _observe(tmp_path, receipt)
     assert result["state"] == "managed-s3-zip-reported"
+    assert result["source_scope"] == "matches-supplied-fork-pr-head"
+    assert result["trigger"] == "unverified"
     assert result["build_status"] == build_status
     assert result["source_plan"]["command"]["source"]["revision"] == receipt["pr"]["head"]
     assert result["publication"] == {

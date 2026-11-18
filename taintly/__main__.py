@@ -2135,8 +2135,9 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
         source = result["source_plan"]
         observation = source["command"]
         print(
-            f"CodeBuild {result['build']} reported a primary S3 ZIP for fork PR "
-            f"#{result['pull_request']} ({result['head']}).\n"
+            f"CodeBuild {result['build']} reported a primary S3 ZIP.\n"
+            f"  Selected commit {result['head']} matches the supplied fork PR "
+            f"#{result['pull_request']} head.\n"
             f"  Build status: {result['build_status']}. Upload phase: SUCCEEDED.\n"
             f"  Reported command: {observation['text']} ({source['path']}:{observation['line']}).\n"
             f"  Primary paths selected: {publication['primary_paths_reported']}.\n"

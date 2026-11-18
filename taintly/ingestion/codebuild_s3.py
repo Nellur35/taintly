@@ -41,7 +41,8 @@ _REPORTED_ZIP_SCHEMA = "codebuild-managed-s3-reported-zip-v1"
 _REPORTED_ZIP_SCOPE = (
     "Trusted saved records report a managed ZIP for this build. The returned object bytes, "
     "origin of individual members, exact S3 API request and effective writing principal "
-    "remain unverified."
+    "remain unverified. The PR record identifies the selected commit's source context. "
+    "The triggering event is unverified."
 )
 _EMPTY_MATCH = "no matching artifact paths found"
 _EMPTY_SCOPE = (
@@ -583,6 +584,8 @@ def _reported_zip(cap: _Row, root: Path, build_id: str, origin: str) -> _Row:
         "pull_request": number,
         "head": source.commit,
         "head_repository": fork,
+        "source_scope": "matches-supplied-fork-pr-head",
+        "trigger": "unverified",
         "source_plan": {
             "kind": "repository-buildspec",
             "path": source.path,
