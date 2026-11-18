@@ -2036,8 +2036,13 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             if historical is not None
             else ""
         )
+        upload_label = (
+            f"archive in {report['upload_phase']}"
+            if report["job_status"] == "success"
+            else "failure-path archive"
+        )
         print(
-            f"GitLab accepted the failure-path archive for job {report['job']} "
+            f"GitLab accepted the {upload_label} for job {report['job']} "
             f"in fork {report['repository']} (HTTP 201).\n"
             f"  MR !{report['mr']} targets {report['target_repository']}. "
             f"Fork pipeline {report['pipeline']} checked out {report['revision']}.\n"
