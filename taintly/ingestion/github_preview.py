@@ -85,15 +85,29 @@ def _bounded_read(path: Path) -> bytes:
     return data
 
 
-def _source(root: Path, run: _Row, source: _Row, revision: str) -> tuple[_Index, _Row]:
+def _source(
+    root: Path,
+    run: _Row,
+    source: _Row,
+    revision: str,
+    *,
+    allow_initial_document_marker: bool = False,
+) -> tuple[_Index, _Row]:
     path = run["path"]
     _require(_matches(path, _WORKFLOW), "run lacks a supported workflow path")
     raw, identity = _source_bytes(root, source, path, revision)
-    return _workflow_source_index(path, raw), identity
+    return _workflow_source_index(
+        path, raw, allow_initial_document_marker=allow_initial_document_marker
+    ), identity
 
 
-def _workflow_source_index(path: str, raw: bytes) -> _Index:
+def _workflow_source_index(
+    path: str, raw: bytes, *, allow_initial_document_marker: bool = False
+) -> _Index:
     text = raw.decode("utf-8").replace("\r\n", "\n")
+    if allow_initial_document_marker and text.startswith("---\n"):
+        # Keep source line numbers and reject all remaining boundaries below.
+        text = text[3:]
     _require(
         "\r" not in text
         and "\ufeff" not in text

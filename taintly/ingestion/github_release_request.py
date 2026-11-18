@@ -29,7 +29,7 @@ from taintly.ingestion.github_preview import (
 from taintly.rules.github._workflow_run_artifact import _Index, _is_exact_identifier_expression
 
 _SCHEMA = "github-draft-release-request-v1"
-_ACTION = "release-drafter/release-drafter@v6"
+_REQUEST_ACTION = r"release-drafter/release-drafter@v6(?:\.[0-9]{1,4}\.[0-9]{1,4})?"
 _PUSH_ACTION = "release-drafter/release-drafter@v7"
 _VERIFIED_ACTION = "978bb0b30c5ee8cdd332ced253758157150d43f0"
 _CHECKOUT = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
@@ -65,12 +65,35 @@ _LOGGED_SCOPE = (
 
 
 def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -> _Row:
-    owner = ("jobs", job_name)
+    job_keys = {"steps", "permissions", "runs-on"}
+    step_keys = {"uses", "env"}
+    jobs = {key[-1] for key in index.keys if key[:-1] == ("jobs",)}
+    _require(
+        len(jobs) == 1, "Workflow source is outside the supported single-action draft job profile"
+    )
+    job_id = next(iter(jobs))
+    if not isinstance(job_id, str) or not _matches(job_id, _NAME):
+        raise PreviewEvidenceError("Invalid draft job identifier")
+    owner = ("jobs", job_id)
     steps = (*owner, "steps")
     step = (*steps, 0)
     env = (*step, "env")
+    if event == "pull_request":
+        display = (*owner, "name")
+        if display in index.keys:
+            job_keys.add("name")
+            _require(
+                _field(index, display).value == job_name,
+                "Recorded job name does not identify the owning draft job",
+            )
+        else:
+            _require(job_name == job_id, "Recorded job name does not identify the owning draft job")
+        if (*step, "name") in index.keys:
+            _field(index, (*step, "name"))
+            step_keys.add("name")
+    else:
+        _require(job_name == job_id, "Recorded job name does not identify the owning draft job")
     permission_owner: tuple[str, ...] = (*owner, "permissions")
-    job_keys = {"steps", "permissions", "runs-on"}
     if event == "push" and permission_owner not in index.keys:
         permission_owner = ("permissions",)
         job_keys.remove("permissions")
@@ -86,11 +109,10 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
                 env,
             )
         )
-        and {key[-1] for key in index.keys if key[:-1] == owner[:1]} == {job_name}
         and {key[-1] for key in index.keys if key[:-1] == owner} == job_keys
         and {key[len(steps)] for key in index.keys if key[: len(steps)] == steps and key != steps}
         == {0}
-        and {key[-1] for key in index.keys if key[:-1] == step} == {"uses", "env"}
+        and {key[-1] for key in index.keys if key[:-1] == step} == step_keys
         and {key[-1] for key in index.keys if key[:-1] == env} == {"GITHUB_TOKEN"}
         and not any((key,) in index.keys for key in ("env", "defaults")),
         "Workflow source is outside the supported single-action draft job profile",
@@ -99,7 +121,11 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
     token = _field(index, (*env, "GITHUB_TOKEN"))
     permission = _field(index, (*permission_owner, "contents"))
     _require(
-        action.value == (_PUSH_ACTION if event == "push" else _ACTION)
+        (
+            action.value == _PUSH_ACTION
+            if event == "push"
+            else _matches(action.value, _REQUEST_ACTION)
+        )
         and _is_exact_identifier_expression(str(token.value), "secrets.GITHUB_TOKEN")
         and permission.value == "write",
         "Workflow source lacks the supported draft action, token binding or requested permission",
@@ -470,7 +496,9 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
     _require(
         job["id"] == job_id
         and _id(job["run_attempt"])
-        and _matches(job["name"], _NAME)
+        and isinstance(job["name"], str)
+        and 0 < len(job["name"]) <= 128
+        and job["name"].isprintable()
         and _id(check["id"])
         and check["id"] == job_id
         and check["app"] == "github-actions"
@@ -499,6 +527,7 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
     )
     if "verified_log" in cap:
         _require("denial" not in cap, "Receipt combines different draft observation profiles")
+        _require(_matches(job["name"], _NAME), "Unsupported logged draft job name")
         return _logged_denial(cap, root, repo)
     request = cap.get("denial")
     if not isinstance(request, dict):
@@ -512,7 +541,7 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
         and _id(request["run"])
         and _id(request["attempt"])
         and request["attempt"] == run["run_attempt"]
-        and request["action"] == _ACTION
+        and _matches(request["action"], _REQUEST_ACTION)
         and _matches(request["annotation_sha256"], _DIGEST)
         and _matches(request["action_annotation_sha256"], _DIGEST)
         and request["annotation_sha256"] != request["action_annotation_sha256"]
@@ -528,8 +557,14 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
         and request["target_commitish"] == ref,
         "Saved response does not bind the selected draft-create request and PR merge ref",
     )
-    index, source = _source(root, run, cap["source"], run["head_sha"])
+    index, source = _source(
+        root, run, cap["source"], run["head_sha"], allow_initial_document_marker=True
+    )
     configured = _source_plan(index, job["name"])
+    _require(
+        configured["action"] == request["action"],
+        "The requested draft action does not match its response evidence",
+    )
     return {
         "state": "draft-release-create-denied",
         "repository": repo,
