@@ -207,7 +207,7 @@ def main():
         "--codebuild-public-s3-observation",
         nargs=3,
         metavar=("JSON", "BUILD_ARN_OR_ID", "GITHUB_ORIGIN"),
-        help="Corroborate a saved CodeBuild-managed S3 output observation.",
+        help="Corroborate saved CodeBuild S3 output or a direct PutObject request.",
     )
     evidence_input.add_argument(
         "--codebuild-public-deploy-observation",
@@ -2164,6 +2164,53 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
     result = codebuild_s3_observation(Path(capture), Path(args.path), build_arn, origin)
     if args.format == "json":
         print(json.dumps({"codebuild_s3_observation": result}, indent=2))
+    elif result["state"] in ("direct-s3-write-observed", "direct-s3-write-denied"):
+        publication = result["publication"]
+        outcome = (
+            "wrote"
+            if result["state"] == "direct-s3-write-observed"
+            else "was denied access to write"
+        )
+        print(f"CodeBuild {result['build']} {outcome} {publication['object_arn']}.")
+        if "input_object" in result:
+            supplied = result["input_object"]
+            influence = result["influence"]
+            print(
+                f"  Selected input ZIP: {supplied['object_arn']} (version {supplied['version']})."
+            )
+            print(
+                f"  Input file {influence['path']} matches {result['repository']} "
+                f"at {influence['revision']}."
+            )
+        else:
+            print(
+                f"  Source {result['repository']} at {result['head']}, file {result['influence']['path']}."
+            )
+        print(f"  Build role: {publication['service_role']}.")
+        if "launch" in result:
+            launch = result["launch"]
+            print(
+                f"  CloudTrail StartBuild caller: {launch['actor']} (event {launch['event_id']})."
+            )
+        if publication["audit"] == "unresolved-version-binding":
+            print("  CloudTrail did not identify the observed S3 object version.")
+        else:
+            print(f"  Independent S3 data event: {publication['audit']}.")
+        if publication["acting_session"] == "unverified":
+            print("  S3 request actor: unverified.")
+            print(f"  Runner-reported STS session: {result['reported_sts_session']}.")
+        transport = publication.get("transport", {})
+        if "http_status" in transport:
+            print(f"  Reported S3 HTTP status: {transport['http_status']}.")
+        if publication.get("denial_reason") == "explicit-resource-policy-deny":
+            print("  AWS reported an explicit deny in a resource-based policy.")
+        if "runtime_credential" in publication:
+            print("  CloudTrail ties the build's STS identity call to the same S3 credential.")
+        if "workspace_identity" in result:
+            print("  CloudTrail confirms the workspace's STS role and session.")
+            if publication["acting_session"] != "unverified":
+                print("  S3 request identity is unverified by this STS event.")
+        print(result["scope"])
     elif result["state"] == "managed-s3-link-unverified":
         print(
             f"Build {result['build']} and the retrieved ZIP are consistent with a managed upload."
@@ -2202,7 +2249,7 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
     else:
         print(f"CodeBuild S3 observation unresolved: {result['reason']}")
         print(result["scope"])
-    sys.exit(11)
+    sys.exit(0 if result["state"] in ("direct-s3-write-observed", "direct-s3-write-denied") else 11)
 
 
 def _assess_codebuild_deploy(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
