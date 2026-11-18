@@ -69,6 +69,11 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
     steps = (*owner, "steps")
     step = (*steps, 0)
     env = (*step, "env")
+    permission_owner: tuple[str, ...] = (*owner, "permissions")
+    job_keys = {"steps", "permissions", "runs-on"}
+    if event == "push" and permission_owner not in index.keys:
+        permission_owner = ("permissions",)
+        job_keys.remove("permissions")
     _require(
         all(
             len(index.keys.get(path, ())) == 1
@@ -77,13 +82,12 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
                 owner[:1],
                 owner,
                 steps,
-                (*owner, "permissions"),
+                permission_owner,
                 env,
             )
         )
         and {key[-1] for key in index.keys if key[:-1] == owner[:1]} == {job_name}
-        and {key[-1] for key in index.keys if key[:-1] == owner}
-        == {"steps", "permissions", "runs-on"}
+        and {key[-1] for key in index.keys if key[:-1] == owner} == job_keys
         and {key[len(steps)] for key in index.keys if key[: len(steps)] == steps and key != steps}
         == {0}
         and {key[-1] for key in index.keys if key[:-1] == step} == {"uses", "env"}
@@ -93,7 +97,7 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
     )
     action = _field(index, (*step, "uses"))
     token = _field(index, (*env, "GITHUB_TOKEN"))
-    permission = _field(index, (*owner, "permissions", "contents"))
+    permission = _field(index, (*permission_owner, "contents"))
     _require(
         action.value == (_PUSH_ACTION if event == "push" else _ACTION)
         and _is_exact_identifier_expression(str(token.value), "secrets.GITHUB_TOKEN")
@@ -148,10 +152,10 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
         and _time(drafter["completed_at"]) <= _time(finish["started_at"]),
         "Saved job does not have the supported single-action execution order",
     )
-    patterns = (
+    patterns: tuple[str, ...] = (
         re.escape(f"Download action repository '{_PUSH_ACTION}' (SHA:{_VERIFIED_ACTION})"),
         re.escape(f"##[group]Run {_PUSH_ACTION}"),
-        r"  tag: +([0-9]{1,12}\.[0-9]{1,12}\.[0-9]{1,12})",
+        r"  tag: +v?[0-9]{1,12}\.[0-9]{1,12}\.[0-9]{1,12}",
         r"  targetCommitish: +" + re.escape(branch),
         r"  draft: +true",
         r"Creating new release\.\.\.",
@@ -163,9 +167,22 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
         isinstance(rows, list) and len(rows) == len(patterns),
         "Saved log lacks the complete draft creation sequence",
     )
-    times = []
     owners = (setup,) + (drafter,) * (len(patterns) - 2) + (finish,)
-    for row, pattern, step in zip(rows, patterns, owners, strict=True):
+    grant_rows = creation.get("effective_permission_rows", [])
+    if "effective_permission_rows" in creation:
+        _require(
+            isinstance(grant_rows, list) and len(grant_rows) == 3,
+            "Saved log lacks the complete job token permission group",
+        )
+        patterns = (
+            re.escape("##[group]GITHUB_TOKEN Permissions"),
+            r"Contents: write",
+            re.escape("##[endgroup]"),
+            *patterns,
+        )
+        owners = (setup, setup, setup, *owners)
+    times = []
+    for row, pattern, step in zip([*grant_rows, *rows], patterns, owners, strict=True):
         when = _time(row["time"])
         _require(
             _matches(row["value"], pattern)
@@ -178,7 +195,7 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
         )
         times.append(when)
     _require(all(a < b for a, b in pairwise(times)), "Draft creation log order is ambiguous")
-    return {
+    result: _Row = {
         "state": "draft-release-create-reported",
         "repository": repo,
         "run": run_id,
@@ -200,6 +217,14 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
         },
         "scope": _PUSH_SCOPE,
     }
+    if grant_rows:
+        result["effective_permission"] = {
+            "credential": "GITHUB_TOKEN",
+            "contents": "write",
+            "time": grant_rows[1]["time"],
+            "line_sha256": grant_rows[1]["sha256"],
+        }
+    return result
 
 
 def _literal_push_branch(index: _Index, raw: bytes, branch: str) -> bool:

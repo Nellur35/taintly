@@ -2288,6 +2288,12 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
     elif state == "draft-release-create-reported":
         operation = result["operation"]
         configured = result["configured"]
+        grant = result.get("effective_permission")
+        grant_text = (
+            f"  Job setup reports {grant['credential']} Contents: {grant['contents']}.\n"
+            if grant is not None
+            else ""
+        )
         print(
             f"The saved Release Drafter log reports draft creation for {operation['requested_tag']} "
             f"via {operation['method']} {operation['url']} targeting {operation['target_commitish']}.\n"
@@ -2295,6 +2301,7 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             f"  Push workflow requests {configured['requested_permission']} and configures "
             f"{configured['credential_binding']} "
             f"({result['source']['path']}:{configured['credential_line']}).\n"
+            f"{grant_text}"
             f"{result['scope']}"
         )
     elif state == "release-asset-observed":

@@ -610,6 +610,18 @@ Each row contains `time`, `value`, and the `sha256` of the original line
 without its newline. Preserve the spaces between the timestamp and message
 and within the message when calculating the hash.
 
+To supply the effective job grant, add `creation.effective_permission_rows`
+with three `time`, `value` and `sha256` records from the same job log.
+Save the opening `GITHUB_TOKEN Permissions` group, its `Contents: write`
+row and the closing group marker. These rows must belong to the setup
+step and precede the action download. The result reports the grant
+separately from the workflow's requested permission.
+
+The push profile accepts the workflow's literal `permissions.contents`
+when the owning job has no `permissions` declaration. If the job
+declares permissions, use its own `contents` setting. The create log
+must report a numeric three-part tag, optionally prefixed by lowercase `v`.
+
 Exit 0 with `draft-release-create-reported` means that the saved action log
 reports completion after the create call returned for the requested draft.
 The raw HTTP status, returned release ID, effective token identity, later

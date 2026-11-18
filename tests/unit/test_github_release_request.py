@@ -210,6 +210,80 @@ def test_success_is_scoped_to_owned_draft_create(push_capture):
         "POST", True, "2.3.4", "master",
     )
     assert "status" not in op and "publication" not in result
+    assert "effective_permission" not in result
+
+
+@pytest.fixture
+def push_grant_capture(push_capture):
+    cap, _, _, assess = push_capture
+    values = ("##[group]GITHUB_TOKEN Permissions", "Contents: write", "##[endgroup]")
+    rows = []
+    for index, value in enumerate(values, 1):
+        time = f"2026-05-13T00:23:16.00{index}Z"
+        digest = hashlib.sha256(f"{time} {value}".encode()).hexdigest()
+        rows.append({"time": time, "value": value, "sha256": digest})
+    cap["creation"]["effective_permission_rows"] = rows
+    return rows, assess
+
+
+def test_success_can_include_owned_setup_grant(push_grant_capture):
+    rows, assess = push_grant_capture
+    assert assess()["effective_permission"] == {
+        "credential": "GITHUB_TOKEN",
+        "contents": "write",
+        "time": rows[1]["time"],
+        "line_sha256": rows[1]["sha256"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("index", "field", "value"),
+    [
+        (0, "value", "##[group]Permissions"),
+        (1, "value", "Contents: read"),
+        (1, "time", "2026-05-13T00:23:18Z"),
+        (2, "time", "2026-05-13T00:23:16.150Z"),
+    ],
+)
+def test_push_grant_requires_matching_setup_step_and_order(push_grant_capture, index, field, value):
+    rows, assess = push_grant_capture
+    row = rows[index]
+    row[field] = value
+    row["sha256"] = hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+    result = assess()
+    assert result["state"] == "unresolved" and "effective_permission" not in result
+
+
+def test_push_grant_rejects_incomplete_group(push_grant_capture):
+    rows, assess = push_grant_capture
+    rows.pop()
+    assert assess()["state"] == "unresolved"
+
+
+def test_push_uses_workflow_permission_when_job_has_no_override(push_capture):
+    cap, source, bind, assess = push_capture
+    workflow_permission = "permissions:\n  contents: write\n"
+    job_permission = "    permissions:\n      contents: write\n"
+    source = workflow_permission + source.replace(job_permission, "").replace("@v6", "@v7")
+    cap["source"] = bind(source)
+    result = assess()
+    assert result["state"] == "draft-release-create-reported", result
+    assert result["configured"]["permission_line"] == 2
+    for new_permission in (
+        "    permissions:\n      contents: read\n",
+        "    permissions:\n      pull-requests: read\n",
+        "    permissions: {}\n",
+    ):
+        cap["source"] = bind(source.replace("    steps:\n", new_permission + "    steps:\n"))
+        assert assess()["state"] == "unresolved"
+
+
+def test_push_preserves_numeric_version_tag_prefix(push_capture):
+    cap, _, _, assess = push_capture
+    row = cap["creation"]["rows"][2]
+    row["value"] = "  tag:    v2.3.4"
+    row["sha256"] = hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+    assert assess()["operation"]["requested_tag"] == "v2.3.4"
 
 
 @pytest.mark.parametrize(
