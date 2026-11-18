@@ -204,7 +204,8 @@ def test_versioned_zip_input_binds_exact_member_and_version(members, version, re
         }
 
 
-def test_launch_receipt_matches_source_in_both_request_and_response():
+@pytest.mark.parametrize("override", [True, False])
+def test_launch_receipt_binds_the_selected_version_with_or_without_an_override(override):
     account = "012345678901"
     region = "us-east-1"
     event_id = "01234567-0123-0123-0123-0123456789ab"
@@ -229,14 +230,24 @@ def test_launch_receipt_matches_source_in_both_request_and_response():
         "recipientAccountId": account,
         "readOnly": False,
         "userIdentity": {"type": "IAMUser", "arn": actor, "accountId": account},
-        "requestParameters": {"projectName": "project", "sourceVersion": "input-version"},
+        "requestParameters": {"projectName": "project"},
         "responseElements": {"build": {key: build[key] for key in ("id", "arn", "sourceVersion")}},
     }
+    if override:
+        receipt["requestParameters"]["sourceVersion"] = "input-version"
     assert _bound_launch(receipt, build, region, account) == {
         "operation": "codebuild:StartBuild",
         "actor": actor,
         "event_id": event_id,
     }
+    if override:
+        receipt["requestParameters"]["sourceVersion"] = "another-version"
+        with pytest.raises(SnapshotError, match="does not match the build"):
+            _bound_launch(receipt, build, region, account)
+        receipt["requestParameters"]["sourceVersion"] = None
+        with pytest.raises(SnapshotError, match="does not match the build"):
+            _bound_launch(receipt, build, region, account)
+        receipt["requestParameters"]["sourceVersion"] = "input-version"
     receipt["responseElements"]["build"]["sourceVersion"] = "another-version"
     with pytest.raises(SnapshotError, match="does not match the build"):
         _bound_launch(receipt, build, region, account)

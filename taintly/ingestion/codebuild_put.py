@@ -394,7 +394,9 @@ def _bound_launch(receipt: _Row, build: _Row, region: str, account: str) -> _Row
         and request.get("projectName") == build["projectName"]
         and response.get("id") == build["id"]
         and response.get("arn") == build["arn"]
-        and request.get("sourceVersion") == response.get("sourceVersion") == build["sourceVersion"],
+        # StartBuild omits sourceVersion when it uses the configured project selector.
+        and response.get("sourceVersion") == build["sourceVersion"]
+        and ("sourceVersion" not in request or request["sourceVersion"] == build["sourceVersion"]),
         "Saved StartBuild event does not match the build, selected source or initiating principal",
     )
     launched = _time(receipt.get("eventTime"))
