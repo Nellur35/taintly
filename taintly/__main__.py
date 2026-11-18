@@ -2130,6 +2130,20 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
         print(f"  Changed source in ZIP: {result['influence']['archive_member']}")
         print(result["scope"])
         print(result["next_evidence"])
+    elif result["state"] == "managed-s3-zip-reported":
+        publication = result["publication"]
+        source = result["source_plan"]
+        observation = source["command"]
+        print(
+            f"CodeBuild {result['build']} reported a primary S3 ZIP for fork PR "
+            f"#{result['pull_request']} ({result['head']}).\n"
+            f"  Build status: {result['build_status']}. Upload phase: SUCCEEDED.\n"
+            f"  Reported command: {observation['text']} ({source['path']}:{observation['line']}).\n"
+            f"  Primary paths selected: {publication['primary_paths_reported']}.\n"
+            f"  Reported object: {publication['object_arn']}\n"
+            f"  CodeBuild-reported ZIP SHA-256: {publication['provider_reported_sha256']}\n"
+            f"{result['scope']}\n{result['next_evidence']}"
+        )
     elif result["state"] == "primary-artifact-paths-unmatched":
         print(f"CodeBuild {result['build']} reported no matches for its primary S3 artifact paths.")
         print(
