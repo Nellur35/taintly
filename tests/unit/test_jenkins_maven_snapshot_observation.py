@@ -316,7 +316,23 @@ def test_missing_upstream_ancestry_remains_unresolved(tmp_path, upstream_capture
 
 def test_identity_proof_still_required_on_fork_checkout(tmp_path, capture):
     capture["registry"]["stored_attributes"]["storageItem-generation"] = "2"
-    assert "write identity is unavailable" in evaluate(tmp_path, capture)["reason"]
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "unresolved"
+    assert "write identity is unavailable" in result["reason"]
+    assert result["authority"] == "unresolved"
+    assert result["checkout"]["revision"] == HEAD
+    assert result["snapshot_evidence"]["object_url"] == TARGET
+    assert "publication" not in result
+    assert "registry_actor" not in result["snapshot_evidence"]
+
+
+def test_missing_writer_cannot_expose_unbound_snapshot(tmp_path, capture):
+    capture["registry"]["stored_attributes"]["storageItem-generation"] = "2"
+    capture["deploy_log"]["node_id"] = "9"
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "unresolved"
+    assert "exact Maven deployment node" in result["reason"]
+    assert "snapshot_evidence" not in result
 
 
 def test_refuses_multiple_reported_revisions_in_one_git_node(tmp_path, upstream_capture):

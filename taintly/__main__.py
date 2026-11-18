@@ -1938,6 +1938,17 @@ def _check_jenkins_maven_snapshot(
             f"  Object: {publication['object_url']}\n  SHA-256: {publication['sha256']}\n"
             f"{result['scope']}\n{result['review_action']}"
         )
+    elif "snapshot_evidence" in result:
+        snapshot = result["snapshot_evidence"]
+        source = result["source"]
+        print(
+            f"Maven in {result['repository']} PR #{result['pr']} used the reported fork "
+            f"checkout {result['head']}.\n"
+            f"  Command: {result['command']} ({source['path']}:{source['line']}).\n"
+            f"  Jenkins job: {result['job']} (node {result['node']}).\n"
+            f"  Matching snapshot bytes: {snapshot['object_url']} ({snapshot['sha256']}).\n"
+            f"Maven snapshot write unresolved: {result['reason']}.\n{result['scope']}"
+        )
     else:
         print(f"Maven snapshot write unresolved: {result['reason']}.\n{result['scope']}")
     sys.exit(0 if resolved and not incomplete_comparison else 11)
