@@ -214,7 +214,11 @@ def _assess(data: _Row, root: Path, repository: str, number: int, check_id: int)
     _require(_id(publisher["id"]), "publisher check ID is unavailable")
     registry = data["registry"]
     registry_path = registry["path"]
-    namespace = "org/jenkins-ci/main" if core else "(?:org/jenkins-ci|io/jenkins)/plugins"
+    namespace = (
+        "org/jenkins-ci/main"
+        if core
+        else "(?:org/jenkins-ci/plugins(?:/workflow)?|io/jenkins/plugins)"
+    )
     coordinate = re.fullmatch(rf"/{namespace}/({_NAME})/({_NAME})/\1-\2\.(jar|hpi)", registry_path)
     if coordinate is None:
         raise IncrementalsEvidenceError("registry object is outside the expected Maven coordinate")
