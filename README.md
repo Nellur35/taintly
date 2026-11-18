@@ -263,6 +263,24 @@ owned deploy invocation from the same definition on `main`. A separate
 same-window Nexus object record still leaves run-to-object attribution
 unverified.
 
+For an external Apache Sling pull request using the reviewed shared library,
+the same command accepts a trusted `jenkins-asf-sling-shared-guard-v1` capture.
+Save the GitHub PR identity as `pull`, the Jenkins `run` with Git BuildData,
+the complete `graph`, the selected Maven verify `stage`, and owned
+`console`, `checkout` and `maven` log projections. Put the exact loaded
+`Jenkinsfile` and the reviewed shared library file at `source/Jenkinsfile`
+and `source/library.groovy`. The `source` record identifies the loaded
+Jenkinsfile commit, blob and SHA-256. The controller must identify the pinned
+library revision and report the branch restriction. Select the Nexus
+snapshots repository URL as the last argument.
+
+`remote-shared-library-publisher-excluded` means this fork build reached the
+reviewed Maven verify command and the library excluded its named remote
+publisher. It does not determine whether Nexus would authorize a request
+from the PR executor or whether another step could publish. The Jenkins checkout
+revision may be a reported merge of the PR head and historical base.
+Missing or conflicting evidence keeps the observation unresolved.
+
 ### Saved GitLab fork MR artifact observations
 
 ```sh
