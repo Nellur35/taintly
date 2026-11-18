@@ -500,6 +500,7 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             "no unique matching Jenkins job artifact",
         )
         result = {
+            "state": "upstream-checkout-observed" if upstream else "snapshot-write-observed",
             "repository": repo,
             "pr": pr,
             "head_repository": pull["head_repository"],
@@ -519,7 +520,6 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         artifact_name = artifact_path.rsplit("/", 1)[1]
         sha512 = capture["registry"]["stored_attributes"]["digest.sha512"]
         _verify_deploy_log(capture["deploy_log"], job, command, workspace, artifact_name, sha512)
-        result["state"] = "upstream-checkout-observed" if upstream else "snapshot-write-observed"
         if upstream:
             result.update(
                 checkout={
