@@ -124,6 +124,83 @@ def test_job_success_can_coexist_with_owned_request_denial(capture):
     assert "publication" not in result
 
 
+@pytest.fixture
+def denial_grant_capture(capture):
+    cap, _, _ = capture
+    action = cap["denial"]["action"]
+    cap["job"]["steps"] = [
+        {
+            "number": 1,
+            "name": "Set up job",
+            "conclusion": "success",
+            "started_at": STARTED,
+            "completed_at": "2026-05-13T00:23:18Z",
+        },
+        {
+            "number": 2,
+            "name": f"Run {action}",
+            "conclusion": "success",
+            "started_at": "2026-05-13T00:23:18Z",
+            "completed_at": COMPLETED,
+        },
+    ]
+    rows = []
+    for second, value in (
+        ("16.1000000", "##[group]GITHUB_TOKEN Permissions"),
+        ("16.1100000", "Contents: read"),
+        ("16.1200000", "##[endgroup]"),
+        ("17.0500000", f"Download action repository '{action}' (SHA:{'a' * 40})"),
+        ("18.0200000", f"##[group]Run {action}"),
+        ("21.1000000", "##[error]Resource not accessible by integration"),
+    ):
+        time = f"2026-05-13T00:23:{second}Z"
+        rows.append(
+            {
+                "time": time,
+                "value": value,
+                "sha256": hashlib.sha256(f"{time} {value}".encode()).hexdigest(),
+            }
+        )
+    cap["custody"] = {"job_log_sha256": "d" * 64}
+    cap["effective_permission_log"] = {
+        "run": 10,
+        "job": 20,
+        "attempt": 1,
+        "log_sha256": "d" * 64,
+        "response_request_id": cap["denial"]["request_id"],
+        "response_block_sha256": "f" * 64,
+        "rows": rows,
+    }
+    return capture
+
+
+def test_exact_denial_correlates_own_job_reported_grant(denial_grant_capture):
+    _, _, assess = denial_grant_capture
+    result = assess()
+    assert result["state"] == "draft-release-create-denied"
+    assert result["operation"]["status"] == 403
+    assert result["effective_permission"]["contents"] == "read"
+    assert result["configured"]["requested_permission"] == "contents: write"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("job", 21), ("attempt", 2), ("response_request_id", "BAD:BAD:BAD"), ("log_sha256", "b" * 64)],
+)
+def test_denial_grant_rejects_different_owners(denial_grant_capture, key, value):
+    cap, _, assess = denial_grant_capture
+    cap["effective_permission_log"][key] = value
+    assert assess()["state"] == "unresolved"
+
+
+def test_denial_grant_cannot_borrow_rows_outside_setup(denial_grant_capture):
+    cap, _, assess = denial_grant_capture
+    row = cap["effective_permission_log"]["rows"][1]
+    row["time"] = "2026-05-13T00:23:19Z"
+    row["sha256"] = hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+    assert assess()["state"] == "unresolved"
+
+
 @pytest.mark.parametrize(
     ("override", "state", "permission_line"),
     [

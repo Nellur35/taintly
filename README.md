@@ -611,6 +611,20 @@ even when GitHub reports a successful job. Missing or incompatible evidence
 returns exit 11. Exact merged workflow bytes, runtime token identity,
 the effective policy and release asset publication remain unverified.
 
+For the direct single-step fork profile, include `effective_permission_log`
+to corroborate the runner's recorded `Contents: read` for that job. Supply
+the owning `run`, `job`, `attempt`, `log_sha256`, `response_request_id` and
+`response_block_sha256`, plus the six ordered `rows` with their original
+timestamp, line content and SHA-256. Save the job log digest in
+`custody.job_log_sha256`. Retain the permission group's opening line,
+`Contents: read`, and closing line, then the recorded action download,
+action invocation, and error beginning the block containing the same
+request ID as the check annotation. The response block hash refers to
+that block in the trusted log, with line endings normalized to LF. Omit
+authorization headers and complete error bodies. A literal pin to the
+reviewed Release Drafter v6.1.0 also supports `disable-autolabeler: false`.
+The reported grant describes the owning job's token setup.
+
 For the pinned Release Drafter v7.7.0 checkout profile, the same command
 accepts an owned job-log projection in `verified_log`. The fork trigger
 must declare the usual opened, reopened and synchronize events without

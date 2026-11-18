@@ -2306,6 +2306,12 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
     elif state == "draft-release-create-denied":
         operation = result["operation"]
         configured = result["configured"]
+        grant = result.get("effective_permission")
+        grant_line = (
+            f"  Job setup reports {grant['credential']} Contents: {grant['contents']}.\n"
+            if grant
+            else ""
+        )
         print(
             f"The saved GitHub check annotation reports HTTP {operation['status']} "
             f"for {operation['method']} "
@@ -2315,6 +2321,7 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             f"  Fork-head source requests {configured['requested_permission']} and configures "
             f"{configured['credential_binding']} "
             f"({result['source']['path']}:{configured['credential_line']}).\n"
+            f"{grant_line}"
             f"{result['scope']}"
         )
     elif state == "draft-release-create-rejection-reported":
