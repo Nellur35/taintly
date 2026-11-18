@@ -577,11 +577,14 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
             "saved detached pipeline does not match the selected fork, MR or checkout",
         )
     archives = [item for item in job["artifacts"] if item["file_type"] == "archive"]
+    status = job.get("status")
+    success = status == "success"
+    expected_failure = None if success else "script_failure"
     _need(
         _identifier(job["id"], "fork job") == job_id
         and job["web_url"] == job_url
-        and job["status"] == "failed"
-        and job["failure_reason"] == "script_failure"
+        and (success or status == "failed")
+        and job.get("failure_reason") == expected_failure
         and all(
             job["pipeline"][key] == pipeline[key]
             for key in ("id", "project_id", "sha", "ref", "source")
@@ -592,7 +595,9 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
         and _identifier(log["job"], "fork runner trace job") == job_id
         and log["url"] == job_url + "/raw"
         and _SHA256.fullmatch(str(log["sha256"])),
-        "saved runner trace and archive inventory do not match the fork-owned failed job",
+        "saved runner trace and archive inventory do not match the fork-owned successful job"
+        if success
+        else "saved runner trace and archive inventory do not match the fork-owned failed job",
     )
     source_hash = hashlib.sha256(
         _source_bytes(root, root / ".gitlab-ci.yml", "selected fork GitLab source")
@@ -606,8 +611,12 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
         rf"id={job_id} (?:status=201|responseStatus=201 Created)"
     )
     phase, response = _archive_upload_rows(log, pipeline, job, reply, "fork-job")
+    expected_phase = "upload_artifacts_on_success" if success else "upload_artifacts_on_failure"
     _need(
-        phase == "upload_artifacts_on_failure", "fork archive is outside the failure-upload phase"
+        phase == expected_phase,
+        "fork archive is outside the success-upload phase"
+        if success
+        else "fork archive is outside the failure-upload phase",
     )
     publication = _archive_receipt(job_url, log, response, archives[0]["size"])
     result = {
@@ -622,7 +631,7 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
         "revision": revision,
         "source_path": ".gitlab-ci.yml",
         "source_sha256": source_hash,
-        "job_status": "failed",
+        "job_status": status,
         "upload_phase": phase,
         "scope": _FORK_ARCHIVE_SCOPE,
         "publication": publication,

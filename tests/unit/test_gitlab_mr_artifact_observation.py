@@ -664,6 +664,35 @@ def test_fork_archive_acceptance_identifies_fork_and_parent_separately(tmp_path,
     assert result["publication"]["retrieval"] == "unverified"
 
 
+@pytest.mark.parametrize("contrast", [None, "wrong-phase", "failure-reason", "wrong-job"])
+def test_successful_fork_archive_requires_its_exact_success_phase_and_status(
+    tmp_path, fork_upload, contrast
+):
+    job = fork_upload["job"]
+    job["status"] = "success"
+    if contrast != "failure-reason":
+        job.pop("failure_reason")
+    rows = fork_upload["log"]["rows"]
+    if contrast != "wrong-phase":
+        for index in (5, 7):
+            row = rows[index]
+            rows[index] = _failure_trace_row(
+                row["time"], row["value"].replace("on_failure", "on_success")
+            )
+    if contrast == "wrong-job":
+        row = rows[6]
+        rows[6] = _failure_trace_row(row["time"], row["value"].replace("id=33", "id=34"))
+    result = _evaluate_fork(tmp_path, fork_upload)
+    if contrast:
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+    else:
+        assert result["state"] == "fork-project-archive-upload-observed"
+        assert result["job_status"] == "success"
+        assert result["upload_phase"] == "upload_artifacts_on_success"
+        assert result["publication"]["http_status"] == 201
+
+
 @pytest.mark.parametrize("mutation", ["canonical-target", "wrong-membership", "new-mr-head", "denied-response"])
 def test_fork_archive_refuses_contradictory_source_or_result(tmp_path, fork_upload, mutation):
     project = 2
