@@ -340,6 +340,11 @@ use `id`, `path_with_namespace` and `web_url`. The fork's `forked_from`
 record uses the target's `id` and `path_with_namespace`. `mr_pipeline` is
 the selected entry in GitLab's target MR pipeline list. Set the fork's
 current MR head, checkout revision and source branch from provider records.
+If the MR head has advanced, also supply `historical_pipeline` from the
+fork pipeline's `.json` view. Include `url`, `sha256` of the saved response,
+numeric `project` and `pipeline`, `mr_url`, `event` (`detached`),
+`source`, `ref`, `revision` and `created_at`. The view must agree with
+the independently saved MR pipeline membership and checkout.
 Supply `.gitlab-ci.yml` at that exact commit. Preserve the eight runner
 rows above, with the failure upload section and its owned HTTP 201.
 The result `fork-project-archive-upload-observed` names the fork's job
