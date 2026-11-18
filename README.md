@@ -352,8 +352,18 @@ the independently saved MR pipeline membership and checkout.
 Supply `.gitlab-ci.yml` at that exact commit. Preserve the eight runner
 rows above, with the failure upload section and its owned HTTP 201.
 The result `fork-project-archive-upload-observed` names the fork's job
-archive. Archive contents and authority in the MR target project remain
-unverified.
+archive. To corroborate a saved download, supply `published-archive.zip`
+in the source projection and an optional `archive_download` record with
+`job`, the original job download `url`, `observed_at`, `bytes`, `sha256`
+and `responses`. Use a UTC timestamp ending in `Z`. Record the host and
+HTTP status for each response. The profile accepts a direct GitLab.com 200
+or its 302 to the GitLab artifact
+CDN followed by 200. Keep signed URLs and request credentials out of the
+receipt. The ZIP size must match the job inventory and stay within
+5,000,000 bytes. An incompatible receipt leaves the upload observation
+visible and exits 11. A verified download establishes byte identity at
+the recorded time. Content provenance, present access and authority in
+the MR target project require separate evidence.
 
 An observed archive upload covers only the selected job and artifact
 member. Published Pages content, push access to registries, protected

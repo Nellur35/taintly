@@ -4,6 +4,8 @@ import hashlib
 import json
 import re
 from datetime import datetime
+from io import BytesIO
+from zipfile import ZipFile
 
 import pytest
 
@@ -678,3 +680,49 @@ def test_fork_archive_refuses_contradictory_source_or_result(tmp_path, fork_uplo
     result = _evaluate_fork(tmp_path, fork_upload, project)
     assert result["state"] == "unresolved"
     assert "publication" not in result
+
+
+@pytest.mark.parametrize(
+    "contrast", [None, "direct", "wrong-job", "foreign-cdn", "bad-size", "bad-digest", "not-zip"]
+)
+def test_fork_archive_download_preserves_the_upload_decision(tmp_path, fork_upload, contrast):
+    buffer = BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr("build.txt", "observed archive bytes")
+    data = buffer.getvalue() if contrast != "not-zip" else b"not a zip"
+    (tmp_path / "published-archive.zip").write_bytes(data)
+    archive, = [entry for entry in fork_upload["job"]["artifacts"] if entry["file_type"] == "archive"]
+    archive["size"] = len(data)
+    job_url = fork_upload["job"]["web_url"]
+    receipt = {
+        "job": 33,
+        "url": job_url + "/artifacts/download",
+        "observed_at": fork_upload["job"]["finished_at"],
+        "responses": [
+            {"status": 302, "host": "gitlab.com"},
+            {"status": 200, "host": "cdn.artifacts.gitlab-static.net"},
+        ],
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    if contrast == "direct":
+        receipt["responses"] = [{"status": 200, "host": "gitlab.com"}]
+    elif contrast == "wrong-job":
+        receipt["url"] = job_url.replace("/33", "/34") + "/artifacts/download"
+    elif contrast == "foreign-cdn":
+        receipt["responses"][-1]["host"] = "example.test"
+    elif contrast == "bad-size":
+        receipt["bytes"] += 1
+    elif contrast == "bad-digest":
+        receipt["sha256"] = "a" * 64
+    fork_upload["archive_download"] = receipt
+    result = _evaluate_fork(tmp_path, fork_upload)
+    assert result["state"] == "fork-project-archive-upload-observed"
+    assert result["publication"]["http_status"] == 201
+    if contrast in (None, "direct"):
+        assert result["archive_download"]["sha256"] == receipt["sha256"]
+        assert result["archive_download"]["state"] == "fork-project-archive-retrieved"
+        assert result["publication"]["retrieval"] == "verified"
+    else:
+        assert result["archive_download"]["state"] == "unresolved"
+        assert result["publication"]["retrieval"] == "unverified"

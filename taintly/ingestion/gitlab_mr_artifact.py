@@ -7,9 +7,11 @@ import re
 from collections import Counter
 from datetime import datetime
 from fnmatch import fnmatchcase
+from io import BytesIO
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
+from zipfile import is_zipfile
 
 from taintly.ingestion.gitlab_registry_job import (
     _PROJECT,
@@ -61,6 +63,12 @@ _CANCELED_SCOPE = (
     "require separate evidence."
 )
 _FORK_ARCHIVE_SCHEMA = "gitlab-fork-project-archive-v1"
+_MAX_FORK_ARCHIVE_BYTES = 5_000_000
+_FORK_DOWNLOAD_SCOPE = (
+    "Trusted saved GitLab job and download records tie these ZIP bytes to the accepted "
+    "fork-job archive. Effective configuration, content ancestry, current access, broader "
+    "audience and rights in the MR target project require separate evidence."
+)
 _FORK_ARCHIVE_SCOPE = (
     "Trusted saved GitLab MR, project, pipeline, job and runner records establish "
     "the accepted archive request for this job in the fork project. Artifact bytes, "
@@ -600,6 +608,7 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
     _need(
         phase == "upload_artifacts_on_failure", "fork archive is outside the failure-upload phase"
     )
+    publication = _archive_receipt(job_url, log, response, archives[0]["size"])
     result = {
         "state": "fork-project-archive-upload-observed",
         "repository": source_path,
@@ -615,7 +624,7 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
         "job_status": "failed",
         "upload_phase": phase,
         "scope": _FORK_ARCHIVE_SCOPE,
-        "publication": _archive_receipt(job_url, log, response, archives[0]["size"]),
+        "publication": publication,
     }
     if isinstance(history, dict):
         result["historical_pipeline"] = {
@@ -623,7 +632,69 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
             "sha256": history["sha256"],
             "current_mr_head": current_head,
         }
+    if "archive_download" in data:
+        download = _fork_archive_download(data, root, result)
+        result["archive_download"] = download
+        if download["state"] == "fork-project-archive-retrieved":
+            publication["retrieval"] = "verified"
+            result["scope"] = _FORK_DOWNLOAD_SCOPE
     return result
+
+
+def _recorded_fork_archive_download(receipt: _Row, root: Path, result: _Row) -> _Row:
+    publication = result["publication"]
+    size = publication["inventory_bytes"]
+    responses = receipt["responses"]
+    _need(
+        _identifier(receipt["job"], "download job") == result["job"]
+        and receipt["url"] == publication["target"]
+        and isinstance(responses, list)
+        and 1 <= len(responses) <= 2
+        and all(isinstance(row, dict) and type(row.get("status")) is int for row in responses)
+        and responses
+        in (
+            [{"status": 200, "host": "gitlab.com"}],
+            [
+                {"status": 302, "host": "gitlab.com"},
+                {"status": 200, "host": "cdn.artifacts.gitlab-static.net"},
+            ],
+        )
+        and _time(receipt["observed_at"], "archive download time")
+        >= _time(publication["reported_at"], "archive upload time"),
+        "download receipt does not identify the selected fork job archive",
+    )
+    _need(
+        type(receipt["bytes"]) is int
+        and 0 < size <= _MAX_FORK_ARCHIVE_BYTES
+        and receipt["bytes"] == size,
+        "download receipt differs from the bounded job archive inventory",
+    )
+    content = _source_bytes(
+        root, root / "published-archive.zip", "fork job archive", max_bytes=size
+    )
+    digest = hashlib.sha256(content).hexdigest()
+    _need(
+        len(content) == size and receipt["sha256"] == digest and is_zipfile(BytesIO(content)),
+        "saved archive differs from the downloaded ZIP size or digest",
+    )
+    return {
+        "state": "fork-project-archive-retrieved",
+        "target": publication["target"],
+        "sha256": digest,
+        "bytes": size,
+        "observed_at": receipt["observed_at"],
+        "scope": _FORK_DOWNLOAD_SCOPE,
+    }
+
+
+def _fork_archive_download(data: _Row, root: Path, result: _Row) -> _Row:
+    try:
+        return _recorded_fork_archive_download(data["archive_download"], root, result)
+    except RegistryJobError as exc:
+        reason = str(exc)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+        reason = "required archive download evidence is missing or malformed"
+    return {"state": "unresolved", "reason": reason, "scope": _FORK_DOWNLOAD_SCOPE}
 
 
 def _recorded_pages_preview(
