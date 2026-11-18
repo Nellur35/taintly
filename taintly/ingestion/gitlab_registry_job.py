@@ -227,7 +227,9 @@ def _owned_workflow_events(content: str) -> list[Event]:
     return events
 
 
-def _source_bytes(repo: Path, path: Path, label: str) -> bytes:
+def _source_bytes(
+    repo: Path, path: Path, label: str, *, max_bytes: int = _MAX_SOURCE_BYTES
+) -> bytes:
     try:
         path = path.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
@@ -236,10 +238,10 @@ def _source_bytes(repo: Path, path: Path, label: str) -> bytes:
         raise RegistryJobError(f"{label} is not a regular in-repository file")
     try:
         with path.open("rb") as handle:
-            data = handle.read(_MAX_SOURCE_BYTES + 1)
+            data = handle.read(max_bytes + 1)
     except OSError as exc:
         raise RegistryJobError(f"{label} bytes are unavailable") from exc
-    if len(data) > _MAX_SOURCE_BYTES:
+    if len(data) > max_bytes:
         raise RegistryJobError(f"{label} exceeds the observation size limit")
     return data
 

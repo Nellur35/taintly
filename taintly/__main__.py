@@ -1981,6 +1981,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     state = report["state"]
     admission = report.get("publication_admission")
     preview = report.get("pages_preview")
+    archive_download = report.get("archive_download")
     if args.format == "json":
         print(json.dumps({mode: report}, indent=2))
     elif state == "job-artifact-observed":
@@ -2069,8 +2070,14 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             )
         else:
             print(f"Pages preview unresolved: {preview['reason']}.")
+    if archive_download is not None and args.format == "text":
+        if archive_download["state"] == "fork-project-archive-retrieved":
+            print(f"  Retrieved ZIP SHA-256: {archive_download['sha256']}.")
+        else:
+            print(f"Fork archive retrieval unresolved: {archive_download['reason']}.")
     incomplete = state in {"unresolved", "registry-image-push-reported"} or any(
-        item is not None and item["state"] == "unresolved" for item in (admission, preview)
+        item is not None and item["state"] == "unresolved"
+        for item in (admission, preview, archive_download)
     )
     sys.exit(11 if incomplete else 0)
 
