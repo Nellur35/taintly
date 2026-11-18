@@ -132,9 +132,9 @@ def capture(tmp_path):
     }
 
 
-def evaluate(tmp_path, capture):
+def evaluate(tmp_path, capture, target=TARGET):
     (tmp_path / "snapshot.json").write_text(json.dumps(capture), encoding="utf-8")
-    return maven_snapshot_observation(tmp_path, REPO, 7, JOB, TARGET)
+    return maven_snapshot_observation(tmp_path, REPO, 7, JOB, target)
 
 
 def test_correlates_owned_fork_command_with_stored_writer(tmp_path, capture):
@@ -341,3 +341,56 @@ def test_refuses_multiple_reported_revisions_in_one_git_node(tmp_path, upstream_
     result = evaluate(tmp_path, upstream_capture)
     assert result["state"] == "unresolved"
     assert "ambiguous upstream repository or revision" in result["reason"]
+
+
+@pytest.fixture
+def failed_upstream_capture(upstream_capture):
+    upstream_capture["run"]["result"] = "FAILURE"
+    upstream_capture["flow"]["status"] = "FAILED"
+    upstream_capture["registry"] = None
+    message = upstream_capture["stage"]["stageFlowNodes"][3]
+    assert message["name"] == "Print Message"
+    message["durationMillis"] = 0
+    return upstream_capture
+
+
+def test_keeps_proven_upstream_path_when_parent_fails_and_nexus_is_unavailable(
+    tmp_path,
+    failed_upstream_capture,
+):
+    alias = REGISTRY + "/content/repositories/snapshots/" + ARTIFACT
+    result = evaluate(tmp_path, failed_upstream_capture, alias)
+    assert result["state"] == result["authority"] == "unresolved"
+    assert result["checkout"]["revision"] == "b" * 40
+    assert result["jenkins_run_result"] == "FAILURE"
+    assert result["node"] == "7"
+    assert result["jenkins_archive_sha256"] == hashlib.sha256(b"Inert authored bytes.").hexdigest()
+    assert result["requested_snapshot"] == alias
+    assert "publication" not in result
+    assert "snapshot_evidence" not in result
+
+
+@pytest.mark.parametrize(
+    "corruption", ["target", "log", "archive", "zero-checkout", "stage", "flow"]
+)
+def test_failed_run_needs_an_owned_successful_command_and_exact_archive(
+    tmp_path, failed_upstream_capture, corruption
+):
+    capture = failed_upstream_capture
+    alias = REGISTRY + "/content/repositories/snapshots/" + ARTIFACT
+    if corruption == "target":
+        alias = TARGET
+    elif corruption == "log":
+        capture["deploy_log"]["node_id"] = "9"
+    elif corruption == "archive":
+        (tmp_path / "artifact.jar").write_bytes(b"Different authored bytes.")
+    elif corruption == "zero-checkout":
+        capture["stage"]["stageFlowNodes"][1]["durationMillis"] = 0
+    elif corruption == "stage":
+        capture["stage"]["status"] = "FAILED"
+    else:
+        capture["flow"]["status"] = "SUCCESS"
+    result = evaluate(tmp_path, capture, alias)
+    assert result["state"] == "unresolved"
+    assert "checkout" not in result
+    assert "publication" not in result
