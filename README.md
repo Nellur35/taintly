@@ -913,6 +913,60 @@ and filesystem state. The overall scan remains incomplete in this profile.
 Keep captures private. Taintly does not authenticate the saved response or
 establish the AWS account, command execution, secret delivery or effective IAM.
 
+### Saved direct CodeBuild S3 request
+
+Use the S3 observation command with a trusted saved capture with
+`schema: codebuild-direct-s3-put-v1`. Pass the exact CodeBuild ARN and
+GitHub repository URL. The supplied Git checkout must contain the resolved
+commit and have the same origin. This profile covers a pinned branch in
+GitHub and one trusted inline Bash command block on the supported CodeBuild
+managed image. The block must verify the commit and file checksum, obtain its
+STS identity, and make one versioned `aws s3api put-object` request with that
+file. See the [supported inline block](taintly/ingestion/codebuild_put.py).
+
+For the operator-prepared S3 input profile, supply `s3_input` with
+`bucket`, `key`, `operator_selected_head`, `receipt` and
+`archive_base64`. The receipt contains the version and full-object
+SHA-256 of the input ZIP. The ZIP must contain one stored regular file
+matching the supplied Git blob. The source-version check uses
+`CODEBUILD_SOURCE_VERSION` and the corresponding environment binding.
+The result identifies the selected S3 version and shows which Git file
+its contents match. It makes no native GitHub checkout claim for that build.
+
+Use the selected `BatchGetBuilds` row as `build` and the owning CloudWatch
+`GetLogEvents` result as `logs`, with `group` and `stream` from the export
+request. For a successful write, add `retrieval` with `bucket`, `key`, the
+version-pinned `GetObject` `response`, and `bytes_base64`. For a denial,
+provide the matching CloudTrail record as `s3_event`.
+For successful writes, an optional CloudTrail record must identify the same
+object version before the report attaches its request ID. An event without
+a version leaves audit corroboration unresolved. The write can still be
+observed through the command response and verified version-pinned retrieval.
+Without a bound S3 data event, `publication.acting_session` is `unverified`.
+`reported_sts_session` records the session shown by the runner's separate
+STS call.
+The Git file, command, request time, role and session, target, checksum,
+and version are checked when relevant. Provide an optional redacted
+`runtime_sts_event` from CloudTrail to bind the build's
+`GetCallerIdentity` call to the same temporary credential as the independently
+matched S3 data event. Keep the event identity and time and use
+`userIdentity.credential_id_sha256` for the STS event instead of its credential
+identifier. The report identifies the STS event and omits that identifier and
+its digest. Use captures made by a trusted operator and keep them private.
+
+An optional `launch_event` can corroborate a same-account IAM user's
+`StartBuild` call. Preserve the CloudTrail management event identity,
+time, account, region, request and returned build. The request and response
+must agree with the saved build and exact source selector. The caller who
+started the build is reported separately from the build role and S3 session.
+
+Exit `0` indicates a corroborated write or denial. Read the reported state to
+tell which occurred. Missing or mismatched evidence exits `11`. A successful
+write can be corroborated by the independent version retrieval when the
+matching CloudTrail data event is unavailable. The result applies to the
+captured request. Future policy decisions, fork admission and artifact audience
+require their own evidence.
+
 ### Saved CodeBuild-managed S3 ZIP
 
 ```bash

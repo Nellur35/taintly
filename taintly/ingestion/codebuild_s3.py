@@ -619,6 +619,23 @@ def codebuild_s3_observation(path: Path, root: Path, build_arn: str, origin: str
         if cap.get("schema") == _REPORTED_ZIP_SCHEMA:
             scope = _REPORTED_ZIP_SCOPE
             return _reported_zip(cap, root.resolve(), build_arn, origin)
+        if cap.get("schema") == "codebuild-direct-s3-put-v1":
+            from taintly.ingestion.codebuild_put import SCOPE, direct_s3_put
+
+            scope = SCOPE
+            try:
+                return direct_s3_put(cap, root.resolve(), build_arn, origin)
+            except (
+                AttributeError,
+                IndexError,
+                KeyError,
+                TypeError,
+                ValueError,
+                OverflowError,
+            ) as exc:
+                if isinstance(exc, SnapshotError):
+                    raise
+                raise SnapshotError("Malformed direct S3 request evidence") from exc
         if cap.get("schema") == _EMPTY_SCHEMA:
             scope = _EMPTY_SCOPE
             return _empty_primary_selection(cap, root.resolve(), build_arn, origin)
