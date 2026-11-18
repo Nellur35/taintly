@@ -726,3 +726,75 @@ def test_fork_archive_download_preserves_the_upload_decision(tmp_path, fork_uplo
     else:
         assert result["archive_download"]["state"] == "unresolved"
         assert result["publication"]["retrieval"] == "unverified"
+
+
+@pytest.mark.parametrize(
+    "contrast", [None, "wrong-archive", "missing-download", "same-display", "wrong-parent",
+                 "wrong-source", "opaque-panel", "ambiguous-id", "wrong-display", "wrong-member"]
+)
+def test_fork_archive_origin_needs_the_bound_zip_and_distinct_display_source(
+    tmp_path, fork_upload, contrast
+):
+    source = b"package main\n\t// <fork display>\n"
+    parent = source.replace(b"fork", b"prior")
+    if contrast == "same-display":
+        parent = source.replace(b"\t", b" " * 8)
+    path = "internal/sample.go"
+    artifact = "coverage.html"
+    fork_upload["commit"]["parent_ids"] = [BASE]
+    claim = {
+        "format": "go-cover-html-v1", "member": artifact,
+        "path": path, "package": "example.test/project/internal",
+    }
+    for label, revision, raw in (("source", HEAD, source), ("parent", BASE, parent)):
+        (tmp_path / f"coverage-{label}.go").write_bytes(raw)
+        claim[label] = {
+            "url": f"https://gitlab.com/api/v4/projects/2/repository/files/internal%2Fsample.go?ref={revision}",
+            "file_path": path, "commit": revision, "size": len(raw),
+            "blob_id": hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw,
+                                    usedforsecurity=False).hexdigest(),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    if contrast == "wrong-parent":
+        claim["parent"]["commit"] = HEAD
+    elif contrast == "wrong-source":
+        claim["source"]["blob_id"] = claim["parent"]["blob_id"]
+    elif contrast == "wrong-member":
+        claim["member"] = "other.html"
+    fork_upload["archive_member_origin"] = claim
+    panel = (b'<pre class="file" id="file0" style="display: none">package main\n'
+             b'<span class="cov1" title="1">        // &lt;fork display&gt;</span>\n</pre>')
+    if contrast == "opaque-panel":
+        panel = b"<!--" + panel + b"-->"
+    elif contrast == "wrong-display":
+        panel = panel.replace(b"fork", b"prior")
+    option = b'<option value="file0">example.test/project/internal/sample.go (0.0%)</option>'
+    if contrast == "ambiguous-id":
+        option += b'<option value="file0">example.test/project/internal/other.go (0.0%)</option>'
+    payload = b'<select id="files">' + option + b'</select><div id="content">' + panel + b"</div>"
+    buffer = BytesIO()
+    with ZipFile(buffer, "w") as z:
+        z.writestr(artifact, payload)
+    raw_zip = buffer.getvalue()
+    (tmp_path / "published-archive.zip").write_bytes(raw_zip)
+    saved, = [r for r in fork_upload["job"]["artifacts"] if r["file_type"] == "archive"]
+    saved["size"] = len(raw_zip)
+    if contrast != "missing-download":
+        fork_upload["archive_download"] = {
+            "job": 34 if contrast == "wrong-archive" else 33,
+            "url": fork_upload["job"]["web_url"] + "/artifacts/download",
+            "observed_at": fork_upload["job"]["finished_at"],
+            "responses": [{"status": 200, "host": "gitlab.com"}],
+            "bytes": len(raw_zip), "sha256": hashlib.sha256(raw_zip).hexdigest(),
+        }
+    result = _evaluate_fork(tmp_path, fork_upload)
+    assert result["publication"]["http_status"] == 201
+    origin = result["archive_member_origin"]
+    assert origin["state"] == ("unresolved" if contrast else "fork-source-display-matched")
+    if contrast is None:
+        assert origin["display_sha256"] == hashlib.sha256(source.replace(b"\t", b" " * 8)).hexdigest()
+        assert origin["archive_sha256"] == result["archive_download"]["sha256"]
+        assert origin["revision"] == HEAD
+        assert origin["parent"] == BASE
+    else:
+        assert "member_sha256" not in origin

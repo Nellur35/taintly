@@ -2007,6 +2007,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     admission = report.get("publication_admission")
     preview = report.get("pages_preview")
     archive_download = report.get("archive_download")
+    member_origin = report.get("archive_member_origin")
     if args.format == "json":
         print(json.dumps({mode: report}, indent=2))
     elif state == "job-artifact-observed":
@@ -2100,9 +2101,19 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             print(f"  Retrieved ZIP SHA-256: {archive_download['sha256']}.")
         else:
             print(f"Fork archive retrieval unresolved: {archive_download['reason']}.")
+    if member_origin is not None and args.format == "text":
+        if member_origin["state"] == "fork-source-display-matched":
+            print(
+                f"  Coverage ZIP member: {member_origin['member']}.\n"
+                f"  Displayed {member_origin['path']} matches the recorded fork checkout "
+                f"{member_origin['revision']}. The parent {member_origin['parent']} differs.\n"
+                f"{member_origin['scope']}"
+            )
+        else:
+            print(f"Fork archive source comparison unresolved: {member_origin['reason']}.")
     incomplete = state in {"unresolved", "registry-image-push-reported"} or any(
         item is not None and item["state"] == "unresolved"
-        for item in (admission, preview, archive_download)
+        for item in (admission, preview, archive_download, member_origin)
     )
     sys.exit(11 if incomplete else 0)
 

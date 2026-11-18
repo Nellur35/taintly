@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from zipfile import is_zipfile
 
+from taintly.ingestion.gitlab_coverage_source import coverage_source_observation
 from taintly.ingestion.gitlab_registry_job import (
     _PROJECT,
     _SHA,
@@ -632,16 +633,21 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
             "sha256": history["sha256"],
             "current_mr_head": current_head,
         }
+    archive_bytes = None
     if "archive_download" in data:
-        download = _fork_archive_download(data, root, result)
+        download, archive_bytes = _fork_archive_download(data, root, result)
         result["archive_download"] = download
         if download["state"] == "fork-project-archive-retrieved":
             publication["retrieval"] = "verified"
             result["scope"] = _FORK_DOWNLOAD_SCOPE
+    if "archive_member_origin" in data:
+        result["archive_member_origin"] = coverage_source_observation(
+            data, root, archive_bytes, result
+        )
     return result
 
 
-def _recorded_fork_archive_download(receipt: _Row, root: Path, result: _Row) -> _Row:
+def _recorded_fork_archive_download(receipt: _Row, root: Path, result: _Row) -> tuple[_Row, bytes]:
     publication = result["publication"]
     size = publication["inventory_bytes"]
     responses = receipt["responses"]
@@ -684,17 +690,17 @@ def _recorded_fork_archive_download(receipt: _Row, root: Path, result: _Row) -> 
         "bytes": size,
         "observed_at": receipt["observed_at"],
         "scope": _FORK_DOWNLOAD_SCOPE,
-    }
+    }, content
 
 
-def _fork_archive_download(data: _Row, root: Path, result: _Row) -> _Row:
+def _fork_archive_download(data: _Row, root: Path, result: _Row) -> tuple[_Row, bytes | None]:
     try:
         return _recorded_fork_archive_download(data["archive_download"], root, result)
     except RegistryJobError as exc:
         reason = str(exc)
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         reason = "required archive download evidence is missing or malformed"
-    return {"state": "unresolved", "reason": reason, "scope": _FORK_DOWNLOAD_SCOPE}
+    return {"state": "unresolved", "reason": reason, "scope": _FORK_DOWNLOAD_SCOPE}, None
 
 
 def _recorded_pages_preview(
