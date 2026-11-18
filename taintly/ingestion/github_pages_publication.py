@@ -205,6 +205,50 @@ def _git_members(result: _Row, destination: str, names: list[str]) -> dict[str, 
     return found
 
 
+def _push_authority(event: _Row, result: _Row, command: _Row, completed: _Row) -> _Row:
+    """Bind a recorded push account to the already corroborated branch update."""
+    try:
+        repo, payload, actor = (event[key] for key in ("repo", "payload", "actor"))
+        when = _time(event["created_at"])
+        _require(
+            event["type"] == "PushEvent"
+            and _matches(event["id"], r"[1-9][0-9]{0,29}")
+            and _id(payload["push_id"])
+            and _id(repo["id"])
+            and _id(payload["repository_id"])
+            and repo["id"] == payload["repository_id"]
+            and repo["name"] == result["repository"]
+            and payload["ref"] == f"refs/heads/{result['branch']}"
+            and payload["before"] == result["previous"]
+            and payload["head"] == result["commit"],
+            "PushEvent does not identify the selected repository and ref update",
+        )
+        _require(
+            _time(command["time"]).replace(microsecond=0)
+            <= when
+            <= _time(completed["time"]).replace(microsecond=0),
+            "PushEvent falls outside the owned push command and result",
+        )
+        _require(
+            _id(actor["id"])
+            and _matches(actor["login"], r"[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?"),
+            "PushEvent does not identify a supported account",
+        )
+    except PreviewEvidenceError as exc:
+        return {"state": "unresolved", "reason": str(exc)}
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return {"state": "unresolved", "reason": "Malformed saved PushEvent"}
+    return {
+        "state": "push-actor-observed",
+        "actor": {"id": actor["id"], "login": actor["login"]},
+        "event_id": event["id"],
+        "push_id": payload["push_id"],
+        "time": event["created_at"],
+        "scope": "GitHub attributes this historical ref update to this account. "
+        "The specific token, other grants and future permissions remain unverified.",
+    }
+
+
 def _pages_deployment(capture: _Row, target: str, ref: str, commit: str, push: _Row) -> _Row:
     deployment, success, run, job = (
         capture[key] for key in ("deployment", "success", "run", "job")
@@ -614,8 +658,8 @@ def pages_publication(
                 rf" +{result['previous'][:9]}\.\.{result['commit'][:9]}  {re.escape(branch)} -> {re.escape(branch)}",
             ),
         )
-        evidence = [_row(rows, job, deploy, kind, pattern) for kind, pattern in confirmations]
-        times = [_time(row["time"]) for row in [seen_download[-1], *evidence]]
+        evidence = {kind: _row(rows, job, deploy, kind, pattern) for kind, pattern in confirmations}
+        times = [_time(row["time"]) for row in [seen_download[-1], *evidence.values()]]
         _require(
             all(a < b for a, b in pairwise(times)),
             "Saved download and Git push rows are out of order",
@@ -637,8 +681,10 @@ def pages_publication(
         "action": _PAGES_ACTION,
         "action_line": action.line,
     }
-    deployment = _pages_deployment(cap["pages"], target, branch, result["commit"], evidence[-1])
-    return {
+    deployment = _pages_deployment(
+        cap["pages"], target, branch, result["commit"], evidence["result"]
+    )
+    observed = {
         "state": "pages-deployment-observed",
         **common,
         "publication": publication,
@@ -650,6 +696,17 @@ def pages_publication(
         "Only the named files were compared. The effective personal-token principal, "
         "wider policy and current deployed revision remain unverified.",
     }
+    if "push_event" in cap:
+        authority = _push_authority(
+            cap["push_event"], result, evidence["command"], evidence["result"]
+        )
+        observed["push_authority"] = authority
+        if authority["state"] == "push-actor-observed":
+            observed["scope"] = (
+                "Trusted saved provider and Git records show the historical Pages deployment. "
+                "Only the named files were compared. The current deployed revision remains unverified."
+            )
+    return observed
 
 
 def pages_observation(

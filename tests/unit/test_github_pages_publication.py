@@ -7,6 +7,7 @@ from taintly.ingestion.github_pages_publication import (
     _git_members,
     _graph_revision,
     _member_path,
+    _push_authority,
 )
 from taintly.ingestion.github_preview import PreviewEvidenceError
 
@@ -57,3 +58,48 @@ def test_sample_needs_a_unique_head_ordinal_and_exact_value(revisions, points):
     assert _graph_revision({"revision_to_hash": {"22": "head"}}, [[22, 1.25]], "head", 1.25) == 22
     with pytest.raises(PreviewEvidenceError):
         _graph_revision({"revision_to_hash": revisions}, points, "head", 1.25)
+
+
+@pytest.mark.parametrize("conflict", [None, "ref", "before", "time", "repo-id", "actor"])
+def test_push_actor_requires_the_exact_update_and_command_window(conflict):
+    destination = {
+        "repository": "owner/site",
+        "branch": "main",
+        "previous": "a" * 40,
+        "commit": "b" * 40,
+    }
+    event = {
+        "type": "PushEvent",
+        "id": "42",
+        "repo": {"id": 19, "name": destination["repository"]},
+        "payload": {
+            "repository_id": 19,
+            "push_id": 97,
+            "ref": "refs/heads/main",
+            "before": destination["previous"],
+            "head": destination["commit"],
+        },
+        "actor": {"id": 842, "login": "build-bot"},
+        "created_at": "2026-01-02T03:04:05Z",
+    }
+    if conflict == "ref":
+        event["payload"]["ref"] = "refs/heads/staging"
+    elif conflict == "before":
+        event["payload"]["before"] = "c" * 40
+    elif conflict == "time":
+        event["created_at"] = "2026-01-02T03:04:06Z"
+    elif conflict == "repo-id":
+        event["payload"]["repository_id"] = 23
+    elif conflict == "actor":
+        event["actor"]["id"] = True
+    result = _push_authority(
+        event,
+        destination,
+        {"time": "2026-01-02T03:04:04.003Z"},
+        {"time": "2026-01-02T03:04:05.002Z"},
+    )
+    assert result["state"] == ("unresolved" if conflict else "push-actor-observed")
+    if conflict:
+        assert "actor" not in result
+    else:
+        assert result["actor"] == {"id": 842, "login": "build-bot"}

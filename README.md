@@ -803,14 +803,19 @@ For schema `github-workflow-run-pages-publication-v1`, supply:
   with its `step`, benchmark `name`, raw `result` archive path and owned
   `command`, `head` and `sample` rows. Select both the published
   `index.json` and the corresponding summary graph for byte comparison.
+- To corroborate the historical push account, optionally include the
+  original destination repository `PushEvent` as `push_event`. Its
+  repository, ref, previous and new head, and timestamp must agree with
+  the selected Git update and owned push logs.
 
 The profile supports a direct fork checkout, an ASV archive, and the reviewed
 `peaceiris/actions-gh-pages` action revision with an observed personal-token
 setup. `pages-deployment-observed` confirms a historical deployment for
 the exact published commit and named files. `pages-publication-skipped`
-records the missing HTML directory and the actual guard skip. The effective
-token principal, wider permissions, benchmark validity and current deployed
-revision stay unverified. Missing or incompatible deployment evidence
+records the missing HTML directory and the actual guard skip. The push
+account is corroborated when the optional event matches. The specific
+token, wider permissions, benchmark validity and current deployed revision
+stay unverified. Missing or incompatible deployment evidence
 returns `unresolved` and exit `11`. Missing optional benchmark evidence
 leaves only that part unresolved. Ordinary scans retain their existing behavior.
 
