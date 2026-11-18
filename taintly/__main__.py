@@ -2421,6 +2421,15 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             )
         else:
             benchmark_text = f"  Fork benchmark sample unverified. {benchmark['reason']}.\n"
+        authority_text = ""
+        if authority := result.get("push_authority"):
+            if authority["state"] == "push-actor-observed":
+                authority_text = (
+                    f"  GitHub attributes the recorded push to {authority['actor']['login']} "
+                    f"(event {authority['event_id']}).\n  {authority['scope']}\n"
+                )
+            else:
+                authority_text = f"  Push account unverified. {authority['reason']}.\n"
         print(
             f"Saved records link fork build {result['producer_run']} and archive "
             f"{result['artifact_id']} to job {result['job']}.\n"
@@ -2428,7 +2437,7 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             f"  {update['matched_files']} selected archive files match Git under {update['prefix']}.\n"
             f"  Historical Pages deployment {deployment['id']} succeeded at "
             f"{deployment['succeeded_at']} for {deployment['site']}.\n"
-            f"{benchmark_text}{result['scope']}"
+            f"{benchmark_text}{authority_text}{result['scope']}"
         )
     elif state == "pages-publication-skipped":
         print(
