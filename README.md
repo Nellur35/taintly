@@ -364,9 +364,9 @@ job, canceled pipeline and ZIP archive inventory. The result
 archive acceptance and preserves the final job status. Archive bytes,
 later availability and wider permissions require separate evidence.
 
-For a failed job in a merge-request pipeline running in the fork's own project,
-use schema `gitlab-fork-project-archive-v1` and pass the fork's project ID
-to the same command. Supply `fork`, `target`, `mr`, `pipeline`, `job`,
+For a successful job or a script failure in a merge-request pipeline running
+in the fork's own project, use schema `gitlab-fork-project-archive-v1`.
+Pass the fork's project ID to the same command. Supply `fork`, `target`, `mr`, `pipeline`, `job`,
 `commit`, `mr_pipeline`, `source_sha256` and `log`. The project records
 use `id`, `path_with_namespace` and `web_url`. The fork's `forked_from`
 record uses the target's `id` and `path_with_namespace`. `mr_pipeline` is
@@ -378,7 +378,9 @@ numeric `project` and `pipeline`, `mr_url`, `event` (`detached`),
 `source`, `ref`, `revision` and `created_at`. The view must agree with
 the independently saved MR pipeline membership and checkout.
 Supply `.gitlab-ci.yml` at that exact commit. Preserve the eight runner
-rows above, with the failure upload section and its owned HTTP 201.
+rows above, with the upload section matching the job outcome and its owned
+HTTP 201. A successful job requires the success-upload section and no
+failure reason. A script failure requires the failure-upload section.
 The result `fork-project-archive-upload-observed` names the fork's job
 archive. To corroborate a saved download, supply `published-archive.zip`
 in the source projection and an optional `archive_download` record with
@@ -392,6 +394,19 @@ receipt. The ZIP size must match the job inventory and stay within
 visible and exits 11. A verified download establishes byte identity at
 the recorded time. Content provenance, present access and authority in
 the MR target project require separate evidence.
+
+To compare one Go coverage panel in that verified ZIP with its source, add
+`archive_member_origin` with `format: go-cover-html-v1`, the HTML `member`,
+Go file `path`, package name `package`, and `source` and `parent` file
+records. Each record retains the exact GitLab repository file API `url`,
+`commit`, `file_path`, `size`, `sha256` and `blob_id`. Supply the
+original file bytes as `coverage-source.go` and `coverage-parent.go`
+alongside `.gitlab-ci.yml`, and retain the unique parent in
+`commit.parent_ids`. The CLI reports `fork-source-display-matched` when
+the panel matches the fork file's display and differs from its parent's.
+An unresolved comparison preserves the archive upload observation and
+returns exit `11`. The panel comparison establishes displayed content.
+Execution, the generator and other member origins require their own evidence.
 
 An observed archive upload covers only the selected job and artifact
 member. Published Pages content, push access to registries, protected
