@@ -712,6 +712,32 @@ def _fork_archive_download(data: _Row, root: Path, result: _Row) -> tuple[_Row, 
     return {"state": "unresolved", "reason": reason, "scope": _FORK_DOWNLOAD_SCOPE}, None
 
 
+def _recorded_pages_account(evidence: _Row, job: _Row, pipe: _Row, deployment: int) -> _Row:
+    try:
+        _need(
+            _identifier(evidence["job_id"], "account job ID") == job["id"]
+            and _identifier(evidence["pipeline_id"], "account pipeline ID") == pipe["id"]
+            and evidence["sha"] == pipe["sha"]
+            and _identifier(evidence["deployment_id"], "account deployment ID") == deployment,
+            "account evidence does not belong to the owning job, revision and deployment",
+        )
+        account = _identifier(evidence["deployment_user_id"], "deployment account ID")
+        _need(
+            _identifier(evidence["job_user_id"], "owning job account ID") == account,
+            "the saved job and deployment accounts do not agree",
+        )
+    except RegistryJobError as exc:
+        return {"state": "unresolved", "reason": str(exc)}
+    except (KeyError, TypeError):
+        return {"state": "unresolved", "reason": "saved deployment account evidence is malformed"}
+    return {
+        "state": "deployment-account-recorded",
+        "account_id": account,
+        "scope": "GitLab records this account on the exact preview deployment and job. "
+        "The credential, wider permissions and future access remain unverified.",
+    }
+
+
 def _recorded_pages_preview(
     data: _Row, cfg: _Config, detail: _Row, path: str, job_url: str
 ) -> _Row:
@@ -807,7 +833,7 @@ def _recorded_pages_preview(
         <= _time(saved["observed_at"], "preview record observation"),
         "Pages deployment timestamps are inconsistent with the selected pipeline and job",
     )
-    return {
+    preview: _Row = {
         "state": "pages-preview-deployment-recorded",
         "operation": "gitlab-pages-preview-environment-deployment",
         "environment_id": environment_id,
@@ -821,6 +847,9 @@ def _recorded_pages_preview(
         "evidence_sha256": saved["sha256"],
         "scope": _PAGES_SCOPE,
     }
+    if "account" in saved:
+        preview["account"] = _recorded_pages_account(saved["account"], job, pipe, deployment)
+    return preview
 
 
 def _pages_preview(data: _Row, cfg: _Config, detail: _Row, path: str, job_url: str) -> _Row:

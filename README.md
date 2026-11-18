@@ -421,8 +421,14 @@ and `action`, `status`, and `environment` from `deployment_status`.
 Keep the environment's `id`, `name`, `state`, `external_url` and
 `last_deployment`. The last deployment retains `id`, `iid`, `sha`,
 `ref` (the ref name), `status`, `created_at`, `deployed_at`, `is_last`,
-`web_path`, and `deployable` (`name` and `build_path`). Omit user and
-credential data.
+`web_path`, and `deployable` (`name` and `build_path`). Omit names, email
+addresses and credential data. To request the recorded deployment account,
+include an optional `account` under `pages_preview`. Project the `job_id`,
+`pipeline_id`, `sha`, `deployment_id`, `job_user_id` and
+`deployment_user_id` from the same trusted job view. The account IDs must
+be numeric and match. Disagreement or missing data in an included account
+projection returns exit `11` and preserves the separately verified
+deployment. The account identifies this deployment and job only.
 
 The supported source declares a default-directory Pages preview with
 `$CI_COMMIT_REF_SLUG` and an environment URL of `$CI_PAGES_URL`. The

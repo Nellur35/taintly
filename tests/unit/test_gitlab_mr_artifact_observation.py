@@ -829,3 +829,42 @@ def test_fork_archive_origin_needs_the_bound_zip_and_distinct_display_source(
         assert origin["parent"] == BASE
     else:
         assert "member_sha256" not in origin
+
+
+@pytest.mark.parametrize(
+    ("conflict", "wrong"),
+    [
+        ("", None),
+        ("job_id", 34),
+        ("pipeline_id", 99),
+        ("sha", BASE),
+        ("job_user_id", 104),
+        ("deployment_user_id", True),
+    ],
+)
+def test_pages_account_requires_the_same_owned_deployment_and_job(
+    tmp_path, pages_capture, conflict, wrong
+):
+    projection = {
+        "job_id": 33,
+        "pipeline_id": pages_capture["pipeline"]["id"],
+        "sha": MERGE,
+        "deployment_id": 55,
+        "job_user_id": 103,
+        "deployment_user_id": 103,
+    }
+    if conflict:
+        projection[conflict] = wrong
+    pages_capture["pages_preview"]["account"] = projection
+    result = evaluate(tmp_path, pages_capture, PAGES)
+    assert result["state"] == "job-artifact-observed"
+    preview = result["pages_preview"]
+    assert preview["state"] == "pages-preview-deployment-recorded"
+    assert preview["availability"] == "unverified"
+    observed = preview["account"]
+    if conflict:
+        assert observed["state"] == "unresolved"
+        assert "account_id" not in observed
+    else:
+        assert observed["state"] == "deployment-account-recorded"
+        assert observed["account_id"] == 103
