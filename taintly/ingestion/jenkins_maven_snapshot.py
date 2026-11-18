@@ -36,6 +36,11 @@ _UPSTREAM_SCOPE = (
     "is unresolved. Other ways that fork data might enter the build, effective repository "
     "policy, and filesystem identity are outside this observation."
 )
+_MATCHED_FORK_SCOPE = (
+    "The reported fork checkout and Maven command are bound to identical Jenkins and Nexus "
+    "JARs. The original Nexus writer, a shared request ID, and effective registry permission "
+    "are unresolved."
+)
 _SCOPE = (
     "Corroboration of trusted saved GitHub, Jenkins and Apache Nexus records for one Maven "
     "snapshot object. The Nexus stored request identifies the writer. Other credentials, "
@@ -328,22 +333,22 @@ def _registry(
         and stored["digest.sha512"] == hashlib.sha512(job_bytes).hexdigest(),
         "Jenkins archive and Nexus object bytes or stored digests differ",
     )
-    result = {"object_url": target_url, "sha256": digest, "created_ms": int(milliseconds)}
+    result: _Row = {"object_url": target_url, "sha256": digest, "created_ms": int(milliseconds)}
     if attribute_writer:
-        actor = stored.get("request.user", "")
-        _require(
-            stored["storageItem-generation"] == "1"
+        actor = stored.get("request.user")
+        if (
+            stored.get("storageItem-generation") == "1"
+            and isinstance(actor, str)
             and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", actor)
-            and actor.lower() != "anonymous",
-            "Nexus stored write identity is unavailable",
-        )
-        return {
-            "operation": "maven-snapshot-write",
-            "object_url": target_url,
-            "sha256": digest,
-            "registry_actor": actor,
-            "created_ms": int(milliseconds),
-        }
+            and actor.lower() != "anonymous"
+        ):
+            return {
+                "operation": "maven-snapshot-write",
+                "object_url": target_url,
+                "sha256": digest,
+                "registry_actor": actor,
+                "created_ms": int(milliseconds),
+            }
     return result
 
 
@@ -458,12 +463,21 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
                 authority="unresolved",
                 scope=_UPSTREAM_SCOPE,
             )
-        else:
+        elif "registry_actor" in publication:
             result.update(
                 publication=publication,
                 review_action="If fork PRs must not publish snapshots, remove the snapshot "
                 "publisher from fork builds and use a separate job bound to an approved revision.",
                 scope=_SCOPE,
+            )
+        else:
+            result.update(
+                state="unresolved",
+                reason="Nexus stored write identity is unavailable",
+                checkout={"repository": repo, "ref": f"PR-{pr}", "revision": revision},
+                snapshot_evidence=publication,
+                authority="unresolved",
+                scope=_MATCHED_FORK_SCOPE,
             )
         return result
     except EvidenceError as exc:

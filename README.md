@@ -204,7 +204,11 @@ The selected checkout and deploy nodes must be adjacent or connected by
 the reviewed Maven preparation sequence within the same recorded stage.
 Conflicting revisions and unsupported intervening steps leave this
 source-to-publication relationship unresolved.
-Missing or incompatible evidence returns exit `11`.
+If the fork checkout, Maven command and exact snapshot bytes match but
+the stored record cannot identify the original writer, the result reports
+the checkout and matching object while leaving authority unresolved.
+Missing or incompatible evidence and unresolved writer attribution return
+exit `11`.
 
 For the supported explicit upstream Git checkout variant, also supply
 `source/base.Jenkinsfile`, its `upstream_definition` blob record, the
