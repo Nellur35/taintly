@@ -23,6 +23,7 @@ from taintly.ingestion.codebuild_snapshot import (
     _github_identity,
     _read_capture,
     _require_git_revision,
+    bind_public_build_response,
 )
 from taintly.ingestion.codebuild_start import _blob, _need, _sha
 from taintly.parsers.structural import EventKind
@@ -36,6 +37,13 @@ _SHA256 = re.compile(r"[a-f0-9]{64}")
 _ZIP_GLOB = re.compile(r"[A-Za-z0-9_.-]*\*\.zip")
 _ARCHIVE_GLOB = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,79}\*\.(?:zip|tgz)")
 _EMPTY_SCHEMA = "codebuild-managed-s3-empty-primary-v1"
+_REPORTED_ZIP_SCHEMA = "codebuild-managed-s3-reported-zip-v1"
+_REPORTED_ZIP_SCOPE = (
+    "Trusted saved records report a managed ZIP for this build. The returned object bytes, "
+    "origin of individual members, exact S3 API request and effective writing principal "
+    "remain unverified. The PR record identifies the selected commit's source context. "
+    "The triggering event is unverified."
+)
 _EMPTY_MATCH = "no matching artifact paths found"
 _EMPTY_SCOPE = (
     "Scope: primary S3 artifact selection in one build, based on trusted saved CodeBuild "
@@ -437,12 +445,180 @@ def _empty_primary_selection(cap: _Row, root: Path, build_id: str, origin: str) 
     }
 
 
+def _reported_zip(cap: _Row, root: Path, build_id: str, origin: str) -> _Row:
+    _need(BUILD_ID.fullmatch(build_id), "The reported ZIP profile requires the exact build ID")
+    build = _owned_record(cap.get("build"), "id", build_id)
+    provider = _owned_record(cap.get("provider"), "build", build_id)
+    logs = _owned_record(cap.get("logs"), "build", build_id)
+    status = _matches(build.get("buildStatus"), re.compile("FAILED|SUCCEEDED"), "build status")
+    _need(
+        build.get("secondarySources") == build.get("secondaryArtifacts") == []
+        and build.get("artifacts") == {"type": "S3", "packaging": "ZIP"},
+        "Expected a completed single-source build with primary S3 ZIP output",
+    )
+    source = bind_public_build_response({"build": build}, build_id, root, origin)
+    pr = _map(cap.get("pr"), "GitHub PR")
+    number = pr.get("number")
+    fork = _matches(pr.get("fork"), _PR_REPO, "external fork repository")
+    _need(
+        type(number) is int
+        and 0 < number < 10**10
+        and _matches(pr.get("repository"), _PR_REPO, "PR target repository").lower()
+        == source.repository
+        and fork.lower() != source.repository
+        and pr.get("head") == build.get("sourceVersion") == source.commit,
+        "The selected build must request and resolve the supplied external PR head",
+    )
+    # Source selection is material even when ambient environment values are unavailable.
+    # This observer matches one literal command and the selector recorded by the runner.
+    issue = _buildspec_structure_limit(source.path, source.content, run=True)
+    _need(issue is None, issue or "")
+    events = unambiguous_checkout_events(source.path, source.content)
+    leaves = {event.path: event for event in events if event.kind is EventKind.LEAF_SCALAR}
+    version = leaves.get(("version",))
+    selectors = [event for path, event in leaves.items() if path[:2] == ("artifacts", "files")]
+    files_key = next(
+        (
+            event
+            for event in events
+            if event.kind is EventKind.MAP_KEY and event.path == ("artifacts", "files")
+        ),
+        None,
+    )
+    _need(
+        version
+        and version.value == "0.2"
+        and len(selectors) == 1
+        and selectors[0].path == ("artifacts", "files", 0)
+        and not any(
+            event.path[:1] == ("secondary-artifacts",)
+            or event.path[:2] == ("artifacts", "secondary-artifacts")
+            for event in events
+        ),
+        "Expected version 0.2 with one primary artifact selector",
+    )
+    selector = _matches(
+        selectors[0].value,
+        re.compile(rf"(?:\$\{{[A-Z_][A-Z0-9_]*\}}|{_PATH})/\*\*/\*"),
+        "primary artifact selector",
+    )
+    if files_key is None:
+        raise SnapshotError("Primary artifact file list must use a plain block")
+    # The structural reader cannot establish the absence of an empty sequence item.
+    # Check the complete physical list before interpreting its reported count.
+    lines = source.content.splitlines()
+    header = lines[files_key.line - 1].split("#", 1)[0].rstrip()
+    indent = len(header) - len(header.lstrip(" "))
+    _need(header.strip() == "files:" and indent > 0, "Primary artifact list is not a plain block")
+    items = []
+    for raw in lines[files_key.line :]:
+        content = raw.split("#", 1)[0].rstrip()
+        if not content.strip():
+            continue
+        width = len(content) - len(content.lstrip(" "))
+        if width < indent or (width == indent and not content.lstrip().startswith("-")):
+            break
+        items.append(content.strip())
+    _need(items == ["- " + selector], "Primary artifact block does not contain exactly one item")
+    selected, _ = _record(
+        logs.get("source"),
+        r"YAML location is /codebuild/output/src[0-9]+/src/github\.com/(?i:"
+        + re.escape(source.repository)
+        + ")/"
+        + re.escape(source.path),
+    )
+    invoked, (script,) = _record(logs.get("command"), rf"Running command bash ({_PATH}\.sh)")
+    command = "bash " + script
+    commands = [
+        event
+        for path, event in leaves.items()
+        if len(path) == 4
+        and path[:3] == ("phases", "build", "commands")
+        and type(path[3]) is int
+        and event.value_kind == "plain"
+        and event.value == command
+    ]
+    _need(len(commands) == 1, "The reported shell command is not uniquely configured in BUILD")
+    _, script_source = _blob(root, source.commit, script)
+
+    upload = logs.get("upload")
+    if not isinstance(upload, list) or len(upload) != 4:
+        raise SnapshotError("Primary ZIP selection and report-discovery records are incomplete")
+    expanded, _ = _record(upload[0], "Expanding " + re.escape(selector))
+    matched, (count,) = _record(upload[1], r"Found ([1-9][0-9]{0,8}) file\(s\)")
+    auto_report, _ = _record(upload[2], r"Set report auto-discover timeout to [1-9][0-9]* seconds")
+    completed, _ = _record(upload[3], "Phase complete: UPLOAD_ARTIFACTS State: SUCCEEDED")
+    download_start, download_end = _phase_window(build, "DOWNLOAD_SOURCE")
+    build_start, build_end = _phase_window(build, "BUILD", status=status)
+    post_start, post_end = _phase_window(build, "POST_BUILD")
+    upload_start, upload_end = _phase_window(build, "UPLOAD_ARTIFACTS")
+    _need(
+        download_start
+        <= selected
+        <= download_end
+        <= build_start
+        <= invoked
+        < build_end
+        <= post_start
+        < post_end
+        <= upload_start
+        <= expanded
+        < matched
+        < auto_report
+        < completed
+        <= upload_end,
+        "The saved build and primary selection do not precede report discovery in the owning phases",
+    )
+    uuid = build_id.split(":", 1)[1]
+    target = _matches(
+        provider.get("s3Arn"),
+        re.compile(rf"arn:aws:s3:::{_BUCKET}/{re.escape(uuid)}/{_SEGMENT}"),
+        "build-specific primary ZIP object ARN",
+    )
+    digest = _matches(provider.get("sha256Checksum"), _SHA256, "provider ZIP SHA-256")
+    return {
+        "state": "managed-s3-zip-reported",
+        "build": build_id,
+        "build_status": status,
+        "repository": source.repository,
+        "pull_request": number,
+        "head": source.commit,
+        "head_repository": fork,
+        "source_scope": "matches-supplied-fork-pr-head",
+        "trigger": "unverified",
+        "source_plan": {
+            "kind": "repository-buildspec",
+            "path": source.path,
+            "sha256": source.sha256,
+            "command": {"text": command, "line": commands[0].line, "source": script_source},
+            "artifact_selector": {"path": selector, "line": selectors[0].line},
+        },
+        "publication": {
+            "operation": "codebuild-managed-s3-artifact-upload",
+            "object_arn": target,
+            "provider_reported_sha256": digest,
+            "primary_paths_reported": int(count),
+            "archive_bytes": "unverified",
+            "authorization": "unverified",
+            "service_role_session": "unverified",
+        },
+        "scope": _REPORTED_ZIP_SCOPE,
+        "next_evidence": (
+            "Match retained archive bytes to the reported ZIP SHA-256 and obtain the "
+            "object-write receipt with the acting session and its link to this build."
+        ),
+    }
+
+
 def codebuild_s3_observation(path: Path, root: Path, build_arn: str, origin: str) -> _Row:
     """Corroborate the supplied managed-output observation offline."""
     scope = _SCOPE
     try:
         _need(path.is_file(), "A regular saved receipt is required")
         cap = _read_capture(path, "CodeBuild managed S3 receipt")
+        if cap.get("schema") == _REPORTED_ZIP_SCHEMA:
+            scope = _REPORTED_ZIP_SCOPE
+            return _reported_zip(cap, root.resolve(), build_arn, origin)
         if cap.get("schema") == _EMPTY_SCHEMA:
             scope = _EMPTY_SCOPE
             return _empty_primary_selection(cap, root.resolve(), build_arn, origin)

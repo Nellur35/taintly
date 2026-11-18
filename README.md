@@ -832,7 +832,7 @@ It preserves the retrieved object and matched member, returns
 build requires independent evidence for that object. A checksum supplied
 alongside the directory ARN has unverified scope for the retrieved file.
 The report names the object write record, build session and byte linkage
-needed to follow up. CodeBuild-packaged archives require a different profile.
+needed to follow up. The packaged ZIP profile below covers a separate observation.
 The exact service-role session, general IAM permissions and subsequent use
 remain unverified. Inconsistent or missing evidence returns exit 11.
 
@@ -854,6 +854,30 @@ with `NONE` packaging. The root selectors must be a plain block list.
 Automatic report discovery is separate from primary
 artifact selection. The mode retains exit 11 because effective S3 authority
 and other writes remain unverified.
+
+For CodeBuild-packaged primary ZIPs, use a full public build ID and
+`codebuild-managed-s3-reported-zip-v1`. Supply trusted saved records for
+an external GitHub PR with a selected SHA, a literal repository buildspec,
+and one primary archive selector. The record contains:
+
+- `pr`: `number`, `head`, `repository`, and `fork`.
+- `build`: CodeBuild's completed build record with its selection, status,
+  phase timestamps and primary S3 ZIP configuration.
+- `logs`: `build` plus the runner's buildspec selection under `source`,
+  one literal `bash path/to/script.sh` BUILD invocation under `command`,
+  and the ordered selector expansion, positive match count, report
+  auto-discovery boundary and terminal success under `upload`.
+- `provider`: the exact `build` ID, the build-specific object `s3Arn`
+  and `sha256Checksum` from CodeBuild's public artifact lookup. Omit
+  signed URLs and tokens.
+
+The local repository must contain the exact PR commit. The
+`managed-s3-zip-reported` state records the successful upload phase and
+the provider-reported object and checksum, including after a failed BUILD
+phase. The selected commit matches the supplied PR head. The evidence
+needed to identify the triggering event is separate. The mode retains exit
+11 pending verification of the archive and writer. A reported selector
+match does not establish the contents of each member.
 
 ### Saved CodeBuild deployment skip
 
