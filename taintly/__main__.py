@@ -2347,13 +2347,25 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             if grant is not None
             else ""
         )
+        tag = operation["requested_tag"]
+        tag_text = f" for {tag}" if tag is not None else " (tag absent from the log)"
+        permission = configured["requested_permission"]
+        configured_text = (
+            f"Push workflow requests {permission} and configures"
+            if permission is not None
+            else "Push workflow declares no Contents grant and configures"
+        )
+        token_input = configured.get("action_credential_input")
+        token_text = (
+            f"  Pinned action uses the default {token_input} input.\n" if token_input else ""
+        )
         print(
-            f"The saved Release Drafter log reports draft creation for {operation['requested_tag']} "
+            f"The saved Release Drafter log reports draft creation{tag_text} "
             f"via {operation['method']} {operation['url']} targeting {operation['target_commitish']}.\n"
             f"  Run {result['run']}, job {result['job']}, attempt {result['attempt']}.\n"
-            f"  Push workflow requests {configured['requested_permission']} and configures "
-            f"{configured['credential_binding']} "
+            f"  {configured_text} {configured['credential_binding']} "
             f"({result['source']['path']}:{configured['credential_line']}).\n"
+            f"{token_text}"
             f"{grant_text}"
             f"{result['scope']}"
         )

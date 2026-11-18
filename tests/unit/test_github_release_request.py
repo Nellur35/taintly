@@ -404,6 +404,52 @@ def test_push_uses_workflow_permission_when_job_has_no_override(push_capture):
         assert assess()["state"] == "unresolved"
 
 
+@pytest.mark.parametrize(
+    "contrast",
+    [None, "missing-grant", "wrong-pin", "token-override", "not-created", "ambiguous-push"],
+)
+def test_push_without_declared_grant_requires_bound_setup_and_completion(
+    push_capture, push_grant_capture, contrast
+):
+    cap, source, bind, assess = push_capture
+    source = source.replace("@v6", "@v7").replace("    permissions:\n      contents: write\n", "")
+    source = source.replace(
+        "    branches: [master]", "    branches: [master]\n  pull_request:\n    types: [opened]"
+    )
+    rows = cap["creation"]["rows"]
+    blank = rows[2]
+    blank["value"] = "  tag:                         "
+    blank["sha256"] = hashlib.sha256(f"{blank['time']} {blank['value']}".encode()).hexdigest()
+    if contrast == "missing-grant":
+        del cap["creation"]["effective_permission_rows"]
+    elif contrast == "wrong-pin":
+        row = rows[0]
+        row["value"] = row["value"].replace(
+            "978bb0b30c5ee8cdd332ced253758157150d43f0", "34d80673e067bdc0c24568d3af899c216adcfaa9"
+        )
+        row["sha256"] = hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+    elif contrast == "token-override":
+        source = source.replace("        env:", "        with:\n          token: custom\n        env:")
+    elif contrast == "not-created":
+        row = rows[-2]
+        row["value"] = "Release updated!"
+        row["sha256"] = hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+    elif contrast == "ambiguous-push":
+        source = source.replace("  pull_request:", "  push:\n    branches: [main]\n  pull_request:")
+    cap["source"] = bind(source)
+    result = assess()
+    if contrast is None:
+        assert result["state"] == "draft-release-create-reported"
+        assert result["configured"]["requested_permission"] is None
+        assert result["configured"]["permission_line"] is None
+        assert result["configured"]["action_credential_input"] == "github.token"
+        assert result["effective_permission"]["contents"] == "write"
+        assert result["operation"]["requested_tag"] is None
+    else:
+        assert result["state"] == "unresolved"
+        assert "operation" not in result
+
+
 def test_push_preserves_numeric_version_tag_prefix(push_capture):
     cap, _, _, assess = push_capture
     row = cap["creation"]["rows"][2]

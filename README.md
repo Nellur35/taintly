@@ -681,7 +681,14 @@ separately from the workflow's requested permission.
 The push profile accepts the workflow's literal `permissions.contents`
 when the owning job has no `permissions` declaration. If the job
 declares permissions, use its own `contents` setting. The create log
-must report a numeric three-part tag, optionally prefixed by lowercase `v`.
+normally reports a numeric three-part tag, optionally prefixed by lowercase `v`.
+
+A workflow may also declare `pull_request` alongside the literal push.
+When neither the workflow nor the job declares permissions, the saved
+setup grant is required. In that case the reported permission request
+is `null`. The pinned action uses its default `github.token` input.
+The receipt must still bind the step's `GITHUB_TOKEN` environment entry
+to `secrets.GITHUB_TOKEN`. A blank tag field is reported as `null`.
 
 Exit 0 with `draft-release-create-reported` means that the saved action log
 reports completion after the create call returned for the requested draft.

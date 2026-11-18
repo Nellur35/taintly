@@ -112,18 +112,12 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
     if permission_owner not in index.keys:
         permission_owner = ("permissions",)
         job_keys.remove("permissions")
+    inherited = event == "push" and permission_owner not in index.keys
+    required: tuple[tuple[object, ...], ...] = (("on", event), owner[:1], owner, steps, env)
+    if not inherited:
+        required = (*required, permission_owner)
     _require(
-        all(
-            len(index.keys.get(path, ())) == 1
-            for path in (
-                ("on", event),
-                owner[:1],
-                owner,
-                steps,
-                permission_owner,
-                env,
-            )
-        )
+        all(len(index.keys.get(path, ())) == 1 for path in required)
         and {key[-1] for key in index.keys if key[:-1] == owner} == job_keys
         and {key[len(steps)] for key in index.keys if key[: len(steps)] == steps and key != steps}
         == {0}
@@ -134,7 +128,7 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
     )
     action = _field(index, (*step, "uses"))
     token = _field(index, (*env, "GITHUB_TOKEN"))
-    permission = _field(index, (*permission_owner, "contents"))
+    permission = None if inherited else _field(index, (*permission_owner, "contents"))
     _require(
         (
             action.value == _PUSH_ACTION
@@ -142,7 +136,7 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
             else _matches(action.value, _REQUEST_ACTION)
         )
         and _is_exact_identifier_expression(str(token.value), "secrets.GITHUB_TOKEN")
-        and permission.value == "write",
+        and (permission is None or permission.value == "write"),
         "Workflow source lacks the supported draft action, token binding or requested permission",
     )
     return {
@@ -150,8 +144,8 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
         "action_line": action.line,
         "credential_binding": "GITHUB_TOKEN",
         "credential_line": token.line,
-        "requested_permission": "contents: write",
-        "permission_line": permission.line,
+        "requested_permission": "contents: write" if permission is not None else None,
+        "permission_line": permission.line if permission is not None else None,
     }
 
 
@@ -193,10 +187,20 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
         and _time(drafter["completed_at"]) <= _time(finish["started_at"]),
         "Saved job does not have the supported single-action execution order",
     )
+    tag = r" +v?[0-9]{1,12}\.[0-9]{1,12}\.[0-9]{1,12}"
+    if configured["requested_permission"] is None:
+        _require(
+            "effective_permission_rows" in creation,
+            "No workflow Contents grant is declared and the owned setup grant is missing",
+        )
+        # The checked bundle reads the default action token input and passes
+        # it to the GitHub adapter. The supported step has no input override.
+        configured["action_credential_input"] = "github.token"
+        tag = rf"(?:{tag}| *)"
     patterns: tuple[str, ...] = (
         re.escape(f"Download action repository '{_PUSH_ACTION}' (SHA:{_VERIFIED_ACTION})"),
         re.escape(f"##[group]Run {_PUSH_ACTION}"),
-        r"  tag: +v?[0-9]{1,12}\.[0-9]{1,12}\.[0-9]{1,12}",
+        r"  tag:" + tag,
         r"  targetCommitish: +" + re.escape(branch),
         r"  draft: +true",
         r"Creating new release\.\.\.",
@@ -249,7 +253,7 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
             "method": "POST",
             "url": f"https://api.github.com/repos/{repo}/releases",
             "draft": True,
-            "requested_tag": rows[2]["value"].split()[-1],
+            "requested_tag": rows[2]["value"].removeprefix("  tag:").strip() or None,
             "target_commitish": branch,
             "action_commit": _VERIFIED_ACTION,
             "completion_at": rows[-2]["time"],
@@ -271,8 +275,11 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
 def _literal_push_branch(index: _Index, raw: bytes, branch: str) -> bool:
     branch_path = ("on", "push", "branches")
     keys = index.keys.get(branch_path, ())
+    events = {path[-1] for path in index.keys if path[:-1] == ("on",)}
+    pull_request = ("on", "pull_request")
     if (
-        {path[-1] for path in index.keys if path[:-1] == ("on",)} != {"push"}
+        events not in ({"push"}, {"push", "pull_request"})
+        or len(index.keys.get(pull_request, ())) > 1
         or {path[-1] for path in index.keys if path[:-1] == ("on", "push")} != {"branches"}
         or len(keys) != 1
     ):
