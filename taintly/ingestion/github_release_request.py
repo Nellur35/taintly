@@ -29,7 +29,10 @@ from taintly.ingestion.github_preview import (
 from taintly.rules.github._workflow_run_artifact import _Index, _is_exact_identifier_expression
 
 _SCHEMA = "github-draft-release-request-v1"
-_REQUEST_ACTION = r"release-drafter/release-drafter@v6(?:\.[0-9]{1,4}\.[0-9]{1,4})?"
+_V6_1_0 = "b1476f6e6eb133afa41ed8589daba6dc69b4d3f5"
+_REQUEST_ACTION = (
+    rf"release-drafter/release-drafter@(?:v6(?:\.[0-9]{{1,4}}\.[0-9]{{1,4}})?|{_V6_1_0})"
+)
 _PUSH_ACTION = "release-drafter/release-drafter@v7"
 _VERIFIED_ACTION = "978bb0b30c5ee8cdd332ced253758157150d43f0"
 _CHECKOUT = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
@@ -78,6 +81,7 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
     steps = (*owner, "steps")
     step = (*steps, 0)
     env = (*step, "env")
+    inputs = (*step, "with")
     if event == "pull_request":
         display = (*owner, "name")
         if display in index.keys:
@@ -93,6 +97,17 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
             step_keys.add("name")
     else:
         _require(job_name == job_id, "Recorded job name does not identify the owning draft job")
+    if event == "pull_request" and inputs in index.keys:
+        _require(
+            _field(index, (*step, "uses")).value == f"release-drafter/release-drafter@{_V6_1_0}"
+            and {
+                path[-1] for path in index.keys if path[: len(inputs)] == inputs and path != inputs
+            }
+            == {"disable-autolabeler"}
+            and str(_field(index, (*inputs, "disable-autolabeler")).value).lower() == "false",
+            "Workflow has unsupported draft action inputs",
+        )
+        step_keys.add("with")
     permission_owner: tuple[str, ...] = (*owner, "permissions")
     if permission_owner not in index.keys:
         permission_owner = ("permissions",)
@@ -489,6 +504,73 @@ def _logged_denial(cap: _Row, root: Path, repo: str) -> _Row:
     }
 
 
+def _denial_grant(cap: _Row, request: _Row) -> _Row:
+    run, job, log = cap["run"], cap["job"], cap["effective_permission_log"]
+    _require(
+        all(
+            _id(log[key]) and log[key] == expected
+            for key, expected in (
+                ("run", run["id"]),
+                ("job", job["id"]),
+                ("attempt", run["run_attempt"]),
+            )
+        )
+        and _matches(log["log_sha256"], _DIGEST)
+        and log["log_sha256"] == cap["custody"]["job_log_sha256"]
+        and log["response_request_id"] == request["request_id"]
+        and _matches(log["response_block_sha256"], _DIGEST),
+        "Saved job log does not identify the selected draft request and attempt",
+    )
+    action = request["action"]
+    setup = _observed_step(job, "Set up job", number=1)
+    drafter = _observed_step(job, f"Run {action}", number=2)
+    _require(
+        _time(setup["completed_at"]) <= _time(drafter["started_at"]),
+        "Saved job token setup overlaps the selected draft action",
+    )
+    ref = action.rsplit("@", 1)[1]
+    sha = ref if _matches(ref, _SHA) else r"[a-f0-9]{40}"
+    patterns = (
+        re.escape("##[group]GITHUB_TOKEN Permissions"),
+        "Contents: read",
+        re.escape("##[endgroup]"),
+        re.escape(f"Download action repository '{action}' (SHA:") + sha + r"\)",
+        re.escape(f"##[group]Run {action}"),
+        re.escape(f"##[error]{_DENIAL}"),
+    )
+    rows = log["rows"]
+    _require(
+        isinstance(rows, list) and len(rows) == len(patterns),
+        "Saved request grant log is incomplete",
+    )
+    times = []
+    for row, pattern, step in zip(rows, patterns, (setup,) * 4 + (drafter,) * 2, strict=True):
+        when = _time(row["time"])
+        _require(
+            _matches(row["value"], pattern)
+            and _time(step["started_at"])
+            <= when.replace(microsecond=0)
+            <= _time(step["completed_at"])
+            and hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+            == row["sha256"],
+            "Saved grant log row does not match its evidence or owning step",
+        )
+        times.append(when)
+    _require(
+        all(a < b for a, b in pairwise(times))
+        and times[-1].replace(microsecond=0) == _time(request["response_at"]),
+        "Saved grant or response log order is ambiguous",
+    )
+    return {
+        "credential": "GITHUB_TOKEN",
+        "contents": "read",
+        "time": rows[1]["time"],
+        "line_sha256": rows[1]["sha256"],
+        "log_sha256": log["log_sha256"],
+        "response_block_sha256": log["response_block_sha256"],
+    }
+
+
 def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) -> _Row:
     run, job, check = cap["run"], cap["job"], cap["check_run"]
     _run_identity(run, job, repo, run_id, "pull_request")
@@ -526,7 +608,10 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
         "Saved pull request does not match the selected fork invocation",
     )
     if "verified_log" in cap:
-        _require("denial" not in cap, "Receipt combines different draft observation profiles")
+        _require(
+            "denial" not in cap and "effective_permission_log" not in cap,
+            "Receipt combines different draft observation profiles",
+        )
         _require(_matches(job["name"], _NAME), "Unsupported logged draft job name")
         return _logged_denial(cap, root, repo)
     request = cap.get("denial")
@@ -565,7 +650,7 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
         configured["action"] == request["action"],
         "The requested draft action does not match its response evidence",
     )
-    return {
+    result: _Row = {
         "state": "draft-release-create-denied",
         "repository": repo,
         "run": run_id,
@@ -595,6 +680,9 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
         },
         "scope": _SCOPE,
     }
+    if "effective_permission_log" in cap:
+        result["effective_permission"] = _denial_grant(cap, request)
+    return result
 
 
 def release_request_observation(
