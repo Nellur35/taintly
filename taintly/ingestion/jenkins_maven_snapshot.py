@@ -36,6 +36,11 @@ _UPSTREAM_SCOPE = (
     "is unresolved. Other ways that fork data might enter the build, effective repository "
     "policy, and filesystem identity are outside this observation."
 )
+_UPSTREAM_ARCHIVE_SCOPE = (
+    "The controller and archived JAR corroborate the upstream checkout and the selected "
+    "Maven invocation. Nexus storage, the writer, filesystem identity and other ways fork "
+    "data might enter the invocation remain unresolved."
+)
 _MATCHED_FORK_SCOPE = (
     "The reported fork checkout and Maven command are bound to identical Jenkins and Nexus "
     "JARs. The original Nexus writer, a shared request ID, and effective registry permission "
@@ -86,13 +91,16 @@ def _maven_line(raw: bytes) -> int:
     return lines[0]
 
 
-def _interval(row: _Row) -> tuple[int, int]:
+def _interval(row: _Row, *, preparation: bool = False) -> tuple[int, int]:
     start, duration = row["startTimeMillis"], row["durationMillis"]
+    # The controller can record an instantaneous log emission at millisecond
+    # resolution. This allowance never applies to a checkout or Maven node.
+    minimum = 0 if preparation and row.get("name") == "Print Message" else 1
     _require(
         type(start) is int
         and type(duration) is int
         and 10**12 <= start < 10**13
-        and 0 < duration <= 7 * 24 * 60 * 60 * 1000,
+        and minimum <= duration <= 7 * 24 * 60 * 60 * 1000,
         "Jenkins execution timestamps are malformed",
     )
     return start, start + duration
@@ -148,7 +156,9 @@ def _review_maven_preparation(nodes: list[_Row], pr: int) -> None:
     )
 
 
-def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row, str, str]:
+def _stage(
+    data: _Row, owner: str, head: str, pr: int, repo: str, *, flow_status: str
+) -> tuple[_Row, str, str]:
     base = owner.removeprefix(_CONTROLLER)
     flow, stage = data["flow"], data["stage"]
     stage_ref = f"{base}execution/node/{stage['id']}/wfapi/describe"
@@ -167,7 +177,7 @@ def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row,
     stage_start, stage_end = _interval(stage)
     _require(
         flow["id"] == str(data["run"]["number"])
-        and flow["status"] == "SUCCESS"
+        and flow["status"] == flow_status
         and flow_start <= stage_start <= stage_end <= flow_end
         and all(summary[field] == stage[field] for field in fields),
         "deployment stage conflicts with its parent run",
@@ -202,7 +212,10 @@ def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row,
     owned_nodes = nodes if upstream else nodes[first : last + 1]
     _require(
         len({node["id"] for node in nodes}) == len(nodes)
-        and all(_interval(a)[1] <= _interval(b)[0] for a, b in pairwise(nodes)),
+        and all(
+            _interval(a, preparation=upstream)[1] <= _interval(b, preparation=upstream)[0]
+            for a, b in pairwise(nodes)
+        ),
         "checkout, preparation or deployment nodes have ambiguous order or identity",
     )
     if upstream:
@@ -213,7 +226,7 @@ def _stage(data: _Row, owner: str, head: str, pr: int, repo: str) -> tuple[_Row,
             "upstream deployment stage has unsupported steps or ordering",
         )
     for node in owned_nodes:
-        start, end = _interval(node)
+        start, end = _interval(node, preparation=upstream)
         _require(
             node["status"] == "SUCCESS"
             and re.fullmatch(r"[1-9][0-9]{0,9}", node["id"])
@@ -352,6 +365,68 @@ def _registry(
     return result
 
 
+def _verify_deploy_log(
+    deploy_log: _Row, job: str, command: _Row, workspace: str, artifact_name: str, sha512: str
+) -> None:
+    _require(
+        deploy_log["url"]
+        == f"{job}execution/node/{command['id']}/log/logText/progressiveText?start=0"
+        and deploy_log["node_id"] == command["id"]
+        and deploy_log["complete"] is True
+        and deploy_log["command_line"] == f"+ {_COMMAND}"
+        and deploy_log["digest_line"] == f"[INFO] {artifact_name} - SHA-512 : {sha512}",
+        "exact Maven deployment node did not corroborate the published artifact digest",
+    )
+    _require(
+        re.fullmatch(
+            rf"\[INFO\] Installing {re.escape(workspace)}"
+            rf"/(?:[A-Za-z0-9_-]+/)*target/{re.escape(artifact_name)} to /[-A-Za-z0-9_/\.]+",
+            deploy_log["artifact_install_line"],
+        ),
+        "Maven artifact path differs from the checkout workspace",
+    )
+
+
+def _partial_upstream_archive(
+    root: Path, target: str, capture: _Row, command: _Row, result: _Row
+) -> _Row:
+    archive = capture["archive_path"]
+    _require(
+        re.fullmatch(
+            r"(?:[A-Za-z0-9_-]+/)+(?P<name>[A-Za-z0-9_.-]+)/"
+            r"(?P<version>[0-9]+(?:\.[0-9]+)*-SNAPSHOT)/(?P=name)-(?P=version)\.jar",
+            archive,
+        )
+        and target == _REGISTRY + _REPOSITORY + archive,
+        "requested snapshot does not match the selected Jenkins archive coordinate",
+    )
+    raw = _project_file(root, "artifact.jar", 8 * 1024 * 1024)
+    _require(raw, "selected Jenkins archive is empty")
+    _verify_deploy_log(
+        capture["deploy_log"],
+        result["job"],
+        command,
+        result["reported_workspace"],
+        archive.rsplit("/", 1)[1],
+        hashlib.sha512(raw).hexdigest(),
+    )
+    return {
+        **result,
+        "state": "unresolved",
+        "reason": "original Nexus snapshot and write identity were not supplied",
+        "jenkins_run_result": "FAILURE",
+        "checkout": {
+            "repository": result["repository"],
+            "ref": "refs/remotes/origin/master",
+            "revision": capture["pull"]["base"],
+        },
+        "jenkins_archive_sha256": hashlib.sha256(raw).hexdigest(),
+        "requested_snapshot": target,
+        "authority": "unresolved",
+        "scope": _UPSTREAM_ARCHIVE_SCOPE,
+    }
+
+
 def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target: str) -> _Row:
     from .jenkins_filevault import FILEVAULT_SCHEMA, FILEVAULT_SCOPE, filevault_exclusion
     from .jenkins_matrix_snapshot import MATRIX_SCHEMA, MATRIX_SCOPE, matrix_snapshot_observation
@@ -387,6 +462,9 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         )
         run, pull = capture["run"], capture["pull"]
         head = pull["observed_head"]
+        partial = (
+            run.get("result") == "FAILURE" and "registry" in capture and capture["registry"] is None
+        )
         _require(
             pull["number"] == pr
             and pull["base_repository"] == repo
@@ -396,7 +474,7 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             and re.fullmatch(r"[a-f0-9]{40}", head)
             and run["url"] == job
             and run["number"] == int(job.rstrip("/").rsplit("/", 1)[1])
-            and run["result"] == "SUCCESS"
+            and (run["result"] == "SUCCESS" or partial)
             and run["building"] is False,
             "fork PR identity or successful Jenkins run is unverified",
         )
@@ -406,7 +484,9 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         )
         original = _source_bytes(root, capture["source"], head, "Jenkinsfile")
         line = _maven_line(original)
-        command, workspace, revision = _stage(capture, job, head, pr, repo)
+        command, workspace, revision = _stage(
+            capture, job, head, pr, repo, flow_status="FAILED" if partial else "SUCCESS"
+        )
         upstream = revision != head
         if upstream:
             pinned = _source_bytes(
@@ -419,32 +499,8 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             and sum(item.get("relativePath") == artifact_path for item in run["artifacts"]) == 1,
             "no unique matching Jenkins job artifact",
         )
-        publication = _registry(
-            root, capture["registry"], artifact_path, target, command, attribute_writer=not upstream
-        )
-        artifact_name = artifact_path.rsplit("/", 1)[1]
-        sha512 = capture["registry"]["stored_attributes"]["digest.sha512"]
-        deploy_log = capture["deploy_log"]
-        _require(
-            deploy_log["url"]
-            == f"{job}execution/node/{command['id']}/log/logText/progressiveText?start=0"
-            and deploy_log["node_id"] == command["id"]
-            and deploy_log["complete"] is True
-            and deploy_log["command_line"] == f"+ {_COMMAND}"
-            and deploy_log["digest_line"] == f"[INFO] {artifact_name} - SHA-512 : {sha512}",
-            "exact Maven deployment node did not corroborate the published artifact digest",
-        )
-        _require(
-            re.fullmatch(
-                rf"\[INFO\] Installing {re.escape(workspace)}"
-                rf"/(?:[A-Za-z0-9_-]+/)*target/{re.escape(artifact_name)} to /[-A-Za-z0-9_/\.]+",
-                deploy_log["artifact_install_line"],
-            ),
-            "Maven artifact path differs from the checkout workspace",
-        )
-        state = "upstream-checkout-observed" if upstream else "snapshot-write-observed"
         result = {
-            "state": state,
+            "state": "upstream-checkout-observed" if upstream else "snapshot-write-observed",
             "repository": repo,
             "pr": pr,
             "head_repository": pull["head_repository"],
@@ -456,6 +512,14 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             "reported_workspace": workspace,
             "jenkins_artifact": job + "artifact/" + artifact_path,
         }
+        if partial:
+            return _partial_upstream_archive(root, target, capture, command, result)
+        publication = _registry(
+            root, capture["registry"], artifact_path, target, command, attribute_writer=not upstream
+        )
+        artifact_name = artifact_path.rsplit("/", 1)[1]
+        sha512 = capture["registry"]["stored_attributes"]["digest.sha512"]
+        _verify_deploy_log(capture["deploy_log"], job, command, workspace, artifact_name, sha512)
         if upstream:
             result.update(
                 checkout={
