@@ -228,14 +228,20 @@ def _assess(data: _Row, root: Path, repository: str, number: int, check_id: int)
         "registry artifact belongs to a different project profile",
     )
     created = _time(registry["created"])
+    publisher_end = _time(publisher["completed_at"])
     _require(
         _time(check["started_at"]) <= created <= _time(check["completed_at"])
-        and _time(check["started_at"])
-        <= _time(publisher["completed_at"])
-        <= _time(check["completed_at"])
-        and created.replace(microsecond=0) <= _time(publisher["completed_at"]),
+        and _time(check["started_at"]) <= publisher_end <= _time(check["completed_at"])
+        and created.replace(microsecond=0) <= publisher_end,
         "registry creation and publication check fall outside the selected Jenkins job",
     )
+    if "lastUpdated" in registry:
+        # Artifactory reports milliseconds. GitHub checks report whole seconds.
+        updated = _time(registry["lastUpdated"])
+        _require(
+            created <= updated and updated.replace(microsecond=0) <= publisher_end,
+            "registry latest upload conflicts with the selected publication window",
+        )
     directory = _REGISTRY + registry_path[1 : registry_path.rindex("/") + 1]
     links = re.findall(
         r"\]\((https://repo\.jenkins-ci\.org/incrementals/[^()\s]+)\)", publisher["summary"]

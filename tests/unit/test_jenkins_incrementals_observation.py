@@ -102,6 +102,21 @@ def test_successful_check_does_not_replace_artifact_bytes(tmp_path, capture):
 
 
 @pytest.mark.parametrize(
+    ("updated", "expected"),
+    [
+        ("2026-11-16T00:00:01.999Z", "publication-observed"),
+        ("2026-11-16T00:00:02Z", "unresolved"),
+        ("2026-11-16T00:00:01.001Z", "unresolved"),
+        ("2026-11-16T00:00:01.500", "unresolved"),
+    ],
+)
+def test_registry_latest_upload_must_match_publication_window(tmp_path, capture, updated, expected):
+    capture["registry"]["lastUpdated"] = updated
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == expected
+
+
+@pytest.mark.parametrize(
     ("namespace", "expected"),
     [
         ("io/jenkins/plugins", "publication-observed"),

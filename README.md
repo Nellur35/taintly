@@ -150,7 +150,10 @@ The trusted `jenkins-incrementals-v1` JSON capture has `repository`,
 `conclusion`, `details_url`, `external_id`, `started_at`, `completed_at`,
 and `summary` from the publisher check), and the Artifactory File Info
 `registry` record. Preserve file size, path, creation time, creation and
-modification identities, and the SHA-256 checksum.
+modification identities, the SHA-256 checksum and `lastUpdated` when
+available. A reported upload after the publication check leaves the
+historical attribution unresolved. Older captures without `lastUpdated`
+leave subsequent uploads unverified.
 
 For plugin HPIs, supported Maven groups are `org.jenkins-ci.plugins`,
 `org.jenkins-ci.plugins.workflow` and `io.jenkins.plugins`. The plugin
