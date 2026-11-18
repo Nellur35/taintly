@@ -41,6 +41,11 @@ _UPSTREAM_ARCHIVE_SCOPE = (
     "Maven invocation. Nexus storage, the writer, filesystem identity and other ways fork "
     "data might enter the invocation remain unresolved."
 )
+_FORK_ARCHIVE_SCOPE = (
+    "The controller and archived JAR corroborate the reported fork checkout and the "
+    "selected Maven invocation. Nexus storage, the writer and filesystem identity "
+    "remain unresolved."
+)
 _MATCHED_FORK_SCOPE = (
     "The reported fork checkout and Maven command are bound to identical Jenkins and Nexus "
     "JARs. The original Nexus writer, a shared request ID, and effective registry permission "
@@ -158,7 +163,7 @@ def _review_maven_preparation(nodes: list[_Row], pr: int) -> None:
 
 def _stage(
     data: _Row, owner: str, head: str, pr: int, repo: str, *, flow_status: str
-) -> tuple[_Row, str, str]:
+) -> tuple[_Row, str, dict[str, str]]:
     base = owner.removeprefix(_CONTROLLER)
     flow, stage = data["flow"], data["stage"]
     stage_ref = f"{base}execution/node/{stage['id']}/wfapi/describe"
@@ -289,7 +294,7 @@ def _stage(
         if (match := re.fullmatch(r" &gt; git init (/[-A-Za-z0-9_/]+) # timeout=[0-9]+", line))
     ]
     _require(len(workspaces) == 1, "checkout workspace path could not be established")
-    return command, workspaces[0], revision
+    return command, workspaces[0], {"repository": repo, "ref": branch, "revision": revision}
 
 
 def _registry(
@@ -387,8 +392,8 @@ def _verify_deploy_log(
     )
 
 
-def _partial_upstream_archive(
-    root: Path, target: str, capture: _Row, command: _Row, result: _Row
+def _partial_snapshot_archive(
+    root: Path, target: str, capture: _Row, command: _Row, result: _Row, checkout: dict[str, str]
 ) -> _Row:
     archive = capture["archive_path"]
     _require(
@@ -415,15 +420,13 @@ def _partial_upstream_archive(
         "state": "unresolved",
         "reason": "original Nexus snapshot and write identity were not supplied",
         "jenkins_run_result": "FAILURE",
-        "checkout": {
-            "repository": result["repository"],
-            "ref": "refs/remotes/origin/master",
-            "revision": capture["pull"]["base"],
-        },
+        "checkout": checkout,
         "jenkins_archive_sha256": hashlib.sha256(raw).hexdigest(),
         "requested_snapshot": target,
         "authority": "unresolved",
-        "scope": _UPSTREAM_ARCHIVE_SCOPE,
+        "scope": _FORK_ARCHIVE_SCOPE
+        if checkout["revision"] == result["head"]
+        else _UPSTREAM_ARCHIVE_SCOPE,
     }
 
 
@@ -484,9 +487,10 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         )
         original = _source_bytes(root, capture["source"], head, "Jenkinsfile")
         line = _maven_line(original)
-        command, workspace, revision = _stage(
+        command, workspace, checkout = _stage(
             capture, job, head, pr, repo, flow_status="FAILED" if partial else "SUCCESS"
         )
+        revision = checkout["revision"]
         upstream = revision != head
         if upstream:
             pinned = _source_bytes(
@@ -513,7 +517,7 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             "jenkins_artifact": job + "artifact/" + artifact_path,
         }
         if partial:
-            return _partial_upstream_archive(root, target, capture, command, result)
+            return _partial_snapshot_archive(root, target, capture, command, result, checkout)
         publication = _registry(
             root, capture["registry"], artifact_path, target, command, attribute_writer=not upstream
         )
@@ -522,11 +526,7 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         _verify_deploy_log(capture["deploy_log"], job, command, workspace, artifact_name, sha512)
         if upstream:
             result.update(
-                checkout={
-                    "repository": repo,
-                    "ref": "refs/remotes/origin/master",
-                    "revision": revision,
-                },
+                checkout=checkout,
                 snapshot_evidence=publication,
                 authority="unresolved",
                 scope=_UPSTREAM_SCOPE,
@@ -542,7 +542,7 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             result.update(
                 state="unresolved",
                 reason="Nexus stored write identity is unavailable",
-                checkout={"repository": repo, "ref": f"PR-{pr}", "revision": revision},
+                checkout=checkout,
                 snapshot_evidence=publication,
                 authority="unresolved",
                 scope=_MATCHED_FORK_SCOPE,

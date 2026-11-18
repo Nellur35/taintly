@@ -1960,9 +1960,14 @@ def _check_jenkins_maven_snapshot(
         )
     elif "requested_snapshot" in result:
         source = result["source"]
+        revision = result["checkout"]["revision"]
+        checkout_summary = (
+            f"fork checkout {revision}."
+            if revision == result["head"]
+            else f"upstream checkout {revision} instead of PR head {result['head']}."
+        )
         print(
-            f"Maven in {result['repository']} PR #{result['pr']} used the reported upstream "
-            f"checkout {result['checkout']['revision']} instead of PR head {result['head']}.\n"
+            f"Maven in {result['repository']} PR #{result['pr']} used the reported {checkout_summary}\n"
             f"  The Jenkins run ended with {result['jenkins_run_result']}. "
             f"The selected Maven node {result['node']} completed successfully.\n"
             f"  Command: {result['command']} ({source['path']}:{source['line']}).\n"
