@@ -125,6 +125,28 @@ def test_job_success_can_coexist_with_owned_request_denial(capture):
 
 
 @pytest.mark.parametrize(
+    ("override", "state", "permission_line"),
+    [
+        ("", "draft-release-create-denied", 5),
+        ("    permissions:\n      contents: write\n", "draft-release-create-denied", 10),
+        ("    permissions:\n      contents: read\n", "unresolved", None),
+        ("    permissions:\n      pull-requests: write\n", "unresolved", None),
+        ("    permissions: {}\n", "unresolved", None),
+    ],
+)
+def test_fork_draft_workflow_permission_respects_job_override(capture, override, state, permission_line):
+    cap, bind, assess = capture
+    source = SOURCE.replace("jobs:\n", "permissions:\n  contents: write\njobs:\n")
+    source = source.replace("    permissions:\n      contents: write\n", override)
+    cap["source"] = bind(source)
+    result = assess()
+    assert result["state"] == state
+    if permission_line is not None:
+        assert result["configured"]["permission_line"] == permission_line
+        assert "effective_permission" not in result
+
+
+@pytest.mark.parametrize(
     ("record", "key", "wrong"),
     [
         ("check_run", "app", "other-integration"),
