@@ -2013,6 +2013,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     state = report["state"]
     admission = report.get("publication_admission")
     preview = report.get("pages_preview")
+    preview_account = preview.get("account") if preview is not None else None
     archive_download = report.get("archive_download")
     member_origin = report.get("archive_member_origin")
     if args.format == "json":
@@ -2106,6 +2107,15 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
                 f"  Environment {preview['environment_id']}: {preview['environment_state']}. "
                 f"Source: {report['source_path']}:{preview['source_line']}.\n{preview['scope']}"
             )
+            if preview_account is not None:
+                if preview_account["state"] == "deployment-account-recorded":
+                    print(
+                        f"  GitLab recorded account {preview_account['account_id']} "
+                        "on this deployment and its job.\n"
+                        f"{preview_account['scope']}"
+                    )
+                else:
+                    print(f"Pages deployment account unresolved: {preview_account['reason']}.")
         else:
             print(f"Pages preview unresolved: {preview['reason']}.")
     if archive_download is not None and args.format == "text":
@@ -2125,7 +2135,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             print(f"Fork archive source comparison unresolved: {member_origin['reason']}.")
     incomplete = state in {"unresolved", "registry-image-push-reported"} or any(
         item is not None and item["state"] == "unresolved"
-        for item in (admission, preview, archive_download, member_origin)
+        for item in (admission, preview, preview_account, archive_download, member_origin)
     )
     sys.exit(11 if incomplete else 0)
 
