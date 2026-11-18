@@ -730,7 +730,7 @@ def test_fork_archive_download_preserves_the_upload_decision(tmp_path, fork_uplo
 
 @pytest.mark.parametrize(
     "contrast", [None, "wrong-archive", "missing-download", "same-display", "wrong-parent",
-                 "wrong-source", "opaque-panel", "ambiguous-id", "wrong-display", "wrong-member"]
+                 "wrong-source", "opaque-panel", "ambiguous-id", "wrong-display", "wrong-member", "non-renderer-escape"]
 )
 def test_fork_archive_origin_needs_the_bound_zip_and_distinct_display_source(
     tmp_path, fork_upload, contrast
@@ -768,6 +768,8 @@ def test_fork_archive_origin_needs_the_bound_zip_and_distinct_display_source(
         panel = b"<!--" + panel + b"-->"
     elif contrast == "wrong-display":
         panel = panel.replace(b"fork", b"prior")
+    elif contrast == "non-renderer-escape":
+        panel = panel.replace(b"&lt;", b"&#60;")
     option = b'<option value="file0">example.test/project/internal/sample.go (0.0%)</option>'
     if contrast == "ambiguous-id":
         option += b'<option value="file0">example.test/project/internal/other.go (0.0%)</option>'

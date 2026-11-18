@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import stat
 from hashlib import sha1, sha256
-from html import unescape
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -110,7 +109,12 @@ def _panel(html: bytes, label: bytes) -> bytes:
         not depth and b"<" not in tail and b">" not in tail, "unsupported markup in coverage source"
     )
     parts.append(tail)
-    return unescape(b"".join(parts).decode("utf-8")).encode("utf-8")
+    escaped = b"".join(parts)
+    _require(
+        re.search(rb"&(?!amp;|lt;|gt;)", escaped) is None,
+        "coverage source uses unsupported HTML escapes",
+    )
+    return escaped.replace(b"&gt;", b">").replace(b"&lt;", b"<").replace(b"&amp;", b"&")
 
 
 def coverage_source_observation(
