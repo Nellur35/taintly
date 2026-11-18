@@ -94,7 +94,7 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
     else:
         _require(job_name == job_id, "Recorded job name does not identify the owning draft job")
     permission_owner: tuple[str, ...] = (*owner, "permissions")
-    if event == "push" and permission_owner not in index.keys:
+    if permission_owner not in index.keys:
         permission_owner = ("permissions",)
         job_keys.remove("permissions")
     _require(
