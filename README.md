@@ -758,6 +758,62 @@ archive contents, and wider permissions. Incompatible or missing evidence
 returns `unresolved` and exit `11`. The separate observation mode leaves
 ordinary repository scans and finding policy intact.
 
+### Saved GitHub Pages publication
+
+Use a saved evidence projection to check whether an external-fork benchmark
+archive reached a historical GitHub Pages deployment in a separate repository.
+
+```sh
+taintly ./source-projection --format json \
+  --github-pages-observation observation.json OWNER/REPO PRODUCER_RUN CONSUMER_RUN
+```
+
+Put both original workflow files at their recorded paths beneath
+`source-projection`, with the original job archive as `publication.zip`.
+Use trusted GitHub metadata, job log excerpts and Git object records.
+Keep credentials out of the projection. The verifier performs no network
+requests and reads selected archive members without extracting them.
+
+For schema `github-workflow-run-pages-publication-v1`, supply:
+
+- `repository` and `pr` with `number`, `head_sha`, `head_repository` and
+  `base_repository`.
+- `producer` and `consumer` with `id`, `path`, `html_url`, `event`,
+  `conclusion`, `head_sha`, `head_repository`, `run_attempt`,
+  `referenced_workflows`, `created_at`, `updated_at` and the selected `job`.
+  Preserve the job's ID, run ID, attempt, revision, conclusion, name, time
+  bounds and numbered step records.
+- `producer_source` and `source` with `path`, `revision` and `sha256`.
+  Supply `steps` with the actual checkout, generation (`generate`), upload,
+  download, guard and deploy step names. Supply the original `archive_prefix`
+  and `artifact` ID, producer run (`run`), `head`, `name`, `size` and
+  `digest` (`sha256:<hex>`).
+- `producer_rows` for `checkout`, `upload` and, on publication, `generate`.
+  The consumer `rows` cover `run`, `artifact` and `downloaded`. A successful
+  write also uses `action`, `credential`, `destination`, `repository`,
+  `token-setup`, `copy`, `command`, `remote` and `result`. For each row,
+  preserve its `kind`, `job`, `attempt`, `time`, `value` and SHA-256 of
+  the UTF-8 `time + " " + value`. Use masked values for credential rows.
+- For a deployment, supply `result` with `repository`, `branch`,
+  `previous`, `commit`, its raw UTF-8 `commit_bytes` and a
+  `tree_objects` mapping from tree ID to raw hex bytes. List the selected
+  relative archive `members`. Include GitHub's `deployment`, `success`,
+  `run` and `job` records under `pages`.
+- To corroborate a specific unparameterized ASV result, include `benchmark`
+  with its `step`, benchmark `name`, raw `result` archive path and owned
+  `command`, `head` and `sample` rows. Select both the published
+  `index.json` and the corresponding summary graph for byte comparison.
+
+The profile supports a direct fork checkout, an ASV archive, and the reviewed
+`peaceiris/actions-gh-pages` action revision with an observed personal-token
+setup. `pages-deployment-observed` confirms a historical deployment for
+the exact published commit and named files. `pages-publication-skipped`
+records the missing HTML directory and the actual guard skip. The effective
+token principal, wider permissions, benchmark validity and current deployed
+revision stay unverified. Missing or incompatible deployment evidence
+returns `unresolved` and exit `11`. Missing optional benchmark evidence
+leaves only that part unresolved. Ordinary scans retain their existing behavior.
+
 ### Saved GitHub Worker version uploads and fork skips
 
 ```sh

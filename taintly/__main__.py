@@ -262,6 +262,12 @@ def main():
         help="Corroborate a saved GitHub workflow_run publication and its recorded uploader.",
     )
     evidence_input.add_argument(
+        "--github-pages-observation",
+        nargs=4,
+        metavar=("JSON", "OWNER/REPO", "PRODUCER_RUN", "CONSUMER_RUN"),
+        help="Corroborate a supported historical GitHub Pages publication offline.",
+    )
+    evidence_input.add_argument(
         "--github-release-request-observation",
         nargs=4,
         metavar=("JSON", "OWNER/REPO", "RUN", "JOB"),
@@ -700,6 +706,7 @@ def main():
         args.github_preview_observation
         or args.github_version_upload_observation
         or args.github_release_observation
+        or args.github_pages_observation
         or args.github_release_request_observation
     ):
         _check_github_observation(parser, args)
@@ -2298,6 +2305,7 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             "github_preview_observation",
             "github_version_upload_observation",
             "github_release_observation",
+            "github_pages_observation",
             "github_release_request_observation",
         )
         if getattr(args, name)
@@ -2318,6 +2326,10 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
         from .ingestion.github_release_observation import release_observation
 
         result = release_observation(*inputs)
+    elif mode == "github_pages_observation":
+        from .ingestion.github_pages_publication import pages_observation
+
+        result = pages_observation(*inputs)
     elif mode == "github_release_request_observation":
         from .ingestion.github_release_request import release_request_observation
 
@@ -2396,6 +2408,32 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             f"{token_text}"
             f"{grant_text}"
             f"{result['scope']}"
+        )
+    elif state == "pages-deployment-observed":
+        update = result["publication"]
+        deployment = result["deployment"]
+        benchmark = result["benchmark_execution"]
+        if benchmark["state"] == "fork-sample-observed-in-published-graph":
+            benchmark_text = (
+                f"  ASV reports {benchmark['benchmark']} for {benchmark['commit']}. "
+                f"The published graph includes the recorded sample ({benchmark['seconds']} s).\n"
+                f"  {benchmark['scope']}\n"
+            )
+        else:
+            benchmark_text = f"  Fork benchmark sample unverified. {benchmark['reason']}.\n"
+        print(
+            f"Saved records link fork build {result['producer_run']} and archive "
+            f"{result['artifact_id']} to job {result['job']}.\n"
+            f"  {update['repository']} {update['target']} at {update['commit']}.\n"
+            f"  {update['matched_files']} selected archive files match Git under {update['prefix']}.\n"
+            f"  Historical Pages deployment {deployment['id']} succeeded at "
+            f"{deployment['succeeded_at']} for {deployment['site']}.\n"
+            f"{benchmark_text}{result['scope']}"
+        )
+    elif state == "pages-publication-skipped":
+        print(
+            f"Job {result['job']} downloaded archive {result['artifact_id']} from "
+            f"fork build {result['producer_run']}.\n{result['scope']}"
         )
     elif state == "release-asset-observed":
         publication = result["publication"]

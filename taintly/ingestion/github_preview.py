@@ -149,7 +149,15 @@ def _source_bytes(root: Path, source: _Row, path: str, revision: str) -> tuple[b
     return raw, {"path": path, "revision": revision, "sha256": digest}
 
 
-def _run_identity(run: _Row, job: _Row, repository: str, run_id: int, event: str) -> None:
+def _run_identity(
+    run: _Row,
+    job: _Row,
+    repository: str,
+    run_id: int,
+    event: str,
+    *,
+    allow_sibling_workflows: bool = False,
+) -> None:
     _require(
         run["id"] == run_id
         and _id(run["id"])
@@ -161,7 +169,10 @@ def _run_identity(run: _Row, job: _Row, repository: str, run_id: int, event: str
         and job["run_id"] == run_id
         and job["run_attempt"] == run["run_attempt"]
         and job["head_sha"] == run["head_sha"]
-        and run["referenced_workflows"] == [],
+        and (
+            run["referenced_workflows"] == []
+            or (allow_sibling_workflows and isinstance(run["referenced_workflows"], list))
+        ),
         "saved run and job do not identify one direct invocation",
     )
 
@@ -279,16 +290,35 @@ def _inputs(index: _Index, step: tuple[object, ...], names: set[str]) -> dict[st
     return {name: _field(index, (*path, name), literal_block=name == "path") for name in names}
 
 
-def _job_steps(index: _Index, job: _Row, selected: list[str]) -> list[tuple[_StepPath, _Row]]:
+def _job_steps(
+    index: _Index,
+    job: _Row,
+    selected: list[str],
+    *,
+    expected_workflow_shell: str | None = None,
+) -> list[tuple[_StepPath, _Row]]:
     prefix = ("jobs", job["name"], "steps")
     _require(
         all(len(index.keys.get(path, ())) == 1 for path in (prefix[:1], prefix[:2], prefix))
         and not any(
             (*prefix[:2], key) in index.keys for key in ("name", "strategy", "container", "uses")
         )
-        and not any((*path, "defaults") in index.keys for path in ((), prefix[:2])),
+        and (*prefix[:2], "defaults") not in index.keys,
         "selected job, runner workspace or defaults are outside the supported profile",
     )
+    defaults = {key for key in index.keys if key[:1] == ("defaults",)}
+    if expected_workflow_shell is None:
+        _require(
+            not defaults,
+            "selected job, runner workspace or defaults are outside the supported profile",
+        )
+    else:
+        _require(
+            defaults == {("defaults",), ("defaults", "run"), ("defaults", "run", "shell")}
+            and all(len(index.keys[key]) == 1 for key in defaults)
+            and _field(index, ("defaults", "run", "shell")).value == expected_workflow_shell,
+            "saved producer shell or working directory is outside the supported profile",
+        )
     rows = [_observed_step(job, name) for name in selected]
     paths = [_step(index, row, prefix) for row in rows]
     slots = list(zip(paths, rows, strict=True))
