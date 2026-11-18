@@ -103,7 +103,13 @@ def test_successful_check_does_not_replace_artifact_bytes(tmp_path, capture):
 
 @pytest.mark.parametrize(
     ("namespace", "expected"),
-    [("io/jenkins/plugins", "publication-observed"), ("io/other/plugins", "unresolved")],
+    [
+        ("io/jenkins/plugins", "publication-observed"),
+        ("org/jenkins-ci/plugins/workflow", "publication-observed"),
+        ("io/other/plugins", "unresolved"),
+        ("org/jenkins-ci/plugins/other", "unresolved"),
+        ("org/jenkins-ci/plugins/workflow/other", "unresolved"),
+    ],
 )
 def test_plugin_coordinates_allow_only_supported_namespaces(tmp_path, capture, namespace, expected):
     original = "org/jenkins-ci/plugins"
