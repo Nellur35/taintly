@@ -158,6 +158,33 @@ def test_source_with_intervening_command_has_no_unique_action_binding(capture):
     assert assess()["state"] == "unresolved"
 
 
+@pytest.mark.parametrize("contrast", [None, "wrong-name", "wrong-version", "other-document"])
+def test_named_single_action_and_explicit_document_start(capture, contrast):
+    cap, bind, assess = capture
+    label = "✏️ Draft release"
+    source = "---\n" + SOURCE.replace(
+        "  draft:\n", f'  draft:\n    name: "{label}"\n'
+    ).replace(
+        "      - uses: release-drafter/release-drafter@v6",
+        "      - name: Run Release Drafter\n        uses: release-drafter/release-drafter@v6.0.0",
+    )
+    if contrast == "other-document":
+        source += "---\nname: Sibling document\n"
+    cap["source"] = bind(source)
+    cap["job"]["name"] = "Different job" if contrast == "wrong-name" else label
+    cap["denial"]["action"] = "release-drafter/release-drafter@v6.0.0"
+    if contrast == "wrong-version":
+        cap["denial"]["action"] = "release-drafter/release-drafter@v6.0.1"
+    result = assess()
+    if contrast is None:
+        assert result["state"] == "draft-release-create-denied"
+        assert result["configured"]["action_line"] == next(
+            line for line, text in enumerate(source.splitlines(), 1) if "uses: release-drafter" in text
+        )
+    else:
+        assert result["state"] == "unresolved" and "operation" not in result
+
+
 @pytest.fixture
 def push_capture(capture):
     cap, bind, assess = capture
