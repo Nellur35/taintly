@@ -4,10 +4,13 @@ from base64 import b64encode
 from datetime import datetime, timezone
 from hashlib import sha256
 from io import BytesIO
+import sys
 from zipfile import ZipFile
 
 import pytest
 
+from taintly import __main__ as cli
+from taintly.ingestion import codebuild_s3
 from taintly.ingestion.codebuild_put import (
     _audit,
     _bound_launch,
@@ -19,6 +22,55 @@ from taintly.ingestion.codebuild_put import (
     _workspace_identity,
 )
 from taintly.ingestion.codebuild_snapshot import SnapshotError
+
+
+@pytest.mark.parametrize("actor_bound", [True, False])
+def test_report_distinguishes_s3_request_actor_from_launcher_and_workspace(
+    actor_bound, tmp_path, monkeypatch, capsys
+):
+    role = "arn:aws:iam::012345678901:role/build-role"
+    session = "arn:aws:sts::012345678901:assumed-role/build-role/build-session"
+    launcher = "arn:aws:iam::012345678901:user/launcher"
+    observation = {
+        "state": "direct-s3-write-observed",
+        "build": "build-id",
+        "repository": "example/project",
+        "head": "a" * 40,
+        "influence": {"path": "marker.txt"},
+        "publication": {
+            "operation": "s3:PutObject",
+            "object_arn": "arn:aws:s3:::bucket/marker.txt",
+            "service_role": role,
+            "acting_session": session if actor_bound else "unverified",
+            "audit": "bound-s3-data-event" if actor_bound else "unavailable",
+        },
+        "launch": {"actor": launcher, "event_id": "launch-id"},
+        "workspace_identity": {"s3_request_identity": "unverified"},
+        "scope": "One observed request.",
+    }
+    if not actor_bound:
+        observation["reported_sts_session"] = session
+    monkeypatch.setattr(codebuild_s3, "codebuild_s3_observation", lambda *_: observation)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["taintly", str(tmp_path), "--no-config", "--codebuild-public-s3-observation",
+         str(tmp_path / "receipt.json"), "build-arn", "https://github.com/example/project"],
+    )
+    with pytest.raises(SystemExit) as exit_:
+        cli.main()
+    assert exit_.value.code == 0
+    output = capsys.readouterr().out
+    assert "S3 operation: s3:PutObject." in output
+    assert f"Build role: {role}." in output
+    assert f"CloudTrail StartBuild caller: {launcher}" in output
+    assert "The workspace STS event identifies the workspace session only." in output
+    if actor_bound:
+        assert f"S3 request actor: {session} (bound to the S3 data event)." in output
+        assert "Runner-reported STS session:" not in output
+    else:
+        assert "S3 request actor: unverified." in output
+        assert f"Runner-reported STS session: {session}." in output
 
 
 @pytest.mark.parametrize(

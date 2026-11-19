@@ -2177,6 +2177,7 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
             else "was denied access to write"
         )
         print(f"CodeBuild {result['build']} {outcome} {publication['object_arn']}.")
+        print(f"  S3 operation: {publication['operation']}.")
         if "input_object" in result:
             supplied = result["input_object"]
             influence = result["influence"]
@@ -2208,6 +2209,10 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
         if publication["acting_session"] == "unverified":
             print("  S3 request actor: unverified.")
             print(f"  Runner-reported STS session: {result['reported_sts_session']}.")
+        else:
+            print(
+                f"  S3 request actor: {publication['acting_session']} (bound to the S3 data event)."
+            )
         transport = publication.get("transport", {})
         if "http_status" in transport:
             print(f"  Reported S3 HTTP status: {transport['http_status']}.")
@@ -2216,9 +2221,7 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
         if "runtime_credential" in publication:
             print("  CloudTrail ties the build's STS identity call to the same S3 credential.")
         if "workspace_identity" in result:
-            print("  CloudTrail confirms the workspace's STS role and session.")
-            if publication["acting_session"] != "unverified":
-                print("  S3 request identity is unverified by this STS event.")
+            print("  The workspace STS event identifies the workspace session only.")
         print(result["scope"])
     elif result["state"] == "managed-s3-link-unverified":
         print(
