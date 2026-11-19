@@ -2027,6 +2027,8 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
         publication = report["publication"]
         print(
             f"GitLab job {report['job']} built a target-project merge of fork MR !{report['mr']}.\n"
+            f"  Pipeline {report['pipeline']} checked out merged revision {report['revision']}.\n"
+            f"  Fork head: {report['fork_head']}.\n"
             f"  {report['source_path']}:{report['command_line']}: {report['command']}\n"
             f"  Managed artifact: {publication['target']}\n"
             f"  SHA-256: {publication['sha256']}\n{report['scope']}\n{report['review_action']}"
@@ -2516,13 +2518,17 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
     elif state == "release-asset-observed":
         publication = result["publication"]
         configured = result["configured_publish"]
+        pr = result["pr"]
+        source = result["source"]
         print(
             f"GitHub records {publication['recorded_uploader']['login']} as uploader of "
             f"{publication['asset']} to {publication['target_repository']} at {publication['tag']}.\n"
-            f"  PR #{result['pr']['number']}, producer run {result['producer_run']}, "
+            f"  PR #{pr['number']}, producer run {result['producer_run']}, "
             f"publishing run {result['consumer_run']}.\n"
+            f"  PR head: {pr['source_repository']} at {pr['source_head']}.\n"
+            f"  Publishing workflow: {source['path']}:{configured['line']} at {source['revision']}.\n"
             f"  Configured credential: {configured['credential_binding']} "
-            f"({result['source']['path']}:{configured.get('credential_line', configured['line'])}).\n"
+            f"({source['path']}:{configured.get('credential_line', configured['line'])}).\n"
             f"{result['scope']}"
         )
         if "review_action" in result:

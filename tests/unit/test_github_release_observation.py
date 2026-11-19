@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 from pathlib import Path
 
 import pytest
 
+from taintly import __main__ as cli
+from taintly.ingestion import github_release_observation
 from taintly.ingestion.github_preview import PreviewEvidenceError
 from taintly.ingestion.github_release_observation import _job_window, _publisher_index, _tag_receipt
 
@@ -23,6 +26,46 @@ jobs:
 """
 WORKFLOW = ".github/workflows/publish.yml"
 REVISION = "a" * 40
+
+
+def test_report_distinguishes_pr_head_and_publishing_revision(tmp_path, monkeypatch, capsys):
+    head = "b" * 40
+    result = {
+        "state": "release-asset-observed",
+        "pr": {"number": 6, "source_repository": "example-fork/project", "source_head": head},
+        "producer_run": 51,
+        "consumer_run": 52,
+        "source": {"path": WORKFLOW, "revision": REVISION},
+        "configured_publish": {"credential_binding": "secrets.PUBLISH", "line": 9},
+        "publication": {
+            "asset": "build.zip",
+            "target_repository": "example/previews",
+            "tag": "pr-6",
+            "recorded_uploader": {"login": "example-publisher"},
+        },
+        "scope": "One uploaded asset.",
+    }
+    monkeypatch.setattr(github_release_observation, "release_observation", lambda *_: result)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "taintly",
+            str(tmp_path),
+            "--no-config",
+            "--github-release-observation",
+            str(tmp_path / "receipt.json"),
+            "example/project",
+            "51",
+            "52",
+        ],
+    )
+    with pytest.raises(SystemExit) as exited:
+        cli.main()
+    assert exited.value.code == 0
+    text = capsys.readouterr().out
+    assert f"PR head: example-fork/project at {head}." in text
+    assert f"Publishing workflow: {WORKFLOW}:9 at {REVISION}." in text
 
 
 def projection(root: Path, content: str):
