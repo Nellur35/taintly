@@ -1887,6 +1887,21 @@ def _check_jenkins_maven_snapshot(
     comparison = result.get("comparison", {})
     registry_record = comparison.get("registry_record", {})
     incomplete_comparison = "unresolved" in (comparison.get("state"), registry_record.get("state"))
+    credential_selection = result.get("maven_credential_selection")
+    credential_details = ""
+    if (
+        credential_selection
+        and credential_selection["state"] == "authentication-selection-reported"
+    ):
+        credential_details = (
+            f"  Maven log reports authentication for {credential_selection['server_id']} at "
+            f"{credential_selection['repository_url']} (node log line {credential_selection['line']}).\n"
+            "  Jenkins credential identity and wider permissions remain unresolved.\n"
+        )
+    elif credential_selection:
+        credential_details = (
+            f"  Maven authentication selection unresolved: {credential_selection['reason']}.\n"
+        )
     if args.format == "json":
         print(json.dumps({mode: result}, indent=2))
     elif result["state"] == "remote-matrix-publisher-skipped":
@@ -1943,6 +1958,7 @@ def _check_jenkins_maven_snapshot(
             f"checkout {checkout['revision']} ({checkout['ref']}).\n"
             f"  PR head: {result['head']}.\n"
             f"  Jenkins job: {result['job']} (node {result['node']}).\n"
+            f"{credential_details}"
             f"  Matching snapshot bytes: {artifact['object_url']} ({artifact['sha256']}).\n"
             f"{result['scope']}"
         )
@@ -1954,6 +1970,7 @@ def _check_jenkins_maven_snapshot(
             f"#{result['pr']}, revision {result['head']}.\n"
             f"  Command: {result['command']} ({source['path']}:{source['line']}).\n"
             f"  Jenkins job: {result['job']} (node {result['node']}).\n"
+            f"{credential_details}"
             f"  Nexus writer: {publication['registry_actor']}.\n"
             f"  Object: {publication['object_url']}\n  SHA-256: {publication['sha256']}\n"
             f"{result['scope']}\n{result['review_action']}"
@@ -1983,6 +2000,7 @@ def _check_jenkins_maven_snapshot(
             f"checkout {result['head']}.\n"
             f"  Command: {result['command']} ({source['path']}:{source['line']}).\n"
             f"  Jenkins job: {result['job']} (node {result['node']}).\n"
+            f"{credential_details}"
             f"  Matching snapshot bytes: {snapshot['object_url']} ({snapshot['sha256']}).\n"
             f"Maven snapshot write unresolved: {result['reason']}.\n{result['scope']}"
         )

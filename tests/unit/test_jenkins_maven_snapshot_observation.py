@@ -411,3 +411,69 @@ def test_failed_run_retains_the_maven_nodes_fork_checkout(tmp_path, capture, bas
     assert "reported fork checkout" in result["scope"]
     assert "publication" not in result
     assert "snapshot_evidence" not in result
+
+
+def test_exact_maven_credential_selection(tmp_path, capture):
+    deploy = capture["deploy_log"]
+    warning = (
+        "[WARNING] Using credentials of server 'example.snapshots' for repository "
+        "https://repository.apache.org/content/repositories/snapshots, although no repository or "
+        "mirror with this id is declared in settings or on the command line and the server declares "
+        "no <repositoryOrigins>. Set maven.repository.credentialScope=strict."
+    )
+    raw = "\n".join(
+        [deploy["command_line"], warning, deploy["artifact_install_line"], deploy["digest_line"]]
+    ).encode()
+    (tmp_path / "maven-node.log").write_bytes(raw)
+    deploy["credential_log_sha256"] = hashlib.sha256(raw).hexdigest()
+    (tmp_path / "snapshot.json").write_text(json.dumps(capture), encoding="utf-8")
+
+    result = maven_snapshot_observation(tmp_path, REPO, 7, JOB, TARGET)
+
+    assert result["state"] == "snapshot-write-observed"
+    assert result["maven_credential_selection"] == {
+        "state": "authentication-selection-reported",
+        "server_id": "example.snapshots",
+        "repository_url": "https://repository.apache.org/content/repositories/snapshots",
+        "repository_origin": "not-explicitly-bound-in-reported-settings",
+        "log_url": deploy["url"],
+        "log_sha256": deploy["credential_log_sha256"],
+        "line": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    "variation", ["wrong-digest", "wrong-target", "conflict", "wrong-node-log", "missing-log", "control-char"]
+)
+def test_maven_credential_selection_needs_unique_bound_evidence(tmp_path, capture, variation):
+    deploy = capture["deploy_log"]
+    target = "https://repository.apache.org/content/repositories/snapshots"
+    warning = (
+        "[WARNING] Using credentials of server 'example.snapshots' for repository "
+        + target
+        + ", although no repository or mirror with this id is declared in settings or on "
+        "the command line and the server declares no <repositoryOrigins>. "
+        "Set maven.repository.credentialScope=strict."
+    )
+    if variation == "wrong-target":
+        warning = warning.replace(target, target + "-other")
+    if variation == "conflict":
+        warning += "\n" + warning.replace("Using credentials", "Not using credentials")
+    if variation == "control-char":
+        warning = "\x1b[31m" + warning
+    command = "+ mvn test" if variation == "wrong-node-log" else deploy["command_line"]
+    raw = "\n".join(
+        [command, warning, deploy["artifact_install_line"], deploy["digest_line"]]
+    ).encode()
+    if variation != "missing-log":
+        (tmp_path / "maven-node.log").write_bytes(raw)
+    deploy["credential_log_sha256"] = (
+        "f" * 64 if variation == "wrong-digest" else hashlib.sha256(raw).hexdigest()
+    )
+    (tmp_path / "snapshot.json").write_text(json.dumps(capture), encoding="utf-8")
+
+    result = maven_snapshot_observation(tmp_path, REPO, 7, JOB, TARGET)
+
+    assert result["state"] == "snapshot-write-observed"
+    assert result["maven_credential_selection"]["state"] == "unresolved"
+    assert "server_id" not in result["maven_credential_selection"]
