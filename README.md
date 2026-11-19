@@ -207,6 +207,17 @@ Nexus item's `provider_url`, `response` identity, `stored_attributes`
 and `stored_properties`. Preserve the stored first-write principal
 separately from the account that retrieved the evidence.
 
+When the collector retained the complete trusted Maven deployment-node
+log, it may include it as `maven-node.log` (up to 2 MiB) and set
+`deploy_log.credential_log_sha256` to the original file's SHA-256. Keep
+the evidence directory private if it contains sensitive log data. The
+scanner checks the selected command, artifact path and digest lines in
+that log before reporting the supported Maven origin-scope warning and
+its settings server ID. This is the authentication selection reported
+by Maven. The actual Jenkins credential reference and wider registry
+permissions remain unresolved. A missing or incompatible optional log
+does not change the independently established publication result.
+
 The result reports the selected historical run, source line, Maven
 operation, exact JAR and recorded Nexus writer. It keeps wider
 permissions, production promotion and future fork admission unresolved.

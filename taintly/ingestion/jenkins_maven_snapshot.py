@@ -392,6 +392,57 @@ def _verify_deploy_log(
     )
 
 
+def _maven_credential_selection(root: Path, deploy_log: _Row) -> _Row:
+    """Read an optional trusted copy of the already-verified Maven node log."""
+    reason = "saved Maven log is unavailable or does not match the deployment evidence"
+    try:
+        raw = _project_file(root, "maven-node.log", 2 * 1024 * 1024)
+        digest = hashlib.sha256(raw).hexdigest()
+        _require(deploy_log["credential_log_sha256"] == digest, reason)
+        lines = raw.decode("utf-8").replace("\r\n", "\n").split("\n")
+        _require(
+            lines[0] == deploy_log["command_line"]
+            and deploy_log["artifact_install_line"] in lines
+            and deploy_log["digest_line"] in lines,
+            reason,
+        )
+    except (EvidenceError, OSError, UnicodeError, RuntimeError):
+        return {"state": "unresolved", "reason": reason}
+
+    target = (_REGISTRY + _REPOSITORY).rstrip("/")
+    pattern = re.compile(
+        r"\[WARNING\] (?P<action>Using|Not using) credentials of server "
+        r"'(?P<server>[A-Za-z0-9][A-Za-z0-9._-]{0,127})' for repository "
+        + re.escape(target)
+        + r"(?P<details>[,:] [ -~]{1,700})"
+    )
+    observations = [
+        (number, match)
+        for number, line in enumerate(lines, 1)
+        if (match := pattern.fullmatch(line))
+    ]
+    if len(observations) == 1:
+        number, match = observations[0]
+        if (
+            match["action"] == "Using"
+            and "and the server declares no <repositoryOrigins>." in match["details"]
+            and "maven.repository.credentialScope=strict" in match["details"]
+        ):
+            return {
+                "state": "authentication-selection-reported",
+                "server_id": match["server"],
+                "repository_url": target,
+                "repository_origin": "not-explicitly-bound-in-reported-settings",
+                "log_url": deploy_log["url"],
+                "log_sha256": digest,
+                "line": number,
+            }
+    return {
+        "state": "unresolved",
+        "reason": "saved Maven log lacks a unique supported authentication selection for the target",
+    }
+
+
 def _partial_snapshot_archive(
     root: Path, target: str, capture: _Row, command: _Row, result: _Row, checkout: dict[str, str]
 ) -> _Row:
@@ -524,6 +575,9 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         artifact_name = artifact_path.rsplit("/", 1)[1]
         sha512 = capture["registry"]["stored_attributes"]["digest.sha512"]
         _verify_deploy_log(capture["deploy_log"], job, command, workspace, artifact_name, sha512)
+        deploy_log = capture["deploy_log"]
+        if "credential_log_sha256" in deploy_log:
+            result["maven_credential_selection"] = _maven_credential_selection(root, deploy_log)
         if upstream:
             result.update(
                 checkout=checkout,
