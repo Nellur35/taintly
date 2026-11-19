@@ -3,12 +3,14 @@
 import hashlib
 import json
 import re
+import sys
 from datetime import datetime
 from io import BytesIO
 from zipfile import ZipFile
 
 import pytest
 
+from taintly import __main__ as cli
 from taintly.ingestion.gitlab_mr_artifact import mr_artifact_observation
 
 HEAD, BASE, MERGE = "a" * 40, "b" * 40, "c" * 40
@@ -93,6 +95,30 @@ def test_explicit_artifact_and_job_authority_are_scoped(tmp_path, capture):
     assert result["publication"]["authority"] == "gitlab-runner-job-scoped-upload"
     assert result["publication"]["member_path"] == "output/index.html"
     assert result["source_project"] == 2
+
+
+def test_report_distinguishes_fork_head_and_checkout(tmp_path, capture, monkeypatch, capsys):
+    evaluate(tmp_path, capture)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "taintly",
+            str(tmp_path),
+            "--no-config",
+            "--gitlab-mr-artifact-observation",
+            str(tmp_path / "observation.json"),
+            "1",
+            "22",
+            "33",
+        ],
+    )
+    with pytest.raises(SystemExit) as exited:
+        cli.main()
+    assert exited.value.code == 0
+    text = capsys.readouterr().out
+    assert f"Pipeline 22 checked out merged revision {MERGE}." in text
+    assert f"Fork head: {HEAD}." in text
 
 
 PAGES = (
