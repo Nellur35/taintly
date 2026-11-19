@@ -930,6 +930,14 @@ managed image. The block must verify the commit and file checksum, obtain its
 STS identity, and make one versioned `aws s3api put-object` request with that
 file. See the [supported inline block](taintly/ingestion/codebuild_put.py).
 
+For a native external GitHub PR source, supply `pr` with `repository`,
+`number`, `fork`, `head` and `base` from the saved GitHub PR response.
+The saved build must select `refs/pull/<number>/head^{<full-head-SHA>}`
+and resolve the same head. The Git checkout must contain both commits.
+The uploaded marker must have a different Git blob at the fork head from
+the file at the PR base. These facts verify the selected source for the
+saved request. Automatic PR admission requires separate evidence.
+
 For the operator-prepared S3 input profile, supply `s3_input` with
 `bucket`, `key`, `operator_selected_head`, `receipt` and
 `archive_base64`. The receipt contains the version and full-object

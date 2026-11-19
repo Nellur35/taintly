@@ -2191,6 +2191,10 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
             print(
                 f"  Source {result['repository']} at {result['head']}, file {result['influence']['path']}."
             )
+        if "pull_request" in result:
+            print(
+                f"  GitHub PR #{result['pull_request']} head repository: {result['head_repository']}."
+            )
         print(f"  Build role: {publication['service_role']}.")
         if "launch" in result:
             launch = result["launch"]
