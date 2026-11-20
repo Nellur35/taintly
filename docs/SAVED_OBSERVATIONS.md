@@ -250,6 +250,23 @@ For a successful archive observation, include the provider's pipeline
 `created_at` and `updated_at` in `job.pipeline`. The recorded job and
 its runner events must fit the pipeline and job windows.
 
+For the verified GitLab.com Docker Machine runner image, an optional
+`archive_runner_evidence` object corroborates the native uploader's
+job token for this archive POST. Supply the trusted redacted log's
+`trace_url`, `trace_sha256`, `executor`, `runner_revision`,
+`helper_index`, `helper_config`, `checkout_directory`, and owning
+`job`, `pipeline`, and `revision`. Supply `runner_line`, `helper_line`,
+`archive_start_line`, `archive_line`, `archive_end_line`,
+`archive_start_time`, `archive_time`, `archive_end_time`, and the archive
+response's `correlation_id`. Use the originating archive stage and its
+response, with no token fields. The profile is limited to Runner
+`7a0f126423ab4aefa71be5cda32668e29bc59b2d` and the compatible verified
+helper image. Actual process bytes and mounts, the token instance and
+permissions for other operations require separate evidence. An invalid
+optional record reports unresolved with exit 11 while preserving any
+already corroborated archive. Omitting the object preserves the
+existing outcome.
+
 For an archive uploaded after script failure, supply `failed_archive`
 alongside the same source file, downloaded member and `artifact` record.
 Use matching `created_at` and `updated_at` values in `pipeline` and

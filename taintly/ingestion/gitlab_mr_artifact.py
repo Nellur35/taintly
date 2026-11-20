@@ -37,6 +37,13 @@ _PATH = re.compile(rf"{_PART}(?:/{_PART})*")
 _FAILED_COMMAND = r"(?:\./gradlew :[A-Za-z0-9:_-]{1,128}|yarn [A-Za-z0-9:_-]{1,128})"
 _BUILD = re.compile(r"(?:bun|yarn) run build(?::[a-z0-9:_-]+)?")
 _MOVE = re.compile(rf"mv ({_PART}(?:/{_PART})*) ({_PART}(?:/{_PART})*)")
+# The recorded linux/amd64 helper image and upload implementation verified on
+# GitLab.com at this Runner revision. Supporting another image needs its own proof.
+_ARCHIVE_RUNNER_REVISION = "7a0f126423ab4aefa71be5cda32668e29bc59b2d"
+_ARCHIVE_HELPER_INDEX = "sha256:604025ad1395452e28268e5ca722452d8e3a3badfd7bee628941a6bfb7ead975"
+_ARCHIVE_HELPER_CONFIG = "sha256:060c57dea4e06ce034c9959e734771d2542983156682d85447a6f9152e64ecd4"
+_ARCHIVE_HELPER_EXECUTABLE = "3da2f76c0857d674b22a300f078786494b248ea4f73ffd549afbb4a0e54c0c50"
+_CORRELATION = re.compile(r"[0-9a-f]{32}")
 _EVENT = "$CI_PIPELINE_SOURCE == 'merge_request_event'"
 _SAME_PROJECT = "$CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID"
 _SCOPE = (
@@ -214,6 +221,79 @@ def _archived_member(
         "member_path": path,
         "sha256": digest,
     }
+
+
+def _native_archive_authority(data: _Row, job_url: str) -> _Row:
+    """Bind the known native uploader to this previously corroborated archive."""
+    try:
+        evidence = data["archive_runner_evidence"]
+        job, pipe, upload = data["job"], data["pipeline"], data["trace"][-1]
+        _need(
+            _identifier(evidence["job"], "runner evidence job") == job["id"]
+            and _identifier(evidence["pipeline"], "runner evidence pipeline") == pipe["id"]
+            and evidence["revision"] == pipe["sha"]
+            and evidence["trace_url"] == job_url + "/raw",
+            "runner evidence belongs to another job, pipeline or revision",
+        )
+        _need(
+            evidence["executor"] == "docker+machine"
+            and evidence["runner_revision"] == _ARCHIVE_RUNNER_REVISION
+            and evidence["helper_index"] == _ARCHIVE_HELPER_INDEX
+            and evidence["helper_config"] == _ARCHIVE_HELPER_CONFIG,
+            "runner or helper image is outside the verified archive profile",
+        )
+        cwd = f"/builds/{data['project']['path']}"
+        _need(evidence["checkout_directory"] == cwd, "runner checkout directory does not match")
+        lines = [
+            _identifier(evidence[key], key)
+            for key in (
+                "runner_line",
+                "helper_line",
+                "archive_start_line",
+                "archive_line",
+                "archive_end_line",
+            )
+        ]
+        start = _time(evidence["archive_start_time"], "archive stage start")
+        finish = _time(evidence["archive_end_time"], "archive stage end")
+        received = _time(evidence["archive_time"], "archive response")
+        _need(
+            all(a < b for a, b in pairwise(lines))
+            and _time(job["started_at"], "job start")
+            <= start
+            <= received
+            <= finish
+            <= _time(job["finished_at"], "job end")
+            and received == _time(upload["time"], "saved archive response"),
+            "archive response does not match the recorded job and upload stage",
+        )
+        return {
+            "state": "native-archive-write-observed",
+            "credential": "runner-job-token",
+            "job": job["id"],
+            "method": "POST",
+            "route": f"jobs/{job['id']}/artifacts",
+            "http_status": upload["http_status"],
+            "correlation_id": _value(
+                evidence["correlation_id"], _CORRELATION, "archive correlation ID"
+            ),
+            "trace_sha256": _value(evidence["trace_sha256"], _SHA256, "runner trace digest"),
+            "archive_response_line": lines[3],
+            "runner_revision": _ARCHIVE_RUNNER_REVISION,
+            "checkout_directory": cwd,
+            "helper_image_executable": "/usr/bin/gitlab-runner-helper",
+            "helper_image_executable_sha256": _ARCHIVE_HELPER_EXECUTABLE,
+            "scope": (
+                "The verified helper image and Runner implementation bind the credential class to "
+                "this job archive. The running process bytes, mounts, token instance, registry "
+                "permissions and deployment permissions remain unverified."
+            ),
+        }
+    except RegistryJobError as exc:
+        reason = str(exc)
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        reason = "saved archive runner evidence is incomplete or malformed"
+    return {"state": "unresolved", "reason": reason}
 
 
 def _successful(
@@ -1170,6 +1250,15 @@ def _assess(
             detail["publication_admission"] = _npm_admission(data, cfg, path, publisher)
         if "pages_preview" in data:
             detail["pages_preview"] = _pages_preview(data, cfg, detail, path, job_url)
+    if "archive_runner_evidence" in data:
+        detail["archive_runner_authority"] = (
+            _native_archive_authority(data, job_url)
+            if detail["state"] == "job-artifact-observed"
+            else {
+                "state": "unresolved",
+                "reason": "runner evidence requires an observed successful job archive",
+            }
+        )
     return {
         "repository": path,
         "project": project_id,
