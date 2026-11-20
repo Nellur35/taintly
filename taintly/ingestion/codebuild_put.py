@@ -26,6 +26,29 @@ SCOPE = (
     "Trusted saved CodeBuild, CloudWatch and S3 evidence for one direct object request. "
     "Future IAM decisions, fork admission and artifact audience require separate evidence."
 )
+_POLICY_SCOPE = (
+    "The saved policy change matches the observed denial. Other policy changes "
+    "and whether this was the only contributing change remain unverified."
+)
+_COMPARED_BUILD_FIELDS = (
+    "projectName",
+    "source",
+    "sourceVersion",
+    "resolvedSourceVersion",
+    "environment",
+    "serviceRole",
+    "artifacts",
+    "secondarySources",
+    "secondarySourceVersions",
+    "secondaryArtifacts",
+    "cache",
+    "encryptionKey",
+    "initiator",
+    "timeoutInMinutes",
+    "queuedTimeoutInMinutes",
+    "vpcConfig",
+    "fileSystemLocations",
+)
 _ARN = re.compile(
     rf"arn:aws:codebuild:([a-z]{{2}}-[a-z0-9-]+-[0-9]):([0-9]{{12}}):build/({BUILD_ID.pattern})"
 )
@@ -812,3 +835,104 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
             (command_start, completion),
         )
     return result
+
+
+def compare_policy_change(capture: _Row, denied: _Row, root: Path, origin: str) -> _Row:
+    """Check one opt-in comparison without replacing the direct observation."""
+    try:
+        return _compare_policy_change(capture, denied, root, origin)
+    except SnapshotError as exc:
+        return {"state": "unresolved", "reason": str(exc)}
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError):
+        return {"state": "unresolved", "reason": "Malformed saved S3 policy comparison evidence"}
+
+
+def _compare_policy_change(capture: _Row, denied: _Row, root: Path, origin: str) -> _Row:
+    comparison = _map(capture.get("policy_comparison"), "S3 policy comparison")
+    earlier = _map(comparison.get("earlier"), "earlier direct S3 receipt")
+    original = _map(earlier.get("build"), "earlier CodeBuild response")
+    current = capture["build"]
+    previous_arn = _text(original.get("arn"), "earlier CodeBuild ARN")
+    _need(
+        earlier.get("schema") == capture["schema"]
+        and "policy_comparison" not in earlier
+        and previous_arn != denied["build_arn"]
+        and previous_arn.rsplit(":", 1)[0] == denied["build_arn"].rsplit(":", 1)[0],
+        "Comparison requires a distinct earlier direct S3 receipt from the same CodeBuild project",
+    )
+    destination = denied["publication"]
+    _need(
+        denied["state"] == "direct-s3-write-denied"
+        and destination.get("denial_reason") == "explicit-resource-policy-deny",
+        "The selected request lacks a corroborated explicit resource-policy denial",
+    )
+    allowed = direct_s3_put(earlier, root, previous_arn, origin)
+    prior = allowed["publication"]
+    _need(
+        allowed["state"] == "direct-s3-write-observed"
+        and prior.get("request_id") != destination["request_id"]
+        and prior["object_arn"] == destination["object_arn"]
+        and allowed["influence"] == denied["influence"]
+        and allowed.get("input_object") == denied.get("input_object")
+        and all(
+            allowed.get(field) == denied.get(field)
+            for field in ("source_scope", "pull_request", "head_repository", "pr_base")
+        )
+        and all(original.get(field) == current.get(field) for field in _COMPARED_BUILD_FIELDS),
+        "The earlier write does not match the denied request's build configuration, source or target",
+    )
+    event = _map(comparison.get("policy_event"), "CloudTrail PutBucketPolicy event")
+    parameters = _map(event.get("requestParameters"), "PutBucketPolicy request parameters")
+    event_id = _text(event.get("eventID"), "policy event ID")
+    request_id = _text(event.get("requestID"), "policy request ID")
+    event_time = _text(event.get("eventTime"), "policy event time")
+    _, _, _, region, account, _ = denied["build_arn"].split(":", 5)
+    object_arn = destination["object_arn"]
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": destination["operation"],
+                "Resource": object_arn,
+                "Condition": {"ArnEquals": {"aws:PrincipalArn": destination["service_role"]}},
+            }
+        ],
+    }
+    _need(
+        event.get("eventSource") == "s3.amazonaws.com"
+        and event.get("eventName") == "PutBucketPolicy"
+        and event.get("eventCategory") == "Management"
+        and event.get("managementEvent") is True
+        and event.get("readOnly") is False
+        and event.get("awsRegion") == region
+        and event.get("recipientAccountId") == account
+        and "errorCode" not in event
+        and "errorMessage" not in event
+        and re.fullmatch(_EVENT_ID, event_id)
+        and re.fullmatch(r"[A-Za-z0-9-]{1,128}", request_id)
+        and parameters.get("bucketName")
+        == object_arn.removeprefix("arn:aws:s3:::").partition("/")[0]
+        and parameters.get("bucketPolicy") == policy,
+        "Saved PutBucketPolicy must record the exact bucket, S3 action, object and role denial",
+    )
+    _need(
+        re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", event_time),
+        "The saved policy event requires a whole-second UTC timestamp",
+    )
+    installed = _time(event_time)
+    _need(
+        _time(original["endTime"]) < installed and installed + 1 <= _time(current["startTime"]),
+        "The recorded policy change does not fall entirely between the saved builds",
+    )
+    actor_verified = prior["audit"] == "bound-s3-data-event"
+    return {
+        "state": "matched-policy-change" if actor_verified else "earlier-writer-unverified",
+        "policy_event": {"event_id": event_id, "request_id": request_id, "time": event_time},
+        "earlier_build_arn": allowed["build_arn"],
+        "earlier_object_version": prior["version"],
+        "earlier_request_id": prior.get("request_id"),
+        "earlier_acting_session": prior["acting_session"],
+        "scope": _POLICY_SCOPE,
+    }
