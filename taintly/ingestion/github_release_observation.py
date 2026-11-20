@@ -12,6 +12,7 @@ from taintly.ingestion.github_preview import (
     _REPOSITORY,
     _SHA,
     PreviewEvidenceError,
+    _artifact_upload_authority,
     _field,
     _id,
     _job_steps,
@@ -452,6 +453,15 @@ def release_observation(
             "consumer_job": consumer["job"]["id"],
             "source": source,
         }
+        if "producer_artifact_authority" in cap:
+            producer_job = producer["job"]
+            context["producer_artifact_authority"] = _artifact_upload_authority(
+                cap["producer_artifact_authority"],
+                producer_job,
+                _observed_step(producer_job, "Run actions/upload-artifact@v7"),
+                artifact,
+                "actions/upload-artifact@v7",
+            )
         if tag_push:
             publication, plan = _recorded_tag(cap, index, consumer, pr, repository)
             return {
