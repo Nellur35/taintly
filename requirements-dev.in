@@ -34,7 +34,7 @@ pytest-xdist
 # Security floor for the dev/CI dependency stack; no runtime dependency.
 urllib3>=2.8.0
 msgpack>=1.2.3
-certifi>=2026.10.19
+certifi>=2026.10.23
 
 # filelock 3.20.4–4.2.0 has newly published local-file attacks. Its patched
 # 4.2.1+ line requires Python 3.11, so keep the last unaffected 3.20.3 on
