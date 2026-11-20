@@ -439,7 +439,8 @@ def test_failed_run_retains_the_maven_nodes_fork_checkout(tmp_path, capture, bas
     assert "snapshot_evidence" not in result
 
 
-def test_exact_maven_credential_selection(tmp_path, capture):
+@pytest.mark.parametrize("registry_available", [True, False])
+def test_exact_maven_credential_selection(tmp_path, capture, registry_available):
     deploy = capture["deploy_log"]
     warning = (
         "[WARNING] Using credentials of server 'example.snapshots' for repository "
@@ -452,11 +453,21 @@ def test_exact_maven_credential_selection(tmp_path, capture):
     ).encode()
     (tmp_path / "maven-node.log").write_bytes(raw)
     deploy["credential_log_sha256"] = hashlib.sha256(raw).hexdigest()
+    target = TARGET
+    if not registry_available:
+        capture["run"]["result"] = "FAILURE"
+        capture["flow"]["status"] = "FAILED"
+        capture["registry"] = None
+        target = REGISTRY + "/content/repositories/snapshots/" + ARTIFACT
     (tmp_path / "snapshot.json").write_text(json.dumps(capture), encoding="utf-8")
 
-    result = maven_snapshot_observation(tmp_path, REPO, 7, JOB, TARGET)
+    result = maven_snapshot_observation(tmp_path, REPO, 7, JOB, target)
 
-    assert result["state"] == "snapshot-write-observed"
+    if registry_available:
+        assert result["state"] == "snapshot-write-observed"
+    else:
+        assert result["state"] == result["authority"] == "unresolved"
+        assert "publication" not in result
     assert result["maven_credential_selection"] == {
         "state": "authentication-selection-reported",
         "server_id": "example.snapshots",

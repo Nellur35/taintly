@@ -106,6 +106,9 @@ its settings server ID. This is the authentication selection reported
 by Maven. The actual Jenkins credential reference and wider registry
 permissions remain unresolved. A missing or incompatible optional log
 does not change the independently established publication result.
+When a record provides the matching Jenkins archive without a Nexus
+receipt, the same log can corroborate the Maven authentication selection.
+Nexus storage and writer attribution remain unresolved.
 
 For optional workspace ownership evidence, retain the complete trusted
 controller response at the owning job's `logText/progressiveHtml?start=0`

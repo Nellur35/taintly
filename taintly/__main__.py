@@ -2004,6 +2004,7 @@ def _check_jenkins_maven_snapshot(
             f"  The Jenkins run ended with {result['jenkins_run_result']}. "
             f"The selected Maven node {result['node']} completed successfully.\n"
             f"  Command: {result['command']} ({source['path']}:{source['line']}).\n"
+            f"{credential_details}"
             f"  Jenkins archive: {result['jenkins_artifact']} ({result['jenkins_archive_sha256']}).\n"
             f"  Requested snapshot: {result['requested_snapshot']}.\n"
             f"Maven snapshot write unresolved: {result['reason']}.\n{result['scope']}"
