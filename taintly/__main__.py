@@ -2204,6 +2204,7 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
         parser.error("CodeBuild S3 observation requires codebuild and text or JSON format")
     capture, build_arn, origin = args.codebuild_public_s3_observation
     result = codebuild_s3_observation(Path(capture), Path(args.path), build_arn, origin)
+    comparison = result.get("policy_comparison")
     if args.format == "json":
         print(json.dumps({"codebuild_s3_observation": result}, indent=2))
     elif result["state"] in ("direct-s3-write-observed", "direct-s3-write-denied"):
@@ -2262,6 +2263,24 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
             print("  CloudTrail ties the build's STS identity call to the same S3 credential.")
         if "workspace_identity" in result:
             print("  The workspace STS event identifies the workspace session only.")
+        if comparison is not None:
+            if comparison["state"] == "unresolved":
+                print(f"  Policy comparison unresolved: {comparison['reason']}.")
+            else:
+                event = comparison["policy_event"]
+                print(
+                    f"  CloudTrail PutBucketPolicy {event['event_id']} at {event['time']} "
+                    "installed the matching deny between the saved builds."
+                )
+                if comparison["state"] == "earlier-writer-unverified":
+                    print(
+                        "  The earlier S3 write is observed, but its request actor is unverified."
+                    )
+                else:
+                    print(
+                        "  Independent S3 data events identify both requests under this build role."
+                    )
+                print(comparison["scope"])
         print(result["scope"])
     elif result["state"] == "managed-s3-link-unverified":
         print(
@@ -2301,7 +2320,10 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
     else:
         print(f"CodeBuild S3 observation unresolved: {result['reason']}")
         print(result["scope"])
-    sys.exit(0 if result["state"] in ("direct-s3-write-observed", "direct-s3-write-denied") else 11)
+    complete = result["state"] in ("direct-s3-write-observed", "direct-s3-write-denied")
+    if comparison is not None:
+        complete = complete and comparison["state"] == "matched-policy-change"
+    sys.exit(0 if complete else 11)
 
 
 def _assess_codebuild_deploy(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:

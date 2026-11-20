@@ -899,12 +899,33 @@ time, account, region, request and returned build. The request and response
 must agree with the saved build and exact source selector. The caller who
 started the build is reported separately from the build role and S3 session.
 
-Exit `0` indicates a corroborated write or denial. Read the reported state to
+For a single request, exit `0` indicates a corroborated write or denial. Read the reported state to
 tell which occurred. Missing or mismatched evidence exits `11`. A successful
 write can be corroborated by the independent version retrieval when the
 matching CloudTrail data event is unavailable. The result applies to the
 captured request. Future policy decisions, fork admission and artifact audience
 require their own evidence.
+
+To compare an observed write with a later explicit resource-policy denial,
+add `policy_comparison` to the denial receipt. Include:
+
+- `earlier`, the complete earlier direct S3 write receipt from the same
+  project, with the matching source, build settings, role and target.
+- `policy_event`, a trusted successful CloudTrail `PutBucketPolicy` management
+  event. Preserve `eventID`, `requestID`, `eventSource`, `eventName`, `eventTime`,
+  `eventCategory`, `managementEvent`, `readOnly`, `awsRegion` and `recipientAccountId`.
+  Preserve `requestParameters.bucketName` and the complete parsed
+  `requestParameters.bucketPolicy` object. The supported policy has one
+  `Deny` statement for the exact `s3:PutObject` target, a wildcard principal,
+  and an `ArnEquals` condition on `aws:PrincipalArn` for the exact build role.
+
+The recorded policy change must fall between the builds. An independently
+bound S3 data event for each request yields `matched-policy-change` and exit
+`0`. If the earlier version was retrieved but its request actor remains
+unverified, the result retains the matched policy event and exits `11`.
+An unsupported or conflicting comparison also exits `11` while preserving
+the selected request's corroborated result. The comparison does not recover
+complete policy history or prove that the change was the sole cause.
 
 ## Saved CodeBuild-managed S3 ZIP
 

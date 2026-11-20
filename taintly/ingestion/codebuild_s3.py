@@ -620,11 +620,17 @@ def codebuild_s3_observation(path: Path, root: Path, build_arn: str, origin: str
             scope = _REPORTED_ZIP_SCOPE
             return _reported_zip(cap, root.resolve(), build_arn, origin)
         if cap.get("schema") == "codebuild-direct-s3-put-v1":
-            from taintly.ingestion.codebuild_put import SCOPE, direct_s3_put
+            from taintly.ingestion.codebuild_put import SCOPE, compare_policy_change, direct_s3_put
 
             scope = SCOPE
             try:
-                return direct_s3_put(cap, root.resolve(), build_arn, origin)
+                resolved = root.resolve()
+                direct = direct_s3_put(cap, resolved, build_arn, origin)
+                if "policy_comparison" in cap:
+                    direct["policy_comparison"] = compare_policy_change(
+                        cap, direct, resolved, origin
+                    )
+                return direct
             except (
                 AttributeError,
                 IndexError,
