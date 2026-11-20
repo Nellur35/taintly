@@ -227,3 +227,15 @@ filter constraints, or establish runtime execution or credential authority.
 These conditions apply to composed paths and secret-bearing cache execution
 states. An incompatible cleanup step cannot erase evidence from a compatible
 path. Existing state and condition budgets still report or retain uncertainty.
+
+### GitLab fork-job archive authority
+
+The [saved GitLab archive observer](SAVED_OBSERVATIONS.md) accepts the optional
+Runner evidence for a successful fork-owned archive in the verified GitLab.com
+runner profile. Include the original line numbers in the saved upload phase's
+start, response, and end rows. The line numbers, times, trace digest, and
+response correlation ID must match the optional record.
+
+The report identifies the Runner job credential class for the specific archive
+POST. Credentials and permissions for the upstream target or other operations
+remain outside that observation.
