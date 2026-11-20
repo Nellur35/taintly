@@ -33,16 +33,16 @@ class _PatternTimeout(Exception):
     """Raised when a pattern match exceeds the safety timeout."""
 
 
-class _IncompleteChunkedSearch:
+class _IncompleteRegexSearch:
     """Falsey sentinel distinguishing bounded coverage from a clean miss."""
 
     def __bool__(self) -> bool:
         return False
 
 
-_INCOMPLETE_CHUNKED_SEARCH = _IncompleteChunkedSearch()
-_CHUNKED_SEARCH_INCOMPLETE: ContextVar[bool] = ContextVar(
-    "taintly_chunked_search_incomplete", default=False
+_INCOMPLETE_REGEX_SEARCH = _IncompleteRegexSearch()
+_REGEX_SEARCH_INCOMPLETE: ContextVar[bool] = ContextVar(
+    "taintly_regex_search_incomplete", default=False
 )
 _JOB_SEGMENT_CACHE: ContextVar[dict[int, tuple[list[str], list[tuple[int, list[str]]]]] | None] = (
     ContextVar("taintly_job_segment_cache", default=None)
@@ -73,17 +73,17 @@ def _defer_context_regex_compilation() -> Iterator[None]:
         _DEFER_CONTEXT_REGEX.reset(token)
 
 
-def _reset_chunked_search_coverage() -> None:
-    _CHUNKED_SEARCH_INCOMPLETE.set(False)
+def _reset_regex_search_coverage() -> None:
+    _REGEX_SEARCH_INCOMPLETE.set(False)
 
 
-def _chunked_search_coverage_incomplete() -> bool:
-    return _CHUNKED_SEARCH_INCOMPLETE.get()
+def _regex_search_coverage_incomplete() -> bool:
+    return _REGEX_SEARCH_INCOMPLETE.get()
 
 
-def _mark_chunked_search_incomplete() -> _IncompleteChunkedSearch:
-    _CHUNKED_SEARCH_INCOMPLETE.set(True)
-    return _INCOMPLETE_CHUNKED_SEARCH
+def _mark_regex_search_incomplete() -> _IncompleteRegexSearch:
+    _REGEX_SEARCH_INCOMPLETE.set(True)
+    return _INCOMPLETE_REGEX_SEARCH
 
 
 _MAX_SAFE_TEXT_LEN = 65_536  # chars; skip regex beyond this to prevent ReDoS in threads.  Bumped 50_000 → 65_536 (2026-05-05) after astral-sh/uv's build-release-binaries.yml hit 50064 bytes — clean 64 KiB power-of-2 covers realistic GitHub Actions / GitLab CI / Jenkins files with margin while keeping per-regex worst-case bounded.
@@ -185,18 +185,11 @@ def _safe_search_chunked(compiled_pattern, content: str):
     """Run a compiled regex search across ``content`` with ReDoS
     protection AND length-cap safety.
 
-    The plain ``_safe_search`` returns ``None`` outright when
-    ``content > _MAX_SAFE_TEXT_LEN``, which silently breaks
-    ``ContextPattern.requires`` / ``AbsencePattern.absent`` on
-    legitimately-large workflows (Microsoft / Azure / AWS routinely
-    have files >50KB).  This chunked variant scans the content in
-    line-windowed chunks bounded by ``_MAX_SAFE_TEXT_LEN``; each
-    chunk pays the
-    SIGALRM ReDoS timeout and the per-chunk length cap, and the
-    A completed search reaches the full file. If the chunk count,
-    single-line size, or wall-clock bound stops it early, the function
-    returns a distinct falsey incomplete sentinel and records degraded
-    coverage for the engine to disclose.
+    Scan line windows within the per-search cap. A match can still be
+    returned after skipping an oversized line or timing out on a chunk.
+    In the absence of a match, any skipped or interrupted window makes
+    the result incomplete. The separate coverage flag survives a later
+    match so the engine can still report the analysis gap.
 
     Overlap of ``_CHUNK_OVERLAP_LINES`` lines preserves matches
     that span the chunk boundary; in practice every requires
@@ -214,6 +207,7 @@ def _safe_search_chunked(compiled_pattern, content: str):
     pos = 0
     n = len(lines)
     chunks_scanned = 0
+    incomplete = False
     deadline = _time.monotonic() + _CHUNKED_WALLCLOCK_BUDGET_S
     while pos < n:
         # Adversarial-input safety: two bounds, either of which
@@ -227,9 +221,9 @@ def _safe_search_chunked(compiled_pattern, content: str):
         #     per-chunk SIGALRM ceilings.  An overall wall-clock
         #     budget contains the worst case end-to-end.
         if chunks_scanned >= _MAX_CHUNKS:
-            return _mark_chunked_search_incomplete()
+            return _mark_regex_search_incomplete()
         if _time.monotonic() >= deadline:
-            return _mark_chunked_search_incomplete()
+            return _mark_regex_search_incomplete()
         # Grow the window until either we hit the line budget or
         # adding the next line would exceed the byte cap.
         end = pos
@@ -240,10 +234,9 @@ def _safe_search_chunked(compiled_pattern, content: str):
             size += len(lines[end])
             end += 1
         if end == pos:
-            # A single line exceeds the cap on its own — nothing to
-            # do but skip it (rare; would require a 50KB single line
-            # which no real workflow has).
-            _mark_chunked_search_incomplete()
+            # Later windows can still establish a match.
+            _mark_regex_search_incomplete()
+            incomplete = True
             pos += 1
             continue
         chunk = "".join(lines[pos:end])
@@ -251,10 +244,12 @@ def _safe_search_chunked(compiled_pattern, content: str):
         chunks_scanned += 1
         if m:
             return m
+        if m is _INCOMPLETE_REGEX_SEARCH:
+            incomplete = True
         if end == n:
             break
         pos = max(pos + 1, end - _CHUNK_OVERLAP_LINES)
-    return None
+    return _INCOMPLETE_REGEX_SEARCH if incomplete else None
 
 
 # Chunk-scan tuning constants for ``_safe_search_chunked``.
@@ -287,14 +282,8 @@ _CHUNK_COVERAGE_CEILING = _MAX_CHUNKS * _MAX_SAFE_TEXT_LEN
 def _safe_search(compiled_pattern, text: str):
     """Run a compiled regex search with ReDoS / CPU-exhaustion protection.
 
-    Two defenses stacked so no single path is load-bearing:
-
-      (1) Unconditional text-length cap. Adversarial content longer than
-          _MAX_SAFE_TEXT_LEN is skipped before the regex engine sees it.
-          A legitimate CI/CD workflow file does not exceed 50KB, so the
-          precision cost is effectively zero. This fires on every call path
-          — POSIX main-thread, POSIX non-main-thread, Windows — so it
-          cannot be bypassed by picking the wrong thread context.
+    (1) A text-length cap applies on every platform. Longer input is
+        skipped, which leaves the search incomplete.
 
       (2) SIGALRM-backed 5-second timeout on POSIX main-thread. The handler
           is a module-level function (not a per-call closure), so the hot
@@ -303,11 +292,12 @@ def _safe_search(compiled_pattern, text: str):
           SIGALRM users (pytest-timeout's signal method, uvicorn workers,
           supervisors) rather than stomping their handler.
 
-    Returns None on timeout or cap hit (treat as "pattern did not match").
+    A completed miss returns None. Timeouts and length-cap hits return
+    a distinct falsey sentinel and record incomplete coverage.
     """
     # (1) Length cap applies unconditionally.
     if len(text) > _MAX_SAFE_TEXT_LEN:
-        return None
+        return _mark_regex_search_incomplete()
 
     if os.name != "posix":
         return compiled_pattern.search(text)
@@ -338,7 +328,7 @@ def _safe_search(compiled_pattern, text: str):
     try:
         return compiled_pattern.search(text)
     except _PatternTimeout:
-        return None
+        return _mark_regex_search_incomplete()
     finally:
         signal.alarm(0)  # type: ignore[attr-defined,unused-ignore]
         if need_swap:
@@ -1028,7 +1018,7 @@ class AbsencePattern:
         # pattern was actually present but the cap returned None).
         # That inverted FP/TP for absence-style rules on big files.
         search = _safe_search_chunked(self._compiled, content)
-        if search is _INCOMPLETE_CHUNKED_SEARCH:
+        if search is _INCOMPLETE_REGEX_SEARCH:
             return []
         if not search:
             return [(1, f"(pattern not found: {self.absent})")]
@@ -1555,7 +1545,7 @@ class ContextPattern:
             return []
         if self._requires_absent_re:
             absent_search = _safe_search_chunked(self._requires_absent_re, gated_content)
-            if absent_search is _INCOMPLETE_CHUNKED_SEARCH or absent_search:
+            if absent_search is _INCOMPLETE_REGEX_SEARCH or absent_search:
                 return []
 
         # Build per-line job-segment content map if we need per-job anchor suppression.
@@ -1621,7 +1611,7 @@ class ContextPattern:
                 continue
             if self._requires_absent_re:
                 absent_search = _safe_search_chunked(self._requires_absent_re, seg_content)
-                if absent_search is _INCOMPLETE_CHUNKED_SEARCH or absent_search:
+                if absent_search is _INCOMPLETE_REGEX_SEARCH or absent_search:
                     continue
             for j, line in enumerate(seg_lines):
                 if any(_safe_search(ex, line) for ex in self._excludes):

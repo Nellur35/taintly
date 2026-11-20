@@ -37,8 +37,8 @@ from .models import (
     Platform,
     Rule,
     Severity,
-    _chunked_search_coverage_incomplete,
-    _reset_chunked_search_coverage,
+    _regex_search_coverage_incomplete,
+    _reset_regex_search_coverage,
     scan_session,
 )
 from .parsers.anchor_expander import expand_anchors
@@ -646,7 +646,7 @@ def scan_file(
 
     deadline = time.monotonic() + budget
     unevaluated = 0
-    _reset_chunked_search_coverage()
+    _reset_regex_search_coverage()
     with (
         scan_session(),
         set_pattern_filepath_context(
@@ -909,17 +909,17 @@ def scan_file(
                     )
                 )
 
-    if _chunked_search_coverage_incomplete():
+    if _regex_search_coverage_incomplete():
         findings.append(
             Finding(
                 rule_id="ENGINE-ERR",
                 severity=Severity.LOW,
-                title="Chunked file-scope search ended before full coverage",
+                title="Regex search ended before full coverage",
                 description=(
-                    "A file-scope regex search reached its chunk-count, line-size, "
-                    "or wall-clock safety bound before scanning the whole file. "
-                    "Taintly suppressed absence-based conclusions that could not "
-                    "be proven; per-line and already-completed rule checks still ran."
+                    "A regex search reached a length, chunk-count, or time limit. "
+                    "Checks that require a completed search for an absent pattern "
+                    "remain unresolved. Other checks and supported matches can "
+                    "still produce findings."
                 ),
                 file=filepath,
             )
