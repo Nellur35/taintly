@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from zipfile import ZIP_STORED, BadZipFile, ZipFile
 
-from taintly.ingestion.codebuild_deploy import _phase_window, _record
+from taintly.ingestion.codebuild_deploy import _RECORD, _phase_window, _record
 from taintly.ingestion.codebuild_snapshot import (
     BUILD_ID,
     SnapshotError,
@@ -130,16 +130,7 @@ def _phase(build: _Row, name: str, status: str = "SUCCEEDED") -> tuple[float, fl
     )
 
 
-def _trace(
-    capture: _Row,
-    build: _Row,
-    inline: str,
-    lower: float,
-    upper: float,
-    status: str,
-    region: str,
-    account: str,
-) -> tuple[str, float, float]:
+def _owned_log_rows(capture: _Row, build: _Row, region: str, account: str) -> list[tuple[int, str]]:
     logs = _map(capture.get("logs"), "CloudWatch export")
     owner = _map(build.get("logs"), "CodeBuild log owner")
     _need(
@@ -154,7 +145,7 @@ def _trace(
         "CloudWatch export does not identify the selected build stream",
     )
     rows = _rows(logs.get("events"), "CloudWatch events", 4096)
-    messages = []
+    messages: list[tuple[int, str]] = []
     last = 0
     for row in rows:
         stamp, message = row["timestamp"], row["message"]
@@ -163,10 +154,19 @@ def _trace(
             "Malformed CloudWatch event order",
         )
         last = stamp
-        # CloudWatch can stamp the runner completion line after the phase timestamp.
-        if lower <= stamp / 1000 <= upper + 1:
-            messages.append(message)
-    trace = "".join(messages)
+        messages.append((stamp, message))
+    return messages
+
+
+def _trace(
+    rows: list[tuple[int, str]],
+    inline: str,
+    lower: float,
+    upper: float,
+    status: str,
+) -> tuple[str, float, float]:
+    # CloudWatch can stamp the runner completion line after the phase timestamp.
+    trace = "".join(message for stamp, message in rows if lower <= stamp / 1000 <= upper + 1)
     command = "\n".join(line[8:] for line in inline.splitlines()[7:])
     matches = list(
         re.finditer(
@@ -192,6 +192,48 @@ def _trace(
             active_commands += 1
     _need(active_commands == 1, "Owning BUILD log reports more than one command")
     return tail[: outcomes[0].start()], start, when
+
+
+def _source_workspace(
+    rows: list[tuple[int, str]],
+    download: tuple[float, float],
+    command_start: float,
+    identity: str | None,
+) -> str | None:
+    lower, upper = download
+    expected = r"/codebuild/output/src[0-9]+/src"
+    if identity is not None:
+        expected += r"/github\.com/(?i:" + re.escape(identity) + ")"
+    events: list[tuple[float, str]] = []
+    # CloudWatch can deliver DOWNLOAD_SOURCE and BUILD records in the same
+    # delayed batch. Compare runner timestamps in the bounded owning stream.
+    messages = "".join(message for _, message in rows)
+    kinds = (
+        r"CODEBUILD_SRC_DIR=[^\n]*|Moving to directory [^\n]*"
+        r"|Phase complete: DOWNLOAD_SOURCE State: [^\n]*|Running command [^\n]*"
+    )
+    pattern = "(" + kinds + ")"
+    for header in re.finditer("^" + _RECORD + pattern + "$", messages, re.M):
+        when, (record,) = _record(header[0], pattern)
+        if lower <= when < command_start:
+            events.append((when, record))
+    if not any(
+        record.startswith(("CODEBUILD_SRC_DIR=", "Moving to directory ")) for _, record in events
+    ):
+        return None  # A compact receipt can still establish the request independently.
+    _need(len(events) == 3, "The build lacks an unambiguous source workspace before its command")
+    (declared, declaration), (entered, movement), (finished, completion) = events
+    match = re.fullmatch("CODEBUILD_SRC_DIR=(" + expected + ")", declaration)
+    if match is None:
+        raise SnapshotError("The recorded workspace does not match the selected source profile")
+    workspace = match[1]
+    _need(
+        lower <= declared < entered < finished <= upper
+        and movement == "Moving to directory " + workspace
+        and completion == "Phase complete: DOWNLOAD_SOURCE State: SUCCEEDED",
+        "Workspace entry does not match the selected source in the owning DOWNLOAD_SOURCE phase",
+    )
+    return workspace
 
 
 def _request_transport(event: _Row, when: float, lower: float, upper: float, denied: bool) -> _Row:
@@ -517,8 +559,9 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
     )
     allowed = status == "SUCCEEDED"
     lower, upper = _phase(build, "BUILD", status)
+    download = _phase(build, "DOWNLOAD_SOURCE")
     _need(
-        _phase(build, "DOWNLOAD_SOURCE")[1] <= lower,
+        download[1] <= lower,
         "CodeBuild source phase must precede the request",
     )
     identity = _github_identity(origin)
@@ -597,8 +640,10 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
     if role_match is None:
         raise SnapshotError("The CodeBuild role does not belong to the selected account")
     role_name = re.escape(role_match[1])
-    trace, command_start, completion = _trace(
-        capture, build, inline, lower, upper, status, region, account
+    rows = _owned_log_rows(capture, build, region, account)
+    trace, command_start, completion = _trace(rows, inline, lower, upper, status)
+    workspace = _source_workspace(
+        rows, download, command_start, identity if input_object is None else None
     )
     identity_and_request = re.compile(
         rf"^source={re.escape(runtime_source)}\nbuild={re.escape(build_arn)}\n[ \t]*"
@@ -710,6 +755,12 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
             command_start,
         )
 
+    source_plan: _Row = {
+        "kind": "provider-inline",
+        "line": inline[: inline.index("aws s3api put-object")].count("\n") + 1,
+    }
+    if workspace is not None:
+        source_plan["workspace"] = workspace
     result = {
         "state": "direct-s3-write-observed" if allowed else "direct-s3-write-denied",
         "build": build_id,
@@ -718,10 +769,7 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
         "head": head,
         "source_ref": selector,
         "source_scope": "pinned-branch",
-        "source_plan": {
-            "kind": "provider-inline",
-            "line": inline[: inline.index("aws s3api put-object")].count("\n") + 1,
-        },
+        "source_plan": source_plan,
         "influence": witness,
         "publication": {
             "operation": "s3:PutObject",
