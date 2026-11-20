@@ -876,6 +876,14 @@ observed through the command response and verified version-pinned retrieval.
 Without a bound S3 data event, `publication.acting_session` is `unverified`.
 `reported_sts_session` records the session shown by the runner's separate
 STS call.
+The owning runner log can also corroborate entry into the primary source
+workspace before the command. The declaration, directory entry and successful
+DOWNLOAD_SOURCE must agree in this managed-image profile. Conflicting or
+partial workspace records leave the observation unresolved. Compact logs
+with neither workspace marker leave the workspace unverified while retaining
+an independently corroborated request. Operating-system process and
+filesystem identity require separate evidence.
+
 The Git file, command, request time, role and session, target, checksum,
 and version are checked when relevant. Provide an optional redacted
 `runtime_sts_event` from CloudTrail to bind the build's

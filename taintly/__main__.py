@@ -2250,6 +2250,9 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
             print(
                 f"  S3 request actor: {publication['acting_session']} (bound to the S3 data event)."
             )
+        workspace = result.get("source_plan", {}).get("workspace")
+        if workspace is not None:
+            print(f"  CodeBuild recorded entry into source workspace {workspace}.")
         transport = publication.get("transport", {})
         if "http_status" in transport:
             print(f"  Reported S3 HTTP status: {transport['http_status']}.")

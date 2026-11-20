@@ -1,10 +1,10 @@
 """A single-command PutObject profile rejects conflicting runner records."""
 
+import sys
 from base64 import b64encode
 from datetime import datetime, timezone
 from hashlib import sha256
 from io import BytesIO
-import sys
 from zipfile import ZipFile
 
 import pytest
@@ -16,8 +16,10 @@ from taintly.ingestion.codebuild_put import (
     _bound_launch,
     _bound_s3_input,
     _denial_reason,
+    _owned_log_rows,
     _pinned_github_source,
     _request_transport,
+    _source_workspace,
     _trace,
     _workspace_identity,
 )
@@ -212,16 +214,56 @@ def test_only_one_runner_command_inside_owning_build(extra_second):
     events.sort(key=lambda entry: entry["timestamp"])
     capture = {"logs": {"group": "group", "stream": "stream", "events": events}}
     inline = "\n" * 7 + "        set -euo pipefail\n        aws s3api put-object"
+    rows = _owned_log_rows(capture, build, "us-east-1", "012345678901")
 
     if extra_second in {2, 4}:
         with pytest.raises(SnapshotError, match="reports more than one command"):
-            _trace(
-                capture, build, inline, start, start + 6, "SUCCEEDED", "us-east-1", "012345678901"
-            )
+            _trace(rows, inline, start, start + 6, "SUCCEEDED")
     else:
-        assert _trace(
-            capture, build, inline, start, start + 6, "SUCCEEDED", "us-east-1", "012345678901"
-        ) == ("", start + 3, start + 6)
+        assert _trace(rows, inline, start, start + 6, "SUCCEEDED") == ("", start + 3, start + 6)
+
+
+@pytest.mark.parametrize(
+    ("variant", "reason"),
+    [
+        ("github", ""),
+        ("zip", ""),
+        ("compact", ""),
+        ("missing-entry", "unambiguous source workspace"),
+        ("wrong-root", "recorded workspace"),
+        ("sibling", "Workspace entry does not match"),
+        ("intervening-command", "unambiguous source workspace"),
+        ("outside-download", "Workspace entry does not match"),
+    ],
+)
+def test_source_workspace_uses_the_runner_order_in_its_owned_stream(variant, reason):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+    identity = None if variant == "zip" else "owner/project"
+    workspace = "/codebuild/output/src123/src"
+    if identity is not None:
+        workspace += "/github.com/Owner/Project"
+    declaration = workspace.replace("Project", "Sibling") if variant == "wrong-root" else workspace
+    movement = workspace.replace("123", "456") if variant == "sibling" else workspace
+    completion = 6 if variant == "outside-download" else 3
+    messages = [(completion, "Phase complete: DOWNLOAD_SOURCE State: SUCCEEDED")]
+    if variant != "compact":
+        messages.append((1, f"CODEBUILD_SRC_DIR={declaration}"))
+        if variant != "missing-entry":
+            messages.append((2, f"Moving to directory {movement}"))
+    if variant == "intervening-command":
+        messages.append((4, "Running command printf inert"))
+    # Simulate CloudWatch delivery in one later batch.
+    rows = [
+        (int((start + 10) * 1000), f"[Container] 2026/01/01 00:00:{sec:02}.000000 {line}\n")
+        for sec, line in sorted(messages)
+    ]
+    if reason:
+        with pytest.raises(SnapshotError, match=reason):
+            _source_workspace(rows, (start, start + 5), start + 7, identity)
+    else:
+        assert _source_workspace(rows, (start, start + 5), start + 7, identity) == (
+            None if variant == "compact" else workspace
+        )
 
 
 @pytest.mark.parametrize(("second", "matches"), [(1, False), (2, True), (4, True), (5, False)])
@@ -428,6 +470,11 @@ def test_only_version_bound_audit_identifies_s3_writer(
         "EXPERIMENT_MARKER_SHA256": digest.hexdigest(),
     }
     capture = {
+        "logs": {
+            "group": "group",
+            "stream": "stream",
+            "events": [{"timestamp": int(start * 1000), "message": "Owning log stream\n"}],
+        },
         "build": {
             "arn": arn,
             "id": build_id,
@@ -436,6 +483,11 @@ def test_only_version_bound_audit_identifies_s3_writer(
             "buildComplete": True,
             "secondarySources": [],
             "cache": {"type": "NO_CACHE"},
+            "logs": {
+                "groupName": "group",
+                "streamName": "stream",
+                "cloudWatchLogsArn": f"arn:aws:logs:{region}:{account}:log-group:group:log-stream:stream",
+            },
             "sourceVersion": f"refs/heads/main^{{{head}}}",
             "resolvedSourceVersion": head,
             "serviceRole": role,
