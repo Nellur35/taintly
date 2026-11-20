@@ -2472,6 +2472,7 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
     else:
         result = preview_observation(*inputs)
     state = result["state"]
+    artifact_authority = result.get("producer_artifact_authority")
     if args.format == "json":
         print(json.dumps({mode: result}, indent=2))
     elif state == "draft-release-create-denied":
@@ -2638,7 +2639,20 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
         )
     else:
         print(f"GitHub observation unresolved: {result['reason']}.\n{result['scope']}")
-    sys.exit(11 if state == "unresolved" else 0)
+    if args.format == "text" and artifact_authority is not None:
+        if artifact_authority["state"] == "unresolved":
+            print(f"  Producer archive authority unresolved: {artifact_authority['reason']}.")
+        else:
+            print(
+                f"  Producer job {artifact_authority['job']} uploaded archive "
+                f"{artifact_authority['artifact_id']} using the run artifact service credential. "
+                "The job's repository GITHUB_TOKEN was reported read-only."
+            )
+            print(f"  {artifact_authority['scope']}")
+    unresolved = state == "unresolved" or (
+        artifact_authority is not None and artifact_authority["state"] == "unresolved"
+    )
+    sys.exit(11 if unresolved else 0)
 
 
 def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:

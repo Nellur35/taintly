@@ -511,6 +511,26 @@ as `retrieved_at`. The result covers the exact source tag and commit.
 Authentication identity, release assets and downstream use require
 separate evidence.
 
+### Producer archive credential
+
+The artifact-to-release, tag-push and Preview receipts accept an optional
+top-level `producer_artifact_authority` record from the trusted producer log.
+Save the `run`, `attempt`, `job` and `step`, plus the runner's
+`runner_version` and the upload action's requested `action` and resolved
+`action_revision`. Save the runner's full `repository_token_permissions`
+map and its `permissions_line`, the resolved action's `action_line`, and the
+archive `artifact_id` and `sha256` (including the prefix). Preserve
+`digest_line`, `digest_at`, `finalize_line` and `finalized_at` from the same
+upload step, and `log_sha256` for the original producer log.
+
+The profile checks a read-only repository permission banner and the
+successful archive finalization against the same job, action and artifact.
+The reviewed upload builds use the runner's separate run artifact service
+credential. The product reports the credential class without its value
+and keeps downstream release or Preview authority separate. A conflicting
+optional record preserves the independently supported publication result
+and returns exit 11. Omit token values and signed URLs from the capture.
+
 The same command also accepts a trusted `github-signed-release-v1`
 receipt for a bounded same-repository PR recipe with separate build,
 reusable signing, and publishing jobs. Preserve their source files under
@@ -686,6 +706,9 @@ records agree about this publication. The report locates the configured
 archive contents, and wider permissions. Incompatible or missing evidence
 returns `unresolved` and exit `11`. The separate observation mode leaves
 ordinary repository scans and finding policy intact.
+
+The optional [producer archive credential](#producer-archive-credential)
+uses the same proof of the owning upload in this profile.
 
 ## Saved GitHub Pages publication
 

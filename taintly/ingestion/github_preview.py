@@ -21,6 +21,10 @@ from taintly.rules.github._workflow_run_artifact import (
 
 _CHECKOUT = "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
 _UPLOAD = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+_ARTIFACT_UPLOAD_PINS = {
+    _UPLOAD: "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "actions/upload-artifact@v7": "cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+}
 _DOWNLOAD = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 _WRANGLER = "cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0"
 _WORKFLOW = r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml"
@@ -226,6 +230,79 @@ def _observed_step(job: _Row, name: str, *, number: object = None) -> _Row:
         "selected step did not complete successfully within the saved job",
     )
     return step
+
+
+def _artifact_upload_authority(
+    receipt: object, job: _Row, step: _Row, artifact: _Row, requested: str
+) -> _Row:
+    """Corroborate the run's own artifact service credential for two reviewed bundles."""
+    if not isinstance(receipt, dict):
+        return {
+            "state": "unresolved",
+            "reason": "saved producer upload authority is missing or invalid",
+        }
+    try:
+        _require(
+            receipt["run"] == job["run_id"]
+            and receipt["attempt"] == job["run_attempt"]
+            and receipt["job"] == job["id"]
+            and receipt["step"] == step["number"],
+            "upload authority belongs to another job, attempt or step",
+        )
+        # These Node action builds use the runtime endpoint credential supplied
+        # by the reviewed runner's NodeScriptActionHandler, separate from github.token.
+        _require(
+            receipt["runner_version"] == "2.338.2"
+            and requested in _ARTIFACT_UPLOAD_PINS
+            and receipt["action"] == requested
+            and receipt["action_revision"] == _ARTIFACT_UPLOAD_PINS[requested],
+            "the runner or resolved upload implementation is outside the reviewed profile",
+        )
+        permissions = receipt["repository_token_permissions"]
+        _require(
+            isinstance(permissions, dict)
+            and permissions.get("Contents") == "read"
+            and all(value in ("read", "none") for value in permissions.values()),
+            "the saved producer does not report a read-only repository token",
+        )
+        lines = [
+            receipt[key]
+            for key in ("permissions_line", "action_line", "digest_line", "finalize_line")
+        ]
+        digest_at, finalized = _time(receipt["digest_at"]), _time(receipt["finalized_at"])
+        _require(
+            _matches(receipt["log_sha256"], _DIGEST)
+            and all(_id(line) for line in lines)
+            and all(a < b for a, b in pairwise(lines))
+            and _time(step["started_at"]) <= digest_at <= finalized
+            and _time(artifact["created_at"]) <= finalized
+            and finalized.replace(microsecond=0) <= _time(step["completed_at"])
+            and receipt["artifact_id"] == artifact["id"]
+            and receipt["sha256"] == artifact["digest"],
+            "upload completion or checksum does not bind the selected artifact and step",
+        )
+        return {
+            "state": "run-artifact-write-observed",
+            "credential": "ACTIONS_RUNTIME_TOKEN",
+            "repository_token": "read-only-reported",
+            "run": receipt["run"],
+            "attempt": receipt["attempt"],
+            "job": receipt["job"],
+            "step": receipt["step"],
+            "artifact_id": artifact["id"],
+            "action_revision": receipt["action_revision"],
+            "runner_version": receipt["runner_version"],
+            "permissions_line": receipt["permissions_line"],
+            "finalize_line": receipt["finalize_line"],
+            "log_sha256": receipt["log_sha256"],
+            "scope": "The credential class applies to this archive write. "
+            "The token value, wider authority and downstream publishing credential require separate evidence.",
+        }
+    except PreviewEvidenceError as exc:
+        reason = str(exc)
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        reason = "saved producer upload authority is incomplete or malformed"
+    return {"state": "unresolved", "reason": reason}
 
 
 def _receipt(trace: list[_Row], step: _Row, job: _Row, kind: str) -> str:
@@ -477,8 +554,14 @@ def _publish(
         _matches(url, r"https://[a-z0-9-]+(?:\.[a-z0-9-]+)+"),
         "Preview record lacks a supported version URL",
     )
+    authority = {}
+    if "producer_artifact_authority" in capture:
+        authority["producer_artifact_authority"] = _artifact_upload_authority(
+            capture["producer_artifact_authority"], build_job, up_obs, artifact, _UPLOAD
+        )
     return {
         "state": "preview-reported",
+        **authority,
         "repository": repository,
         "pr": {"number": pr["number"], "head_repository": pr["head_repo"], "head": pr["head"]},
         "producer": {
