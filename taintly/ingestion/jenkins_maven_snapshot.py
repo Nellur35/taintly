@@ -444,6 +444,11 @@ def _maven_credential_selection(root: Path, deploy_log: _Row) -> _Row:
     }
 
 
+def _record_maven_credential_selection(root: Path, deploy_log: _Row, result: _Row) -> None:
+    if "credential_log_sha256" in deploy_log:
+        result["maven_credential_selection"] = _maven_credential_selection(root, deploy_log)
+
+
 def _partial_snapshot_archive(
     root: Path, target: str, capture: _Row, command: _Row, result: _Row, checkout: dict[str, str]
 ) -> _Row:
@@ -459,14 +464,16 @@ def _partial_snapshot_archive(
     )
     raw = _project_file(root, "artifact.jar", 8 * 1024 * 1024)
     _require(raw, "selected Jenkins archive is empty")
+    deploy_log = capture["deploy_log"]
     _verify_deploy_log(
-        capture["deploy_log"],
+        deploy_log,
         result["job"],
         command,
         result["reported_workspace"],
         archive.rsplit("/", 1)[1],
         hashlib.sha512(raw).hexdigest(),
     )
+    _record_maven_credential_selection(root, deploy_log, result)
     return {
         **result,
         "state": "unresolved",
@@ -578,8 +585,7 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         sha512 = capture["registry"]["stored_attributes"]["digest.sha512"]
         _verify_deploy_log(capture["deploy_log"], job, command, workspace, artifact_name, sha512)
         deploy_log = capture["deploy_log"]
-        if "credential_log_sha256" in deploy_log:
-            result["maven_credential_selection"] = _maven_credential_selection(root, deploy_log)
+        _record_maven_credential_selection(root, deploy_log, result)
         if "workspace_console" in capture:
             from .jenkins_workspace import workspace_allocation
 
