@@ -21,6 +21,7 @@ import shlex
 import subprocess
 from dataclasses import dataclass
 
+from ._file_commit import read_snapshot, write_text_atomic
 from .models import _quoted_heredoc_body_lines
 from .parsers.structural import Event, EventKind, walk_workflow
 from .reporters._encoding import em_dash_char, sep_char
@@ -92,8 +93,8 @@ def fix_pin_actions(filepath: str, dry_run: bool = False) -> list[FixResult]:
     """Pin all unpinned action references to their commit SHAs."""
     results = []
 
-    with open(filepath, encoding="utf-8") as f:
-        lines = f.readlines()
+    snapshot = read_snapshot(filepath)
+    lines = snapshot.lines()
 
     modified = False
     new_lines = []
@@ -145,8 +146,7 @@ def fix_pin_actions(filepath: str, dry_run: bool = False) -> list[FixResult]:
             new_lines.append(line)
 
     if modified and not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
 
     return results
 
@@ -162,8 +162,8 @@ def fix_persist_credentials(filepath: str, dry_run: bool = False) -> list[FixRes
     """Add persist-credentials: false to checkout steps that don't have it."""
     results = []
 
-    with open(filepath, encoding="utf-8") as f:
-        lines = f.readlines()
+    snapshot = read_snapshot(filepath)
+    lines = snapshot.lines()
 
     modified = False
     new_lines = []
@@ -280,8 +280,7 @@ def fix_persist_credentials(filepath: str, dry_run: bool = False) -> list[FixRes
             i += 1
 
     if modified and not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
 
     return results
 
@@ -295,8 +294,8 @@ def fix_add_permissions(filepath: str, dry_run: bool = False) -> list[FixResult]
     """Add a minimal permissions block if none exists."""
     results: list[FixResult] = []
 
-    with open(filepath, encoding="utf-8") as f:
-        content = f.read()
+    snapshot = read_snapshot(filepath)
+    content = snapshot.text()
 
     if re.search(r"^permissions:", content, re.MULTILINE):
         return results  # Already has permissions
@@ -344,8 +343,7 @@ def fix_add_permissions(filepath: str, dry_run: bool = False) -> list[FixResult]
     )
 
     if not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(lines)
+        write_text_atomic(filepath, "".join(lines), expected=snapshot)
 
     return results
 
@@ -372,8 +370,8 @@ def fix_npm_ignore_scripts(filepath: str, dry_run: bool = False) -> list[FixResu
     is not part of the default ``--fix`` safe set.
     """
     results: list[FixResult] = []
-    with open(filepath, encoding="utf-8") as f:
-        content = f.read()
+    snapshot = read_snapshot(filepath)
+    content = snapshot.text()
 
     new_lines: list[str] = []
     modified = False
@@ -406,8 +404,7 @@ def fix_npm_ignore_scripts(filepath: str, dry_run: bool = False) -> list[FixResu
         modified = True
 
     if modified and not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
 
     return results
 
@@ -480,8 +477,8 @@ def fix_remove_insecure_commands(filepath: str, dry_run: bool = False) -> list[F
     because the deprecated commands no longer exist upstream.
     """
     results: list[FixResult] = []
-    with open(filepath, encoding="utf-8") as f:
-        content = f.read()
+    snapshot = read_snapshot(filepath)
+    content = snapshot.text()
 
     lines = content.splitlines(keepends=True)
     removed: set[int] = set()
@@ -502,8 +499,7 @@ def fix_remove_insecure_commands(filepath: str, dry_run: bool = False) -> list[F
     if removed and not dry_run:
         removed |= _emptied_env_block_indices(lines, removed)
         new_lines = [ln for i, ln in enumerate(lines) if i not in removed]
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
 
     return results
 
@@ -534,8 +530,8 @@ def fix_remove_debug_logging(filepath: str, dry_run: bool = False) -> list[FixRe
     attempts in every log.
     """
     results: list[FixResult] = []
-    with open(filepath, encoding="utf-8") as f:
-        content = f.read()
+    snapshot = read_snapshot(filepath)
+    content = snapshot.text()
 
     lines = content.splitlines(keepends=True)
     removed: set[int] = set()
@@ -556,8 +552,7 @@ def fix_remove_debug_logging(filepath: str, dry_run: bool = False) -> list[FixRe
     if removed and not dry_run:
         removed |= _emptied_env_block_indices(lines, removed)
         new_lines = [ln for i, ln in enumerate(lines) if i not in removed]
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
 
     return results
 
@@ -604,8 +599,8 @@ def fix_disable_setup_cache_in_release(filepath: str, dry_run: bool = False) -> 
     case.
     """
     results: list[FixResult] = []
-    with open(filepath, encoding="utf-8") as f:
-        content = f.read()
+    snapshot = read_snapshot(filepath)
+    content = snapshot.text()
 
     # Only rewrite in files that actually satisfy SEC9-GH-003's trigger
     # gate AND use a setup-<lang> action; otherwise we'd overwrite
@@ -644,8 +639,7 @@ def fix_disable_setup_cache_in_release(filepath: str, dry_run: bool = False) -> 
         modified = True
 
     if modified and not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
 
     return results
 
@@ -749,8 +743,8 @@ def fix_quote_github_refs(filepath: str, dry_run: bool = False) -> list[FixResul
     Pairs with rule SEC4-GH-018.
     """
     results: list[FixResult] = []
-    with open(filepath, encoding="utf-8") as f:
-        lines = f.readlines()
+    snapshot = read_snapshot(filepath)
+    lines = snapshot.lines()
 
     heredoc_skip = _quoted_heredoc_body_lines(lines)
     new_lines: list[str] = []
@@ -777,8 +771,7 @@ def fix_quote_github_refs(filepath: str, dry_run: bool = False) -> list[FixResul
         modified = True
 
     if modified and not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
 
     return results
 
@@ -964,8 +957,8 @@ def fix_quote_gitlab_refs(filepath: str, dry_run: bool = False) -> list[FixResul
     Pairs with rule SEC4-GL-003.
     """
     results: list[FixResult] = []
-    with open(filepath, encoding="utf-8") as f:
-        lines = f.readlines()
+    snapshot = read_snapshot(filepath)
+    lines = snapshot.lines()
 
     heredoc_skip = _quoted_heredoc_body_lines(lines)
     editable = _gitlab_quote_edit_lines(lines)
@@ -993,8 +986,7 @@ def fix_quote_gitlab_refs(filepath: str, dry_run: bool = False) -> list[FixResul
         modified = True
 
     if modified and not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
 
     return results
 
@@ -1038,8 +1030,8 @@ def fix_quote_gitlab_ci_vars(filepath: str, dry_run: bool = False) -> list[FixRe
     payload-bearing user-input vars rather than ref/tag identifiers).
     """
     results: list[FixResult] = []
-    with open(filepath, encoding="utf-8") as f:
-        lines = f.readlines()
+    snapshot = read_snapshot(filepath)
+    lines = snapshot.lines()
 
     heredoc_skip = _quoted_heredoc_body_lines(lines)
     editable = _gitlab_quote_edit_lines(lines)
@@ -1067,8 +1059,7 @@ def fix_quote_gitlab_ci_vars(filepath: str, dry_run: bool = False) -> list[FixRe
         modified = True
 
     if modified and not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
 
     return results
 
@@ -1112,8 +1103,8 @@ def fix_unquote_groovy_gstring_with_params(filepath: str, dry_run: bool = False)
     can opt into knowingly.
     """
     results: list[FixResult] = []
-    with open(filepath, encoding="utf-8") as f:
-        lines = f.readlines()
+    snapshot = read_snapshot(filepath)
+    lines = snapshot.lines()
 
     new_lines: list[str] = []
     modified = False
@@ -1157,8 +1148,7 @@ def fix_unquote_groovy_gstring_with_params(filepath: str, dry_run: bool = False)
         modified = True
 
     if modified and not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
 
     return results
 
@@ -1220,8 +1210,8 @@ def fix_jenkins_cap_add_hint(filepath: str, dry_run: bool = False) -> list[FixRe
     if not is_jk:
         return results
 
-    with open(filepath, encoding="utf-8") as f:
-        lines = f.readlines()
+    snapshot = read_snapshot(filepath)
+    lines = snapshot.lines()
 
     new_lines: list[str] = []
     modified = False
@@ -1248,8 +1238,7 @@ def fix_jenkins_cap_add_hint(filepath: str, dry_run: bool = False) -> list[FixRe
             new_lines.append(line)
 
     if modified and not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
     return results
 
 
@@ -1300,8 +1289,8 @@ def fix_github_ai_allowed_tools_scaffold(filepath: str, dry_run: bool = False) -
     GitHub workflow walk. Unsupported, merged, malformed, duplicate, or
     flow-style candidate steps are left unchanged.
     """
-    with open(filepath, encoding="utf-8", newline="") as f:
-        content = f.read()
+    snapshot = read_snapshot(filepath)
+    content = snapshot.data.decode("utf-8")
     newline = "\r\n" if "\r\n" in content else "\r" if "\r" in content else "\n"
     lines = content.splitlines(keepends=True)
     try:
@@ -1416,8 +1405,7 @@ def fix_github_ai_allowed_tools_scaffold(filepath: str, dry_run: bool = False) -
         output.append(line)
         if index in insertions:
             output.append(insertions[index])
-    with open(filepath, "w", encoding="utf-8", newline="") as f:
-        f.write("".join(output))
+    write_text_atomic(filepath, "".join(output), expected=snapshot, newline="")
     return results
 
 
@@ -1461,8 +1449,8 @@ def fix_hoist_service_credentials(filepath: str, dry_run: bool = False) -> list[
     if not (name == ".gitlab-ci.yml" or name.endswith(".gitlab-ci.yml") or "/ci/" in filepath_fwd):
         return results
 
-    with open(filepath, encoding="utf-8") as f:
-        lines = f.readlines()
+    snapshot = read_snapshot(filepath)
+    lines = snapshot.lines()
 
     new_lines: list[str] = []
     modified = False
@@ -1495,8 +1483,7 @@ def fix_hoist_service_credentials(filepath: str, dry_run: bool = False) -> list[
         modified = True
 
     if modified and not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
     return results
 
 
@@ -1527,8 +1514,8 @@ def fix_egress_allowlist_scaffold(filepath: str, dry_run: bool = False) -> list[
     results: list[FixResult] = []
     if not filepath.lower().endswith((".yml", ".yaml")):
         return results
-    with open(filepath, encoding="utf-8") as f:
-        content = f.read()
+    snapshot = read_snapshot(filepath)
+    content = snapshot.text()
     if _HARDEN_RUNNER_PRESENT.search(content) or "steps:" not in content:
         return results
 
@@ -1599,8 +1586,7 @@ def fix_egress_allowlist_scaffold(filepath: str, dry_run: bool = False) -> list[
         i += 1
 
     if modified and not dry_run:
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        write_text_atomic(filepath, "".join(new_lines), expected=snapshot)
     return results
 
 
@@ -1652,13 +1638,27 @@ def apply_fixes(
     results: list[FixResult] = []
     fixers = list(ALL_FIXERS.keys()) if fix_types is None else fix_types
 
-    for fix_name in fixers:
-        if fix_name in ALL_FIXERS:
-            results.extend(ALL_FIXERS[fix_name](filepath, dry_run=dry_run))
-
-    for fix_name in extra_fix_types or []:
-        if fix_name in OPT_IN_FIXERS:
-            results.extend(OPT_IN_FIXERS[fix_name](filepath, dry_run=dry_run))
+    selected = [(name, ALL_FIXERS[name]) for name in fixers if name in ALL_FIXERS]
+    selected.extend(
+        (name, OPT_IN_FIXERS[name]) for name in extra_fix_types or [] if name in OPT_IN_FIXERS
+    )
+    for fix_name, fixer in selected:
+        try:
+            results.extend(fixer(filepath, dry_run=dry_run))
+        except (OSError, UnicodeError) as error:
+            # An earlier fix may already have committed. Stop this file and
+            # let the caller report the failure alongside prior results.
+            results.append(
+                FixResult(
+                    file=filepath,
+                    line=0,
+                    original="",
+                    fixed="",
+                    fix_type=fix_name,
+                    error=f"{type(error).__name__}: source could not be safely updated; review and retry.",
+                )
+            )
+            break
 
     return results
 
