@@ -1902,6 +1902,17 @@ def _check_jenkins_maven_snapshot(
         credential_details = (
             f"  Maven authentication selection unresolved: {credential_selection['reason']}.\n"
         )
+    workspace_allocation = result.get("workspace_allocation")
+    if workspace_allocation and workspace_allocation["state"] == "controller-allocation-correlated":
+        credential_details += (
+            f"  Jenkins assigned agent {workspace_allocation['agent']} "
+            f"and workspace {workspace_allocation['workspace']} "
+            f"(allocation node {workspace_allocation['allocation_node']}).\n"
+        )
+    elif workspace_allocation:
+        credential_details += (
+            f"  Jenkins workspace allocation unresolved: {workspace_allocation['reason']}.\n"
+        )
     if args.format == "json":
         print(json.dumps({mode: result}, indent=2))
     elif result["state"] == "remote-matrix-publisher-skipped":

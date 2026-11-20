@@ -580,6 +580,24 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         deploy_log = capture["deploy_log"]
         if "credential_log_sha256" in deploy_log:
             result["maven_credential_selection"] = _maven_credential_selection(root, deploy_log)
+        if "workspace_console" in capture:
+            from .jenkins_workspace import workspace_allocation
+
+            allocation = workspace_allocation(
+                root,
+                capture["workspace_console"],
+                job,
+                capture["jenkinsfile_loader"],
+                capture["stage"]["id"],
+                capture["checkout_log"]["nodeId"],
+                command["id"],
+                workspace,
+            )
+            _require(
+                allocation["state"] != "conflicting-allocations",
+                allocation.get("reason", "Jenkins workspace allocation conflicts"),
+            )
+            result["workspace_allocation"] = allocation
         if upstream:
             result.update(
                 checkout=checkout,
