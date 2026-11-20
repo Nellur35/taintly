@@ -56,7 +56,7 @@ def test_upload_credential_is_independent_from_repository_token(upload, ref, pin
     result = _artifact_upload_authority(saved, job, step, artifact, ref)
     assert result["state"] == "run-artifact-write-observed"
     assert result["credential"] == "ACTIONS_RUNTIME_TOKEN"
-    assert result["repository_token"] == "read-only-reported"
+    assert result["repository_access"] == "read-only-reported"
     assert (result["job"], result["artifact_id"]) == (job["id"], artifact["id"])
 
 

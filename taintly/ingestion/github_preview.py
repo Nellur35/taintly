@@ -284,7 +284,7 @@ def _artifact_upload_authority(
         return {
             "state": "run-artifact-write-observed",
             "credential": "ACTIONS_RUNTIME_TOKEN",
-            "repository_token": "read-only-reported",
+            "repository_access": "read-only-reported",
             "run": receipt["run"],
             "attempt": receipt["attempt"],
             "job": receipt["job"],
