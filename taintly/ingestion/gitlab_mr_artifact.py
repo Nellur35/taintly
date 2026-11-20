@@ -223,11 +223,13 @@ def _archived_member(
     }
 
 
-def _native_archive_authority(data: _Row, job_url: str) -> _Row:
+def _native_archive_authority(
+    data: _Row, job_url: str, project_path: str, upload: _Row, *, fork_log: _Row | None = None
+) -> _Row:
     """Bind the known native uploader to this previously corroborated archive."""
     try:
         evidence = data["archive_runner_evidence"]
-        job, pipe, upload = data["job"], data["pipeline"], data["trace"][-1]
+        job, pipe = data["job"], data["pipeline"]
         _need(
             _identifier(evidence["job"], "runner evidence job") == job["id"]
             and _identifier(evidence["pipeline"], "runner evidence pipeline") == pipe["id"]
@@ -242,7 +244,7 @@ def _native_archive_authority(data: _Row, job_url: str) -> _Row:
             and evidence["helper_config"] == _ARCHIVE_HELPER_CONFIG,
             "runner or helper image is outside the verified archive profile",
         )
-        cwd = f"/builds/{data['project']['path']}"
+        cwd = f"/builds/{project_path}"
         _need(evidence["checkout_directory"] == cwd, "runner checkout directory does not match")
         lines = [
             _identifier(evidence[key], key)
@@ -267,6 +269,23 @@ def _native_archive_authority(data: _Row, job_url: str) -> _Row:
             and received == _time(upload["time"], "saved archive response"),
             "archive response does not match the recorded job and upload stage",
         )
+        correlation = _value(evidence["correlation_id"], _CORRELATION, "archive correlation ID")
+        trace_digest = _value(evidence["trace_sha256"], _SHA256, "runner trace digest")
+        if fork_log is not None:
+            phase_start, phase_reply, phase_end = fork_log["rows"][-3:]
+            phase_spans = [
+                (
+                    _identifier(row["line"], "fork archive trace line"),
+                    _time(row["time"], "fork archive trace time"),
+                )
+                for row in (phase_start, phase_reply, phase_end)
+            ]
+            _need(
+                trace_digest == fork_log["sha256"]
+                and phase_spans == list(zip(lines[2:], (start, received, finish), strict=True))
+                and f" correlation_id={correlation} " in phase_reply["value"],
+                "runner evidence does not match the verified fork archive response",
+            )
         return {
             "state": "native-archive-write-observed",
             "credential": "runner-job-token",
@@ -274,10 +293,8 @@ def _native_archive_authority(data: _Row, job_url: str) -> _Row:
             "method": "POST",
             "route": f"jobs/{job['id']}/artifacts",
             "http_status": upload["http_status"],
-            "correlation_id": _value(
-                evidence["correlation_id"], _CORRELATION, "archive correlation ID"
-            ),
-            "trace_sha256": _value(evidence["trace_sha256"], _SHA256, "runner trace digest"),
+            "correlation_id": correlation,
+            "trace_sha256": trace_digest,
             "archive_response_line": lines[3],
             "runner_revision": _ARCHIVE_RUNNER_REVISION,
             "checkout_directory": cwd,
@@ -722,6 +739,21 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
             "sha256": history["sha256"],
             "current_mr_head": current_head,
         }
+    if "archive_runner_evidence" in data:
+        result["archive_runner_authority"] = (
+            _native_archive_authority(
+                data,
+                job_url,
+                source_path,
+                {"time": response["time"], "http_status": publication["http_status"]},
+                fork_log=log,
+            )
+            if success
+            else {
+                "state": "unresolved",
+                "reason": "runner evidence requires an observed successful job archive",
+            }
+        )
     archive_bytes = None
     if "archive_download" in data:
         download, archive_bytes = _fork_archive_download(data, root, result)
@@ -1252,7 +1284,7 @@ def _assess(
             detail["pages_preview"] = _pages_preview(data, cfg, detail, path, job_url)
     if "archive_runner_evidence" in data:
         detail["archive_runner_authority"] = (
-            _native_archive_authority(data, job_url)
+            _native_archive_authority(data, job_url, path, data["trace"][-1])
             if detail["state"] == "job-artifact-observed"
             else {
                 "state": "unresolved",

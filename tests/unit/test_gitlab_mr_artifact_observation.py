@@ -98,21 +98,8 @@ def test_explicit_artifact_and_job_authority_are_scoped(tmp_path, capture):
 
 
 
-@pytest.mark.parametrize(
-    ("changed", "value", "expected"),
-    [
-        ("job", 33, "native-archive-write-observed"),
-        ("job", 34, "unresolved"),
-        ("revision", BASE, "unresolved"),
-        ("archive_time", time(3), "unresolved"),
-        ("archive_end_line", 8, "unresolved"),
-        ("helper_config", "sha256:" + "a" * 64, "unresolved"),
-        ("checkout_directory", "/other", "unresolved"),
-        ("correlation_id", "bad\rvalue", "unresolved"),
-    ],
-)
-def test_native_archive_authority_binds_the_owned_runner(tmp_path, capture, changed, value, expected):
-    capture["archive_runner_evidence"] = {
+def _runner_archive_evidence():
+    return {
         "job": 33,
         "pipeline": 22,
         "revision": MERGE,
@@ -133,6 +120,23 @@ def test_native_archive_authority_binds_the_owned_runner(tmp_path, capture, chan
         "archive_end_time": time(5),
         "correlation_id": "e" * 32,
     }
+
+
+@pytest.mark.parametrize(
+    ("changed", "value", "expected"),
+    [
+        ("job", 33, "native-archive-write-observed"),
+        ("job", 34, "unresolved"),
+        ("revision", BASE, "unresolved"),
+        ("archive_time", time(3), "unresolved"),
+        ("archive_end_line", 8, "unresolved"),
+        ("helper_config", "sha256:" + "a" * 64, "unresolved"),
+        ("checkout_directory", "/other", "unresolved"),
+        ("correlation_id", "bad\rvalue", "unresolved"),
+    ],
+)
+def test_native_archive_authority_binds_the_owned_runner(tmp_path, capture, changed, value, expected):
+    capture["archive_runner_evidence"] = _runner_archive_evidence()
     capture["archive_runner_evidence"][changed] = value
     result = evaluate(tmp_path, capture)
     assert result["state"] == "job-artifact-observed"
@@ -767,6 +771,50 @@ def test_successful_fork_archive_requires_its_exact_success_phase_and_status(
         assert result["job_status"] == "success"
         assert result["upload_phase"] == "upload_artifacts_on_success"
         assert result["publication"]["http_status"] == 201
+
+
+@pytest.mark.parametrize(
+    ("changed", "value"),
+    [
+        (None, None),
+        ("trace_sha256", "f" * 64),
+        ("archive_line", 11),
+        ("correlation_id", "f" * 32),
+    ],
+)
+def test_fork_runner_authority_binds_the_verified_archive(tmp_path, fork_upload, changed, value):
+    fork_upload["job"].update(status="success", failure_reason=None)
+    log = fork_upload["log"]
+    rows = log["rows"]
+    for index in (5, 7):
+        time_stamp, value_before = rows[index]["time"], rows[index]["value"]
+        rows[index] = _failure_trace_row(time_stamp, value_before.replace("on_failure", "on_success"))
+    for number, row in enumerate(rows, start=3):
+        row["line"] = number
+
+    evidence = _runner_archive_evidence()
+    evidence.update(
+        revision=HEAD, trace_url=log["url"], trace_sha256=log["sha256"],
+        checkout_directory="/builds/team/fork",
+        archive_start_line=rows[5]["line"], archive_line=rows[6]["line"], archive_end_line=rows[7]["line"],
+        archive_start_time=rows[5]["time"], archive_time=rows[6]["time"], archive_end_time=rows[7]["time"],
+        correlation_id=rows[6]["value"].split("correlation_id=")[1].split()[0],
+    )
+    if changed is not None:
+        evidence[changed] = value
+    fork_upload["archive_runner_evidence"] = evidence
+
+    result = _evaluate_fork(tmp_path, fork_upload)
+    assert result["state"] == "fork-project-archive-upload-observed"
+    assert result["publication"]["http_status"] == 201
+    authority = result["archive_runner_authority"]
+    if changed is None:
+        assert authority["credential"] == "runner-job-token"
+        assert authority["route"] == "jobs/33/artifacts"
+        assert authority["trace_sha256"] == log["sha256"]
+    else:
+        assert authority["state"] == "unresolved"
+        assert "credential" not in authority
 
 
 @pytest.mark.parametrize("mutation", ["canonical-target", "wrong-membership", "new-mr-head", "denied-response"])
