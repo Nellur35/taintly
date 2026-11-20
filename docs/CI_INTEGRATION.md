@@ -114,24 +114,42 @@ as described above.
 
 ### SARIF output
 
-After checking out the target repository:
+On an Ubuntu runner, add these steps after checking out the target repository:
 
 ```yaml
+- name: Allocate this scan's report path
+  id: sarif_path
+  shell: bash
+  run: |
+    directory="$(mktemp -d -- "$RUNNER_TEMP/taintly-sarif.XXXXXX")"
+    printf 'path=%s/report.sarif\n' "$directory" >> "$GITHUB_OUTPUT"
 - uses: Nellur35/taintly@eec7b923f9054abcaf004d0cecad1120045206e3  # reviewed commit
   with:
     version: eec7b923f9054abcaf004d0cecad1120045206e3
     fail-on: HIGH
     upload-sarif: true
-    sarif-file: taintly.sarif
+    sarif-file: ${{ steps.sarif_path.outputs.path }}
+- name: Check for this scan's report
+  id: sarif_ready
+  if: ${{ !cancelled() && steps.sarif_path.outcome == 'success' }}
+  shell: bash
+  env:
+    TAINTLY_SARIF_PATH: ${{ steps.sarif_path.outputs.path }}
+  run: |
+    if [ -f "$TAINTLY_SARIF_PATH" ]; then
+      printf 'present=true\n' >> "$GITHUB_OUTPUT"
+    fi
 - uses: github/codeql-action/upload-sarif@181d5eefc20863364f96762470ba6f862bdef56b  # v3.29.2
-  if: ${{ !cancelled() && hashFiles('taintly.sarif') != '' }}
+  if: ${{ !cancelled() && steps.sarif_ready.outputs.present == 'true' }}
   with:
-    sarif_file: taintly.sarif
+    sarif_file: ${{ steps.sarif_path.outputs.path }}
 ```
 
-The job needs `contents: read` and `security-events: write`. Upload still runs
-after a scan step reports findings, provided a report exists. The Action writes
-the file; the separate upload step publishes it to GitHub code scanning.
+The job needs `contents: read` and `security-events: write`. The fresh runner-temp
+directory ties the report to this scan. If the scan fails before writing a
+report, the upload step is skipped. A valid report can still be uploaded when
+the scanner finds a blocking issue or reports incomplete coverage. Read the scan
+step's exit status alongside the SARIF.
 
 ## Using taintly as a CI gate
 
