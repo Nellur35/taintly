@@ -594,7 +594,10 @@ The supported profile uses one Release Drafter v6 step with a configured
 job token in a direct fork PR run. Match the exact action ref in the
 workflow and annotation, including any v6 patch version. A single leading
 YAML document marker and literal job and step names are supported. The
-recorded job name must identify the sole job. The requested Contents
+recorded job name must identify the sole job. A job condition comparing
+`github.repository` with the literal target repository is supported.
+The comparison describes the repository running the workflow. It can
+match a run triggered by an external fork. The requested Contents
 permission comes from that job's permission map when present, or the
 workflow's map when the job has none. Exit 0 with `draft-release-create-denied`
 means the saved GitHub response corroborates a 403 for that draft request,
