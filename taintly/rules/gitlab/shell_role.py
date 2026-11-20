@@ -51,6 +51,18 @@ class GitLabShellEvidence:
 
 
 @dataclass(frozen=True)
+class GitLabDotenvUse:
+    """One configured consumer occurrence. Effective dotenv binding is a separate question."""
+
+    filepath: str
+    content_sha256: str
+    line: int
+    owner_path: tuple[object, ...]
+    identity: tuple[object, ...]
+    role: GitLabShellRole
+
+
+@dataclass(frozen=True)
 class _PathRecord:
     identity: tuple[object, ...]
     count: int
@@ -445,6 +457,122 @@ def _role_for_command(command: str, sink_var: str) -> tuple[GitLabShellRole, str
     if re.fullmatch(fixed_printf + r"\s*\|\s*sh\s*", command):
         return GitLabShellRole.CODE, "fixed printf output is supplied to a literal sh interpreter"
     return GitLabShellRole.UNKNOWN, "command form is outside the bounded GitLab shell profile"
+
+
+_PACKAGE_COMPONENT = r"(?:[A-Za-z0-9_.-]|\$\{[A-Za-z_][A-Za-z0-9_]{0,63}\}){1,128}"
+_DOTENV_CURL_PACKAGE = re.compile(
+    r'curl[ \t]+--header[ \t]+"JOB-TOKEN: \$\{CI_JOB_TOKEN\}"'
+    r"[ \t]+--upload-file[ \t]+[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"
+    r'[ \t]+"\$\{CI_API_V4_URL\}/projects/\$\{CI_PROJECT_ID\}/packages/generic/'
+    rf'(?P<path>{_PACKAGE_COMPONENT}/{_PACKAGE_COMPONENT}/{_PACKAGE_COMPONENT})"'
+)
+
+
+_DOTENV_PREFIX_WORD = r'(?:[A-Za-z0-9_.:/+-]+|"[A-Za-z0-9_.:/+$ {}-]*")'
+_DOTENV_PREFIX_COMMAND = re.compile(
+    rf"{_DOTENV_PREFIX_WORD}(?:[ \t]+{_DOTENV_PREFIX_WORD}){{0,64}}"
+)
+_DOTENV_OPEN_SYNTAX = {
+    "case",
+    "do",
+    "elif",
+    "else",
+    "for",
+    "function",
+    "if",
+    "select",
+    "then",
+    "until",
+    "while",
+}
+
+
+def _dotenv_prefix_is_closed(profile: _GitLabSourceProfile, owner: tuple[object, ...]) -> bool:
+    job, _, index = owner
+    for prefix, limit in (
+        (("before_script",), None),
+        (("default", "before_script"), None),
+        ((job, "before_script"), None),
+        ((job, "script"), cast("int", index)),
+    ):
+        earlier = _sequence_prefix_commands(profile.events_by_path, prefix, limit)
+        if earlier is None or any(
+            _DOTENV_PREFIX_COMMAND.fullmatch(item) is None
+            or item.split(maxsplit=1)[0] in _DOTENV_OPEN_SYNTAX
+            for item in earlier
+        ):
+            return False
+    return True
+
+
+def _dotenv_use_from_profile(
+    profile: _GitLabSourceProfile, identity: tuple[object, ...]
+) -> GitLabDotenvUse | None:
+    record = profile.records.get(identity)
+    if record is None or record.count != 1 or not profile.structure_valid:
+        return None
+    path = _path_from_identity(identity)
+    if path.kind != "dotenv" or path.sink_kind != "script" or len(path.sink_snippet) > 1024:
+        return None
+
+    # Treat a literal scalar or single-command literal block as one source
+    # unit. Replayed or folded text cannot qualify an occurrence.
+    owners = []
+    for event in profile.events:
+        if (
+            event.kind is not EventKind.LEAF_SCALAR
+            or len(event.path) != 3
+            or not isinstance(event.path[0], str)
+            or event.path[1] != "script"
+            or not isinstance(event.path[2], int)
+            or event.merge_origins
+        ):
+            continue
+        if event.value_kind == "block_literal" and event.block_lines is not None:
+            rows = [(line, text.strip()) for line, text in event.block_lines if text.strip()]
+            if rows == [(path.sink_line, path.sink_snippet)]:
+                owners.append(event.path)
+        elif (
+            event.block_lines is None
+            and event.line == path.sink_line
+            and event.value == path.sink_snippet
+        ):
+            owners.append(event.path)
+    if len(owners) != 1 or not _dotenv_prefix_is_closed(profile, owners[0]):
+        return None
+
+    # The local source identifies a consumer argument, while effective
+    # inherited state and command dispatch remain unverified.
+    role_by_command, _ = _role_for_command(path.sink_snippet, path.laundered_var)
+    role = (
+        GitLabShellRole.CODE if role_by_command is GitLabShellRole.CODE else GitLabShellRole.UNKNOWN
+    )
+    if package := _DOTENV_CURL_PACKAGE.fullmatch(path.sink_snippet):
+        name = path.laundered_var
+        if name not in {"CI_JOB_TOKEN", "CI_API_V4_URL", "CI_PROJECT_ID"} and (
+            "$" + "{" + name + "}" in package["path"]
+        ):
+            role = GitLabShellRole.DATA
+    return GitLabDotenvUse(
+        profile.filepath, profile.content_sha256, path.sink_line, owners[0], identity, role
+    )
+
+
+def classify_gitlab_dotenv_use(
+    content: str, filepath: str, path: TaintPath
+) -> GitLabDotenvUse | None:
+    return _dotenv_use_from_profile(_source_profile(content, filepath), _path_identity(path))
+
+
+def validate_gitlab_dotenv_use(
+    evidence: GitLabDotenvUse, content: str, filepath: str, line: int
+) -> bool:
+    if evidence.filepath != filepath or evidence.line != line:
+        return False
+    profile = _source_profile(content, filepath)
+    if evidence.content_sha256 != profile.content_sha256:
+        return False
+    return _dotenv_use_from_profile(profile, evidence.identity) == evidence
 
 
 def classify_gitlab_shallow_use(

@@ -304,6 +304,50 @@ def _qualify_gitlab_shell_use(finding: Finding, evidence: object, content: str) 
     )
 
 
+def _qualify_gitlab_dotenv_use(finding: Finding, evidence: object, content: str) -> None:
+    from .rules.gitlab.shell_role import (
+        GitLabDotenvUse,
+        GitLabShellRole,
+        validate_gitlab_dotenv_use,
+    )
+
+    finding.review_needed = True
+    role = GitLabShellRole.UNKNOWN
+    if isinstance(evidence, GitLabDotenvUse) and validate_gitlab_dotenv_use(
+        evidence, content, finding.file, finding.line
+    ):
+        role = evidence.role
+        finding.context_notes.append(
+            f"Configured consumer at line {finding.line} in job {evidence.owner_path[0]!r}."
+        )
+    finding.context_tags.append("gitlab-dotenv-role-" + role.value)
+    if role is GitLabShellRole.DATA:
+        finding.severity = Severity.MEDIUM
+        finding.confidence = "medium"
+        if finding.exploitability == "high":
+            finding.exploitability = "medium"
+        finding.title = "GitLab dotenv value can select a package URL path (review)"
+        finding.context_notes.append(
+            "The selected value is part of the quoted package URL argument. The "
+            "job-token header is a separate operand and ordinary POSIX expansion "
+            "does not reinterpret this argument as shell code."
+        )
+        finding.calibration_reason = "The configured consumer uses the value as destination data."
+    elif role is GitLabShellRole.CODE:
+        finding.title = "GitLab dotenv value may reach interpreter program input"
+        finding.context_notes.append(
+            "The configured interpreter form consumes the selected value as program input."
+        )
+    else:
+        finding.context_notes.append(
+            "The configured command role is unresolved in the supported profile."
+        )
+    finding.context_notes.append(
+        "Effective includes, runner command identity, dotenv binding, execution "
+        "and publication authority remain unverified."
+    )
+
+
 def _dedupe_project_scope(findings: list[Finding]) -> list[Finding]:
     """Keep only the first finding per project-scope rule_id.
 
@@ -881,6 +925,8 @@ def scan_file(
                             _qualify_shell_use(finding, match_context, content)
                     if rule.id == "TAINT-GL-001":
                         _qualify_gitlab_shell_use(finding, match_context, content)
+                    if rule.id == "TAINT-GL-003":
+                        _qualify_gitlab_dotenv_use(finding, match_context, content)
                     owner_path = getattr(match_context, "owner_path", None)
                     if rule.id == "SEC3-GH-006" and owner_path is not None:
                         # Internal-only binding used by the dead-range filter

