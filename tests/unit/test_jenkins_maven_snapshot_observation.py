@@ -144,6 +144,32 @@ def test_correlates_owned_fork_command_with_stored_writer(tmp_path, capture):
     assert result["source"]["line"] == 3
 
 
+@pytest.mark.parametrize("defect", [None, "flow", "publisher", "older-object", "zero-checkout"])
+def test_snapshot_write_is_decided_by_the_owned_node_and_registry(tmp_path, capture, defect):
+    capture["run"]["result"] = "FAILURE"
+    capture["flow"]["status"] = "FAILED"
+    if defect == "flow":
+        capture["flow"]["status"] = "SUCCESS"
+    elif defect == "publisher":
+        capture["stage"]["stageFlowNodes"][-1]["status"] = "FAILED"
+    elif defect == "older-object":
+        stored = capture["registry"]["stored_attributes"]
+        rec = str(START - 1)
+        stored.update({"storageItem-created": rec, "storageItem-modified": rec})
+        capture["registry"]["stored_properties"]["created"] = rec
+    elif defect == "zero-checkout":
+        capture["stage"]["stageFlowNodes"][0]["durationMillis"] = 0
+
+    result = evaluate(tmp_path, capture)
+    if defect is None:
+        assert result["state"] == "snapshot-write-observed"
+        assert result["jenkins_run_result"] == "FAILURE"
+        assert result["publication"]["registry_actor"] == "writer"
+    else:
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+
+
 @pytest.mark.parametrize("head_repository", ["apache/example", "Apache/Example"])
 def test_same_github_repository_cannot_supply_fork_identity(tmp_path, capture, head_repository):
     capture["pull"]["head_repository"] = head_repository

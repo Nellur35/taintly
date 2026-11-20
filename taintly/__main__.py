@@ -1965,12 +1965,17 @@ def _check_jenkins_maven_snapshot(
     elif resolved:
         publication = result["publication"]
         source = result["source"]
+        failed_run_details = (
+            "  Jenkins reported overall FAILURE. The selected Maven deployment node succeeded.\n"
+            if result.get("jenkins_run_result") == "FAILURE"
+            else ""
+        )
         print(
             f"Saved evidence corroborates a Maven snapshot write from {result['repository']} PR "
             f"#{result['pr']}, revision {result['head']}.\n"
             f"  Command: {result['command']} ({source['path']}:{source['line']}).\n"
             f"  Jenkins job: {result['job']} (node {result['node']}).\n"
-            f"{credential_details}"
+            f"{failed_run_details}{credential_details}"
             f"  Nexus writer: {publication['registry_actor']}.\n"
             f"  Object: {publication['object_url']}\n  SHA-256: {publication['sha256']}\n"
             f"{result['scope']}\n{result['review_action']}"

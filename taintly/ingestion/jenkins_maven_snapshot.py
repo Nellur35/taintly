@@ -214,11 +214,12 @@ def _stage(
     revision = _upstream_branch(data, repo, head) if upstream else head
     if upstream or between:
         _review_maven_preparation(between, pr)
+    message = between[1] if between else None
     owned_nodes = nodes if upstream else nodes[first : last + 1]
     _require(
         len({node["id"] for node in nodes}) == len(nodes)
         and all(
-            _interval(a, preparation=upstream)[1] <= _interval(b, preparation=upstream)[0]
+            _interval(a, preparation=a is message)[1] <= _interval(b, preparation=b is message)[0]
             for a, b in pairwise(nodes)
         ),
         "checkout, preparation or deployment nodes have ambiguous order or identity",
@@ -231,7 +232,7 @@ def _stage(
             "upstream deployment stage has unsupported steps or ordering",
         )
     for node in owned_nodes:
-        start, end = _interval(node, preparation=upstream)
+        start, end = _interval(node, preparation=node is message)
         _require(
             node["status"] == "SUCCESS"
             and re.fullmatch(r"[1-9][0-9]{0,9}", node["id"])
@@ -516,9 +517,8 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         )
         run, pull = capture["run"], capture["pull"]
         head = pull["observed_head"]
-        partial = (
-            run.get("result") == "FAILURE" and "registry" in capture and capture["registry"] is None
-        )
+        failed = run["result"] == "FAILURE"
+        partial = failed and "registry" in capture and capture["registry"] is None
         _require(
             pull["number"] == pr
             and pull["base_repository"] == repo
@@ -528,7 +528,7 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             and re.fullmatch(r"[a-f0-9]{40}", head)
             and run["url"] == job
             and run["number"] == int(job.rstrip("/").rsplit("/", 1)[1])
-            and (run["result"] == "SUCCESS" or partial)
+            and (run["result"] == "SUCCESS" or failed)
             and run["building"] is False,
             "fork PR identity or successful Jenkins run is unverified",
         )
@@ -539,7 +539,7 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         original = _source_bytes(root, capture["source"], head, "Jenkinsfile")
         line = _maven_line(original)
         command, workspace, checkout = _stage(
-            capture, job, head, pr, repo, flow_status="FAILED" if partial else "SUCCESS"
+            capture, job, head, pr, repo, flow_status="FAILED" if failed else "SUCCESS"
         )
         revision = checkout["revision"]
         upstream = revision != head
@@ -569,6 +569,8 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         }
         if partial:
             return _partial_snapshot_archive(root, target, capture, command, result, checkout)
+        if failed:
+            result["jenkins_run_result"] = run["result"]
         publication = _registry(
             root, capture["registry"], artifact_path, target, command, attribute_writer=not upstream
         )
