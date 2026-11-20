@@ -782,13 +782,15 @@ def test_successful_fork_archive_requires_its_exact_success_phase_and_status(
         ("correlation_id", "f" * 32),
     ],
 )
-def test_fork_runner_authority_binds_the_verified_archive(tmp_path, fork_upload, changed, value):
-    fork_upload["job"].update(status="success", failure_reason=None)
+@pytest.mark.parametrize("job_succeeded", [True, False])
+def test_fork_runner_authority_binds_the_verified_archive(tmp_path, fork_upload, changed, value, job_succeeded):
     log = fork_upload["log"]
     rows = log["rows"]
-    for index in (5, 7):
-        time_stamp, value_before = rows[index]["time"], rows[index]["value"]
-        rows[index] = _failure_trace_row(time_stamp, value_before.replace("on_failure", "on_success"))
+    if job_succeeded:
+        fork_upload["job"].update(status="success", failure_reason=None)
+        for index in (5, 7):
+            row = rows[index]
+            rows[index] = _failure_trace_row(row["time"], row["value"].replace("on_failure", "on_success"))
     for number, row in enumerate(rows, start=3):
         row["line"] = number
 
