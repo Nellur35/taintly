@@ -503,3 +503,49 @@ def test_maven_credential_selection_needs_unique_bound_evidence(tmp_path, captur
     assert result["state"] == "snapshot-write-observed"
     assert result["maven_credential_selection"]["state"] == "unresolved"
     assert "server_id" not in result["maven_credential_selection"]
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["supported", "wrong-run", "digest", "missing", "escaped", "other-allocation", "missing-start"],
+)
+def test_controller_allocation_is_bound_to_both_operations(tmp_path, capture, variant):
+    command_parent = "3" if variant in ("other-allocation", "missing-start") else "5"
+    html = f"""Obtained Jenkinsfile from {HEAD}
+<span class="pipeline-new-node" nodeId="2" startId="2">[Pipeline] node
+</span><span class="pipeline-node-2">Running on <a href="/computer/first/">first</a> in /ci/workspace/example
+</span><span class="pipeline-new-node" nodeId="5" startId="5" enclosingId="2">[Pipeline] stage
+</span><span class="pipeline-new-node" nodeId="3" startId="3" enclosingId="5">[Pipeline] node
+</span><span class="pipeline-node-3">Running on <a href="/computer/second/">second</a> in /ci/workspace/example
+</span><span class="pipeline-new-node" nodeId="6" enclosingId="5">[Pipeline] checkout
+</span><span class="pipeline-new-node" nodeId="7" enclosingId="{command_parent}">[Pipeline] sh
+</span>"""
+    if variant == "wrong-run":
+        html = html.replace(HEAD, "b" * 40)
+    elif variant == "escaped":
+        html = html.replace("<", "&lt;").replace(">", "&gt;")
+    if variant == "missing-start":
+        html = html.replace(' startId="3"', "")
+    body = html.encode()
+    if variant != "missing":
+        (tmp_path / "maven-workspace-console.html").write_bytes(body)
+    capture["workspace_console"] = {
+        "url": JOB + "logText/progressiveHtml?start=0",
+        "complete": True,
+        "sha256": "0" * 64 if variant == "digest" else hashlib.sha256(body).hexdigest(),
+    }
+    result = evaluate(tmp_path, capture)
+    if variant == "other-allocation":
+        assert result["state"] == "unresolved"
+        assert "different Jenkins allocations" in result["reason"]
+        assert "publication" not in result
+    else:
+        assert result["state"] == "snapshot-write-observed"
+        allocation = result["workspace_allocation"]
+        if variant == "supported":
+            assert allocation["state"] == "controller-allocation-correlated"
+            assert allocation["allocation_node"] == "2"
+            assert allocation["agent"] == "first"
+        else:
+            assert allocation["state"] == "unresolved"
+            assert "agent" not in allocation

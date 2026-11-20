@@ -107,6 +107,20 @@ by Maven. The actual Jenkins credential reference and wider registry
 permissions remain unresolved. A missing or incompatible optional log
 does not change the independently established publication result.
 
+For optional workspace ownership evidence, retain the complete trusted
+controller response at the owning job's `logText/progressiveHtml?start=0`
+as `maven-workspace-console.html` (up to 4 MiB). The capture's
+`workspace_console` sets `url` to that exact response URL, `sha256` to
+the saved bytes' SHA-256, and `complete` to true after the collector
+checks that there is no further log output. Keep this file private.
+The observer follows the controller's enclosing node identifiers from
+checkout and deployment to their allocation. It reports the assigned
+agent and workspace only when the selected records agree. A complete
+matching log that shows different allocations leaves source-to-write
+attribution unresolved. A missing or incompatible optional log leaves
+the allocation unresolved. The assigned workspace alone does not
+establish the process working directory or executable identity.
+
 The result reports the selected historical run, source line, Maven
 operation, exact JAR and recorded Nexus writer. It keeps wider
 permissions, production promotion and future fork admission unresolved.
