@@ -124,6 +124,29 @@ def test_job_success_can_coexist_with_owned_request_denial(capture):
     assert "publication" not in result
 
 
+@pytest.mark.parametrize(
+    ("condition", "expected"),
+    [
+        ("github.repository == 'team/project'", "draft-release-create-denied"),
+        ("${{ github.repository == 'TEAM/Project' }}", "draft-release-create-denied"),
+        ("github.repository == 'other/project'", "unresolved"),
+        ("github.repository != 'team/project'", "unresolved"),
+        ("github.event.pull_request.head.repo.full_name == 'team/project'", "unresolved"),
+        ("github.repository == 'team/project' && inputs.publish", "unresolved"),
+    ],
+)
+def test_draft_denial_repository_condition_checks_run_repository(capture, condition, expected):
+    cap, bind, assess = capture
+    cap["source"] = bind(SOURCE.replace("    runs-on:", f"    if: {condition}\n    runs-on:"))
+    result = assess()
+    assert result["state"] == expected
+    if expected == "draft-release-create-denied":
+        assert result["configured"]["repository_condition_line"] == 6
+        assert result["operation"]["status"] == 403
+    else:
+        assert "operation" not in result
+
+
 @pytest.fixture
 def denial_grant_capture(capture):
     cap, _, _ = capture

@@ -26,6 +26,7 @@ from taintly.ingestion.github_preview import (
     _time,
     _workflow_source_index,
 )
+from taintly.parsers import gha_expr
 from taintly.rules.github._workflow_run_artifact import _Index, _is_exact_identifier_expression
 
 _SCHEMA = "github-draft-release-request-v1"
@@ -67,7 +68,9 @@ _LOGGED_SCOPE = (
 )
 
 
-def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -> _Row:
+def _source_plan(
+    index: _Index, job_name: str, repository: str, *, event: str = "pull_request"
+) -> _Row:
     job_keys = {"steps", "permissions", "runs-on"}
     step_keys = {"uses", "env"}
     jobs = {key[-1] for key in index.keys if key[:-1] == ("jobs",)}
@@ -82,7 +85,30 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
     step = (*steps, 0)
     env = (*step, "env")
     inputs = (*step, "with")
+    guard_line = None
     if event == "pull_request":
+        guard = (*owner, "if")
+        if guard in index.keys:
+            condition = _field(index, guard)
+            body = str(condition.value).strip()
+            if body.startswith("${{") and body.endswith("}}"):
+                body = body[3:-2].strip()
+            try:
+                comparison = gha_expr.parse(body)
+            except gha_expr.ExprSyntaxError as exc:
+                raise PreviewEvidenceError("Invalid draft job repository condition") from exc
+            _require(
+                isinstance(comparison, gha_expr.Binary)
+                and comparison.op == "=="
+                and gha_expr.canonical_path(comparison.left) == "github.repository"
+                and isinstance(comparison.right, gha_expr.Lit)
+                and isinstance(comparison.right.value, str)
+                and _matches(comparison.right.value, _REPOSITORY)
+                and comparison.right.value.lower() == repository.lower(),
+                "Draft job condition does not establish the selected target repository",
+            )
+            job_keys.add("if")
+            guard_line = condition.line
         display = (*owner, "name")
         if display in index.keys:
             job_keys.add("name")
@@ -142,6 +168,7 @@ def _source_plan(index: _Index, job_name: str, *, event: str = "pull_request") -
     return {
         "action": action.value,
         "action_line": action.line,
+        **({"repository_condition_line": guard_line} if guard_line is not None else {}),
         "credential_binding": "GITHUB_TOKEN",
         "credential_line": token.line,
         "requested_permission": "contents: write" if permission is not None else None,
@@ -176,7 +203,7 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
     _require(
         _literal_push_branch(index, raw, branch), "Workflow lacks the selected literal push branch"
     )
-    configured = _source_plan(index, job["name"], event="push")
+    configured = _source_plan(index, job["name"], repo, event="push")
     setup = _observed_step(job, "Set up job")
     drafter = _observed_step(job, f"Run {_PUSH_ACTION}")
     finish = _observed_step(job, "Complete job")
@@ -652,7 +679,7 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
     index, source = _source(
         root, run, cap["source"], run["head_sha"], allow_initial_document_marker=True
     )
-    configured = _source_plan(index, job["name"])
+    configured = _source_plan(index, job["name"], repo)
     _require(
         configured["action"] == request["action"],
         "The requested draft action does not match its response evidence",
