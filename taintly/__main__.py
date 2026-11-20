@@ -2055,6 +2055,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     preview = report.get("pages_preview")
     preview_account = preview.get("account") if preview is not None else None
     archive_download = report.get("archive_download")
+    archive_authority = report.get("archive_runner_authority")
     member_origin = report.get("archive_member_origin")
     if args.format == "json":
         print(json.dumps({mode: report}, indent=2))
@@ -2175,9 +2176,27 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             )
         else:
             print(f"Fork archive source comparison unresolved: {member_origin['reason']}.")
+    if archive_authority is not None and args.format == "text":
+        if archive_authority["state"] == "native-archive-write-observed":
+            print(
+                f"  Runner job token used for POST {archive_authority['route']} "
+                f"(HTTP {archive_authority['http_status']}).\n"
+                f"  Archive response: {archive_authority['correlation_id']} "
+                f"(runner log line {archive_authority['archive_response_line']}).\n"
+                f"{archive_authority['scope']}"
+            )
+        else:
+            print(f"GitLab archive runner authority unresolved: {archive_authority['reason']}.")
     incomplete = state in {"unresolved", "registry-image-push-reported"} or any(
         item is not None and item["state"] == "unresolved"
-        for item in (admission, preview, preview_account, archive_download, member_origin)
+        for item in (
+            admission,
+            preview,
+            preview_account,
+            archive_download,
+            member_origin,
+            archive_authority,
+        )
     )
     sys.exit(11 if incomplete else 0)
 

@@ -97,6 +97,56 @@ def test_explicit_artifact_and_job_authority_are_scoped(tmp_path, capture):
     assert result["source_project"] == 2
 
 
+
+@pytest.mark.parametrize(
+    ("changed", "value", "expected"),
+    [
+        ("job", 33, "native-archive-write-observed"),
+        ("job", 34, "unresolved"),
+        ("revision", BASE, "unresolved"),
+        ("archive_time", time(3), "unresolved"),
+        ("archive_end_line", 8, "unresolved"),
+        ("helper_config", "sha256:" + "a" * 64, "unresolved"),
+        ("checkout_directory", "/other", "unresolved"),
+        ("correlation_id", "bad\rvalue", "unresolved"),
+    ],
+)
+def test_native_archive_authority_binds_the_owned_runner(tmp_path, capture, changed, value, expected):
+    capture["archive_runner_evidence"] = {
+        "job": 33,
+        "pipeline": 22,
+        "revision": MERGE,
+        "trace_url": JOB + "/raw",
+        "trace_sha256": "d" * 64,
+        "executor": "docker+machine",
+        "runner_revision": "7a0f126423ab4aefa71be5cda32668e29bc59b2d",
+        "helper_index": "sha256:604025ad1395452e28268e5ca722452d8e3a3badfd7bee628941a6bfb7ead975",
+        "helper_config": "sha256:060c57dea4e06ce034c9959e734771d2542983156682d85447a6f9152e64ecd4",
+        "checkout_directory": "/builds/team/repo",
+        "runner_line": 1,
+        "helper_line": 2,
+        "archive_start_line": 3,
+        "archive_line": 8,
+        "archive_end_line": 9,
+        "archive_start_time": time(3),
+        "archive_time": time(4),
+        "archive_end_time": time(5),
+        "correlation_id": "e" * 32,
+    }
+    capture["archive_runner_evidence"][changed] = value
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "job-artifact-observed"
+    authority = result["archive_runner_authority"]
+    assert authority["state"] == expected
+    if expected == "native-archive-write-observed":
+        assert authority["credential"] == "runner-job-token"
+        assert authority["route"] == "jobs/33/artifacts"
+        assert authority["archive_response_line"] == 8
+        assert authority["correlation_id"] == "e" * 32
+    else:
+        assert "credential" not in authority
+
+
 def test_report_distinguishes_fork_head_and_checkout(tmp_path, capture, monkeypatch, capsys):
     evaluate(tmp_path, capture)
     monkeypatch.setattr(
