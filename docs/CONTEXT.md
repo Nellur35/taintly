@@ -231,8 +231,10 @@ path. Existing state and condition budgets still report or retain uncertainty.
 ### GitLab fork-job archive authority
 
 The [saved GitLab archive observer](SAVED_OBSERVATIONS.md) accepts the optional
-Runner evidence for a successful fork-owned archive in the verified GitLab.com
-runner profile. Include the original line numbers in the saved upload phase's
+Runner evidence for an accepted fork-owned archive in the verified GitLab.com
+runner profile. Both the success-upload phase and the upload phase after script
+failure are supported when the runner reports HTTP 201 for the same archive.
+Include the original line numbers in the saved upload phase's
 start, response, and end rows. The line numbers, times, trace digest, and
 response correlation ID must match the optional record.
 

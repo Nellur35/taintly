@@ -740,19 +740,12 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
             "current_mr_head": current_head,
         }
     if "archive_runner_evidence" in data:
-        result["archive_runner_authority"] = (
-            _native_archive_authority(
-                data,
-                job_url,
-                source_path,
-                {"time": response["time"], "http_status": publication["http_status"]},
-                fork_log=log,
-            )
-            if success
-            else {
-                "state": "unresolved",
-                "reason": "runner evidence requires an observed successful job archive",
-            }
+        result["archive_runner_authority"] = _native_archive_authority(
+            data,
+            job_url,
+            source_path,
+            {"time": response["time"], "http_status": publication["http_status"]},
+            fork_log=log,
         )
     archive_bytes = None
     if "archive_download" in data:
