@@ -2557,6 +2557,28 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
                 f"job log line {request['response_line']})."
             )
         print(result["scope"])
+    elif state in ("reusable-draft-dry-run-reported", "reusable-draft-write-reported"):
+        operation = result["operation"]
+        invocation = result["reusable_invocation"]
+        called = invocation["source"]
+        grant = result["effective_permission"]
+        outcome = (
+            "dry-run before draft creation"
+            if state == "reusable-draft-dry-run-reported"
+            else f"completed draft {operation['kind']}"
+        )
+        target_ref = operation.get("target_ref")
+        selection = f" (merge ref {target_ref})" if target_ref else ""
+        print(
+            f"The saved reusable Release Drafter action reports {outcome} for "
+            f"{operation['requested_tag']} targeting {operation['target_commitish']}{selection}.\n"
+            f"  Run {result['run']}, job {result['job']}, attempt {result['attempt']}. "
+            f"Runner reports GITHUB_TOKEN Contents: {grant['contents']}.\n"
+            f"  Caller token binding: {result['source']['path']}:{invocation['binding_line']}. "
+            f"Selected workflow: {invocation['repository']}/{called['path']} "
+            f"at {called['revision']} (consumer at line {result['configured']['credential_line']}).\n"
+            f"{result['scope']}"
+        )
     elif state == "draft-release-create-denied":
         operation = result["operation"]
         configured = result["configured"]
