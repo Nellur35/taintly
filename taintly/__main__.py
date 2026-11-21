@@ -2516,6 +2516,11 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             f"Job conclusion: {result['job_conclusion']}. "
             "Job setup reports GITHUB_TOKEN Contents: write."
         )
+        execution = result["execution"]
+        print(
+            f"  Runner shell {execution['shell']} reported at job log lines "
+            f"{execution['first_log_line']}-{execution['last_log_line']}."
+        )
         for request in result["requests"]:
             field = request["field"] or "no fields"
             target = request["target_commitish"]

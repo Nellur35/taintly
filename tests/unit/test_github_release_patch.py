@@ -72,13 +72,37 @@ def capture(tmp_path):
         "4. PATCH tag_name (unchanged) HTTP 200",
         '5. PATCH target_commitish (unchanged) HTTP 403 "message":"Resource not accessible by integration"',
     ]
+    literal = _YAML.partition("        run: |\n")[2]
+    commands = [line.removeprefix("          ") for line in literal.splitlines() if line.strip()]
+    assert commands
+    transcript = [
+        "##[group]Run " + commands[0],
+        *commands,
+        "shell: /usr/bin/bash -e {0}",
+        "env:",
+        "  GH_TOKEN: ***",
+        "  REPO: team/project",
+        "  PUBLISHED_ID: 42",
+        "  PUBLISHED_TAG: checked",
+        "  PUBLISHED_SHA: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "##[endgroup]",
+    ]
     rows = []
-    for n, value in enumerate(values, 1):
-        stamp = _time(n + (5 if n > 4 else 0))
+    text = []
+    for i, value in enumerate(values, 1):
+        if i == 5:
+            text.extend(f"{_time(6)} {line}\n" for line in transcript)
+        stamp = _time(i + (5 if i > 4 else 0))
         rows.append(
-            {"line": n, "time": stamp, "value": value, "sha256": _sha(f"{stamp} {value}".encode())}
+            {
+                "line": len(text) + 1,
+                "time": stamp,
+                "value": value,
+                "sha256": _sha(f"{stamp} {value}".encode()),
+            }
         )
-    raw = "".join(f"{r['time']} {r['value']}\n" for r in rows).encode()
+        text.append(f"{stamp} {value}\n")
+    raw = "".join(text).encode()
     log = tmp_path / "release-patch.log"
     log.write_bytes(raw)
     cap = {
@@ -158,6 +182,7 @@ def test_report_binds_denied_target_field_in_successful_job(capture):
     ]
     assert [row["status"] for row in result["requests"]] == [200, 200, 200, 403]
     assert result["requests"][-1]["target_commitish"] == "b" * 40
+    assert result["execution"]["shell"] == "/usr/bin/bash"
     assert "publication" not in result
 
 
@@ -209,3 +234,28 @@ def test_patch_comparison_rejects_contradictory_or_incomplete_evidence(capture, 
     result = evaluate()
     assert result["state"] == "unresolved"
     assert "requests" not in result
+
+
+def test_release_patch_refuses_a_different_literal_release_in_source(capture):
+    cap, source, _, evaluate = capture
+    changed = source.read_bytes().replace(b"PUBLISHED_ID: '42'", b"PUBLISHED_ID: '43'")
+    source.write_bytes(changed)
+    cap["source"]["sha256"] = _sha(changed)
+    result = evaluate()
+    assert result["state"] == "unresolved"
+    assert (
+        result["reason"]
+        == "Runner transcript does not match the source-bound Release PATCH environment"
+    )
+
+
+def test_release_patch_refuses_a_different_echoed_body_even_with_matching_log_digest(capture):
+    cap, _, log, evaluate = capture
+    raw = log.read_bytes().replace(b'echo "== Published release', b'echo "== Another release')
+    log.write_bytes(raw)
+    cap["patch_log"]["sha256"] = _sha(raw)
+    result = evaluate()
+    assert result["state"] == "unresolved"
+    assert (
+        result["reason"] == "Runner transcript does not match the selected Release PATCH shell body"
+    )

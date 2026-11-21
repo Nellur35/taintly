@@ -726,7 +726,8 @@ last compared PATCH call, and the ordered `permissions`, `bindings` and
 `responses` rows. Each row gives its physical log `line`, timestamp `time`,
 value without trailing whitespace and SHA-256 `sha256` of
 `"<time> <value>"`. The validator matches the rows against the saved log and
-their owning setup or script step.
+their owning setup or script step. The step transcript must also echo the exact supported shell body
+and its environment, including the target references present in the source.
 
 - The supported script runs the GitHub CLI under a job token and records
   the HTTP status each time. It contains one of two bounded comparisons:

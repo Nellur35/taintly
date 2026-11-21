@@ -111,8 +111,7 @@ def _owned_profile(index: _Index, job_name: str, branch: str) -> tuple[str, _Row
     event = leaves[0]
     if not isinstance(event.value, str):
         raise PreviewEvidenceError("Release PATCH shell body is missing")
-    body = [line.strip() for line in event.value.split("\n")]
-    return _scalar(index, (*step, "name")), env, body, event.line
+    return _scalar(index, (*step, "name")), env, event.value.split("\n"), event.line
 
 
 def _recorded_row(row: _Row, step: _Row, pattern: str) -> re.Match[str]:
@@ -205,6 +204,59 @@ def _published_requests(prefix: list[tuple[int, str]], env: _Row) -> list[_Reque
     return requests
 
 
+def _execution_transcript(
+    lines: list[str], body: list[str], env: _Row, repo: str, step: _Row, first_request: _Row
+) -> _Row:
+    """Corroborate the runner's script and environment echo before its output."""
+    sgr = re.compile(r"\x1b\[[0-9;]*m")
+    parts = [line.partition(" ") for line in lines]
+    messages = [sgr.sub("", value).rstrip() for _, _, value in parts]
+    program = [line.rstrip() for line in body if line.strip()]
+    starts = [
+        i
+        for i, line in enumerate(messages[: first_request["line"] - 1])
+        if line == f"##[group]Run {program[0]}"
+    ]
+    _require(len(starts) == 1, "Saved job log does not identify one echoed Release PATCH step")
+    start = starts[0]
+    end = next(
+        (i for i in range(start + 1, first_request["line"] - 1) if messages[i] == "##[endgroup]"),
+        start,
+    )
+    shell = next(
+        (i for i in range(start + 1, end) if messages[i].startswith("shell: ")),
+        end,
+    )
+    _require(
+        shell + 1 < end
+        and [line for line in messages[start + 1 : shell] if line.strip()] == program
+        and messages[shell] == "shell: /usr/bin/bash -e {0}"
+        and messages[shell + 1] == "env:",
+        "Runner transcript does not match the selected Release PATCH shell body",
+    )
+    env_lines = messages[shell + 2 : end]
+    variables = [line.removeprefix("  ").split(": ", 1) for line in env_lines]
+    _require(
+        all(line.startswith("  ") for line in env_lines)
+        and all(len(pair) == 2 for pair in variables),
+        "Runner transcript has an unsupported environment record",
+    )
+    expected = {**env, "GH_TOKEN": "***", "REPO": repo}
+    _require(
+        len(variables) == len(expected) and dict(variables) == expected,
+        "Runner transcript does not match the source-bound Release PATCH environment",
+    )
+    _require(
+        _time(step["started_at"])
+        <= _time(parts[start][0]).replace(microsecond=0)
+        <= _time(parts[end][0]).replace(microsecond=0)
+        <= _time(step["completed_at"])
+        and _time(parts[end][0]) < _time(first_request["time"]),
+        "Runner transcript is outside the recorded Release PATCH step",
+    )
+    return {"shell": "/usr/bin/bash", "first_log_line": start + 1, "last_log_line": end + 1}
+
+
 def patch_comparison(receipt: _Row, root: Path, repo: str, run_id: int, job_id: int) -> _Row:
     run, job, log = receipt["run"], receipt["job"], receipt["patch_log"]
     _run_identity(run, job, repo, run_id, "push")
@@ -238,7 +290,7 @@ def patch_comparison(receipt: _Row, root: Path, repo: str, run_id: int, job_id: 
         strict=True,
     ):
         _recorded_row(row, setup, re.escape(expected))
-    commands = [(start_line + i, line) for i, line in enumerate(body, 1) if line]
+    commands = [(start_line + i, line.strip()) for i, line in enumerate(body, 1) if line.strip()]
     wrapper = [line for _, line in commands[:8]]
     _require(
         len(wrapper) == 8
@@ -290,6 +342,9 @@ def patch_comparison(receipt: _Row, root: Path, repo: str, run_id: int, job_id: 
         ),
         "Release PATCH log rows are duplicated or out of order",
     )
+    _require(bool(log["responses"]), "Release PATCH response rows are missing")
+    first_observation = (log["bindings"] or log["responses"])[0]
+    transcript = _execution_transcript(lines, body, env, repo, step, first_observation)
     operations = []
     for request, row in zip(plan, log["responses"], strict=True):
         match = _recorded_row(
@@ -323,6 +378,7 @@ def patch_comparison(receipt: _Row, root: Path, repo: str, run_id: int, job_id: 
         "attempt": run["run_attempt"],
         "job_conclusion": job["conclusion"],
         "source": source,
+        "execution": transcript,
         "effective_permission": {"credential": "GITHUB_TOKEN", "contents": "write"},
         "operation": {
             "method": "PATCH",
