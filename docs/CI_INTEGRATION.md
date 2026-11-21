@@ -84,7 +84,7 @@ python -m taintly /path/to/repo --platform codebuild
 ```yaml
 - uses: Nellur35/taintly@eec7b923f9054abcaf004d0cecad1120045206e3  # reviewed commit
   with:
-    version: eec7b923f9054abcaf004d0cecad1120045206e3
+    version: fa1d0acd0488d0e11d6876ba1e28cda9ea710c61
     fail-on: HIGH
 ```
 
@@ -102,7 +102,7 @@ taintly:
   image: python:3.12-slim
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends git ca-certificates
-    - python -m pip install "git+https://github.com/Nellur35/taintly@eec7b923f9054abcaf004d0cecad1120045206e3"
+    - python -m pip install "git+https://github.com/Nellur35/taintly@fa1d0acd0488d0e11d6876ba1e28cda9ea710c61"
   script:
     - python -m taintly . --fail-on HIGH
 ```
@@ -125,7 +125,7 @@ On an Ubuntu runner, add these steps after checking out the target repository:
     printf 'path=%s/report.sarif\n' "$directory" >> "$GITHUB_OUTPUT"
 - uses: Nellur35/taintly@eec7b923f9054abcaf004d0cecad1120045206e3  # reviewed commit
   with:
-    version: eec7b923f9054abcaf004d0cecad1120045206e3
+    version: fa1d0acd0488d0e11d6876ba1e28cda9ea710c61
     fail-on: HIGH
     upload-sarif: true
     sarif-file: ${{ steps.sarif_path.outputs.path }}
@@ -183,7 +183,7 @@ jobs:
           persist-credentials: false
       - uses: Nellur35/taintly@eec7b923f9054abcaf004d0cecad1120045206e3  # reviewed commit
         with:
-          version: eec7b923f9054abcaf004d0cecad1120045206e3
+          version: fa1d0acd0488d0e11d6876ba1e28cda9ea710c61
           fail-on: HIGH
 ```
 
@@ -220,7 +220,7 @@ jobs:
           persist-credentials: false
       - uses: Nellur35/taintly@eec7b923f9054abcaf004d0cecad1120045206e3  # reviewed commit
         with:
-          version: eec7b923f9054abcaf004d0cecad1120045206e3
+          version: fa1d0acd0488d0e11d6876ba1e28cda9ea710c61
           extra-args: --diff .taintly-baseline.json --fail-on HIGH
 ```
 
@@ -250,7 +250,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install a reviewed scanner revision
-        run: python -m pip install "git+https://github.com/Nellur35/taintly@eec7b923f9054abcaf004d0cecad1120045206e3"
+        run: python -m pip install "git+https://github.com/Nellur35/taintly@fa1d0acd0488d0e11d6876ba1e28cda9ea710c61"
       - name: Static scan and pinned-reference checks
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
