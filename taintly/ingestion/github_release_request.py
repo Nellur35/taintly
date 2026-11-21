@@ -258,8 +258,7 @@ def _reusable_plan(cap: _Row, root: Path, caller: _Index, repository: str) -> tu
     return configured, {
         "caller_job": caller_job,
         "call_line": call.line,
-        "secret_alias": secret,
-        "secret_line": binding.line,
+        "binding_line": binding.line,
         "repository": called_repository,
         "ref": selected["ref"],
         "job": called_job,

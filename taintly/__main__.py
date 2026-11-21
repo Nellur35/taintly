@@ -2570,9 +2570,8 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
         else:
             called = invocation["source"]
             source_detail = (
-                f"  Fork-head caller passes {configured['credential_binding']} as "
-                f"{invocation['secret_alias']} "
-                f"({result['source']['path']}:{invocation['secret_line']}).\n"
+                f"  Fork-head caller passes {configured['credential_binding']} through a named input "
+                f"({result['source']['path']}:{invocation['binding_line']}).\n"
                 f"  The saved run selects {invocation['repository']}/{called['path']} "
                 f"at {called['revision']} (consumer at line {configured['credential_line']}).\n"
             )

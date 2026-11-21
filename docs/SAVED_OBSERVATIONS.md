@@ -691,7 +691,8 @@ at `reusable/<revision>/<path>` relative to the source projection. In the
 called workflow the same named secret is a required `workflow_call` input and
 feeds the only Release Drafter action's `GITHUB_TOKEN` environment entry.
 This profile covers inherited grants and retains the existing exact owned
-request checks. It records the configured handoff and the observed 403.
+request checks. It records the source locations of the configured handoff
+and the observed 403.
 Runtime token identity, effective grant, resolved action bytes and exact
 caller merge bytes require separate evidence.
 

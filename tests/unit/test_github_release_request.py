@@ -187,7 +187,8 @@ def test_owned_reusable_rejection_reports_configured_handoff_and_no_effective_gr
     invocation = found["reusable_invocation"]
     assert invocation["caller_job"] == "caller"
     assert invocation["job"] == "publisher"
-    assert invocation["secret_alias"] == "job_token"
+    assert invocation["binding_line"] == 8
+    assert "job_token" not in json.dumps(found)
     assert invocation["source"]["revision"] == "e" * 40
     assert found["configured"]["requested_permission"] is None
     assert "effective_permission" not in found
