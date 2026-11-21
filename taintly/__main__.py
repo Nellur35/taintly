@@ -253,7 +253,7 @@ def main():
     parser.add_argument(
         "--gitlab-artifact-origin",
         metavar="HTTPS_ORIGIN",
-        help="Bind a saved canceled target-project archive observation to its GitLab origin.",
+        help="Bind a saved detached archive observation to its GitLab origin.",
     )
     parser.add_argument(
         "--gitlab-mr-publish-job",
