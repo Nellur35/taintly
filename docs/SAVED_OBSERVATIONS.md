@@ -316,8 +316,10 @@ For an explicitly selected origin, schema `gitlab-fork-project-archive-v1`
 also accepts a failed fork-owned pipeline and job at the recorded MR head.
 The job must report `script_failure`, one ZIP archive entry, and the eight
 ordered rows through its failure-phase archive response, with the runner's
-ULID correlation ID. Supply the source file record from the fork project at
-the exact revision, as well as the matching local `.gitlab-ci.yml`. The
+ULID correlation ID. When adjoining section end and start rows share a
+timestamp, preserve strictly increasing original trace row positions as
+`line` on all eight rows. Leave `rows_format` absent for this timestamped
+trace. Supply the source file record from the fork project at the exact revision, as well as the matching local `.gitlab-ci.yml`. The
 observer reports a recorded acceptance in the fork project. Exact uploader
 credentials, artifact bytes, and permissions in the target project require
 separate evidence.

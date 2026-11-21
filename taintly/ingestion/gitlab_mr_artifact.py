@@ -595,6 +595,7 @@ def _archive_upload_rows(
     *,
     accept_plain_start: bool = False,
 ) -> tuple[str, _Row]:
+    _need("rows_format" not in log, "unsupported timestamped archive runner row format")
     rows = log["rows"]
     _need(
         isinstance(rows, list) and len(rows) == 8,
@@ -639,6 +640,16 @@ def _archive_upload_rows(
             "runner section epoch conflicts with its trace timestamp",
         )
         times.append(when)
+    ties = {index for index, (left, right) in enumerate(pairwise(times)) if left == right}
+    if ties:
+        # An end marker and the next phase's start marker can be emitted
+        # together. Their saved row positions must independently show order.
+        _need(ties <= {2, 4}, "shared trace time is outside a runner phase transition")
+        positions = [_identifier(row.get("line"), "runner trace row position") for row in rows]
+        _need(
+            all(left < right for left, right in pairwise(positions)),
+            "shared trace time lacks ordered runner row positions",
+        )
     _need(
         _time(pipeline["created_at"], "owning pipeline creation")
         <= _time(job["started_at"], f"{job_label} start")
@@ -646,7 +657,7 @@ def _archive_upload_rows(
         < times[-1]
         <= _time(job["finished_at"], f"{job_label} end")
         <= _time(pipeline["updated_at"], "owning pipeline last update")
-        and all(a < b for a, b in pairwise(times)),
+        and all(a <= b for a, b in pairwise(times)),
         f"saved {label} runner rows are outside the job or out of phase order",
     )
     return phase, rows[6]

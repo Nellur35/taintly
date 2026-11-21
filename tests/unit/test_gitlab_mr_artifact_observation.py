@@ -1267,6 +1267,8 @@ def test_target_head_archive_keeps_accepted_upload_when_runner_evidence_disagree
     [
         None, "alternate-origin", "wrong-project", "wrong-checkout", "missing-source",
         "wrong-source-commit", "wrong-job", "wrong-phase", "denied", "unsupported-runner",
+        "unknown-format", "null-format", "ordered-tie", "missing-line", "duplicate-line",
+        "reversed-line", "tied-response",
     ],
 )
 def test_explicit_origin_binds_failed_fork_archive(tmp_path, fork_upload, contrast):
@@ -1311,10 +1313,27 @@ def test_explicit_origin_binds_failed_fork_archive(tmp_path, fork_upload, contra
         rows[6] = _failure_trace_row(response["time"], denied)
     elif contrast == "unsupported-runner":
         data["archive_runner_evidence"] = {}
+    elif contrast in {"unknown-format", "null-format"}:
+        data["log"]["rows_format"] = "future-format" if contrast == "unknown-format" else None
+    elif contrast in {"ordered-tie", "missing-line", "duplicate-line", "reversed-line", "tied-response"}:
+        stamp = rows[4]["time"]
+        epoch = int(datetime.fromisoformat(stamp).timestamp())
+        boundary = re.sub(r"section_start:\d+:", f"section_start:{epoch}:", rows[5]["value"])
+        rows[5] = _failure_trace_row(stamp, boundary)
+        if contrast == "tied-response":
+            rows[6] = _failure_trace_row(stamp, rows[6]["value"])
+        for number, row in enumerate(rows, 1):
+            row["line"] = number
+        if contrast == "missing-line":
+            del rows[5]["line"]
+        elif contrast == "duplicate-line":
+            rows[5]["line"] = rows[4]["line"]
+        elif contrast == "reversed-line":
+            rows[4]["line"], rows[5]["line"] = rows[5]["line"], rows[4]["line"]
     packet = tmp_path / "observation.json"
     packet.write_text(json.dumps(data), encoding="utf-8")
     result = mr_artifact_observation(packet, tmp_path, selected_project, 22, 33, origin=origin)
-    if contrast is not None:
+    if contrast not in {None, "ordered-tie"}:
         assert result["state"] == "unresolved"
         assert "publication" not in result
         return
