@@ -286,6 +286,11 @@ def _request_transport(event: _Row, when: float, lower: float, upper: float, den
     if extra is None:
         return {}
     fields = _map(extra, "S3 request transport")
+    if "AuthenticationMethod" in fields:
+        _need(
+            fields["AuthenticationMethod"] == "AuthHeader",
+            "S3 authentication method conflicts with the direct AWS CLI request",
+        )
     result: _Row = {}
     if "httpStatusCode" in fields:
         status = fields["httpStatusCode"]
