@@ -1021,6 +1021,12 @@ with neither workspace marker leave the workspace unverified while retaining
 an independently corroborated request. Operating-system process and
 filesystem identity require separate evidence.
 
+If the owning pre-command logs record a YAML location, that selection must
+uniquely identify the managed inline buildspec in DOWNLOAD_SOURCE. A
+contradictory selection leaves the observation unresolved. A compact log
+without this optional row can still bind the build response to the exact
+observed command.
+
 The Git file, command, request time, role and session, target, checksum,
 and version are checked when relevant. Provide an optional redacted
 `runtime_sts_event` from CloudTrail to bind the build's
