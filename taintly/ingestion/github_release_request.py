@@ -726,8 +726,17 @@ def release_request_observation(
     scope = _SCOPE
     try:
         _require(_matches(repository, _REPOSITORY), "Expected a literal GitHub repository")
-        cap = _observation_capture(snapshot, _SCHEMA)
+        from taintly.ingestion.github_release_patch import (
+            PATCH_SCHEMA,
+            PATCH_SCOPE,
+            patch_comparison,
+        )
+
+        cap = _observation_capture(snapshot, _SCHEMA, PATCH_SCHEMA)
         _require(cap["repository"] == repository, "Receipt belongs to another repository")
+        if cap["schema"] == PATCH_SCHEMA:
+            scope = PATCH_SCOPE
+            return patch_comparison(cap, root.resolve(), repository, run_id, job_id)
         if "creation" in cap:
             _require(
                 "verified_log" not in cap and "effective_permission_log" not in cap,
