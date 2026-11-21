@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import os
 import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from enum import Enum
+
+from .parsers.structural import Event, EventKind, walk_workflow
+from .parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
+from .parsers.yaml_command_scalar import decode_single_line_command_scalar
 
 
 class GuardVerdict(Enum):
@@ -80,14 +85,22 @@ def evaluate_gitlab_rules(job: dict[str, object], ctx: GitLabContext | None = No
         return GuardVerdict.RUNTIME
     for rule in rules:
         if not isinstance(rule, dict):
-            continue
-        if str(rule.get("when", "")).strip().lower() != "never":
-            continue
-        verdict = evaluate_gitlab_if(rule.get("if"), ctx)
-        if verdict is ExprVerdict.STATIC_TRUE:
-            return GuardVerdict.DEAD
-        if verdict is ExprVerdict.RUNTIME:
             return GuardVerdict.RUNTIME
+        if "if" in rule and rule["if"] is None:
+            return GuardVerdict.RUNTIME
+        verdict = evaluate_gitlab_if(rule.get("if"), ctx)
+        if verdict is ExprVerdict.STATIC_FALSE:
+            continue
+        # Rules are ordered decisions. A possible earlier admission cannot
+        # be skipped in order to reach a later denial. Extra match clauses
+        # (changes/exists, etc.) are conjunctions, never unconditional true.
+        if verdict is ExprVerdict.RUNTIME or set(rule) - {"if", "when"}:
+            return GuardVerdict.RUNTIME
+        return (
+            GuardVerdict.DEAD
+            if str(rule.get("when", "")).strip().lower() == "never"
+            else GuardVerdict.RUNTIME
+        )
     return GuardVerdict.RUNTIME
 
 
@@ -106,12 +119,9 @@ def evaluate_gitlab_if(expr: object, ctx: GitLabContext | None = None) -> ExprVe
         return ExprVerdict.RUNTIME
 
     left = _value_for(match.group(1), ctx)
-    right_token = match.group(4) or match.group(5) or match.group(6)
-    right = (
-        _value_for(right_token, ctx)
-        if right_token and right_token.startswith("CI_")
-        else right_token
-    )
+    literal = match.group(4) if match.group(4) is not None else match.group(5)
+    variable = match.group(6)
+    right = _value_for(variable, ctx) if variable else literal
     if left is None or right is None:
         return ExprVerdict.RUNTIME
     equal = left == right
@@ -123,13 +133,7 @@ def evaluate_gitlab_if(expr: object, ctx: GitLabContext | None = None) -> ExprVe
 def find_dead_gitlab_job_ranges(
     content: str, ctx: GitLabContext | None = None
 ) -> list[tuple[int, int]]:
-    lines = content.splitlines()
-    ranges: list[tuple[int, int]] = []
-    for start, end, _name in _top_level_jobs(lines):
-        job = _extract_job_rules(lines, start, end)
-        if evaluate_gitlab_rules(job, ctx) is GuardVerdict.DEAD:
-            ranges.append((start + 1, end))
-    return ranges
+    return analyze_gitlab_deadness(content, ctx)[0]
 
 
 def is_pipeline_whole_dead(content: str, ctx: GitLabContext | None = None) -> bool:
@@ -141,20 +145,39 @@ def is_pipeline_whole_dead(content: str, ctx: GitLabContext | None = None) -> bo
     1. The pipeline has at least one job (an empty file or a file
        with no jobs is not "whole-dead").
     2. Every job evaluates to ``GuardVerdict.DEAD``.
+    3. The source has a complete literal job inventory without an include
+       declaration or unresolved structural ownership. Hidden templates do
+       not count as executable jobs.
 
     Conservatism: any RUNTIME job (the default for rules that depend
     on runtime variables like ``$CI_PIPELINE_SOURCE`` when the
     context is not populated) prevents whole-dead classification.
     """
-    lines = content.splitlines()
-    jobs = list(_top_level_jobs(lines))
-    if not jobs:
-        return False
-    for start, end, _name in jobs:
-        job = _extract_job_rules(lines, start, end)
-        if evaluate_gitlab_rules(job, ctx) is not GuardVerdict.DEAD:
-            return False
-    return True
+    return analyze_gitlab_deadness(content, ctx)[1]
+
+
+def analyze_gitlab_deadness(
+    content: str, ctx: GitLabContext | None = None
+) -> tuple[list[tuple[int, int]], bool]:
+    """One source-owned proof for job filtering and whole-file suppression.
+
+    RUNTIME means deadness is unproven, not that execution was observed.
+    Unknown includes prevent a whole-pipeline proof, while a direct local
+    literal denial can still exclude its own source job.
+    """
+    # This is only an applicability shortcut for suppression. A spelling we
+    # cannot identify keeps findings and cannot prove whole-file deadness.
+    if "never" not in content:
+        return [], False
+    jobs, records, complete = _source_jobs(content)
+    dead = [
+        (start + 1, end)
+        for start, end, name in jobs
+        if evaluate_gitlab_rules(records[name], ctx) is GuardVerdict.DEAD
+    ]
+    if dead and not _flow_ownership_supported(content):
+        return [], False
+    return dead, bool(jobs) and complete and len(dead) == len(jobs)
 
 
 def _value_for(token: str, ctx: GitLabContext | None) -> str | None:
@@ -175,75 +198,150 @@ def _strip_quotes(value: str) -> str:
     return value
 
 
-def _indent(line: str) -> int:
-    return len(line) - len(line.lstrip(" "))
-
-
 def _is_ignorable(line: str) -> bool:
     stripped = line.strip()
     return not stripped or stripped.startswith("#")
 
 
-def _top_level_jobs(lines: list[str]) -> list[tuple[int, int, str]]:
-    jobs: list[tuple[int, int, str]] = []
-    starts: list[tuple[int, str]] = []
-    for idx, line in enumerate(lines):
-        if _is_ignorable(line) or _indent(line) != 0:
-            continue
-        match = re.match(r"^([A-Za-z0-9_.-]+)\s*:\s*(?:#.*)?$", line)
-        if match is None:
-            continue
-        name = match.group(1)
-        if name in _RESERVED_TOP_LEVEL:
-            continue
-        starts.append((idx, name))
-    for pos, (start, name) in enumerate(starts):
-        end = starts[pos + 1][0] if pos + 1 < len(starts) else len(lines)
-        while end > start + 1 and _is_ignorable(lines[end - 1]):
-            end -= 1
-        jobs.append((start, end, name))
-    return jobs
+def _owned_rule_record(
+    branch: list[Event],
+    keys: Counter[tuple[object, ...]],
+    lines: list[str],
+    name: str,
+) -> dict[str, object]:
+    """Materialize existing rule fields; callers establish owner/context policy.
 
-
-def _extract_job_rules(lines: list[str], start: int, end: int) -> dict[str, object]:
-    rules: list[dict[str, str]] = []
-    idx = start + 1
-    while idx < end:
-        if re.match(r"^\s+rules\s*:\s*(?:#.*)?$", lines[idx]):
-            rules_indent = _indent(lines[idx])
-            idx += 1
-            while idx < end:
-                if not _is_ignorable(lines[idx]) and _indent(lines[idx]) <= rules_indent:
-                    break
-                if re.match(r"^\s*-\s+", lines[idx]):
-                    item_start = idx
-                    item_end = idx + 1
-                    item_indent = _indent(lines[idx])
-                    while item_end < end:
-                        if not _is_ignorable(lines[item_end]):
-                            indent = _indent(lines[item_end])
-                            if indent <= rules_indent:
-                                break
-                            if indent == item_indent and re.match(r"^\s*-\s+", lines[item_end]):
-                                break
-                        item_end += 1
-                    rules.append(_parse_rule_item(lines[item_start:item_end]))
-                    idx = item_end
-                    continue
-                idx += 1
+    No activation, inheritance or container-kind conclusion is made here.
+    An empty record does not establish a sequence schema.
+    """
+    root = (name, "rules")
+    rule_events = [e for e in branch if e.path[:2] == root]
+    if not keys[root]:
+        return {}
+    if any(
+        len(e.path) < 3 or not isinstance(e.path[2], int)
+        for e in rule_events
+        if e.kind is not EventKind.MAP_KEY or e.path != root
+    ):
+        return {"rules": None}
+    items: dict[int, list[Event]] = defaultdict(list)
+    for event in rule_events:
+        if len(event.path) >= 3 and isinstance(event.path[2], int):
+            items[event.path[2]].append(event)
+    indexes = sorted(items)
+    rules: list[object] = []
+    for expected, index in enumerate(indexes):
+        if expected != index:
+            rules.append(None)
             break
-        idx += 1
+        item = root + (index,)
+        item_events = items[index]
+        fields = {str(e.path[3]) for e in item_events if len(e.path) >= 4 and e.path[:3] == item}
+        if not fields or any(
+            e.kind is EventKind.LEAF_SCALAR and e.path == item for e in item_events
+        ):
+            rules.append(None)
+            break
+        record: dict[str, object] = {}
+        for field in fields:
+            path = item + (field,)
+            values = [e for e in item_events if e.kind is EventKind.LEAF_SCALAR and e.path == path]
+            if field not in {"if", "when"}:
+                record[field] = None  # Present, with unresolved matching/modifier semantics.
+                continue
+            if keys[path] != 1 or len(values) != 1:
+                record["if"] = None
+                break
+            value = values[0]
+            text = value.value if value.value_kind == "plain" else None
+            if value.value_kind == "quoted" and 0 < value.line <= len(lines):
+                text = decode_single_line_command_scalar(lines[value.line - 1], value)
+            if text is None or not text.strip() or text.strip() in {"null", "~"}:
+                record["if"] = None
+                break
+            record[field] = text
+        rules.append(record)
     return {"rules": rules}
 
 
-def _parse_rule_item(lines: list[str]) -> dict[str, str]:
-    rule: dict[str, str] = {}
-    for raw in lines:
-        line = raw.strip()
-        if line.startswith("- "):
-            line = line[2:].strip()
-        for key in ("if", "when"):
-            match = re.match(rf"^{key}\s*:\s*(.+?)\s*$", line)
-            if match is not None:
-                rule[key] = _strip_quotes(match.group(1).strip())
-    return rule
+def _source_jobs(
+    content: str,
+) -> tuple[list[tuple[int, int, str]], dict[str, dict[str, object]], bool]:
+    """Literal owned rule records; unknown fields survive as proof barriers."""
+    lines = content.splitlines()
+    events = tuple(
+        walk_workflow(
+            ".gitlab-ci.yml", content=content, include_keys=True, include_merge_origins=True
+        )
+    )
+    keys = Counter(e.path for e in events if e.kind is EventKind.MAP_KEY)
+    top = [e for e in events if e.kind is EventKind.MAP_KEY and len(e.path) == 1]
+    if (
+        any(e.kind is EventKind.CUTOFF for e in events)
+        or any("\\" in (e.value or "") for e in top)
+        or any(e.kind is EventKind.ERROR and (not e.path or not keys[e.path[:1]]) for e in events)
+    ):
+        return [], {}, False
+    owned: dict[str, list[Event]] = defaultdict(list)
+    for event in events:
+        if event.path and isinstance(event.path[0], str):
+            owned[event.path[0]].append(event)
+    jobs: list[tuple[int, int, str]] = []
+    records: dict[str, dict[str, object]] = {}
+    complete = not keys[("include",)] and not any(e.kind is EventKind.ERROR for e in events)
+    complete &= not any(e.path and not keys[e.path[:1]] for e in events)
+    for pos, header in enumerate(top):
+        name = str(header.path[0])
+        if name in _RESERVED_TOP_LEVEL or name.startswith("."):
+            continue
+        start = header.line - 1
+        end = top[pos + 1].line - 1 if pos + 1 < len(top) else len(lines)
+        if end <= start or (pos and top[pos - 1].line == header.line):
+            complete = False
+            continue
+        while end > start + 1 and _is_ignorable(lines[end - 1]):
+            end -= 1
+        jobs.append((start, end, name))
+        records[name] = {"rules": None}
+        branch = owned[name]
+        if (
+            keys[(name,)] != 1
+            or keys[(name, "extends")]
+            or any(e.kind is EventKind.ERROR or e.merge_origins for e in branch)
+            or any(
+                e.kind is EventKind.MAP_KEY and (keys[e.path] != 1 or "\\" in (e.value or ""))
+                for e in branch
+            )
+            or any(
+                e.kind is EventKind.LEAF_SCALAR
+                and e.path
+                and isinstance(e.path[-1], str)
+                and not keys[e.path]
+                for e in branch
+            )
+        ):
+            continue
+        records[name] = _owned_rule_record(branch, keys, lines, name)
+    return jobs, records, complete
+
+
+def _flow_ownership_supported(content: str) -> bool:
+    """The structural walk alone cannot certify malformed flow or flow aliases."""
+    expected_close = {
+        TokenKind.FLOW_OPEN_SEQ: TokenKind.FLOW_CLOSE_SEQ,
+        TokenKind.FLOW_OPEN_MAP: TokenKind.FLOW_CLOSE_MAP,
+    }
+    closures = set(expected_close.values())
+    stack: list[TokenKind] = []
+    try:
+        for token in tokenize(content):
+            if token.kind in expected_close:
+                stack.append(expected_close[token.kind])
+            elif token.kind in closures:
+                if not stack or stack.pop() is not token.kind:
+                    return False
+            elif stack and token.kind in {TokenKind.ANCHOR, TokenKind.ALIAS, TokenKind.MERGE_KEY}:
+                return False
+    except TokenizerError:
+        return False
+    return not stack

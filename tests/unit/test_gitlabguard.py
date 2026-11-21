@@ -247,3 +247,57 @@ def test_detect_gitlab_context_drives_whole_pipeline_dead(monkeypatch):
         """
     ).lstrip()
     assert is_pipeline_whole_dead(content, ctx) is True
+
+
+
+def test_gitlab_fallback_denial_respects_earlier_possible_admission():
+    content = dedent("""
+        pages:
+          rules:
+            - if: '$CI_PIPELINE_SOURCE == "push"'
+              when: always
+            - when: never
+          script: [echo docs]
+        """).lstrip()
+
+    assert find_dead_gitlab_job_ranges(content, GitLabContext(pipeline_source="push")) == []
+    assert find_dead_gitlab_job_ranges(content, GitLabContext(pipeline_source="merge_request_event")) == [
+        (1, 6)
+    ]
+    assert find_dead_gitlab_job_ranges(content) == []
+
+
+def test_gitlab_unsupported_changes_cannot_prove_job_is_dead():
+    content = dedent("""
+        pages:
+          rules:
+            - changes:
+                - docs/**/*
+              when: never
+            - when: always
+          script: [echo docs]
+        """).lstrip()
+
+    assert find_dead_gitlab_job_ranges(content) == []
+
+
+def test_gitlab_whole_file_denial_requires_a_local_job_inventory():
+    content = dedent("""
+        include:
+          - local: ci/publish.yml
+        quiet:
+          rules:
+            - when: never
+          script: [echo docs]
+        """).lstrip()
+
+    assert find_dead_gitlab_job_ranges(content) == [(3, 6)]
+    assert not is_pipeline_whole_dead(content)
+
+
+def test_gitlab_comparison_keeps_quoted_variable_names_literal():
+    context = GitLabContext(pipeline_source="push")
+    assert evaluate_gitlab_if('$CI_PIPELINE_SOURCE == "CI_PIPELINE_SOURCE"', context) is (
+        ExprVerdict.STATIC_FALSE
+    )
+    assert evaluate_gitlab_if('$CI_PIPELINE_SOURCE == ""', context) is ExprVerdict.STATIC_FALSE
