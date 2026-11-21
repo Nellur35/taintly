@@ -918,6 +918,10 @@ def _detached_archive(
         if download["state"] != "unresolved":
             publication["retrieval"] = "verified"
             result["scope"] = download["scope"]
+    if "pages_handoff" in data:
+        from taintly.ingestion.gitlab_pages_handoff import pages_handoff
+
+        result["pages_handoff"] = pages_handoff(data, root)
     if "archive_member_origin" in data:
         result["archive_member_origin"] = coverage_source_observation(
             data, root, archive_bytes, result
@@ -1460,6 +1464,10 @@ def _assess(
                 "reason": "runner evidence requires an observed successful job archive",
             }
         )
+    if "pages_publication" in data:
+        from taintly.ingestion.gitlab_pages_publication import pages_publication
+
+        detail["pages_publication"] = pages_publication(data, root, detail)
     return {
         "repository": path,
         "project": project_id,
@@ -1490,6 +1498,16 @@ def mr_artifact_observation(
     scope = _DETACHED_CANCELED_SCOPE if origin is not None else _SCOPE
     try:
         data = _load_job_receipt(snapshot)
+        _need(
+            "pages_handoff" not in data
+            or (data.get("schema") == _FORK_ARCHIVE_SCHEMA and origin is None),
+            "Pages handoff requires a GitLab.com fork-project archive observation",
+        )
+        _need(
+            "pages_publication" not in data
+            or (data.get("schema") == "gitlab-mr-artifact-v1" and origin is None),
+            "Pages publication requires a GitLab.com target-project merge observation",
+        )
         if origin is not None:
             _need(
                 isinstance(origin, str)

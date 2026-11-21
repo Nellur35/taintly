@@ -246,6 +246,47 @@ corroborate an explicit same-project job guard and manual fallback using
 the supplied project IDs and a job with no recorded start. For that
 case use empty `trace` and null `artifact`.
 
+For the GitLab.com project Pages address
+`https://NAMESPACE.gitlab.io/PROJECT/`, a `pages_publication` object can
+corroborate selected responses from a later push to the default branch.
+The supported job named `pages` receives earlier archives through the
+platform's implicit download phase and runs one literal move into
+`public`. The selected push must have the same root configuration bytes
+as the saved MR observation. Preserve trusted provider records for:
+
+- `project`, the default-branch `pipeline`, and `upstream_config`
+  (`url` and `sha256` of the exact raw source).
+- `merge`, the MR record with its API `url`, and `merge_base` with the
+  exact provider merge-base `url` and returned commit `id`. The selected
+  merge must precede the later push and follow the original MR job.
+- `producer` and `publisher`, each with the job record and trusted
+  redacted `log` containing `job`, `url`, `sha256` and eight ordered
+  `rows` of checkout, script and upload phase markers. Each row records
+  `line`, `time`, `value` and the SHA-256 of `time + " " + value`.
+  Include the producer's `build` row and the publisher's `transfer`
+  rows for the download phase, exact producer request and response,
+  and literal move.
+- `archive`, the selected publisher's public archive download receipt
+  with `url`, `http_status`, `size`, `sha256` and `observed_at`. Save
+  its original file as `pages-publication.zip`. At most 64 MiB are read
+  in bounded chunks for the digest. The existing ZIP member analysis
+  limits still apply to profiles that parse archives.
+- `members`, one to four relative paths including `index.html`. Supply
+  a `producer`, `archive` and `site` HTTP receipt for each, with the
+  same fields as the download receipt. Include the saved strong
+  `etag` on the site receipt. Save the original response bodies as
+  `pages-producer-N.bin`, `pages-archive-N.bin`, and `pages-served-N.bin`,
+  starting at zero and capped at 128 KiB each.
+
+The saved receiver ETag must equal the verified ZIP digest. The selected
+bodies must match across the owned build job, Pages job and site. This
+corroborates the sampled publication after the merge while preserving
+the separate result for the earlier MR job. Other artifact downloads,
+unobserved files, the exact provider credential and broader grants
+require separate evidence. An invalid optional object exits 11 and
+preserves the existing artifact result. No network access is needed
+while the scanner evaluates these records.
+
 For a successful archive observation, include the provider's pipeline
 `created_at` and `updated_at` in `job.pipeline`. The recorded job and
 its runner events must fit the pipeline and job windows.
@@ -365,6 +406,42 @@ receipt. The ZIP size must match the job inventory and stay within
 visible and exits 11. A verified download establishes byte identity at
 the recorded time. Content provenance, present access and authority in
 the MR target project require separate evidence.
+
+For a saved fork archive and a separate upstream Pages handoff, optionally
+include `pages_handoff` in a GitLab.com `gitlab-fork-project-archive-v1`
+receipt. This is an offline observation of the named jobs.
+
+- `fork_inventory` is a complete, single-page saved fork pipeline jobs
+  response, fetched after the recorded update. Retain the receipt URL
+  with `?per_page=100&include_retried=true`, `observed_at`, `sha256`,
+  `page`, `total_pages`, `next_page`, `total` and the `jobs`. Each job
+  retains its ID, status, name, URL and pipeline identity.
+- `upstream_project`, `upstream_pipeline` and `upstream_config` bind a
+  successful push to the MR target's default branch on a distinct commit.
+  Retain the project ID, URL, namespace and default branch, the normal
+  pipeline identity and timestamps, and the owning file API URL and
+  SHA-256 under `upstream_config`. The checked-in configuration must match
+  the one supplied for the fork observation.
+- The `producer` and `publisher` records each contain the exact `job`,
+  the usual eight `log` rows for a successful upload, and an `archive`
+  with its `api` download URL, `bytes` and `zip_sha256`. Keep
+  `pages-input.zip` and `pages-output.zip` in the source directory. Use
+  the `publisher.transfer` array to retain six log rows in order.
+  Capture download section start, named artifact request, HTTP 200,
+  download section end, directory move, and redirects copy. Preserve
+  original trace row positions, timestamps and redacted row hashes.
+- For `redirects_source`, save the owning file API URL (`api`), root
+  filename (`file`), checkout commit, publisher job ID and file SHA-256.
+
+The supported source declares an explicit single dependency for a `pages`
+job, moves that job archive's directory to `public`, and copies one root
+file to `public/_redirects`. Both archive uploads must report HTTP 201.
+The CLI checks the complete fork inventory for absence of the named Pages
+job, the upstream download for the exact producing job, and the saved
+archive member bytes after the move and copy. The result supports this
+handoff and retains uncertainty about live serving and broader authority.
+Missing or conflicting optional evidence returns exit 11 while retaining
+a verified fork archive.
 
 For a successful MR job that runs in the target project and checks out the
 fork head directly, use `gitlab-target-project-head-archive-v1`. Pass the
