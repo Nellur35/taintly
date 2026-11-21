@@ -335,6 +335,36 @@ visible and exits 11. A verified download establishes byte identity at
 the recorded time. Content provenance, present access and authority in
 the MR target project require separate evidence.
 
+For a successful MR job that runs in the target project and checks out the
+fork head directly, use `gitlab-target-project-head-archive-v1`. Pass the
+target project ID. Supply the same project, MR membership, commit, job,
+source and trace records, with these requirements.
+
+- The selected pipeline and job belong to the target project. The pipeline
+  ref is `refs/merge-requests/IID/head` and its SHA matches the recorded
+  current MR head, the fork commit and the job's `commit.id`.
+- The source checkout contains the fork's exact `.gitlab-ci.yml`. Supply
+  `source_file` with the saved fork file response's `file_path`,
+  `commit_id` and `content_sha256`, plus the canonical API URL
+  `https://gitlab.com/api/v4/projects/FORK_ID/repository/files/.gitlab-ci.yml?ref=SHA`.
+- Both pipeline and job succeeded. The ordered trace must show checkout
+  of that head, the script section, and the owning job's HTTP 201 in the
+  success-upload section. This profile accepts the archive receipt alone
+  or with the same optional download evidence and byte limit as above.
+- Optional `archive_runner_evidence` uses the verified runner and helper
+  profile below. The saved checkout directory must name the target project
+  under `/builds/`. The trace digest, upload lines, timestamps and correlation
+  ID must match this job's recorded upload. Incomplete or mismatched runner
+  evidence leaves the credential class unresolved with exit 11 and retains
+  the accepted archive.
+
+`target-project-head-archive-upload-observed` identifies the accepted archive for
+that target job. Exact credential, effective configuration, file content
+provenance and deployment require separate evidence. A stale MR head,
+failed admission with no job, mismatched job or missing 201 stays unresolved.
+A missing or mismatched optional download does not undo the observed
+upload. An explicitly supplied incompatible download exits 11.
+
 To compare one Go coverage panel in that verified ZIP with its source, add
 `archive_member_origin` with `format: go-cover-html-v1`, the HTML `member`,
 Go file `path`, package name `package`, and `source` and `parent` file

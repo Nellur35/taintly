@@ -2078,6 +2078,15 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             f"checkout {report['revision']}.\n"
             f"  Job archive target: {publication['target']}\n{report['scope']}"
         )
+    elif state == "target-project-head-archive-upload-observed":
+        publication = report["publication"]
+        print(
+            f"GitLab accepted the archive for job {report['job']} "
+            f"in target project {report['repository']} (HTTP 201).\n"
+            f"  MR !{report['mr']}, pipeline {report['pipeline']}, "
+            f"checkout {report['revision']} from fork {report['source_repository']}.\n"
+            f"  Job archive target: {publication['target']}\n{report['scope']}"
+        )
     elif state == "fork-project-archive-upload-observed":
         publication = report["publication"]
         historical = report.get("historical_pipeline")
@@ -2162,10 +2171,15 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
         else:
             print(f"Pages preview unresolved: {preview['reason']}.")
     if archive_download is not None and args.format == "text":
-        if archive_download["state"] == "fork-project-archive-retrieved":
+        if archive_download["state"] != "unresolved":
             print(f"  Retrieved ZIP SHA-256: {archive_download['sha256']}.")
         else:
-            print(f"Fork archive retrieval unresolved: {archive_download['reason']}.")
+            archive_label = (
+                "Target-project archive"
+                if state == "target-project-head-archive-upload-observed"
+                else "Fork archive"
+            )
+            print(f"{archive_label} retrieval unresolved: {archive_download['reason']}.")
     if member_origin is not None and args.format == "text":
         if member_origin["state"] == "fork-source-display-matched":
             print(

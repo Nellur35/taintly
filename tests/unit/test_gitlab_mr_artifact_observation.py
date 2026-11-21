@@ -994,3 +994,184 @@ def test_pages_account_requires_the_same_owned_deployment_and_job(
     else:
         assert observed["state"] == "deployment-account-recorded"
         assert observed["account_id"] == 103
+
+
+@pytest.fixture
+def target_head_upload(fork_upload):
+    data = fork_upload
+    data["schema"] = "gitlab-target-project-head-archive-v1"
+    target_url = data["target"]["web_url"]
+    project = data["target"]["id"]
+    job = data["job"]
+    ref = "refs/merge-requests/9/head"
+    data["pipeline"].update(
+        project_id=project, ref=ref, web_url=f"{target_url}/-/pipelines/22"
+    )
+    data["mr_pipeline"] = {**data["pipeline"]}
+    job.update(
+        status="success", failure_reason=None, pipeline={**data["pipeline"]},
+        web_url=f"{target_url}/-/jobs/33", name="Build documentation", commit={"id": HEAD},
+    )
+    log = data["log"]
+    log["url"] = job["web_url"] + "/raw"
+    rows = log["rows"]
+    rows[1] = _failure_trace_row(
+        rows[1]["time"], f"01O Checking out {HEAD[:8]} as detached HEAD (ref is {ref})..."
+    )
+    for index in (5, 7):
+        row = rows[index]
+        rows[index] = _failure_trace_row(
+            row["time"], row["value"].replace("on_failure", "on_success")
+        )
+    data["source_file"] = {
+        "url": f"https://gitlab.com/api/v4/projects/2/repository/files/.gitlab-ci.yml?ref={HEAD}",
+        "commit_id": HEAD,
+        "file_path": ".gitlab-ci.yml",
+        "content_sha256": hashlib.sha256(BUILDSPEC.encode()).hexdigest(),
+    }
+    return data
+
+
+@pytest.mark.parametrize(
+    "contrast",
+    [
+        None, "selected-fork", "membership", "merge-ref", "advanced-head",
+        "job-checkout", "fork-file", "job-url", "no-receipt", "wrong-phase",
+        "different-upload-job", "unsupported-profile",
+    ],
+)
+def test_target_head_archive_requires_consistent_source_execution_and_upload(
+    tmp_path, target_head_upload, contrast
+):
+    data = target_head_upload
+    selected = 1
+    if contrast == "selected-fork":
+        selected = 2
+    elif contrast == "membership":
+        data["mr_pipeline"]["project_id"] = 2
+    elif contrast == "merge-ref":
+        for pipeline in (data["pipeline"], data["mr_pipeline"], data["job"]["pipeline"]):
+            pipeline["ref"] = "refs/merge-requests/9/merge"
+    elif contrast == "advanced-head":
+        data["mr"]["sha"] = BASE
+    elif contrast == "job-checkout":
+        data["job"]["commit"]["id"] = BASE
+    elif contrast == "fork-file":
+        data["source_file"]["url"] = data["source_file"]["url"].replace("projects/2", "projects/1")
+    elif contrast == "job-url":
+        data["job"]["web_url"] = data["job"]["web_url"].replace("team/repo", "team/fork")
+    elif contrast == "no-receipt":
+        del data["log"]["rows"][6]
+    elif contrast in ("wrong-phase", "different-upload-job"):
+        rows = data["log"]["rows"]
+        indices = (5, 7) if contrast == "wrong-phase" else (6,)
+        for index in indices:
+            row = rows[index]
+            value = row["value"].replace("on_success", "on_failure").replace("id=33", "id=34")
+            rows[index] = _failure_trace_row(row["time"], value)
+    elif contrast == "unsupported-profile":
+        data["pages_preview"] = {}
+    result = _evaluate_fork(tmp_path, data, selected)
+    if contrast is None:
+        assert result["state"] == "target-project-head-archive-upload-observed"
+        assert (result["source_project"], result["project"], result["target_project"]) == (2, 1, 1)
+        assert result["job_name"] == "Build documentation"
+        assert result["publication"]["target"] == "https://gitlab.com/team/repo/-/jobs/33/artifacts/download"
+        assert result["publication"]["retrieval"] == "unverified"
+    else:
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+
+
+@pytest.mark.parametrize("bad_download", [False, True])
+def test_target_head_archive_download_preserves_upload_when_zip_fails(
+    tmp_path, target_head_upload, bad_download, monkeypatch, capsys
+):
+    data = target_head_upload
+    buffer = BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        archive.writestr("docs/index.html", "documentation")
+    content = buffer.getvalue()
+    (tmp_path / "published-archive.zip").write_bytes(content)
+    job = data["job"]
+    next(item for item in job["artifacts"] if item["file_type"] == "archive")["size"] = len(content)
+    data["archive_download"] = {
+        "job": 33,
+        "url": job["web_url"] + "/artifacts/download",
+        "observed_at": job["finished_at"],
+        "responses": [{"status": 200, "host": "gitlab.com"}],
+        "bytes": len(content),
+        "sha256": "f" * 64 if bad_download else hashlib.sha256(content).hexdigest(),
+    }
+    _evaluate_fork(tmp_path, data, 1)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["taintly", str(tmp_path), "--format", "json", "--no-config",
+         "--gitlab-mr-artifact-observation", str(tmp_path / "observation.json"), "1", "22", "33"],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    report = json.loads(capsys.readouterr().out)["gitlab_mr_artifact_observation"]
+    assert report["state"] == "target-project-head-archive-upload-observed"
+    assert report["publication"]["http_status"] == 201
+    if bad_download:
+        assert exit_info.value.code == 11
+        assert report["publication"]["retrieval"] == "unverified"
+        assert report["archive_download"]["state"] == "unresolved"
+    else:
+        assert exit_info.value.code == 0
+        assert report["publication"]["retrieval"] == "verified"
+        assert report["archive_download"]["state"] == "target-project-archive-retrieved"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (None, None),
+        ("checkout_directory", "/builds/team/fork"),
+        ("trace_sha256", "f" * 64),
+        ("correlation_id", "f" * 32),
+        ("runner_revision", "c" * 40),
+        ("helper_config", "sha256:" + "f" * 64),
+        ("archive_line", 5),
+    ],
+)
+def test_target_head_archive_keeps_accepted_upload_when_runner_evidence_disagrees(
+    tmp_path, target_head_upload, field, value, monkeypatch, capsys
+):
+    data = target_head_upload
+    log = data["log"]
+    for number, row in enumerate(log["rows"], start=3):
+        row["line"] = number
+    start, reply, end = log["rows"][-3:]
+    runner = _runner_archive_evidence()
+    runner.update(
+        revision=HEAD, trace_sha256=log["sha256"],
+        archive_start_line=start["line"], archive_line=reply["line"], archive_end_line=end["line"],
+        archive_start_time=start["time"], archive_time=reply["time"], archive_end_time=end["time"],
+        correlation_id=reply["value"].split("correlation_id=")[1].split()[0],
+    )
+    if field is not None:
+        runner[field] = value
+    data["archive_runner_evidence"] = runner
+    _evaluate_fork(tmp_path, data, 1)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["taintly", str(tmp_path), "--format", "json", "--no-config",
+         "--gitlab-mr-artifact-observation", str(tmp_path / "observation.json"), "1", "22", "33"],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    report = json.loads(capsys.readouterr().out)["gitlab_mr_artifact_observation"]
+    assert report["state"] == "target-project-head-archive-upload-observed"
+    assert report["publication"]["http_status"] == 201
+    authority = report["archive_runner_authority"]
+    if field is None:
+        assert exit_info.value.code == 0
+        assert authority["credential"] == "runner-job-token"
+        assert authority["checkout_directory"] == "/builds/team/repo"
+        assert authority["route"] == "jobs/33/artifacts"
+    else:
+        assert exit_info.value.code == 11
+        assert authority["state"] == "unresolved"
+        assert "credential" not in authority
