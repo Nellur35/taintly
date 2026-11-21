@@ -124,13 +124,13 @@ measure of equal coverage, precision or recall. See the exact
 ## Coverage
 
 <!-- AUTOGEN:summary -->
-336 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
+337 file-based rules and 32 platform-posture checks across GitHub Actions, GitLab CI, Jenkins, and AWS CodeBuild. Includes a dedicated AI / ML category for workflows that load models or run AI coding agents.
 <!-- /AUTOGEN:summary -->
 
 <!-- AUTOGEN:coverage -->
 | Category | GitHub | GitLab | Jenkins | CodeBuild |
 |----------|--------|--------|---------|-----------|
-| SEC-1 — Insufficient Flow Control | 6 | 3 | 2 | 0 |
+| SEC-1 — Insufficient Flow Control | 7 | 3 | 2 | 0 |
 | SEC-2 — Inadequate IAM | 7 | 4 | 3 | 0 |
 | SEC-3 — Dependency Chain Abuse | 35 | 19 | 14 | 4 |
 | SEC-4 — Poisoned Pipeline Execution | 77 | 30 | 24 | 2 |

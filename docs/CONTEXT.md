@@ -77,6 +77,16 @@ Limited authority is not a certificate of harmlessness. These source-derived
 calibrations can affect the score through finding metadata; deployment notes
 from `.taintly-context.yml` retain their annotation-only behavior above.
 
+### Release Drafter guard review
+
+`SEC1-GH-004` checks root actions pinned to the verified Release Drafter
+v7.0.0, v7.1.0, v7.2.0 and v7.3.1 commits. Their bundles ignore the
+`disable-releaser` input. The finding identifies the owning pull-request step, configured action
+token and declared job Contents scope when those facts are available.
+Fork admission, the effective grant and any resulting release write require
+runtime evidence. Moving PR labeling to the dedicated autolabeler keeps the
+draft request out of that step.
+
 ## Source-derived execution context for composed findings
 
 `CHAIN-GH-101` through `CHAIN-GH-105` also inspect workflow source. This is
