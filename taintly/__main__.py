@@ -251,6 +251,11 @@ def main():
         help="Check saved target-project fork MR artifact or manual job evidence.",
     )
     parser.add_argument(
+        "--gitlab-artifact-origin",
+        metavar="HTTPS_ORIGIN",
+        help="Bind a saved canceled target-project archive observation to its GitLab origin.",
+    )
+    parser.add_argument(
         "--gitlab-mr-publish-job",
         metavar="NAME",
         help="Also assess admission of an npm publisher in the saved GitLab MR pipeline.",
@@ -693,6 +698,8 @@ def main():
         return
     if args.gitlab_mr_publish_job is not None:
         parser.error("--gitlab-mr-publish-job requires --gitlab-mr-artifact-observation")
+    if args.gitlab_artifact_origin is not None:
+        parser.error("--gitlab-artifact-origin requires --gitlab-mr-artifact-observation")
     if args.codebuild_public_s3_observation:
         _assess_codebuild_s3(parser, args)
         return
@@ -2030,7 +2037,16 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     from .ingestion.gitlab_mr_artifact import mr_artifact_observation
 
     mode = "gitlab_mr_artifact_observation"
-    allowed = {"path", mode, "platform", "format", "no_config", "no_color", "gitlab_mr_publish_job"}
+    allowed = {
+        "path",
+        mode,
+        "platform",
+        "format",
+        "no_config",
+        "no_color",
+        "gitlab_mr_publish_job",
+        "gitlab_artifact_origin",
+    }
     for name, value in vars(args).items():
         if name not in allowed and value != parser.get_default(name):
             parser.error(f"--{name.replace('_', '-')} is unavailable in GitLab observation mode")
@@ -2049,6 +2065,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
         int(pipeline),
         int(job),
         publisher=args.gitlab_mr_publish_job,
+        origin=args.gitlab_artifact_origin,
     )
     state = report["state"]
     admission = report.get("publication_admission")
@@ -2076,6 +2093,15 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             f"The coordinator accepted its archive in {report['upload_phase']} (HTTP 201).\n"
             f"  Fork MR !{report['mr']}, pipeline {report['pipeline']}, "
             f"checkout {report['revision']}.\n"
+            f"  Job archive target: {publication['target']}\n{report['scope']}"
+        )
+    elif state == "target-project-head-archive-accepted-canceled-job":
+        publication = report["publication"]
+        print(
+            f"GitLab job {report['job']} in {report['repository']} is recorded as canceled. "
+            f"The coordinator accepted its archive in {report['upload_phase']} (HTTP 201).\n"
+            f"  MR !{report['mr']}, pipeline {report['pipeline']}, "
+            f"checkout {report['revision']} from fork {report['source_repository']}.\n"
             f"  Job archive target: {publication['target']}\n{report['scope']}"
         )
     elif state == "target-project-head-archive-upload-observed":
