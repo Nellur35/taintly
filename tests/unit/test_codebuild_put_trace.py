@@ -439,6 +439,9 @@ def test_launch_receipt_binds_the_selected_version_with_or_without_an_override(o
         ({"endTime": 1767225604000}, "completion conflicts"),
         ({"endTime": None}, "complete millisecond record"),
         ({"httpStatusCode": 200}, "HTTP status conflicts"),
+        ({"AuthenticationMethod": "AuthHeader"}, None),
+        ({"AuthenticationMethod": "QueryString"}, "authentication method conflicts"),
+        ({"AuthenticationMethod": None}, "authentication method conflicts"),
     ],
 )
 def test_precise_s3_transport_can_disprove_a_coarse_time_match(updates, message):

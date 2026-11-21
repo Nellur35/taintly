@@ -1154,8 +1154,12 @@ without this optional row can still bind the build response to the exact
 observed command.
 
 The Git file, command, request time, role and session, target, checksum,
-and version are checked when relevant. Provide an optional redacted
-`runtime_sts_event` from CloudTrail to bind the build's
+and version are checked when relevant. When the S3 data event includes
+`additionalEventData.AuthenticationMethod`, the supported direct AWS CLI
+request uses `AuthHeader`. A conflicting method such as `QueryString`
+leaves the command-to-request binding unresolved. Omitting the optional
+field supplies no authentication method evidence. Provide an optional
+redacted `runtime_sts_event` from CloudTrail to bind the build's
 `GetCallerIdentity` call to the same temporary credential as the independently
 matched S3 data event. Keep the event identity and time and use
 `userIdentity.credential_id_sha256` for the STS event instead of its credential
