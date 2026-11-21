@@ -70,6 +70,15 @@ _CANCELED_SCOPE = (
     "Archive bytes, retention, content provenance, wider credential grants and download audience "
     "require separate evidence."
 )
+_DETACHED_CANCELED_SCOPE = (
+    "Trusted saved records bind the historical fork checkout and HTTP 201 archive response "
+    "to a canceled job in the target project. Archive contents, current availability, "
+    "the exact credential, and other permissions require separate evidence."
+)
+_ARTIFACT_ORIGIN = re.compile(
+    r"https://[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+"
+)
+_CANONICAL_PROJECT = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)+")
 _FORK_ARCHIVE_SCHEMA = "gitlab-fork-project-archive-v1"
 _TARGET_HEAD_ARCHIVE_SCHEMA = "gitlab-target-project-head-archive-v1"
 _TARGET_HEAD_ARCHIVE_SCOPE = (
@@ -573,21 +582,28 @@ def _archive_receipt(job_url: str, log: _Row, response: _Row, size: int) -> _Row
 
 
 def _archive_upload_rows(
-    log: _Row, pipeline: _Row, job: _Row, reply: str, label: str
+    log: _Row,
+    pipeline: _Row,
+    job: _Row,
+    reply: str,
+    label: str,
+    *,
+    accept_plain_start: bool = False,
 ) -> tuple[str, _Row]:
     rows = log["rows"]
     _need(
         isinstance(rows, list) and len(rows) == 8,
         "saved runner trace lacks the complete checkout, script and archive phase sequence",
     )
+    start_prefix = r"00O[+ ]section_start:" if accept_plain_start else r"00O\+section_start:"
     upload_phase = re.fullmatch(
-        r"00O\+section_start:[0-9]{1,12}:(upload_artifacts_on_(?:success|failure))",
+        start_prefix + r"[0-9]{1,12}:(upload_artifacts_on_(?:success|failure))",
         str(rows[5]["value"]),
     )
     if upload_phase is None:
         raise RegistryJobError("the saved result is outside a supported runner upload phase")
     phase = upload_phase[1]
-    start = r"00O\+section_start:([0-9]{1,12}):"
+    start = start_prefix + r"([0-9]{1,12}):"
     end = r"00O section_end:([0-9]{1,12}):"
     checkout = (
         f"01O Checking out {pipeline['sha'][:8]} as detached HEAD (ref is {pipeline['ref']})..."
@@ -632,12 +648,22 @@ def _archive_upload_rows(
 
 
 def _detached_archive(
-    data: _Row, root: Path, project_id: int, pipeline_id: int, job_id: int, *, target_owned: bool
+    data: _Row,
+    root: Path,
+    project_id: int,
+    pipeline_id: int,
+    job_id: int,
+    *,
+    target_owned: bool,
+    origin: str | None = None,
 ) -> _Row:
     target, fork, mr = data["target"], data["fork"], data["mr"]
     pipeline, job, log = data["pipeline"], data["job"], data["log"]
-    source_path = _value(fork["path_with_namespace"], _PROJECT, "GitLab fork project path")
-    target_path = _value(target["path_with_namespace"], _PROJECT, "GitLab MR target path")
+    canceled = origin is not None
+    base = origin or "https://gitlab.com"
+    path_pattern = _CANONICAL_PROJECT if canceled else _PROJECT
+    source_path = _value(fork["path_with_namespace"], path_pattern, "GitLab fork project path")
+    target_path = _value(target["path_with_namespace"], path_pattern, "GitLab MR target path")
     source_project = _identifier(fork["id"], "fork project")
     destination = _identifier(target["id"], "MR target project")
     iid = _identifier(mr["iid"], "merge request IID")
@@ -647,8 +673,8 @@ def _detached_archive(
         if target_owned
         else _value(mr["source_branch"], _FORK_BRANCH, "MR source branch")
     )
-    fork_url = f"https://gitlab.com/{source_path}"
-    target_url = f"https://gitlab.com/{target_path}"
+    fork_url = f"{base}/{source_path}"
+    target_url = f"{base}/{target_path}"
     owner = destination if target_owned else source_project
     owning_url = target_url if target_owned else fork_url
     pipeline_url = f"{owning_url}/-/pipelines/{pipeline_id}"
@@ -670,7 +696,24 @@ def _detached_archive(
     membership = data["mr_pipeline"]
     current_head = _value(mr["sha"], _SHA, "current MR head")
     history = data.get("historical_pipeline")
-    if target_owned:
+    if canceled:
+        _need(
+            target_owned
+            and pipeline["status"] == job["status"] == "canceled"
+            and isinstance(history, dict)
+            and revision == job["commit"]["id"]
+            and not {
+                "archive_download",
+                "archive_runner_evidence",
+                "archive_member_origin",
+                "failed_archive",
+                "canceled_archive",
+                "pages_preview",
+                "publication_admission",
+            }.intersection(data),
+            "the selected origin requires a canceled target-project job with historical checkout evidence",
+        )
+    elif target_owned:
         _need(
             not {
                 "historical_pipeline",
@@ -688,7 +731,7 @@ def _detached_archive(
         _identifier(pipeline["id"], "detached pipeline") == pipeline_id
         and pipeline["project_id"] == owner
         and pipeline["source"] == "merge_request_event"
-        and pipeline["status"] in {"success", "failed"}
+        and (canceled or pipeline["status"] in {"success", "failed"})
         and pipeline["ref"] == ref
         and pipeline["web_url"] == pipeline_url
         and all(
@@ -718,15 +761,22 @@ def _detached_archive(
     archives = [item for item in job["artifacts"] if item["file_type"] == "archive"]
     status = job.get("status")
     success = status == "success"
-    expected_failure = None if success else "script_failure"
+    expected_failure = None if success or canceled else "script_failure"
     _need(
         _identifier(job["id"], "fork job") == job_id
         and job["web_url"] == job_url
-        and (success or status == "failed")
+        and (canceled or success or status == "failed")
         and job.get("failure_reason") == expected_failure
         and all(
             job["pipeline"][key] == pipeline[key]
             for key in ("id", "project_id", "sha", "ref", "source")
+        )
+        and (
+            not canceled
+            or all(
+                job["pipeline"][key] == pipeline[key]
+                for key in ("status", "created_at", "updated_at", "web_url")
+            )
         )
         and len(archives) == 1
         and _identifier(archives[0]["size"], "saved archive size")
@@ -751,7 +801,7 @@ def _detached_archive(
     if target_owned:
         source_file = data["source_file"]
         expected_url = (
-            f"https://gitlab.com/api/v4/projects/{source_project}/"
+            f"{base}/api/v4/projects/{source_project}/"
             f"repository/files/.gitlab-ci.yml?ref={revision}"
         )
         _need(
@@ -761,13 +811,17 @@ def _detached_archive(
             and source_file["content_sha256"] == source_hash,
             "saved fork configuration record does not match the selected checkout and bytes",
         )
+    correlation = (
+        r"[0-7][0-9A-HJKMNP-TV-Z]{25}" if canceled else r"(?:[0-9a-f]{32}|[0-9a-f]{16}-[A-Z]{3})"
+    )
     reply = (
         r'01E Uploading artifacts as "archive" to coordinator\.\.\. 201 Created +'
-        r"correlation_id=(?:[0-9a-f]{32}|[0-9a-f]{16}-[A-Z]{3}) "
-        rf"id={job_id} (?:status=201|responseStatus=201 Created)"
+        rf"correlation_id={correlation} id={job_id} (?:status=201|responseStatus=201 Created)"
     )
     trace_label = "target-project-job" if target_owned else "fork-job"
-    phase, response = _archive_upload_rows(log, pipeline, job, reply, trace_label)
+    phase, response = _archive_upload_rows(
+        log, pipeline, job, reply, trace_label, accept_plain_start=canceled
+    )
     expected_phase = "upload_artifacts_on_success" if success else "upload_artifacts_on_failure"
     _need(
         phase == expected_phase,
@@ -778,7 +832,9 @@ def _detached_archive(
     publication = _archive_receipt(job_url, log, response, archives[0]["size"])
     result = {
         "state": (
-            "target-project-head-archive-upload-observed"
+            "target-project-head-archive-accepted-canceled-job"
+            if canceled
+            else "target-project-head-archive-upload-observed"
             if target_owned
             else "fork-project-archive-upload-observed"
         ),
@@ -794,9 +850,17 @@ def _detached_archive(
         "source_sha256": source_hash,
         "job_status": status,
         "upload_phase": phase,
-        "scope": _TARGET_HEAD_ARCHIVE_SCOPE if target_owned else _FORK_ARCHIVE_SCOPE,
+        "scope": (
+            _DETACHED_CANCELED_SCOPE
+            if canceled
+            else _TARGET_HEAD_ARCHIVE_SCOPE
+            if target_owned
+            else _FORK_ARCHIVE_SCOPE
+        ),
         "publication": publication,
     }
+    if canceled:
+        result["origin"] = base
     if target_owned:
         result["source_repository"] = source_path
         result["source_project"] = source_project
@@ -1390,10 +1454,25 @@ def mr_artifact_observation(
     job: int,
     *,
     publisher: str | None = None,
+    origin: str | None = None,
 ) -> _Row:
-    scope = _SCOPE
+    scope = _DETACHED_CANCELED_SCOPE if origin is not None else _SCOPE
     try:
         data = _load_job_receipt(snapshot)
+        if origin is not None:
+            _need(
+                isinstance(origin, str)
+                and len(origin) <= 253
+                and _ARTIFACT_ORIGIN.fullmatch(origin),
+                "the expected artifact origin must be a bare HTTPS hostname",
+            )
+            _need(
+                publisher is None and data.get("schema") == _TARGET_HEAD_ARCHIVE_SCHEMA,
+                "the explicit origin is supported for canceled detached target-project archives only",
+            )
+            return _detached_archive(
+                data, root.resolve(), project, pipeline, job, target_owned=True, origin=origin
+            )
         from taintly.ingestion.gitlab_branch_image import SCHEMA, SCOPE, branch_image_observation
 
         if data.get("schema") == SCHEMA:

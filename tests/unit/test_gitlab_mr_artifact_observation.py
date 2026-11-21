@@ -1035,6 +1035,91 @@ def target_head_upload(fork_upload):
 @pytest.mark.parametrize(
     "contrast",
     [
+        None,
+        "missing-origin",
+        "foreign-origin",
+        "origin-with-path",
+        "different-job",
+        "job-status",
+        "foreign-trace",
+        "foreign-file",
+        "missing-history",
+        "bad-epoch",
+    ],
+)
+def test_explicit_origin_binds_canceled_detached_archive(tmp_path, target_head_upload, contrast):
+    origin = "https://ci.example.org"
+    data = json.loads(json.dumps(target_head_upload).replace("https://gitlab.com", origin))
+    data["mr"]["sha"] = BASE
+    data["pipeline"]["status"] = data["job"]["status"] = "canceled"
+    data["job"]["pipeline"]["status"] = data["mr_pipeline"]["status"] = "canceled"
+    pipe = data["pipeline"]
+    data["historical_pipeline"] = {
+        "url": pipe["web_url"] + ".json",
+        "sha256": "f" * 64,
+        "project": 1,
+        "pipeline": 22,
+        "mr_url": data["mr"]["web_url"],
+        "event": "detached",
+        "source": pipe["source"],
+        "revision": HEAD,
+        "ref": pipe["ref"],
+        "created_at": pipe["created_at"],
+    }
+    rows = data["log"]["rows"]
+    for index in (5, 7):
+        row = rows[index]
+        rows[index] = _failure_trace_row(
+            row["time"], row["value"].replace("on_success", "on_failure").replace("00O+", "00O ")
+        )
+    response = rows[6]
+    rows[6] = _failure_trace_row(
+        response["time"],
+        re.sub(r"correlation_id=\S+", "correlation_id=" + "0" * 26, response["value"]),
+    )
+    if contrast == "missing-origin":
+        origin = None
+    elif contrast == "foreign-origin":
+        origin = "https://other.example.org"
+    elif contrast == "origin-with-path":
+        origin += "/team"
+    elif contrast == "different-job":
+        rows[6] = _failure_trace_row(rows[6]["time"], rows[6]["value"].replace("id=33", "id=34"))
+    elif contrast == "job-status":
+        data["job"]["status"] = "failed"
+    elif contrast == "foreign-trace":
+        data["log"]["url"] = data["log"]["url"].replace("ci.example.org", "other.example.org")
+    elif contrast == "foreign-file":
+        data["source_file"]["url"] = data["source_file"]["url"].replace(
+            "ci.example.org", "other.example.org"
+        )
+    elif contrast == "missing-history":
+        del data["historical_pipeline"]
+    elif contrast == "bad-epoch":
+        rows[5] = _failure_trace_row(
+            rows[5]["time"], re.sub(r"section_start:\d+:", "section_start:0:", rows[5]["value"])
+        )
+    source = BUILDSPEC.encode()
+    (tmp_path / ".gitlab-ci.yml").write_bytes(source)
+    data["source_sha256"] = hashlib.sha256(source).hexdigest()
+    packet = tmp_path / "observation.json"
+    packet.write_text(json.dumps(data), encoding="utf-8")
+    result = mr_artifact_observation(packet, tmp_path, 1, 22, 33, origin=origin)
+    if contrast is not None:
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+        return
+    assert result["state"] == "target-project-head-archive-accepted-canceled-job"
+    assert result["job_status"] == "canceled"
+    assert result["historical_pipeline"]["current_mr_head"] == BASE
+    assert result["revision"] == HEAD
+    assert result["publication"]["http_status"] == 201
+    assert result["publication"]["retrieval"] == "unverified"
+
+
+@pytest.mark.parametrize(
+    "contrast",
+    [
         None, "selected-fork", "membership", "merge-ref", "advanced-head",
         "job-checkout", "fork-file", "job-url", "no-receipt", "wrong-phase",
         "different-upload-job", "unsupported-profile",

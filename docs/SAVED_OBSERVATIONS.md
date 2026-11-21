@@ -304,6 +304,24 @@ job, canceled pipeline and ZIP archive inventory. The result
 archive acceptance and preserves the final job status. Archive bytes,
 later availability and wider permissions require separate evidence.
 
+For a canceled job in a target project's detached fork MR pipeline on a
+saved GitLab origin, keep schema `gitlab-target-project-head-archive-v1`
+and pass `--gitlab-artifact-origin https://gitlab.example.org`. This
+option requires the exact HTTPS origin, with no path or credentials.
+The observer runs offline and checks the saved project, MR, pipeline,
+job, trace and fork source URLs against that origin. Preserve canonical
+project path capitalization.
+
+Add the trusted historical pipeline view projection and its digest
+under `historical_pipeline`, as for the detached profile below. Use the
+target project's MR head ref and the historical revision reported by
+that pipeline. Preserve the ZIP entry and the eight ordered trace rows
+through the HTTP 201 failure-phase archive response. A current MR head
+that has advanced can coexist with an older checkout. The output
+`target-project-head-archive-accepted-canceled-job` retains both the
+recorded cancellation and the accepted upload. Review the historical
+job as the producer if a downstream step uses the archive.
+
 For a successful job or a script failure in a merge-request pipeline running
 in the fork's own project, use schema `gitlab-fork-project-archive-v1`.
 Pass the fork's project ID to the same command. Supply `fork`, `target`, `mr`, `pipeline`, `job`,
