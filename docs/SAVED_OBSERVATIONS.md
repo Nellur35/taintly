@@ -680,6 +680,21 @@ authorization headers and complete error bodies. A literal pin to the
 reviewed Release Drafter v6.1.0 also supports `disable-autolabeler: false`.
 The reported grant describes the owning job's token setup.
 
+The draft-request command also supports one explicit reusable invocation in a
+direct external fork PR. The saved job name identifies the caller and called
+jobs as `caller / called`. The fork-head source must have one literal
+branch-based workflow call and one named secret bound to `secrets.GITHUB_TOKEN`.
+Provide the run's single selected `referenced_workflows` entry with its
+`path`, `ref` and commit `sha`. Supply `reusable_source` with
+`repository`, `path`, `revision` and `sha256`, keeping the called workflow
+at `reusable/<revision>/<path>` relative to the source projection. In the
+called workflow the same named secret is a required `workflow_call` input and
+feeds the only Release Drafter action's `GITHUB_TOKEN` environment entry.
+This profile covers inherited grants and retains the existing exact owned
+request checks. It records the configured handoff and the observed 403.
+Runtime token identity, effective grant, resolved action bytes and exact
+caller merge bytes require separate evidence.
+
 For the pinned Release Drafter v7.7.0 checkout profile, the same command
 accepts an owned job-log projection in `verified_log`. The fork trigger
 must declare the usual opened, reopened and synchronize events without

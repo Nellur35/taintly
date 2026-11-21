@@ -2560,6 +2560,22 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
     elif state == "draft-release-create-denied":
         operation = result["operation"]
         configured = result["configured"]
+        invocation = result.get("reusable_invocation")
+        if invocation is None:
+            source_detail = (
+                f"  Fork-head source requests {configured['requested_permission']} and configures "
+                f"{configured['credential_binding']} "
+                f"({result['source']['path']}:{configured['credential_line']}).\n"
+            )
+        else:
+            called = invocation["source"]
+            source_detail = (
+                f"  Fork-head caller passes {configured['credential_binding']} as "
+                f"{invocation['secret_alias']} "
+                f"({result['source']['path']}:{invocation['secret_line']}).\n"
+                f"  The saved run selects {invocation['repository']}/{called['path']} "
+                f"at {called['revision']} (consumer at line {configured['credential_line']}).\n"
+            )
         grant = result.get("effective_permission")
         grant_line = (
             f"  Job setup reports {grant['credential']} Contents: {grant['contents']}.\n"
@@ -2572,9 +2588,7 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
             f"{operation['url']} targeting {operation['target_commitish']}.\n"
             f"  Run {result['run']}, job {result['job']}, attempt {result['attempt']}. "
             f"Job conclusion: {result['job_conclusion']}.\n"
-            f"  Fork-head source requests {configured['requested_permission']} and configures "
-            f"{configured['credential_binding']} "
-            f"({result['source']['path']}:{configured['credential_line']}).\n"
+            f"{source_detail}"
             f"{grant_line}"
             f"{result['scope']}"
         )
