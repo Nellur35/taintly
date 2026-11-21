@@ -2075,6 +2075,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     archive_authority = report.get("archive_runner_authority")
     member_origin = report.get("archive_member_origin")
     handoff = report.get("pages_handoff")
+    pages_publication = report.get("pages_publication")
     if args.format == "json":
         print(json.dumps({mode: report}, indent=2))
     elif state == "job-artifact-observed":
@@ -2239,6 +2240,20 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             )
         else:
             print(f"GitLab Pages handoff unresolved: {handoff['reason']}.")
+    if pages_publication is not None and args.format == "text":
+        if pages_publication["state"] == "post-merge-pages-publication-observed":
+            print(
+                f"  A separate push after the merge ran Pages job {pages_publication['pages_job']}.\n"
+                f"  Pages downloaded the archive from job {pages_publication['source_job']} "
+                f"in pipeline {pages_publication['upstream_pipeline']}.\n"
+                f"  {pages_publication['move']['command']} (runner log line "
+                f"{pages_publication['move']['trace_line']}).\n"
+                f"  {len(pages_publication['members'])} public responses match the selected archive "
+                f"members at {pages_publication['publication']['target']}.\n"
+                f"{pages_publication['scope']}"
+            )
+        else:
+            print(f"GitLab Pages publication unresolved: {pages_publication['reason']}.")
     incomplete = state in {"unresolved", "registry-image-push-reported"} or any(
         item is not None and item["state"] == "unresolved"
         for item in (
@@ -2249,6 +2264,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             member_origin,
             archive_authority,
             handoff,
+            pages_publication,
         )
     )
     sys.exit(11 if incomplete else 0)

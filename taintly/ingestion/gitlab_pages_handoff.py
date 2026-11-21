@@ -101,10 +101,10 @@ def _upstream(data: _Row, handoff: _Row) -> _Row:
     return pipe
 
 
-def _archive(
-    record: _Row, root: Path, pipe: _Row, project_url: str, name: str, filename: str
-) -> tuple[int, _Row, bytes]:
-    job, log, archive = record["job"], record["log"], record["archive"]
+def _archive_request(
+    record: _Row, pipe: _Row, project_url: str, name: str
+) -> tuple[int, _Row, int]:
+    job, log = record["job"], record["log"]
     job_id = _identifier(job["id"], "upstream job")
     url = f"{project_url}/-/jobs/{job_id}"
     entries = [row for row in job["artifacts"] if row["file_type"] == "archive"]
@@ -132,12 +132,21 @@ def _archive(
     )
     row_positions = [_identifier(row.get("line"), "archive trace position") for row in log["rows"]]
     size = _identifier(entries[0]["size"], "upstream archive size")
+    _need(
+        phase == "upload_artifacts_on_success" and all(a < b for a, b in pairwise(row_positions)),
+        "archive request is outside the owning upload phase",
+    )
+    return job_id, response, size
+
+
+def _archive(
+    record: _Row, root: Path, pipe: _Row, project_url: str, name: str, filename: str
+) -> tuple[int, _Row, bytes]:
+    job_id, response, size = _archive_request(record, pipe, project_url, name)
+    archive = record["archive"]
     api = f"https://gitlab.com/api/v4/projects/{pipe['project_id']}/jobs/{job_id}/artifacts"
     _need(
-        phase == "upload_artifacts_on_success"
-        and all(a < b for a, b in pairwise(row_positions))
-        and archive["api"] == api
-        and archive["bytes"] == size <= _MAX_FORK_ARCHIVE_BYTES,
+        archive["api"] == api and archive["bytes"] == size <= _MAX_FORK_ARCHIVE_BYTES,
         "saved ZIP does not identify the accepted archive for this upstream job",
     )
     raw = _source_bytes(root, root / filename, "saved upstream archive", max_bytes=size)
@@ -149,7 +158,7 @@ def _archive(
 
 
 def _transfer(
-    publisher: _Row, producer: str, producer_id: int, copy_commands: tuple[str, str]
+    publisher: _Row, producer: str, producer_id: int, copy_commands: tuple[str, ...]
 ) -> list[int]:
     log, transfer = publisher["log"], publisher["transfer"]
     source_end, script_start, script_end = log["rows"][2:5]

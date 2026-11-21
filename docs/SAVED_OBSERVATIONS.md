@@ -246,6 +246,47 @@ corroborate an explicit same-project job guard and manual fallback using
 the supplied project IDs and a job with no recorded start. For that
 case use empty `trace` and null `artifact`.
 
+For the GitLab.com project Pages address
+`https://NAMESPACE.gitlab.io/PROJECT/`, a `pages_publication` object can
+corroborate selected responses from a later push to the default branch.
+The supported job named `pages` receives earlier archives through the
+platform's implicit download phase and runs one literal move into
+`public`. The selected push must have the same root configuration bytes
+as the saved MR observation. Preserve trusted provider records for:
+
+- `project`, the default-branch `pipeline`, and `upstream_config`
+  (`url` and `sha256` of the exact raw source).
+- `merge`, the MR record with its API `url`, and `merge_base` with the
+  exact provider merge-base `url` and returned commit `id`. The selected
+  merge must precede the later push and follow the original MR job.
+- `producer` and `publisher`, each with the job record and trusted
+  redacted `log` containing `job`, `url`, `sha256` and eight ordered
+  `rows` of checkout, script and upload phase markers. Each row records
+  `line`, `time`, `value` and the SHA-256 of `time + " " + value`.
+  Include the producer's `build` row and the publisher's `transfer`
+  rows for the download phase, exact producer request and response,
+  and literal move.
+- `archive`, the selected publisher's public archive download receipt
+  with `url`, `http_status`, `size`, `sha256` and `observed_at`. Save
+  its original file as `pages-publication.zip`. At most 64 MiB are read
+  in bounded chunks for the digest. The existing ZIP member analysis
+  limits still apply to profiles that parse archives.
+- `members`, one to four relative paths including `index.html`. Supply
+  a `producer`, `archive` and `site` HTTP receipt for each, with the
+  same fields as the download receipt. Include the saved strong
+  `etag` on the site receipt. Save the original response bodies as
+  `pages-producer-N.bin`, `pages-archive-N.bin`, and `pages-served-N.bin`,
+  starting at zero and capped at 128 KiB each.
+
+The saved receiver ETag must equal the verified ZIP digest. The selected
+bodies must match across the owned build job, Pages job and site. This
+corroborates the sampled publication after the merge while preserving
+the separate result for the earlier MR job. Other artifact downloads,
+unobserved files, the exact provider credential and broader grants
+require separate evidence. An invalid optional object exits 11 and
+preserves the existing artifact result. No network access is needed
+while the scanner evaluates these records.
+
 For a successful archive observation, include the provider's pipeline
 `created_at` and `updated_at` in `job.pipeline`. The recorded job and
 its runner events must fit the pipeline and job windows.

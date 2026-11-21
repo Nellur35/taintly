@@ -1464,6 +1464,10 @@ def _assess(
                 "reason": "runner evidence requires an observed successful job archive",
             }
         )
+    if "pages_publication" in data:
+        from taintly.ingestion.gitlab_pages_publication import pages_publication
+
+        detail["pages_publication"] = pages_publication(data, root, detail)
     return {
         "repository": path,
         "project": project_id,
@@ -1498,6 +1502,11 @@ def mr_artifact_observation(
             "pages_handoff" not in data
             or (data.get("schema") == _FORK_ARCHIVE_SCHEMA and origin is None),
             "Pages handoff requires a GitLab.com fork-project archive observation",
+        )
+        _need(
+            "pages_publication" not in data
+            or (data.get("schema") == "gitlab-mr-artifact-v1" and origin is None),
+            "Pages publication requires a GitLab.com target-project merge observation",
         )
         if origin is not None:
             _need(
