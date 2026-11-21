@@ -34,6 +34,7 @@ PATCH_SCOPE = (
     "and asset publication require separate evidence."
 )
 _DENIAL = "Resource not accessible by integration"
+_REDACTED_ENV_VALUE = "***"
 # Match the bounded wrapper that takes status and error text from gh api's
 # response headers and body. Unchecked shell prefixes cannot supply a result.
 _PROBE = (
@@ -241,7 +242,7 @@ def _execution_transcript(
         and all(len(pair) == 2 for pair in variables),
         "Runner transcript has an unsupported environment record",
     )
-    expected = {**env, "GH_TOKEN": "***", "REPO": repo}
+    expected = {**env, "GH_TOKEN": _REDACTED_ENV_VALUE, "REPO": repo}
     _require(
         len(variables) == len(expected) and dict(variables) == expected,
         "Runner transcript does not match the source-bound Release PATCH environment",
