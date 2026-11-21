@@ -235,7 +235,13 @@ def _archived_member(
 
 
 def _native_archive_authority(
-    data: _Row, job_url: str, project_path: str, upload: _Row, *, fork_log: _Row | None = None
+    data: _Row,
+    job_url: str,
+    project_path: str,
+    upload: _Row,
+    *,
+    detached_log: _Row | None = None,
+    detached_owner: str = "fork",
 ) -> _Row:
     """Bind the known native uploader to this previously corroborated archive."""
     try:
@@ -282,20 +288,20 @@ def _native_archive_authority(
         )
         correlation = _value(evidence["correlation_id"], _CORRELATION, "archive correlation ID")
         trace_digest = _value(evidence["trace_sha256"], _SHA256, "runner trace digest")
-        if fork_log is not None:
-            phase_start, phase_reply, phase_end = fork_log["rows"][-3:]
+        if detached_log is not None:
+            phase_start, phase_reply, phase_end = detached_log["rows"][-3:]
             phase_spans = [
                 (
-                    _identifier(row["line"], "fork archive trace line"),
-                    _time(row["time"], "fork archive trace time"),
+                    _identifier(row["line"], f"{detached_owner} archive trace line"),
+                    _time(row["time"], f"{detached_owner} archive trace time"),
                 )
                 for row in (phase_start, phase_reply, phase_end)
             ]
             _need(
-                trace_digest == fork_log["sha256"]
+                trace_digest == detached_log["sha256"]
                 and phase_spans == list(zip(lines[2:], (start, received, finish), strict=True))
                 and f" correlation_id={correlation} " in phase_reply["value"],
-                "runner evidence does not match the verified fork archive response",
+                f"runner evidence does not match the verified {detached_owner} archive response",
             )
         return {
             "state": "native-archive-write-observed",
@@ -669,7 +675,6 @@ def _detached_archive(
             not {
                 "historical_pipeline",
                 "archive_member_origin",
-                "archive_runner_evidence",
                 "failed_archive",
                 "canceled_archive",
                 "pages_preview",
@@ -806,9 +811,10 @@ def _detached_archive(
         result["archive_runner_authority"] = _native_archive_authority(
             data,
             job_url,
-            source_path,
+            target_path if target_owned else source_path,
             {"time": response["time"], "http_status": publication["http_status"]},
-            fork_log=log,
+            detached_log=log,
+            detached_owner="target-project" if target_owned else "fork",
         )
     archive_bytes = None
     if "archive_download" in data:

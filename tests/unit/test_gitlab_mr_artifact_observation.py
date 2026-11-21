@@ -1122,3 +1122,56 @@ def test_target_head_archive_download_preserves_upload_when_zip_fails(
         assert exit_info.value.code == 0
         assert report["publication"]["retrieval"] == "verified"
         assert report["archive_download"]["state"] == "target-project-archive-retrieved"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (None, None),
+        ("checkout_directory", "/builds/team/fork"),
+        ("trace_sha256", "f" * 64),
+        ("correlation_id", "f" * 32),
+        ("runner_revision", "c" * 40),
+        ("helper_config", "sha256:" + "f" * 64),
+        ("archive_line", 5),
+    ],
+)
+def test_target_head_archive_keeps_accepted_upload_when_runner_evidence_disagrees(
+    tmp_path, target_head_upload, field, value, monkeypatch, capsys
+):
+    data = target_head_upload
+    log = data["log"]
+    for number, row in enumerate(log["rows"], start=3):
+        row["line"] = number
+    start, reply, end = log["rows"][-3:]
+    runner = _runner_archive_evidence()
+    runner.update(
+        revision=HEAD, trace_sha256=log["sha256"],
+        archive_start_line=start["line"], archive_line=reply["line"], archive_end_line=end["line"],
+        archive_start_time=start["time"], archive_time=reply["time"], archive_end_time=end["time"],
+        correlation_id=reply["value"].split("correlation_id=")[1].split()[0],
+    )
+    if field is not None:
+        runner[field] = value
+    data["archive_runner_evidence"] = runner
+    _evaluate_fork(tmp_path, data, 1)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["taintly", str(tmp_path), "--format", "json", "--no-config",
+         "--gitlab-mr-artifact-observation", str(tmp_path / "observation.json"), "1", "22", "33"],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    report = json.loads(capsys.readouterr().out)["gitlab_mr_artifact_observation"]
+    assert report["state"] == "target-project-head-archive-upload-observed"
+    assert report["publication"]["http_status"] == 201
+    authority = report["archive_runner_authority"]
+    if field is None:
+        assert exit_info.value.code == 0
+        assert authority["credential"] == "runner-job-token"
+        assert authority["checkout_directory"] == "/builds/team/repo"
+        assert authority["route"] == "jobs/33/artifacts"
+    else:
+        assert exit_info.value.code == 11
+        assert authority["state"] == "unresolved"
+        assert "credential" not in authority

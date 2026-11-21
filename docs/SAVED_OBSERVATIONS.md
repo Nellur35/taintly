@@ -351,6 +351,12 @@ source and trace records, with these requirements.
   of that head, the script section, and the owning job's HTTP 201 in the
   success-upload section. This profile accepts the archive receipt alone
   or with the same optional download evidence and byte limit as above.
+- Optional `archive_runner_evidence` uses the verified runner and helper
+  profile below. The saved checkout directory must name the target project
+  under `/builds/`. The trace digest, upload lines, timestamps and correlation
+  ID must match this job's recorded upload. Incomplete or mismatched runner
+  evidence leaves the credential class unresolved with exit 11 and retains
+  the accepted archive.
 
 `target-project-head-archive-upload-observed` identifies the accepted archive for
 that target job. Exact credential, effective configuration, file content
