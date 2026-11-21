@@ -1260,3 +1260,69 @@ def test_target_head_archive_keeps_accepted_upload_when_runner_evidence_disagree
         assert exit_info.value.code == 11
         assert authority["state"] == "unresolved"
         assert "credential" not in authority
+
+
+@pytest.mark.parametrize(
+    "contrast",
+    [
+        None, "alternate-origin", "wrong-project", "wrong-checkout", "missing-source",
+        "wrong-source-commit", "wrong-job", "wrong-phase", "denied", "unsupported-runner",
+    ],
+)
+def test_explicit_origin_binds_failed_fork_archive(tmp_path, fork_upload, contrast):
+    origin = "https://ci.example.org"
+    data = json.loads(json.dumps(fork_upload).replace("https://gitlab.com", origin))
+    data["pipeline"]["status"] = data["job"]["pipeline"]["status"] = "failed"
+    data["job"]["commit"] = {"id": HEAD}
+    source = BUILDSPEC.encode()
+    (tmp_path / ".gitlab-ci.yml").write_bytes(source)
+    data["source_sha256"] = hashlib.sha256(source).hexdigest()
+    data["source_file"] = {
+        "url": f"{origin}/api/v4/projects/2/repository/files/.gitlab-ci.yml?ref={HEAD}",
+        "file_path": ".gitlab-ci.yml",
+        "commit_id": HEAD,
+        "content_sha256": data["source_sha256"],
+    }
+    rows = data["log"]["rows"]
+    response = rows[6]
+    value = re.sub(r"correlation_id=\S+", "correlation_id=" + "0" * 26, response["value"])
+    rows[6] = _failure_trace_row(response["time"], value)
+    selected_project = 2
+    if contrast == "alternate-origin":
+        origin = "https://other.example.org"
+    elif contrast == "wrong-project":
+        selected_project = 1
+    elif contrast == "wrong-checkout":
+        data["job"]["commit"]["id"] = BASE
+    elif contrast == "missing-source":
+        del data["source_file"]
+    elif contrast == "wrong-source-commit":
+        data["source_file"]["commit_id"] = BASE
+    elif contrast == "wrong-job":
+        rows[6] = _failure_trace_row(response["time"], value.replace("id=33", "id=34"))
+    elif contrast == "wrong-phase":
+        for index in (5, 7):
+            row = rows[index]
+            rows[index] = _failure_trace_row(
+                row["time"], row["value"].replace("on_failure", "on_success")
+            )
+    elif contrast == "denied":
+        denied = value.replace("201 Created", "403 Forbidden").replace("status=201", "status=403")
+        rows[6] = _failure_trace_row(response["time"], denied)
+    elif contrast == "unsupported-runner":
+        data["archive_runner_evidence"] = {}
+    packet = tmp_path / "observation.json"
+    packet.write_text(json.dumps(data), encoding="utf-8")
+    result = mr_artifact_observation(packet, tmp_path, selected_project, 22, 33, origin=origin)
+    if contrast is not None:
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+        return
+    assert result["state"] == "fork-project-archive-upload-observed"
+    assert (result["project"], result["target_project"]) == (2, 1)
+    assert result["job_status"] == "failed"
+    assert result["upload_phase"] == "upload_artifacts_on_failure"
+    assert result["origin"] == origin
+    assert result["publication"]["http_status"] == 201
+    assert result["publication"]["retrieval"] == "unverified"
+    assert "archive_runner_authority" not in result

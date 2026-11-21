@@ -103,6 +103,11 @@ _FORK_ARCHIVE_SCOPE = (
     "effective configuration, content ancestry, and authority in the MR target project "
     "require separate evidence."
 )
+_EXPLICIT_FORK_ARCHIVE_SCOPE = (
+    "Trusted saved GitLab evidence identifies an accepted archive from a failed job in "
+    "the fork project, on the explicitly selected origin. Artifact bytes, the exact "
+    "credential, effective configuration and authority in the target project remain unverified."
+)
 _FORK_BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
 
 
@@ -659,9 +664,10 @@ def _detached_archive(
 ) -> _Row:
     target, fork, mr = data["target"], data["fork"], data["mr"]
     pipeline, job, log = data["pipeline"], data["job"], data["log"]
-    canceled = origin is not None
+    explicit_origin = origin is not None
+    canceled = explicit_origin and target_owned
     base = origin or "https://gitlab.com"
-    path_pattern = _CANONICAL_PROJECT if canceled else _PROJECT
+    path_pattern = _CANONICAL_PROJECT if explicit_origin else _PROJECT
     source_path = _value(fork["path_with_namespace"], path_pattern, "GitLab fork project path")
     target_path = _value(target["path_with_namespace"], path_pattern, "GitLab MR target path")
     source_project = _identifier(fork["id"], "fork project")
@@ -696,13 +702,9 @@ def _detached_archive(
     membership = data["mr_pipeline"]
     current_head = _value(mr["sha"], _SHA, "current MR head")
     history = data.get("historical_pipeline")
-    if canceled:
+    if explicit_origin:
         _need(
-            target_owned
-            and pipeline["status"] == job["status"] == "canceled"
-            and isinstance(history, dict)
-            and revision == job["commit"]["id"]
-            and not {
+            not {
                 "archive_download",
                 "archive_runner_evidence",
                 "archive_member_origin",
@@ -711,7 +713,21 @@ def _detached_archive(
                 "pages_preview",
                 "publication_admission",
             }.intersection(data),
+            "explicit origin covers only the selected job's archive acceptance",
+        )
+    if canceled:
+        _need(
+            pipeline["status"] == job["status"] == "canceled"
+            and isinstance(history, dict)
+            and revision == job["commit"]["id"],
             "the selected origin requires a canceled target-project job with historical checkout evidence",
+        )
+    elif explicit_origin:
+        _need(
+            pipeline["status"] == job["status"] == "failed"
+            and history is None
+            and revision == current_head == job["commit"]["id"],
+            "the selected origin requires a failed fork-owned job at the recorded MR head",
         )
     elif target_owned:
         _need(
@@ -772,7 +788,7 @@ def _detached_archive(
             for key in ("id", "project_id", "sha", "ref", "source")
         )
         and (
-            not canceled
+            not explicit_origin
             or all(
                 job["pipeline"][key] == pipeline[key]
                 for key in ("status", "created_at", "updated_at", "web_url")
@@ -798,7 +814,7 @@ def _detached_archive(
     _need(
         source_hash == data["source_sha256"], "GitLab configuration differs from saved fork source"
     )
-    if target_owned:
+    if target_owned or explicit_origin:
         source_file = data["source_file"]
         expected_url = (
             f"{base}/api/v4/projects/{source_project}/"
@@ -812,7 +828,9 @@ def _detached_archive(
             "saved fork configuration record does not match the selected checkout and bytes",
         )
     correlation = (
-        r"[0-7][0-9A-HJKMNP-TV-Z]{25}" if canceled else r"(?:[0-9a-f]{32}|[0-9a-f]{16}-[A-Z]{3})"
+        r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
+        if explicit_origin
+        else r"(?:[0-9a-f]{32}|[0-9a-f]{16}-[A-Z]{3})"
     )
     reply = (
         r'01E Uploading artifacts as "archive" to coordinator\.\.\. 201 Created +'
@@ -855,11 +873,13 @@ def _detached_archive(
             if canceled
             else _TARGET_HEAD_ARCHIVE_SCOPE
             if target_owned
+            else _EXPLICIT_FORK_ARCHIVE_SCOPE
+            if explicit_origin
             else _FORK_ARCHIVE_SCOPE
         ),
         "publication": publication,
     }
-    if canceled:
+    if explicit_origin:
         result["origin"] = base
     if target_owned:
         result["source_repository"] = source_path
@@ -1467,11 +1487,20 @@ def mr_artifact_observation(
                 "the expected artifact origin must be a bare HTTPS hostname",
             )
             _need(
-                publisher is None and data.get("schema") == _TARGET_HEAD_ARCHIVE_SCHEMA,
-                "the explicit origin is supported for canceled detached target-project archives only",
+                publisher is None
+                and data.get("schema") in (_FORK_ARCHIVE_SCHEMA, _TARGET_HEAD_ARCHIVE_SCHEMA),
+                "the explicit origin requires a detached archive observation schema",
             )
+            target_owned = data["schema"] == _TARGET_HEAD_ARCHIVE_SCHEMA
+            scope = _DETACHED_CANCELED_SCOPE if target_owned else _EXPLICIT_FORK_ARCHIVE_SCOPE
             return _detached_archive(
-                data, root.resolve(), project, pipeline, job, target_owned=True, origin=origin
+                data,
+                root.resolve(),
+                project,
+                pipeline,
+                job,
+                target_owned=target_owned,
+                origin=origin,
             )
         from taintly.ingestion.gitlab_branch_image import SCHEMA, SCOPE, branch_image_observation
 
