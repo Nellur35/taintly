@@ -252,6 +252,133 @@ def test_reusable_rejection_preserves_unresolved_ownership(reusable_capture, cha
     assert "operation" not in result and "effective_permission" not in result
 
 
+@pytest.fixture
+def reusable_v7_capture(reusable_capture):
+    cap, bind, assess, caller, called, set_called, _ = reusable_capture
+    action = "release-drafter/release-drafter@v7"
+    commit = "978bb0b30c5ee8cdd332ced253758157150d43f0"
+    merge = "f" * 40
+    set_called(
+        called.replace("release-drafter@v6", "release-drafter@v7")
+        .replace("        env:\n          GITHUB_TOKEN:", "        with:\n          token:")
+    )
+
+    def prepare(outcome):
+        cap.pop("denial")
+        if outcome == "dry-run":
+            cap["source"] = {**bind(caller), "revision": merge}
+            cap["pr"]["merge"] = {
+                "sha": merge,
+                "parents": ["d" * 40, HEAD],
+                "committer_at": "2026-05-13T00:23:04Z",
+            }
+            target = merge
+            grant = "read"
+            draft_rows = [
+                "##[warning]refs/pull/40/merge points to an ephemeral pull request merge commit; "
+                "forcing dry-run mode and disabling publish. Set dry-run: true explicitly to suppress this warning.",
+                "  tag:   v1.2.3",
+                f"  targetCommitish:   {target}",
+                "  draft:   true",
+                "[dry-run] Would create a new release with payload: {",
+            ]
+        else:
+            cap.pop("pr")
+            cap["run"].update(event="push", head_branch="latest", head_repository=REPO)
+            cap["source"] = bind(caller.replace(
+                "  pull_request:\n    types: [opened, synchronize]",
+                "  push:\n    branches: [latest]\n  workflow_dispatch:",
+            ))
+            target = "latest"
+            grant = "write"
+            start, end = {
+                "create": ("Creating new release...", "Release created!"),
+                "update": ("Updating existing release...", "Release updated!"),
+            }[outcome]
+            draft_rows = ["  tag:   v1.2.3", f"  targetCommitish:   {target}", "  draft:   true", start, end]
+        cap["job"]["steps"] = [
+            {"name": "Set up job", "number": 1, "conclusion": "success",
+             "started_at": STARTED, "completed_at": "2026-05-13T00:23:18Z"},
+            {"name": f"Run {action}", "number": 2, "conclusion": "success",
+             "started_at": "2026-05-13T00:23:18Z", "completed_at": "2026-05-13T00:23:22Z"},
+            {"name": "Complete job", "number": 3, "conclusion": "success",
+             "started_at": "2026-05-13T00:23:22Z", "completed_at": COMPLETED},
+        ]
+        values = [
+            "##[group]GITHUB_TOKEN Permissions", f"Contents: {grant}", "##[endgroup]",
+            f"Download action repository '{action}' (SHA:{commit})", f"##[group]Run {action}",
+            *draft_rows, "Cleaning up orphan processes",
+        ]
+        seconds = ["16.100", "16.200", "16.300", "17.100", "18.100", "18.200", "20.100",
+                   "20.200", "20.300", "21.100", "22.100"]
+        rows = []
+        for second, value in zip(seconds, values, strict=True):
+            time = f"2026-05-13T00:23:{second}Z"
+            rows.append({"time": time, "value": value, "sha256": hashlib.sha256(f"{time} {value}".encode()).hexdigest()})
+        cap["reusable_v7_log"] = {"run": 10, "job": 20, "attempt": 1, "outcome": outcome,
+                                  "action_commit": commit, "log_sha256": "0" * 64, "rows": rows}
+        cap["custody"] = {"job_log_sha256": "0" * 64}
+        return cap, assess, target
+
+    return prepare
+
+
+@pytest.mark.parametrize("outcome", ("dry-run", "create", "update"))
+def test_reusable_v7_reports_owned_guard_or_write(reusable_v7_capture, outcome):
+    _, assess, target = reusable_v7_capture(outcome)
+    result = assess()
+    assert result["state"] == ("reusable-draft-dry-run-reported" if outcome == "dry-run" else "reusable-draft-write-reported")
+    assert result["operation"]["target_commitish"] == target
+    assert result["operation"]["requested_tag"] == "v1.2.3"
+    assert result["operation"]["kind"] == ("create" if outcome == "dry-run" else outcome)
+    assert result["effective_permission"]["contents"] == ("read" if outcome == "dry-run" else "write")
+    assert result["configured"]["action_credential_input"] == "token"
+    assert "status" not in result["operation"]
+
+
+@pytest.mark.parametrize("change", (
+    "different-parent", "fork-head-instead-of-merge", "different-pull-ref", "different-planned-sha",
+    "borrowed-attempt", "mixed-log-kind", "unreviewed-action", "different-log-digest",
+    "borrowed-setup-time", "altered-log-row", "missing-completion", "unrelated-push-branch",
+))
+def test_reusable_v7_leaves_conflicting_authority_or_log_unresolved(reusable_v7_capture, change):
+    outcome = "update" if change in ("missing-completion", "unrelated-push-branch") else "dry-run"
+    cap, assess, _ = reusable_v7_capture(outcome)
+    log = cap["reusable_v7_log"]
+    if change == "different-parent":
+        cap["pr"]["merge"]["parents"][1] = "9" * 40
+    elif change == "fork-head-instead-of-merge":
+        cap["source"]["revision"] = HEAD
+    elif change in ("different-pull-ref", "different-planned-sha", "borrowed-setup-time", "altered-log-row"):
+        row = log["rows"][{"different-pull-ref": 5, "different-planned-sha": 7,
+                          "borrowed-setup-time": 1, "altered-log-row": 6}[change]]
+        if change == "different-pull-ref":
+            row["value"] = row["value"].replace("/40/", "/41/")
+        elif change == "different-planned-sha":
+            row["value"] = "  targetCommitish:   " + HEAD
+        elif change == "borrowed-setup-time":
+            row["time"] = "2026-05-13T00:23:19.200Z"
+        else:
+            row["value"] = "  tag:   v9.0.0"
+        if change != "altered-log-row":
+            row["sha256"] = hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+    elif change == "borrowed-attempt":
+        log["attempt"] = 2
+    elif change == "mixed-log-kind":
+        cap["denial"] = {}
+    elif change == "unreviewed-action":
+        log["action_commit"] = "6" * 40
+    elif change == "different-log-digest":
+        cap["custody"]["job_log_sha256"] = "1" * 64
+    elif change == "missing-completion":
+        log["rows"].pop(-2)
+    elif change == "unrelated-push-branch":
+        cap["run"]["head_branch"] = "elsewhere"
+    result = assess()
+    assert result["state"] == "unresolved"
+    assert "operation" not in result and "effective_permission" not in result
+
+
 @pytest.mark.parametrize(
     ("condition", "expected"),
     [

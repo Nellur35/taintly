@@ -84,9 +84,9 @@ def _source_plan(
     *,
     event: str = "pull_request",
     secret_alias: str = "GITHUB_TOKEN",
+    uses_action_token_input: bool = False,
 ) -> _Row:
     job_keys = {"steps", "permissions", "runs-on"}
-    step_keys = {"uses", "env"}
     jobs = {key[-1] for key in index.keys if key[:-1] == ("jobs",)}
     _require(
         len(jobs) == 1, "Workflow source is outside the supported single-action draft job profile"
@@ -99,6 +99,8 @@ def _source_plan(
     step = (*steps, 0)
     env = (*step, "env")
     inputs = (*step, "with")
+    token_map, token_name = (inputs, "token") if uses_action_token_input else (env, "GITHUB_TOKEN")
+    step_keys = {"uses", token_map[-1]}
     guard_line = None
     if event == "pull_request":
         guard = (*owner, "if")
@@ -153,7 +155,7 @@ def _source_plan(
         permission_owner = ("permissions",)
         job_keys.remove("permissions")
     inherited = event in {"push", "workflow_call"} and permission_owner not in index.keys
-    required: tuple[tuple[object, ...], ...] = (("on", event), owner[:1], owner, steps, env)
+    required: tuple[tuple[object, ...], ...] = (("on", event), owner[:1], owner, steps, token_map)
     if not inherited:
         required = (*required, permission_owner)
     _require(
@@ -162,17 +164,17 @@ def _source_plan(
         and {key[len(steps)] for key in index.keys if key[: len(steps)] == steps and key != steps}
         == {0}
         and {key[-1] for key in index.keys if key[:-1] == step} == step_keys
-        and {key[-1] for key in index.keys if key[:-1] == env} == {"GITHUB_TOKEN"}
+        and {key[-1] for key in index.keys if key[:-1] == token_map} == {token_name}
         and not any((key,) in index.keys for key in ("env", "defaults")),
         "Workflow source is outside the supported single-action draft job profile",
     )
     action = _field(index, (*step, "uses"))
-    token = _field(index, (*env, "GITHUB_TOKEN"))
+    token = _field(index, (*token_map, token_name))
     permission = None if inherited else _field(index, (*permission_owner, "contents"))
     _require(
         (
             action.value == _PUSH_ACTION
-            if event == "push"
+            if event == "push" or uses_action_token_input
             else _matches(action.value, _REQUEST_ACTION)
         )
         and _is_exact_identifier_expression(str(token.value), f"secrets.{secret_alias}")
@@ -185,12 +187,21 @@ def _source_plan(
         **({"repository_condition_line": guard_line} if guard_line is not None else {}),
         "credential_binding": "GITHUB_TOKEN",
         "credential_line": token.line,
+        **({"action_credential_input": token_name} if uses_action_token_input else {}),
         "requested_permission": "contents: write" if permission is not None else None,
         "permission_line": permission.line if permission is not None else None,
     }
 
 
-def _reusable_plan(cap: _Row, root: Path, caller: _Index, repository: str) -> tuple[_Row, _Row]:
+def _reusable_plan(
+    cap: _Row,
+    root: Path,
+    caller: _Index,
+    repository: str,
+    *,
+    caller_event: str = "pull_request",
+    uses_action_token_input: bool = False,
+) -> tuple[_Row, _Row]:
     caller_job, _, called_job = cap["job"]["name"].partition(" / ")
     _require(
         _matches(caller_job, _NAME) and _matches(called_job, _NAME),
@@ -204,7 +215,7 @@ def _reusable_plan(cap: _Row, root: Path, caller: _Index, repository: str) -> tu
         raise PreviewEvidenceError("The caller lacks one literal token input alias")
     _require(
         {key[-1] for key in caller.keys if key[:-1] == ("jobs",)} == {caller_job}
-        and len(caller.keys.get(("on", "pull_request"), ())) == 1
+        and len(caller.keys.get(("on", caller_event), ())) == 1
         and all(len(caller.keys.get(key, ())) == 1 for key in (("jobs",), owner, secret_map))
         and {key[-1] for key in caller.keys if key[:-1] == owner} == {"uses", "secrets"}
         and not any((key,) in caller.keys for key in ("permissions", "env", "defaults")),
@@ -253,7 +264,12 @@ def _reusable_plan(cap: _Row, root: Path, caller: _Index, repository: str) -> tu
         "The called workflow does not declare the selected token input and inherited grant",
     )
     configured = _source_plan(
-        callee, called_job, repository, event="workflow_call", secret_alias=secret
+        callee,
+        called_job,
+        repository,
+        event="workflow_call",
+        secret_alias=secret,
+        uses_action_token_input=uses_action_token_input,
     )
     return configured, {
         "caller_job": caller_job,
@@ -389,11 +405,19 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
     return result
 
 
-def _literal_push_branch(index: _Index, raw: bytes, branch: str) -> bool:
+def _literal_push_branch(index: _Index, raw: bytes, branch: str, *, reusable: bool = False) -> bool:
     branch_path = ("on", "push", "branches")
     keys = index.keys.get(branch_path, ())
     events = {path[-1] for path in index.keys if path[:-1] == ("on",)}
     pull_request = ("on", "pull_request")
+    if reusable:
+        if not _matches(branch, _NAME) or len(index.keys.get(("on", "workflow_dispatch"), ())) > 1:
+            return False
+        events.discard("workflow_dispatch")
+        literal = re.escape(branch)
+        branches = rf"""(?:{literal}|'{literal}'|"{literal}")"""
+    else:
+        branches = _PUSH_BRANCH
     if (
         events not in ({"push"}, {"push", "pull_request"})
         or len(index.keys.get(pull_request, ())) > 1
@@ -418,10 +442,10 @@ def _literal_push_branch(index: _Index, raw: bytes, branch: str) -> bool:
         )
     )
     if inline:
-        if children or not re.fullmatch(rf"\[ *{_PUSH_BRANCH}( *, *{_PUSH_BRANCH})? *\]", inline):
+        if children or not re.fullmatch(rf"\[ *{branches}( *, *{branches})? *\]", inline):
             return False
-        return branch in re.findall(r"main|master", inline)
-    items = [re.fullmatch(rf" +-[ ]+({_PUSH_BRANCH})(?: +#.*)? *", row) for row in children]
+        return any(item.strip().strip("'\"") == branch for item in inline[1:-1].split(","))
+    items = [re.fullmatch(rf" +-[ ]+({branches})(?: +#.*)? *", row) for row in children]
     return (
         1 <= len(items) <= 2
         and all(items)
@@ -695,10 +719,11 @@ def _denial_grant(cap: _Row, request: _Row) -> _Row:
     }
 
 
-def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) -> _Row:
+def _bound_job(
+    cap: _Row, repo: str, run_id: int, job_id: int, event: str, *, reusable: bool = False
+) -> None:
     run, job, check = cap["run"], cap["job"], cap["check_run"]
-    reusable = "reusable_source" in cap
-    _run_identity(run, job, repo, run_id, "pull_request", allow_sibling_workflows=reusable)
+    _run_identity(run, job, repo, run_id, event, allow_sibling_workflows=reusable)
     _run_window(run, job)
     _require(
         job["id"] == job_id
@@ -722,7 +747,11 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
         and job["conclusion"] in {"success", "failure"},
         "Saved GitHub check run is not the selected job and attempt",
     )
-    pr = cap["pr"]
+
+
+def _bound_fork(cap: _Row, repo: str) -> _Row:
+    run = cap["run"]
+    pr: _Row = cap["pr"]
     _require(
         _id(pr["number"])
         and pr["base_repository"] == repo
@@ -732,6 +761,14 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
         and run["head_sha"] == pr["head_sha"],
         "Saved pull request does not match the selected fork invocation",
     )
+    return pr
+
+
+def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) -> _Row:
+    run, job, check = cap["run"], cap["job"], cap["check_run"]
+    reusable = "reusable_source" in cap
+    _bound_job(cap, repo, run_id, job_id, "pull_request", reusable=reusable)
+    pr = _bound_fork(cap, repo)
     if reusable:
         _require(
             "verified_log" not in cap and "effective_permission_log" not in cap,
@@ -844,6 +881,11 @@ def release_request_observation(
         if cap["schema"] == PATCH_SCHEMA:
             scope = PATCH_SCOPE
             return patch_comparison(cap, root.resolve(), repository, run_id, job_id)
+        if "reusable_v7_log" in cap:
+            from taintly.ingestion.github_reusable_draft_v7 import SCOPE, reusable_v7_observation
+
+            scope = SCOPE
+            return reusable_v7_observation(cap, root.resolve(), repository, run_id, job_id)
         if "creation" in cap:
             _require(
                 not any(

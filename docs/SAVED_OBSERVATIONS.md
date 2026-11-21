@@ -696,6 +696,30 @@ and the observed 403.
 Runtime token identity, effective grant, resolved action bytes and exact
 caller merge bytes require separate evidence.
 
+For a saved Release Drafter v7 reusable run, use `reusable_v7_log` with
+`run`, `job`, `attempt`, `action_commit`, `log_sha256`, `rows` and
+`outcome`. The reviewed action commits are
+`978bb0b30c5ee8cdd332ced253758157150d43f0` and
+`d1a19e60e81a7e650d00a7de9277f87e439117ea`. The named caller input
+feeds the called action's `with.token` input. The same selected workflow
+record and called source location apply. Put the same log digest in
+`custody.job_log_sha256`. Keep the grant group start, its Contents row and
+end, the action download and invocation, and the final runner cleanup row.
+Record their original timestamps, message text as `value`, and line hashes.
+
+- A fork `dry-run` receipt includes the historical `pr.merge` SHA, two
+  parents and committer time. Use the matching merge caller as `source`.
+  Retain the forced dry-run warning for the PR merge ref, the tag, the
+  resolved merge target, the draft flag and the proposed create marker.
+  Job setup reports Contents read. Exit 0 identifies this reported guard
+  outcome for the selected draft.
+- A `create` or `update` receipt covers a repository-owned push admitted
+  by a literal branch selector. Keep the push caller bytes and the tag,
+  branch target, draft flag, write-start and completion markers. Job setup
+  reports Contents write. Exit 0 identifies the reported write to that
+  draft. The HTTP response and stored release or asset require separate
+  provider evidence.
+
 For the pinned Release Drafter v7.7.0 checkout profile, the same command
 accepts an owned job-log projection in `verified_log`. The fork trigger
 must declare the usual opened, reopened and synchronize events without
