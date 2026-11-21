@@ -7,6 +7,7 @@ from pathlib import Path
 
 from taintly.ingestion.github_preview import (
     _DIGEST,
+    _EXPR_ID,
     _NAME,
     _REPOSITORY,
     _SHA,
@@ -46,6 +47,7 @@ _LOGGED_CREATE_ERROR = (
 )
 _PUSH_BRANCH = r"(?:main|master|'(?:main|master)'|\"(?:main|master)\")"
 _DENIAL = "Resource not accessible by integration"
+_BRANCH_CALL = re.compile(rf"({_REPOSITORY})/({_WORKFLOW})@({_NAME})")
 _SCOPE = (
     "Trusted saved GitHub check annotations and run records. The reported response is scoped "
     "to one draft-create request. "
@@ -66,10 +68,22 @@ _LOGGED_SCOPE = (
     "attempt. The exact HTTP status, request ID, policy behind the grant, other "
     "requests and artifact publication are unverified."
 )
+_REUSABLE_SCOPE = (
+    "Trusted saved GitHub check annotations and run records. The reported response is scoped "
+    "to one draft-create request. The fork-head caller supplies a configured job-token "
+    "reference to the provider-selected reusable workflow. Exact caller merge bytes, runtime "
+    "token identity, effective permissions, resolved action bytes and artifact publication "
+    "are unverified."
+)
 
 
 def _source_plan(
-    index: _Index, job_name: str, repository: str, *, event: str = "pull_request"
+    index: _Index,
+    job_name: str,
+    repository: str,
+    *,
+    event: str = "pull_request",
+    secret_alias: str = "GITHUB_TOKEN",
 ) -> _Row:
     job_keys = {"steps", "permissions", "runs-on"}
     step_keys = {"uses", "env"}
@@ -138,7 +152,7 @@ def _source_plan(
     if permission_owner not in index.keys:
         permission_owner = ("permissions",)
         job_keys.remove("permissions")
-    inherited = event == "push" and permission_owner not in index.keys
+    inherited = event in {"push", "workflow_call"} and permission_owner not in index.keys
     required: tuple[tuple[object, ...], ...] = (("on", event), owner[:1], owner, steps, env)
     if not inherited:
         required = (*required, permission_owner)
@@ -161,7 +175,7 @@ def _source_plan(
             if event == "push"
             else _matches(action.value, _REQUEST_ACTION)
         )
-        and _is_exact_identifier_expression(str(token.value), "secrets.GITHUB_TOKEN")
+        and _is_exact_identifier_expression(str(token.value), f"secrets.{secret_alias}")
         and (permission is None or permission.value == "write"),
         "Workflow source lacks the supported draft action, token binding or requested permission",
     )
@@ -173,6 +187,82 @@ def _source_plan(
         "credential_line": token.line,
         "requested_permission": "contents: write" if permission is not None else None,
         "permission_line": permission.line if permission is not None else None,
+    }
+
+
+def _reusable_plan(cap: _Row, root: Path, caller: _Index, repository: str) -> tuple[_Row, _Row]:
+    caller_job, _, called_job = cap["job"]["name"].partition(" / ")
+    _require(
+        _matches(caller_job, _NAME) and _matches(called_job, _NAME),
+        "The saved job does not identify one caller and called job",
+    )
+    owner = ("jobs", caller_job)
+    secret_map = (*owner, "secrets")
+    aliases = [key[-1] for key in caller.keys if key[:-1] == secret_map]
+    secret = aliases[0] if len(aliases) == 1 else None
+    if not isinstance(secret, str) or not _matches(secret, _EXPR_ID):
+        raise PreviewEvidenceError("The caller lacks one literal token input alias")
+    _require(
+        {key[-1] for key in caller.keys if key[:-1] == ("jobs",)} == {caller_job}
+        and len(caller.keys.get(("on", "pull_request"), ())) == 1
+        and all(len(caller.keys.get(key, ())) == 1 for key in (("jobs",), owner, secret_map))
+        and {key[-1] for key in caller.keys if key[:-1] == owner} == {"uses", "secrets"}
+        and not any((key,) in caller.keys for key in ("permissions", "env", "defaults")),
+        "The caller does not identify one reusable job and explicit token handoff",
+    )
+    call = _field(caller, (*owner, "uses"))
+    binding = _field(caller, (*secret_map, secret))
+    _require(
+        _is_exact_identifier_expression(str(binding.value), "secrets.GITHUB_TOKEN"),
+        "The caller does not pass the configured GITHUB_TOKEN reference",
+    )
+    match = _BRANCH_CALL.fullmatch(str(call.value))
+    if match is None:
+        raise PreviewEvidenceError("The caller lacks a supported literal reusable branch reference")
+    called_repository, called_path, branch = match.groups()
+    references = cap["run"]["referenced_workflows"]
+    _require(len(references) == 1, "The run lacks one selected reusable workflow")
+    selected = references[0]
+    revision = selected["sha"]
+    evidence = cap["reusable_source"]
+    _require(
+        selected["path"] == call.value
+        and selected["ref"] == f"refs/heads/{branch}"
+        and _matches(revision, _SHA)
+        and evidence["repository"] == called_repository,
+        "Caller, provider selection and reusable source do not agree",
+    )
+    projection = (root / "reusable" / revision).resolve()
+    _require(projection.is_relative_to(root), "Reusable workflow directory leaves the projection")
+    raw, identity = _source_bytes(projection, evidence, called_path, revision)
+    callee = _workflow_source_index(called_path, raw)
+    trigger = ("on", "workflow_call")
+    secret_path = (*trigger, "secrets", secret)
+    _require(
+        {key[-1] for key in callee.keys if key[:-1] == ("on",)} == {"workflow_call"}
+        and {key[-1] for key in callee.keys if key[:-1] == trigger} == {"secrets"}
+        and {key[-1] for key in callee.keys if key[:-1] == (*trigger, "secrets")} == {secret}
+        and all(
+            len(callee.keys.get(key, ())) == 1
+            for key in (trigger, secret_path, (*trigger, "secrets"))
+        )
+        and str(_field(callee, (*secret_path, "required")).value).lower() == "true"
+        and not any(
+            key in callee.keys for key in (("permissions",), ("jobs", called_job, "permissions"))
+        ),
+        "The called workflow does not declare the selected token input and inherited grant",
+    )
+    configured = _source_plan(
+        callee, called_job, repository, event="workflow_call", secret_alias=secret
+    )
+    return configured, {
+        "caller_job": caller_job,
+        "call_line": call.line,
+        "binding_line": binding.line,
+        "repository": called_repository,
+        "ref": selected["ref"],
+        "job": called_job,
+        "source": identity,
     }
 
 
@@ -607,7 +697,8 @@ def _denial_grant(cap: _Row, request: _Row) -> _Row:
 
 def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) -> _Row:
     run, job, check = cap["run"], cap["job"], cap["check_run"]
-    _run_identity(run, job, repo, run_id, "pull_request")
+    reusable = "reusable_source" in cap
+    _run_identity(run, job, repo, run_id, "pull_request", allow_sibling_workflows=reusable)
     _run_window(run, job)
     _require(
         job["id"] == job_id
@@ -641,6 +732,11 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
         and run["head_sha"] == pr["head_sha"],
         "Saved pull request does not match the selected fork invocation",
     )
+    if reusable:
+        _require(
+            "verified_log" not in cap and "effective_permission_log" not in cap,
+            "Receipt combines different draft observation profiles",
+        )
     if "verified_log" in cap:
         _require(
             "denial" not in cap and "effective_permission_log" not in cap,
@@ -653,6 +749,11 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
         raise PreviewEvidenceError("No owned draft-create API denial was supplied")
     target = f"https://api.github.com/repos/{repo}/releases"
     ref = f"refs/pull/{pr['number']}/merge"
+    matching_url = (
+        _matches(request["url"], rf"https://api\.github\.com/repos/(?i:{re.escape(repo)})/releases")
+        if reusable
+        else request["url"] == target
+    )
     _require(
         request["check_run"] == check["id"]
         and _id(request["check_run"])
@@ -667,7 +768,7 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
         and _matches(request["request_id"], r"[0-9A-F]{1,12}(?::[0-9A-F]{1,16}){2,5}")
         and _time(job["started_at"]) <= _time(request["response_at"]) <= _time(job["completed_at"])
         and request["method"] == "POST"
-        and request["url"] == target
+        and matching_url
         and type(request["status"]) is int
         and request["status"] == 403
         and request["message"] == _DENIAL
@@ -679,7 +780,11 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
     index, source = _source(
         root, run, cap["source"], run["head_sha"], allow_initial_document_marker=True
     )
-    configured = _source_plan(index, job["name"], repo)
+    invocation = None
+    if reusable:
+        configured, invocation = _reusable_plan(cap, root, index, repo)
+    else:
+        configured = _source_plan(index, job["name"], repo)
     _require(
         configured["action"] == request["action"],
         "The requested draft action does not match its response evidence",
@@ -712,8 +817,10 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
                 "action_annotation_sha256",
             )
         },
-        "scope": _SCOPE,
+        "scope": _REUSABLE_SCOPE if reusable else _SCOPE,
     }
+    if invocation is not None:
+        result["reusable_invocation"] = invocation
     if "effective_permission_log" in cap:
         result["effective_permission"] = _denial_grant(cap, request)
     return result
@@ -739,12 +846,17 @@ def release_request_observation(
             return patch_comparison(cap, root.resolve(), repository, run_id, job_id)
         if "creation" in cap:
             _require(
-                "verified_log" not in cap and "effective_permission_log" not in cap,
+                not any(
+                    key in cap
+                    for key in ("verified_log", "effective_permission_log", "reusable_source")
+                ),
                 "Receipt combines different draft observation profiles",
             )
             scope = _PUSH_SCOPE
             return _draft_creation(cap, root.resolve(), repository, run_id, job_id)
-        if "verified_log" in cap:
+        if "reusable_source" in cap:
+            scope = _REUSABLE_SCOPE
+        elif "verified_log" in cap:
             scope = _LOGGED_SCOPE
         return _draft_denial(cap, root.resolve(), repository, run_id, job_id)
     except PreviewEvidenceError as exc:

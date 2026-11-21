@@ -124,6 +124,134 @@ def test_job_success_can_coexist_with_owned_request_denial(capture):
     assert "publication" not in result
 
 
+@pytest.fixture
+def reusable_capture(capture, tmp_path):
+    cap, bind, assess = capture
+    owner = "shared/ci"
+    path = ".github/workflows/publish.yml"
+    revision = "e" * 40
+    uses = f"{owner}/{path}@stable"
+    caller = """\
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  caller:
+    uses: CALL
+    secrets:
+      job_token: ${{ secrets.GITHUB_TOKEN }}
+""".replace("CALL", uses)
+    called = """\
+on:
+  workflow_call:
+    secrets:
+      job_token:
+        required: true
+jobs:
+  publisher:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: release-drafter/release-drafter@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.job_token }}
+"""
+    cap["source"] = bind(caller)
+    cap["job"]["name"] = "caller / publisher"
+    cap["run"]["referenced_workflows"] = [
+        {"path": uses, "ref": "refs/heads/stable", "sha": revision}
+    ]
+    cap["denial"]["url"] = "https://api.github.com/repos/Team/Project/releases"
+    file = tmp_path / "reusable" / revision / path
+    file.parent.mkdir(parents=True)
+
+    def set_called(text):
+        file.write_bytes(text.encode())
+        cap["reusable_source"] = {
+            "repository": owner,
+            "path": path,
+            "revision": revision,
+            "sha256": hashlib.sha256(text.encode()).hexdigest(),
+        }
+
+    set_called(called)
+    return cap, bind, assess, caller, called, set_called, file
+
+
+def test_owned_reusable_rejection_reports_configured_handoff_and_no_effective_grant(reusable_capture):
+    cap, _, assess, _, _, _, _ = reusable_capture
+    found = assess()
+    assert found["state"] == "draft-release-create-denied"
+    assert found["operation"]["status"] == 403
+    assert found["operation"]["url"] == cap["denial"]["url"]
+    assert found["job_conclusion"] == "success"
+    invocation = found["reusable_invocation"]
+    assert invocation["caller_job"] == "caller"
+    assert invocation["job"] == "publisher"
+    assert invocation["binding_line"] == 8
+    assert "job_token" not in json.dumps(found)
+    assert invocation["source"]["revision"] == "e" * 40
+    assert found["configured"]["requested_permission"] is None
+    assert "effective_permission" not in found
+
+
+@pytest.mark.parametrize(
+    "change",
+    (
+        "another-caller",
+        "another-called-job",
+        "duplicate-selection",
+        "different-workflow",
+        "different-branch",
+        "different-callee-revision",
+        "missing-projection",
+        "different-source-bytes",
+        "different-source-repo",
+        "different-credential",
+        "missing-credential-in-called-job",
+        "different-request-target",
+        "different-request-attempt",
+        "same-repository",
+        "mixed-profile",
+    ),
+)
+def test_reusable_rejection_preserves_unresolved_ownership(reusable_capture, change):
+    cap, bind, assess, caller, called, set_called, file = reusable_capture
+    selection = cap["run"]["referenced_workflows"][0]
+    if change == "another-caller":
+        cap["job"]["name"] = "sibling / publisher"
+    elif change == "another-called-job":
+        cap["job"]["name"] = "caller / sibling"
+    elif change == "duplicate-selection":
+        cap["run"]["referenced_workflows"].append(dict(selection))
+    elif change == "different-workflow":
+        selection["path"] = selection["path"].replace("publish.yml", "sibling.yml")
+    elif change == "different-branch":
+        selection["ref"] = "refs/heads/elsewhere"
+    elif change == "different-callee-revision":
+        selection["sha"] = "f" * 40
+    elif change == "missing-projection":
+        file.unlink()
+    elif change == "different-source-bytes":
+        file.write_bytes((called + "# unrelated bytes\n").encode())
+    elif change == "different-source-repo":
+        cap["reusable_source"]["repository"] = "sibling/ci"
+    elif change == "different-credential":
+        cap["source"] = bind(caller.replace("secrets.GITHUB_TOKEN", "secrets.OTHER"))
+    elif change == "missing-credential-in-called-job":
+        set_called(called.replace("secrets.job_token", "secrets.OTHER"))
+    elif change == "different-request-target":
+        cap["denial"]["url"] = "https://api.github.com/repos/Team/Sibling/releases"
+    elif change == "different-request-attempt":
+        cap["denial"]["attempt"] = 2
+    elif change == "same-repository":
+        cap["pr"]["head_repository"] = cap["run"]["head_repository"] = REPO
+    elif change == "mixed-profile":
+        cap["effective_permission_log"] = {}
+    result = assess()
+    assert result["state"] == "unresolved"
+    assert "operation" not in result and "effective_permission" not in result
+
+
 @pytest.mark.parametrize(
     ("condition", "expected"),
     [
