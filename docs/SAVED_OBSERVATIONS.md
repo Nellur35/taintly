@@ -711,6 +711,39 @@ publication and any fork's ability to write remain unverified. A successful
 job with an update, dry run or missing completion stays unresolved for this
 creation question.
 
+### Saved GitHub Release metadata PATCH comparison
+
+Use the same observation command with schema
+`github-release-patch-comparison-v1` to compare a narrow series of reported
+metadata updates in one successful repository push job. Supply the direct
+run and job records, the exact workflow source projection, and the public
+job log saved as `release-patch.log` in the source projection. Use this mode
+only with trusted saved records. It reads evidence offline and performs no
+requests to the provider.
+
+Supply `patch_log.url`, `sha256` of the saved log, `last_source_line` of the
+last compared PATCH call, and the ordered `permissions`, `bindings` and
+`responses` rows. Each row gives its physical log `line`, timestamp `time`,
+value without trailing whitespace and SHA-256 `sha256` of
+`"<time> <value>"`. The validator matches the rows against the saved log and
+their owning setup or script step. The step transcript must also echo the exact supported shell body
+and its environment, including the target references present in the source.
+
+- The supported script runs the GitHub CLI under a job token and records
+  the HTTP status each time. It contains one of two bounded comparisons:
+  a draft update with the original commit, a distinct commit, then the
+  original again, or a published release update sending no field, name,
+  tag name and finally target commit.
+- The draft comparison also needs three owned binding rows for the
+  resolved main commit, the literal alternative commit and the created
+  draft ID. The published comparison needs no binding rows because the
+  release ID and target commit are literal workflow environment values.
+- Unmatched source, request, log, step or token grant leaves the result
+  unresolved. An accepted comparison exits 0 even if one of its recorded
+  requests returned 403. The recorded request statuses describe the
+  selected release only. Token values, denial policy, fork permissions
+  and asset writes require separate evidence.
+
 ## Saved GitHub Preview observations
 
 When reviewing a completed fork build, use the named operation and both

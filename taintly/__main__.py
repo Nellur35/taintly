@@ -2508,6 +2508,29 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
     artifact_authority = result.get("producer_artifact_authority")
     if args.format == "json":
         print(json.dumps({mode: result}, indent=2))
+    elif state == "release-patch-comparison-reported":
+        operation = result["operation"]
+        print(
+            f"Saved GitHub job {result['job']} reports {operation['method']} {operation['url']}.\n"
+            f"  Run {result['run']}, attempt {result['attempt']}. "
+            f"Job conclusion: {result['job_conclusion']}. "
+            "Job setup reports GITHUB_TOKEN Contents: write."
+        )
+        execution = result["execution"]
+        print(
+            f"  Runner shell {execution['shell']} reported at job log lines "
+            f"{execution['first_log_line']}-{execution['last_log_line']}."
+        )
+        for request in result["requests"]:
+            field = request["field"] or "no fields"
+            target = request["target_commitish"]
+            printed_field = f"{field}={target}" if target else field
+            print(
+                f"  {printed_field}: HTTP {request['status']} "
+                f"({result['source']['path']}:{request['source_line']}, "
+                f"job log line {request['response_line']})."
+            )
+        print(result["scope"])
     elif state == "draft-release-create-denied":
         operation = result["operation"]
         configured = result["configured"]
