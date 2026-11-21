@@ -71,6 +71,17 @@ _CANCELED_SCOPE = (
     "require separate evidence."
 )
 _FORK_ARCHIVE_SCHEMA = "gitlab-fork-project-archive-v1"
+_TARGET_HEAD_ARCHIVE_SCHEMA = "gitlab-target-project-head-archive-v1"
+_TARGET_HEAD_ARCHIVE_SCOPE = (
+    "Trusted saved GitLab records tie a fork head checkout to its accepted job archive "
+    "in the target project. Effective configuration, exact credentials, content ancestry, "
+    "deployment and present download access require separate evidence."
+)
+_TARGET_HEAD_DOWNLOAD_SCOPE = (
+    "Trusted saved GitLab job and download records tie these ZIP bytes to the accepted "
+    "target-project job archive. Effective configuration, exact credentials, content ancestry, "
+    "present access and deployment remain unverified."
+)
 _MAX_FORK_ARCHIVE_BYTES = 5_000_000
 _FORK_DOWNLOAD_SCOPE = (
     "Trusted saved GitLab job and download records tie these ZIP bytes to the accepted "
@@ -614,36 +625,62 @@ def _archive_upload_rows(
     return phase, rows[6]
 
 
-def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job_id: int) -> _Row:
+def _detached_archive(
+    data: _Row, root: Path, project_id: int, pipeline_id: int, job_id: int, *, target_owned: bool
+) -> _Row:
     target, fork, mr = data["target"], data["fork"], data["mr"]
     pipeline, job, log = data["pipeline"], data["job"], data["log"]
     source_path = _value(fork["path_with_namespace"], _PROJECT, "GitLab fork project path")
     target_path = _value(target["path_with_namespace"], _PROJECT, "GitLab MR target path")
-    owner = _identifier(fork["id"], "fork project")
+    source_project = _identifier(fork["id"], "fork project")
     destination = _identifier(target["id"], "MR target project")
     iid = _identifier(mr["iid"], "merge request IID")
-    revision = _value(pipeline["sha"], _SHA, "fork pipeline revision")
-    ref = _value(mr["source_branch"], _FORK_BRANCH, "MR source branch")
+    revision = _value(pipeline["sha"], _SHA, "detached pipeline revision")
+    ref = (
+        f"refs/merge-requests/{iid}/head"
+        if target_owned
+        else _value(mr["source_branch"], _FORK_BRANCH, "MR source branch")
+    )
     fork_url = f"https://gitlab.com/{source_path}"
     target_url = f"https://gitlab.com/{target_path}"
-    pipeline_url = f"{fork_url}/-/pipelines/{pipeline_id}"
-    job_url = f"{fork_url}/-/jobs/{job_id}"
+    owner = destination if target_owned else source_project
+    owning_url = target_url if target_owned else fork_url
+    pipeline_url = f"{owning_url}/-/pipelines/{pipeline_id}"
+    job_url = f"{owning_url}/-/jobs/{job_id}"
     _need(
-        owner == project_id == _identifier(mr["source_project_id"], "MR source project")
+        project_id == owner
+        and source_project == _identifier(mr["source_project_id"], "MR source project")
         and destination == _identifier(mr["target_project_id"], "MR target project")
-        and owner != destination
+        and source_project != destination
         and source_path != target_path
         and fork["forked_from"] == {"id": destination, "path_with_namespace": target_path}
         and fork["web_url"] == fork_url
         and target["web_url"] == target_url
         and mr["web_url"] == f"{target_url}/-/merge_requests/{iid}",
-        "requested project does not own this fork job or match the recorded MR target",
+        "requested project does not own this target-project job or match the recorded fork"
+        if target_owned
+        else "requested project does not own this fork job or match the recorded MR target",
     )
     membership = data["mr_pipeline"]
     current_head = _value(mr["sha"], _SHA, "current MR head")
     history = data.get("historical_pipeline")
+    if target_owned:
+        _need(
+            not {
+                "historical_pipeline",
+                "archive_member_origin",
+                "archive_runner_evidence",
+                "failed_archive",
+                "canceled_archive",
+                "pages_preview",
+                "publication_admission",
+            }.intersection(data)
+            and pipeline["status"] == job["status"] == "success"
+            and revision == current_head == job["commit"]["id"],
+            "target-project archive requires a successful job at the recorded fork head",
+        )
     _need(
-        _identifier(pipeline["id"], "fork pipeline") == pipeline_id
+        _identifier(pipeline["id"], "detached pipeline") == pipeline_id
         and pipeline["project_id"] == owner
         and pipeline["source"] == "merge_request_event"
         and pipeline["status"] in {"success", "failed"}
@@ -692,9 +729,13 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
         and _identifier(log["job"], "fork runner trace job") == job_id
         and log["url"] == job_url + "/raw"
         and _SHA256.fullmatch(str(log["sha256"])),
-        "saved runner trace and archive inventory do not match the fork-owned successful job"
-        if success
-        else "saved runner trace and archive inventory do not match the fork-owned failed job",
+        "saved runner trace and archive inventory do not match the target-project job"
+        if target_owned
+        else (
+            "saved runner trace and archive inventory do not match the fork-owned successful job"
+            if success
+            else "saved runner trace and archive inventory do not match the fork-owned failed job"
+        ),
     )
     source_hash = hashlib.sha256(
         _source_bytes(root, root / ".gitlab-ci.yml", "selected fork GitLab source")
@@ -702,12 +743,26 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
     _need(
         source_hash == data["source_sha256"], "GitLab configuration differs from saved fork source"
     )
+    if target_owned:
+        source_file = data["source_file"]
+        expected_url = (
+            f"https://gitlab.com/api/v4/projects/{source_project}/"
+            f"repository/files/.gitlab-ci.yml?ref={revision}"
+        )
+        _need(
+            source_file["url"] == expected_url
+            and source_file["file_path"] == ".gitlab-ci.yml"
+            and source_file["commit_id"] == revision
+            and source_file["content_sha256"] == source_hash,
+            "saved fork configuration record does not match the selected checkout and bytes",
+        )
     reply = (
         r'01E Uploading artifacts as "archive" to coordinator\.\.\. 201 Created +'
         r"correlation_id=(?:[0-9a-f]{32}|[0-9a-f]{16}-[A-Z]{3}) "
         rf"id={job_id} (?:status=201|responseStatus=201 Created)"
     )
-    phase, response = _archive_upload_rows(log, pipeline, job, reply, "fork-job")
+    trace_label = "target-project-job" if target_owned else "fork-job"
+    phase, response = _archive_upload_rows(log, pipeline, job, reply, trace_label)
     expected_phase = "upload_artifacts_on_success" if success else "upload_artifacts_on_failure"
     _need(
         phase == expected_phase,
@@ -717,8 +772,12 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
     )
     publication = _archive_receipt(job_url, log, response, archives[0]["size"])
     result = {
-        "state": "fork-project-archive-upload-observed",
-        "repository": source_path,
+        "state": (
+            "target-project-head-archive-upload-observed"
+            if target_owned
+            else "fork-project-archive-upload-observed"
+        ),
+        "repository": target_path if target_owned else source_path,
         "project": owner,
         "target_repository": target_path,
         "target_project": destination,
@@ -730,9 +789,13 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
         "source_sha256": source_hash,
         "job_status": status,
         "upload_phase": phase,
-        "scope": _FORK_ARCHIVE_SCOPE,
+        "scope": _TARGET_HEAD_ARCHIVE_SCOPE if target_owned else _FORK_ARCHIVE_SCOPE,
         "publication": publication,
     }
+    if target_owned:
+        result["source_repository"] = source_path
+        result["source_project"] = source_project
+        result["job_name"] = _value(job["name"], _FAILED_JOB, "target-project job name")
     if isinstance(history, dict):
         result["historical_pipeline"] = {
             "url": history["url"],
@@ -749,11 +812,11 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
         )
     archive_bytes = None
     if "archive_download" in data:
-        download, archive_bytes = _fork_archive_download(data, root, result)
+        download, archive_bytes = _detached_archive_download(data, root, result, target_owned)
         result["archive_download"] = download
-        if download["state"] == "fork-project-archive-retrieved":
+        if download["state"] != "unresolved":
             publication["retrieval"] = "verified"
-            result["scope"] = _FORK_DOWNLOAD_SCOPE
+            result["scope"] = download["scope"]
     if "archive_member_origin" in data:
         result["archive_member_origin"] = coverage_source_observation(
             data, root, archive_bytes, result
@@ -761,7 +824,9 @@ def _fork_archive(data: _Row, root: Path, project_id: int, pipeline_id: int, job
     return result
 
 
-def _recorded_fork_archive_download(receipt: _Row, root: Path, result: _Row) -> tuple[_Row, bytes]:
+def _recorded_archive_download(
+    receipt: _Row, root: Path, result: _Row, target_owned: bool
+) -> tuple[_Row, bytes]:
     publication = result["publication"]
     size = publication["inventory_bytes"]
     responses = receipt["responses"]
@@ -781,7 +846,9 @@ def _recorded_fork_archive_download(receipt: _Row, root: Path, result: _Row) -> 
         )
         and _time(receipt["observed_at"], "archive download time")
         >= _time(publication["reported_at"], "archive upload time"),
-        "download receipt does not identify the selected fork job archive",
+        "download receipt does not identify the selected job archive"
+        if target_owned
+        else "download receipt does not identify the selected fork job archive",
     )
     _need(
         type(receipt["bytes"]) is int
@@ -790,7 +857,10 @@ def _recorded_fork_archive_download(receipt: _Row, root: Path, result: _Row) -> 
         "download receipt differs from the bounded job archive inventory",
     )
     content = _source_bytes(
-        root, root / "published-archive.zip", "fork job archive", max_bytes=size
+        root,
+        root / "published-archive.zip",
+        "target-project job archive" if target_owned else "fork job archive",
+        max_bytes=size,
     )
     digest = hashlib.sha256(content).hexdigest()
     _need(
@@ -798,23 +868,28 @@ def _recorded_fork_archive_download(receipt: _Row, root: Path, result: _Row) -> 
         "saved archive differs from the downloaded ZIP size or digest",
     )
     return {
-        "state": "fork-project-archive-retrieved",
+        "state": (
+            "target-project-archive-retrieved" if target_owned else "fork-project-archive-retrieved"
+        ),
         "target": publication["target"],
         "sha256": digest,
         "bytes": size,
         "observed_at": receipt["observed_at"],
-        "scope": _FORK_DOWNLOAD_SCOPE,
+        "scope": _TARGET_HEAD_DOWNLOAD_SCOPE if target_owned else _FORK_DOWNLOAD_SCOPE,
     }, content
 
 
-def _fork_archive_download(data: _Row, root: Path, result: _Row) -> tuple[_Row, bytes | None]:
+def _detached_archive_download(
+    data: _Row, root: Path, result: _Row, target_owned: bool
+) -> tuple[_Row, bytes | None]:
     try:
-        return _recorded_fork_archive_download(data["archive_download"], root, result)
+        return _recorded_archive_download(data["archive_download"], root, result, target_owned)
     except RegistryJobError as exc:
         reason = str(exc)
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
         reason = "required archive download evidence is missing or malformed"
-    return {"state": "unresolved", "reason": reason, "scope": _FORK_DOWNLOAD_SCOPE}, None
+    scope = _TARGET_HEAD_DOWNLOAD_SCOPE if target_owned else _FORK_DOWNLOAD_SCOPE
+    return {"state": "unresolved", "reason": reason, "scope": scope}, None
 
 
 def _recorded_pages_account(evidence: _Row, job: _Row, pipe: _Row, deployment: int) -> _Row:
@@ -1321,10 +1396,18 @@ def mr_artifact_observation(
                 publisher is None, "the image observation does not assess npm publisher admission"
             )
             return branch_image_observation(data, root.resolve(), project, pipeline, job)
-        if data.get("schema") == _FORK_ARCHIVE_SCHEMA:
-            scope = _FORK_ARCHIVE_SCOPE
-            _need(publisher is None, "fork archive evidence covers its own upload only")
-            return _fork_archive(data, root.resolve(), project, pipeline, job)
+        if data.get("schema") in (_FORK_ARCHIVE_SCHEMA, _TARGET_HEAD_ARCHIVE_SCHEMA):
+            target_owned = data["schema"] == _TARGET_HEAD_ARCHIVE_SCHEMA
+            scope = _TARGET_HEAD_ARCHIVE_SCOPE if target_owned else _FORK_ARCHIVE_SCOPE
+            _need(
+                publisher is None,
+                "target-project archive evidence covers its own upload only"
+                if target_owned
+                else "fork archive evidence covers its own upload only",
+            )
+            return _detached_archive(
+                data, root.resolve(), project, pipeline, job, target_owned=target_owned
+            )
         _need(
             data.get("schema") == "gitlab-mr-artifact-v1", "unsupported artifact observation schema"
         )
