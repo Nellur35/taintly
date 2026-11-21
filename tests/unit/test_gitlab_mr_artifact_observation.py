@@ -151,6 +151,31 @@ def test_native_archive_authority_binds_the_owned_runner(tmp_path, capture, chan
         assert "credential" not in authority
 
 
+@pytest.mark.parametrize("borrowed_index", [False, True])
+def test_new_runner_requires_its_own_helper_image(tmp_path, capture, borrowed_index):
+    evidence = _runner_archive_evidence()
+    evidence.update(
+        runner_revision="d22d8753a6b96df6131d1d500decb4192d7f6f31",
+        helper_config="sha256:ea7a461bccb1b352892e9fbbf7430a63c0b9ffacd7b28ae6ca2e786ba4d34de2",
+    )
+    if not borrowed_index:
+        evidence["helper_index"] = (
+            "sha256:6fa6131930f0200667b536f3269fa038c09338763e864b80153b7bf0591d5bc8"
+        )
+    capture["archive_runner_evidence"] = evidence
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "job-artifact-observed"
+    authority = result["archive_runner_authority"]
+    if borrowed_index:
+        assert authority["state"] == "unresolved"
+        assert "credential" not in authority
+    else:
+        assert authority["credential"] == "runner-job-token"
+        assert authority["helper_image_executable_sha256"] == (
+            "eda88cf7ce99060eb557f4d83f7937081bbe305d6bab9df5018d520a5fc8e810"
+        )
+
+
 def test_report_distinguishes_fork_head_and_checkout(tmp_path, capture, monkeypatch, capsys):
     evaluate(tmp_path, capture)
     monkeypatch.setattr(

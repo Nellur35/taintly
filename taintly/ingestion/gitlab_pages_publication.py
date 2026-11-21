@@ -8,7 +8,13 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
-from taintly.ingestion.gitlab_mr_artifact import _PATH, _Config, _need, _Row
+from taintly.ingestion.gitlab_mr_artifact import (
+    _PATH,
+    _Config,
+    _native_archive_authority,
+    _need,
+    _Row,
+)
 from taintly.ingestion.gitlab_pages_handoff import _archive_request, _literal_sequence, _transfer
 from taintly.ingestion.gitlab_registry_job import (
     _SHA,
@@ -243,7 +249,7 @@ def pages_publication(data: _Row, root: Path, mr_result: _Row) -> _Row:
             source_time,
             pages_end,
         )
-        return {
+        result = {
             "state": "post-merge-pages-publication-observed",
             "merge_commit": bundle["merge"]["merge_commit_sha"],
             "upstream_pipeline": pipe["id"],
@@ -268,6 +274,16 @@ def pages_publication(data: _Row, root: Path, mr_result: _Row) -> _Row:
             "members": samples,
             "scope": _SCOPE,
         }
+        if "archive_runner_evidence" in publisher:
+            result["archive_runner_authority"] = _native_archive_authority(
+                publisher | {"pipeline": pipe},
+                pages_url,
+                data["project"]["path"],
+                pages_post | {"http_status": 201},
+                detached_log=publisher["log"],
+                detached_owner="Pages",
+            )
+        return result
     except RegistryJobError as exc:
         reason = str(exc)
     except (AttributeError, IndexError, KeyError, OSError, RuntimeError, TypeError, ValueError):

@@ -285,7 +285,9 @@ the separate result for the earlier MR job. Other artifact downloads,
 unobserved files, the exact provider credential and broader grants
 require separate evidence. An invalid optional object exits 11 and
 preserves the existing artifact result. No network access is needed
-while the scanner evaluates these records.
+while the scanner evaluates these records. Add `archive_runner_evidence`
+to the `publisher` record to verify the Pages job's native upload
+credential class using its own Runner evidence.
 
 For a successful archive observation, include the provider's pipeline
 `created_at` and `updated_at` in `job.pipeline`. The recorded job and
@@ -300,9 +302,11 @@ job token for this archive POST. Supply the trusted redacted log's
 `archive_start_line`, `archive_line`, `archive_end_line`,
 `archive_start_time`, `archive_time`, `archive_end_time`, and the archive
 response's `correlation_id`. Use the originating archive stage and its
-response, with no token fields. The profile is limited to Runner
-`7a0f126423ab4aefa71be5cda32668e29bc59b2d` and the compatible verified
-helper image. Actual process bytes and mounts, the token instance and
+response, with no token fields. Supported Runner revisions are
+`7a0f126423ab4aefa71be5cda32668e29bc59b2d` and
+`d22d8753a6b96df6131d1d500decb4192d7f6f31`, each with its own verified
+helper index and platform image configuration. Actual process bytes and
+mounts, the token instance and
 permissions for other operations require separate evidence. An invalid
 optional record reports unresolved with exit 11 while preserving any
 already corroborated archive. Omitting the object preserves the

@@ -2076,6 +2076,9 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     member_origin = report.get("archive_member_origin")
     handoff = report.get("pages_handoff")
     pages_publication = report.get("pages_publication")
+    pages_authority = (
+        pages_publication.get("archive_runner_authority") if pages_publication else None
+    )
     if args.format == "json":
         print(json.dumps({mode: report}, indent=2))
     elif state == "job-artifact-observed":
@@ -2254,6 +2257,15 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             )
         else:
             print(f"GitLab Pages publication unresolved: {pages_publication['reason']}.")
+    if pages_authority is not None and args.format == "text":
+        if pages_authority["state"] == "native-archive-write-observed":
+            print(
+                f"  Pages runner job token used for POST {pages_authority['route']} "
+                f"(HTTP {pages_authority['http_status']}, runner log line "
+                f"{pages_authority['archive_response_line']}).\n{pages_authority['scope']}"
+            )
+        else:
+            print(f"GitLab Pages archive runner authority unresolved: {pages_authority['reason']}.")
     incomplete = state in {"unresolved", "registry-image-push-reported"} or any(
         item is not None and item["state"] == "unresolved"
         for item in (
@@ -2265,6 +2277,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             archive_authority,
             handoff,
             pages_publication,
+            pages_authority,
         )
     )
     sys.exit(11 if incomplete else 0)
