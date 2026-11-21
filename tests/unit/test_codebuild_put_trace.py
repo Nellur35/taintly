@@ -266,6 +266,44 @@ def test_source_workspace_uses_the_runner_order_in_its_owned_stream(variant, rea
         )
 
 
+@pytest.mark.parametrize(
+    ("before_command", "after_command", "conflict"),
+    [
+        ([(2, "inline")], [], False),
+        ([], [], False),
+        ([(2, "checkout")], [], True),
+        ([(2, "inline"), (3, "inline")], [], True),
+        ([(5, "inline")], [], True),
+        ([(2, "inline")], [(2, "checkout")], False),
+        ([], [(2, "checkout")], False),
+    ],
+)
+def test_source_workspace_checks_only_the_owning_inline_selection(
+    before_command, after_command, conflict,
+):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+    workspace = "/codebuild/output/src123/src"
+    paths = {"inline": "/codebuild/readonly/buildspec.yml", "checkout": f"{workspace}/buildspec.yml"}
+    rows = [
+        (1, f"CODEBUILD_SRC_DIR={workspace}"),
+        (3, f"Moving to directory {workspace}"),
+        (4, "Phase complete: DOWNLOAD_SOURCE State: SUCCEEDED"),
+    ]
+    rows.extend((when, f"YAML location is {paths[label]}") for when, label in before_command)
+    rows.sort()
+    rows.append((7, "Running command set -euo pipefail"))
+    rows.extend((when, f"YAML location is {paths[label]}") for when, label in after_command)
+    formatted = [
+        (int((start + 10) * 1000), f"[Container] 2026/01/01 00:00:{sec:02}.000000 {line}\n")
+        for sec, line in rows
+    ]
+    if conflict:
+        with pytest.raises(SnapshotError, match="buildspec selection"):
+            _source_workspace(formatted, (start, start + 5), start + 7, None)
+    else:
+        assert _source_workspace(formatted, (start, start + 5), start + 7, None) == workspace
+
+
 @pytest.mark.parametrize(("second", "matches"), [(1, False), (2, True), (4, True), (5, False)])
 def test_cloudtrail_second_must_overlap_owning_command(second, matches):
     account = "012345678901"

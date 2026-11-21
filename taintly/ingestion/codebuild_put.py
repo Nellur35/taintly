@@ -233,13 +233,33 @@ def _source_workspace(
     messages = "".join(message for _, message in rows)
     kinds = (
         r"CODEBUILD_SRC_DIR=[^\n]*|Moving to directory [^\n]*"
+        r"|YAML location is [^\n]*"
         r"|Phase complete: DOWNLOAD_SOURCE State: [^\n]*|Running command [^\n]*"
     )
     pattern = "(" + kinds + ")"
     for header in re.finditer("^" + _RECORD + pattern + "$", messages, re.M):
         when, (record,) = _record(header[0], pattern)
+        if when == command_start and record == "Running command set -euo pipefail":
+            break
         if lower <= when < command_start:
             events.append((when, record))
+    selections = [
+        index for index, (_, record) in enumerate(events) if record.startswith("YAML location is ")
+    ]
+    if selections:
+        index = selections[0]
+        selected, location = events.pop(index)
+        _need(
+            len(selections) == 1
+            and selected <= upper
+            and location == "YAML location is /codebuild/readonly/buildspec.yml"
+            and not any(
+                record.startswith("Phase complete: DOWNLOAD_SOURCE State: ")
+                and (position < index or completed < selected)
+                for position, (completed, record) in enumerate(events)
+            ),
+            "The saved buildspec selection conflicts with the inline plan in DOWNLOAD_SOURCE",
+        )
     if not any(
         record.startswith(("CODEBUILD_SRC_DIR=", "Moving to directory ")) for _, record in events
     ):
