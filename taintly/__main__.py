@@ -2074,6 +2074,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     archive_download = report.get("archive_download")
     archive_authority = report.get("archive_runner_authority")
     member_origin = report.get("archive_member_origin")
+    handoff = report.get("pages_handoff")
     if args.format == "json":
         print(json.dumps({mode: report}, indent=2))
     elif state == "job-artifact-observed":
@@ -2227,6 +2228,17 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             )
         else:
             print(f"GitLab archive runner authority unresolved: {archive_authority['reason']}.")
+    if handoff is not None and args.format == "text":
+        if handoff["state"] == "upstream-pages-handoff-observed":
+            print(
+                f"  Fork pipeline {report['pipeline']} had no job named pages in its saved inventory.\n"
+                f"  Upstream Pages job {handoff['pages_job']} downloaded the archive from "
+                f"job {handoff['artifact_producer_job']} in pipeline {handoff['upstream_pipeline']}.\n"
+                f"  Pages uploaded its own archive (HTTP 201). "
+                f"{handoff['matched_members']} website members match.\n{handoff['scope']}"
+            )
+        else:
+            print(f"GitLab Pages handoff unresolved: {handoff['reason']}.")
     incomplete = state in {"unresolved", "registry-image-push-reported"} or any(
         item is not None and item["state"] == "unresolved"
         for item in (
@@ -2236,6 +2248,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             archive_download,
             member_origin,
             archive_authority,
+            handoff,
         )
     )
     sys.exit(11 if incomplete else 0)

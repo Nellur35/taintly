@@ -366,6 +366,42 @@ visible and exits 11. A verified download establishes byte identity at
 the recorded time. Content provenance, present access and authority in
 the MR target project require separate evidence.
 
+For a saved fork archive and a separate upstream Pages handoff, optionally
+include `pages_handoff` in a GitLab.com `gitlab-fork-project-archive-v1`
+receipt. This is an offline observation of the named jobs.
+
+- `fork_inventory` is a complete, single-page saved fork pipeline jobs
+  response, fetched after the recorded update. Retain the receipt URL
+  with `?per_page=100&include_retried=true`, `observed_at`, `sha256`,
+  `page`, `total_pages`, `next_page`, `total` and the `jobs`. Each job
+  retains its ID, status, name, URL and pipeline identity.
+- `upstream_project`, `upstream_pipeline` and `upstream_config` bind a
+  successful push to the MR target's default branch on a distinct commit.
+  Retain the project ID, URL, namespace and default branch, the normal
+  pipeline identity and timestamps, and the owning file API URL and
+  SHA-256 under `upstream_config`. The checked-in configuration must match
+  the one supplied for the fork observation.
+- The `producer` and `publisher` records each contain the exact `job`,
+  the usual eight `log` rows for a successful upload, and an `archive`
+  with its `api` download URL, `bytes` and `zip_sha256`. Keep
+  `pages-input.zip` and `pages-output.zip` in the source directory. Use
+  the `publisher.transfer` array to retain six log rows in order.
+  Capture download section start, named artifact request, HTTP 200,
+  download section end, directory move, and redirects copy. Preserve
+  original trace row positions, timestamps and redacted row hashes.
+- For `redirects_source`, save the owning file API URL (`api`), root
+  filename (`file`), checkout commit, publisher job ID and file SHA-256.
+
+The supported source declares an explicit single dependency for a `pages`
+job, moves that job archive's directory to `public`, and copies one root
+file to `public/_redirects`. Both archive uploads must report HTTP 201.
+The CLI checks the complete fork inventory for absence of the named Pages
+job, the upstream download for the exact producing job, and the saved
+archive member bytes after the move and copy. The result supports this
+handoff and retains uncertainty about live serving and broader authority.
+Missing or conflicting optional evidence returns exit 11 while retaining
+a verified fork archive.
+
 For a successful MR job that runs in the target project and checks out the
 fork head directly, use `gitlab-target-project-head-archive-v1`. Pass the
 target project ID. Supply the same project, MR membership, commit, job,
