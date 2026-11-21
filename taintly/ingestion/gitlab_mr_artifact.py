@@ -37,12 +37,20 @@ _PATH = re.compile(rf"{_PART}(?:/{_PART})*")
 _FAILED_COMMAND = r"(?:\./gradlew :[A-Za-z0-9:_-]{1,128}|yarn [A-Za-z0-9:_-]{1,128})"
 _BUILD = re.compile(r"(?:bun|yarn) run build(?::[a-z0-9:_-]+)?")
 _MOVE = re.compile(rf"mv ({_PART}(?:/{_PART})*) ({_PART}(?:/{_PART})*)")
-# The recorded linux/amd64 helper image and upload implementation verified on
-# GitLab.com at this Runner revision. Supporting another image needs its own proof.
-_ARCHIVE_RUNNER_REVISION = "7a0f126423ab4aefa71be5cda32668e29bc59b2d"
-_ARCHIVE_HELPER_INDEX = "sha256:604025ad1395452e28268e5ca722452d8e3a3badfd7bee628941a6bfb7ead975"
-_ARCHIVE_HELPER_CONFIG = "sha256:060c57dea4e06ce034c9959e734771d2542983156682d85447a6f9152e64ecd4"
-_ARCHIVE_HELPER_EXECUTABLE = "3da2f76c0857d674b22a300f078786494b248ea4f73ffd549afbb4a0e54c0c50"
+# Verified GitLab.com linux/amd64 Runner revisions, helper index and config
+# digests, and the executable digest from the corresponding image layer.
+_ARCHIVE_HELPERS = {
+    "7a0f126423ab4aefa71be5cda32668e29bc59b2d": (
+        "sha256:604025ad1395452e28268e5ca722452d8e3a3badfd7bee628941a6bfb7ead975",
+        "sha256:060c57dea4e06ce034c9959e734771d2542983156682d85447a6f9152e64ecd4",
+        "3da2f76c0857d674b22a300f078786494b248ea4f73ffd549afbb4a0e54c0c50",
+    ),
+    "d22d8753a6b96df6131d1d500decb4192d7f6f31": (
+        "sha256:6fa6131930f0200667b536f3269fa038c09338763e864b80153b7bf0591d5bc8",
+        "sha256:ea7a461bccb1b352892e9fbbf7430a63c0b9ffacd7b28ae6ca2e786ba4d34de2",
+        "eda88cf7ce99060eb557f4d83f7937081bbe305d6bab9df5018d520a5fc8e810",
+    ),
+}
 _CORRELATION = re.compile(r"[0-9a-f]{32}")
 _EVENT = "$CI_PIPELINE_SOURCE == 'merge_request_event'"
 _SAME_PROJECT = "$CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID"
@@ -268,11 +276,12 @@ def _native_archive_authority(
             and evidence["trace_url"] == job_url + "/raw",
             "runner evidence belongs to another job, pipeline or revision",
         )
+        revision = _value(evidence["runner_revision"], _SHA, "archive runner revision")
+        _need(revision in _ARCHIVE_HELPERS, "runner is outside the verified archive profile")
+        helper = _ARCHIVE_HELPERS[revision]
         _need(
             evidence["executor"] == "docker+machine"
-            and evidence["runner_revision"] == _ARCHIVE_RUNNER_REVISION
-            and evidence["helper_index"] == _ARCHIVE_HELPER_INDEX
-            and evidence["helper_config"] == _ARCHIVE_HELPER_CONFIG,
+            and (evidence["helper_index"], evidence["helper_config"]) == helper[:2],
             "runner or helper image is outside the verified archive profile",
         )
         cwd = f"/builds/{project_path}"
@@ -327,10 +336,10 @@ def _native_archive_authority(
             "correlation_id": correlation,
             "trace_sha256": trace_digest,
             "archive_response_line": lines[3],
-            "runner_revision": _ARCHIVE_RUNNER_REVISION,
+            "runner_revision": revision,
             "checkout_directory": cwd,
             "helper_image_executable": "/usr/bin/gitlab-runner-helper",
-            "helper_image_executable_sha256": _ARCHIVE_HELPER_EXECUTABLE,
+            "helper_image_executable_sha256": helper[2],
             "scope": (
                 "The verified helper image and Runner implementation bind the credential class to "
                 "this job archive. The running process bytes, mounts, token instance, registry "
