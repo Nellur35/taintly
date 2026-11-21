@@ -311,7 +311,17 @@ def _native_archive_authority(
         )
         correlation = _value(evidence["correlation_id"], _CORRELATION, "archive correlation ID")
         trace_digest = _value(evidence["trace_sha256"], _SHA256, "runner trace digest")
-        if detached_log is not None:
+        if detached_log is None:
+            # The compact trace already corroborates the successful upload.
+            # Bind its original response identity before adding a credential.
+            _need(
+                upload.get("trace_sha256") == trace_digest
+                and upload.get("correlation_id") == correlation
+                and type(upload.get("line")) is int
+                and upload["line"] == lines[3],
+                "runner evidence does not match the verified merged-job archive response",
+            )
+        else:
             phase_start, phase_reply, phase_end = detached_log["rows"][-3:]
             phase_spans = [
                 (
