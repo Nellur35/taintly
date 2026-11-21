@@ -362,6 +362,16 @@ def test_success_is_scoped_to_owned_draft_create(push_capture):
     assert "effective_permission" not in result
 
 
+@pytest.mark.parametrize("denial_log", [None, {"run": 11, "job": 21, "attempt": 2}])
+def test_push_cannot_include_the_denial_permission_log(push_capture, denial_log):
+    cap, _, _, assess = push_capture
+    cap["effective_permission_log"] = denial_log
+    result = assess()
+    assert result["state"] == "unresolved"
+    assert result["reason"] == "Receipt combines different draft observation profiles"
+    assert "operation" not in result and "effective_permission" not in result
+
+
 @pytest.fixture
 def push_grant_capture(push_capture):
     cap, _, _, assess = push_capture

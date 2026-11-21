@@ -730,7 +730,8 @@ def release_request_observation(
         _require(cap["repository"] == repository, "Receipt belongs to another repository")
         if "creation" in cap:
             _require(
-                "verified_log" not in cap, "Receipt combines different draft observation profiles"
+                "verified_log" not in cap and "effective_permission_log" not in cap,
+                "Receipt combines different draft observation profiles",
             )
             scope = _PUSH_SCOPE
             return _draft_creation(cap, root.resolve(), repository, run_id, job_id)
