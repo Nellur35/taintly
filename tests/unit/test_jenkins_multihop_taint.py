@@ -74,6 +74,53 @@ def test_elvis_default_truthy_path_carries_source():
     assert len(_flows(code)) == 1
 
 
+def test_literal_branch_membership_only_selects_constant_text():
+    code = (
+        "def nativeExe = env.BRANCH_NAME in ['main', 'release']\n"
+        "def flags = nativeExe ? '-Dnative=true ' : ''\n"
+        'sh "./mvnw ${flags}deploy"'
+    )
+    assert not _fires(code)
+
+
+def test_literal_membership_of_a_tainted_local_yields_a_boolean():
+    code = (
+        "def branchName = env.BRANCH_NAME\n"
+        'def allowed = branchName in ["main",\n "release"]\n'
+        'sh "echo ${allowed}"'
+    )
+    assert not _fires(code)
+
+
+def test_membership_condition_does_not_clear_value_from_a_selected_arm():
+    code = (
+        "def allowed = env.BRANCH_NAME in ['main']\n"
+        "def option = allowed ? env.CHANGE_TITLE : 'stable'\n"
+        'sh "echo ${option}"'
+    )
+    assert [flow.hops for flow in _flows(code)] == [("env.CHANGE_TITLE", "option", "sh")]
+
+
+def test_conditional_membership_reassignment_preserves_a_possible_flow():
+    code = (
+        "def value = env.CHANGE_TITLE\n"
+        "if (params.CHECK) {\n"
+        "  value = env.BRANCH_NAME in ['main']\n"
+        "}\n"
+        'sh "echo ${value}"'
+    )
+    assert [flow.hops for flow in _flows(code)] == [("env.CHANGE_TITLE", "value", "sh")]
+
+
+def test_incomplete_multiline_expression_is_not_classified_as_a_boolean():
+    code = (
+        "def value = env.BRANCH_NAME in ['main']\n"
+        "  ? env.CHANGE_TITLE : 'stable'\n"
+        'sh "echo ${value}"'
+    )
+    assert _fires(code)
+
+
 def test_bat_and_powershell_and_pwsh_sinks():
     for sink in ("bat", "powershell", "pwsh"):
         code = f'def r = env.BRANCH_NAME\n{sink} "build ${{r}}"'

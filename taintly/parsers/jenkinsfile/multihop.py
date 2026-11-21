@@ -31,6 +31,10 @@ heuristic over-fired 3:1 on the corpus (method-return + cross-function
 name collisions); this scoped propagation kept the one real flow and
 dropped all three false positives.
 
+An exact membership check against a literal string list produces a
+Boolean. The compared value can select a later branch without supplying
+the bytes of either branch's result.
+
 Output: :class:`MultiHopFlow` records — one per (tainted var → shell
 sink) reaching the sink via **N≥1** local hops (the N==0 direct case is
 already TAINT-JK-001's, and is excluded so the two rules don't co-fire).
@@ -71,6 +75,7 @@ class _Assign:
     line: int
     scope: tuple[int, ...]
     declared: bool
+    literal_list_membership: bool
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,37 @@ def _span_refs(tok: Token) -> set[str]:
             if li:
                 refs.add(li)
     return refs
+
+
+def _literal_list_membership(rhs: list[Token]) -> bool:
+    """Recognize an identifier or dotted property tested against a literal list."""
+    tokens = [token for token in rhs if token.kind not in (TokKind.COMMENT, TokKind.NEWLINE)]
+    operator = next(
+        (
+            i
+            for i, token in enumerate(tokens)
+            if token.kind == TokKind.IDENT and token.value == "in"
+        ),
+        0,
+    )
+    if operator % 2 != 1:
+        return False
+    reference, values = tokens[:operator], tokens[operator + 1 :]
+    if not all(token.kind == TokKind.IDENT for token in reference[::2]) or not all(
+        token.kind == TokKind.OP and token.value == "." for token in reference[1::2]
+    ):
+        return False
+    if len(values) < 2 or values[0].kind != TokKind.LBRACKET or values[-1].kind != TokKind.RBRACKET:
+        return False
+    entries = values[1:-1]
+    return (
+        (not entries or len(entries) % 2 == 1)
+        and all(
+            token.kind == TokKind.STRING and not token.unterminated and not token.interpolations
+            for token in entries[::2]
+        )
+        and all(token.kind == TokKind.OP and token.value == "," for token in entries[1::2])
+    )
 
 
 def _collect(content: str) -> tuple[list[_Assign], list[_Sink]]:
@@ -194,6 +230,18 @@ def _collect(content: str) -> tuple[list[_Assign], list[_Sink]]:
             ):
                 rhs, end = _read_rhs(toks, k + 1)
                 if rhs:
+                    membership = _literal_list_membership(rhs)
+                    if membership and end < n and toks[end].kind == TokKind.NEWLINE:
+                        # An apparent Boolean result can still be the start of
+                        # a continued expression, such as a multiline ternary.
+                        following = _next_significant(toks, end)
+                        if following < n:
+                            token = toks[following]
+                            membership = token.kind in (
+                                TokKind.IDENT,
+                                TokKind.RBRACE,
+                                TokKind.EOF,
+                            ) and token.value not in {"as", "in", "instanceof"}
                     assigns.append(
                         _Assign(
                             var=name,
@@ -201,6 +249,7 @@ def _collect(content: str) -> tuple[list[_Assign], list[_Sink]]:
                             line=tok.line,
                             scope=scope,
                             declared=declared,
+                            literal_list_membership=membership,
                         )
                     )
                 i = end
@@ -426,6 +475,10 @@ def resolve_multihop_flows(content: str, source_re: re.Pattern[str]) -> list[Mul
             assignment = cast("_Assign", event)
             target_key = binding_key(assignment.scope, assignment.var, assignment.declared)
             bindings.add(target_key)
+            if assignment.literal_list_membership:
+                # Using the input as a predicate adds no value provenance.
+                # A conditional reassignment may leave earlier taint intact.
+                continue
             visible = visible_taint(assignment.scope)
             if _rhs_is_direct_source(assignment.rhs, source_re):
                 src = _first_source_label(assignment.rhs, source_re)
