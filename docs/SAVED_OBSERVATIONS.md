@@ -302,7 +302,12 @@ job token for this archive POST. Supply the trusted redacted log's
 `archive_start_line`, `archive_line`, `archive_end_line`,
 `archive_start_time`, `archive_time`, `archive_end_time`, and the archive
 response's `correlation_id`. Use the originating archive stage and its
-response, with no token fields. Supported Runner revisions are
+response, with no token fields. For the compact merged-result observation
+(`gitlab-mr-artifact-v1`), retain the source log's `trace_sha256`, original
+response `line` and response `correlation_id` in the matching upload row
+of `trace`. The credential decision requires those three fields to agree
+with the optional Runner projection. An older upload row still
+corroborates the archive itself. Supported Runner revisions are
 `7a0f126423ab4aefa71be5cda32668e29bc59b2d` and
 `d22d8753a6b96df6131d1d500decb4192d7f6f31`, each with its own verified
 helper index and platform image configuration. Actual process bytes and

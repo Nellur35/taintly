@@ -67,7 +67,15 @@ def capture(tmp_path):
         "trace": [
             {"kind": "checkout", "time": time(2), "sha_prefix": MERGE[:8], "ref": run["ref"]},
             {"kind": "command", "time": time(3), "command": "bun run build"},
-            {"kind": "upload", "time": time(4), "job": 33, "http_status": 201},
+            {
+                "kind": "upload",
+                "time": time(4),
+                "job": 33,
+                "http_status": 201,
+                "line": 8,
+                "trace_sha256": "d" * 64,
+                "correlation_id": "e" * 32,
+            },
         ],
         "artifact": {
             "path": "output/index.html",
@@ -133,6 +141,9 @@ def _runner_archive_evidence():
         ("helper_config", "sha256:" + "a" * 64, "unresolved"),
         ("checkout_directory", "/other", "unresolved"),
         ("correlation_id", "bad\rvalue", "unresolved"),
+        ("trace_sha256", "f" * 64, "unresolved"),
+        ("correlation_id", "f" * 32, "unresolved"),
+        ("archive_line", 7, "unresolved"),
     ],
 )
 def test_native_archive_authority_binds_the_owned_runner(tmp_path, capture, changed, value, expected):
@@ -149,6 +160,18 @@ def test_native_archive_authority_binds_the_owned_runner(tmp_path, capture, chan
         assert authority["correlation_id"] == "e" * 32
     else:
         assert "credential" not in authority
+
+
+@pytest.mark.parametrize("missing", ["trace_sha256", "correlation_id", "line"])
+def test_merged_archive_remains_observed_without_runner_response_identity(tmp_path, capture, missing):
+    capture["archive_runner_evidence"] = _runner_archive_evidence()
+    del capture["trace"][-1][missing]
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "job-artifact-observed"
+    assert result["archive_runner_authority"] == {
+        "state": "unresolved",
+        "reason": "runner evidence does not match the verified merged-job archive response",
+    }
 
 
 @pytest.mark.parametrize("borrowed_index", [False, True])
