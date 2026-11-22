@@ -2082,6 +2082,11 @@ def _check_gitlab_ref_observation(
             f"GitLab job {report['job']} recorded a write to {report['target']} by actor {report['actor']}.\n"
             f"  {report['repository']} at {report['revision']}; provider event {report['event']}."
         )
+        destination = report.get("reported_push_destination")
+        if destination is not None:
+            print(
+                f"  Git reported destination {destination['url']} at log line {destination['log_line']}."
+            )
         if rule is not None and rule["state"] == "writer-listed-in-current-project-rule":
             print(
                 f"  Rule {rule['rule']} lists this actor in push entry {rule['entry']} "

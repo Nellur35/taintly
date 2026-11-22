@@ -207,7 +207,8 @@ def _unstarted(data: _Row, identity: _Row) -> _Row:
         and type(trace["bytes"]) is int
         and trace["bytes"] == 0
         and trace["sha256"] == hashlib.sha256(b"").hexdigest()
-        and "ref_event" not in data,
+        and "ref_event" not in data
+        and "push_destination" not in trace,
         "the saved publisher is not established as unstarted",
     )
     return {
@@ -299,6 +300,20 @@ def _observed_write(data: _Row, identity: _Row) -> _Row:
         "log_sha256": _value(trace["sha256"], _SHA256, "runner trace digest"),
         "log_line": push,
     }
+    if "push_destination" in trace:
+        destination = trace["push_destination"]
+        expected_url = f"https://gitlab.com/{identity['repository']}.git"
+        _need(
+            isinstance(destination, dict)
+            and type(destination.get("line")) is int
+            and trace["step_start"] < destination["line"] == push - 1
+            and destination.get("header") == f"To {expected_url}",
+            "saved Git push destination does not match this repository and update line",
+        )
+        result["reported_push_destination"] = {
+            "url": expected_url,
+            "log_line": destination["line"],
+        }
     try:
         result["current_rule"] = _current_rule(data, identity, writer, event["created_at"])
     except (RegistryJobError, AttributeError, KeyError, TypeError, ValueError):

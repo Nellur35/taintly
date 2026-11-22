@@ -621,7 +621,14 @@ input directory. The receipt includes these records:
   needs the checkout and write line references and ref/commit details
   within the owning script phase. `ref_event` supplies the provider
   event ID, actor ID, project, timestamp, action, ref type and before
-  and after commits for the exact branch update.
+  and after commits for the exact branch update. If Git reported the
+  destination directly above the branch update in the same script phase,
+  include `trace.push_destination` with its `line` and exact credential-free
+  `header` of the form `To https://gitlab.com/NAMESPACE/PROJECT.git`.
+  The observer checks it against the selected project. An incompatible
+  header leaves the job-to-write relationship unresolved. Older receipts
+  without the header still use the native event and report no Git
+  destination confirmation. The header describes Git's reported remote.
 - For an unstarted publisher, save the MR source/target and source
   head, two merged-checkout parents, MR pipeline membership, the job's
   status and empty start/finish/runner fields, and the empty trace
