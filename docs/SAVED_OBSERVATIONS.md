@@ -515,15 +515,16 @@ A missing or mismatched optional download does not undo the observed
 upload. An explicitly supplied incompatible download exits 11.
 
 
-To check whether the accepted target job archive lists one specific root
-file, supply the unmodified response body from
-`https://gitlab.com/api/v4/projects/PROJECT_ID/jobs/JOB_ID/artifacts/tree`
-with no query parameters as `archive-tree.json`. Add an `archive_tree`
-entry to the saved packet with numeric `project` and `job`, exact `url`,
+To check whether the accepted GitLab.com job archive lists one specific
+file, supply the unmodified listing response as `archive-tree.json`. An
+`archive_tree` entry carries numeric `project` and `job`, exact `url`,
 integer `status` 200, UTC `observed_at`, response-body `sha256`, and the
-selected filename as `member`. The listing must follow the upload
-observation. The CLI reports the matching filename and its provider
-reported size. ZIP bytes, content origin and later access require
+selected path as `member`. Use the root
+`https://gitlab.com/api/v4/projects/PROJECT_ID/jobs/JOB_ID/artifacts/tree`
+URL for a root file. For `folder/file`, use only `?path=folder` and keep
+`folder/file` in `member`. The listing must follow the upload observation
+and match its owning job. The CLI reports the matching path and its
+provider-reported size. ZIP bytes, content origin and later access require
 separate evidence. An invalid supplied listing returns exit `11` and
 retains the observed upload.
 

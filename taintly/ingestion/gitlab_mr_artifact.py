@@ -37,6 +37,8 @@ _JOB = re.compile(r"[A-Za-z0-9_.-]{1,100}(?::[A-Za-z0-9_.-]{1,100})?")
 _FAILED_JOB = re.compile(r"[A-Za-z0-9_.-][A-Za-z0-9_.: -]{0,99}")
 _PART = r"[A-Za-z0-9_][A-Za-z0-9_.-]*"
 _PATH = re.compile(rf"{_PART}(?:/{_PART})*")
+_ARCHIVE_COMPONENT = r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,239}"
+_ARCHIVE_LISTED_PATH = re.compile(rf"(?:{_ARCHIVE_COMPONENT}/)?{_ARCHIVE_COMPONENT}")
 _FAILED_COMMAND = (
     r"(?:\./gradlew(?: :[A-Za-z0-9:_-]{1,128}){1,2}|yarn [A-Za-z0-9:_-]{1,128}"
     rf"|yarn [A-Za-z0-9_][A-Za-z0-9:_-]{{0,127}} {_PART}(?:/{_PART})+)"
@@ -935,11 +937,8 @@ def _detached_archive(
     if "archive_tree" in data:
         result["archive_tree"] = (
             _archive_tree_member(data["archive_tree"], root, result)
-            if target_owned and not explicit_origin
-            else {
-                "state": "unresolved",
-                "reason": "archive tree requires a GitLab.com target-project job",
-            }
+            if not explicit_origin
+            else {"state": "unresolved", "reason": "archive tree requires a GitLab.com job"}
         )
     if "archive_windows_helper" in data:
         result["archive_windows_helper"] = (
@@ -1062,10 +1061,14 @@ def _windows_archive_helper(evidence: _Row, log: _Row, job: _Row) -> _Row:
 
 
 def _archive_tree_member(receipt: _Row, root: Path, result: _Row) -> _Row:
-    """Verify one root entry in the saved native listing of the accepted archive."""
+    """Verify one file from the owned archive's root or one directory listing."""
     try:
         project, job = result["project"], result["job"]
+        member = _value(receipt["member"], _ARCHIVE_LISTED_PATH, "archive member")
+        directory, _, basename = member.rpartition("/")
         url = f"https://gitlab.com/api/v4/projects/{project}/jobs/{job}/artifacts/tree"
+        if directory:
+            url += f"?path={directory}"
         _need(
             _identifier(receipt["project"], "archive tree project") == project
             and _identifier(receipt["job"], "archive tree job") == job
@@ -1074,9 +1077,6 @@ def _archive_tree_member(receipt: _Row, root: Path, result: _Row) -> _Row:
             and _time(receipt["observed_at"], "archive tree observation time")
             >= _time(result["publication"]["reported_at"], "archive upload time"),
             "archive tree receipt does not match the selected job and upload",
-        )
-        name = _value(
-            receipt["member"], re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,239}"), "archive member"
         )
         raw = _source_bytes(root, root / "archive-tree.json", "archive tree", max_bytes=131_072)
         digest = hashlib.sha256(raw).hexdigest()
@@ -1088,19 +1088,23 @@ def _archive_tree_member(receipt: _Row, root: Path, result: _Row) -> _Row:
         matches = [
             entry
             for entry in entries
-            if isinstance(entry, dict) and (entry.get("name") == name or entry.get("path") == name)
+            if isinstance(entry, dict)
+            and (entry.get("path") == member or (not directory and entry.get("name") == basename))
         ]
         _need(
             len(matches) == 1
-            and matches[0].get("name") == matches[0].get("path") == name
+            and matches[0].get("name") == basename
+            and matches[0].get("path") == member
             and matches[0].get("type") == "file"
             and type(matches[0].get("size")) is int
             and matches[0]["size"] >= 0,
-            "saved archive tree does not identify the selected root file uniquely",
+            "saved archive tree does not identify the selected root file uniquely"
+            if not directory
+            else "saved archive tree does not identify the selected file uniquely",
         )
         return {
             "state": "archive-member-listed",
-            "member": name,
+            "member": member,
             "member_bytes": matches[0]["size"],
             "url": url,
             "observed_at": receipt["observed_at"],

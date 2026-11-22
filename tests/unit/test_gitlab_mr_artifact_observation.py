@@ -1727,3 +1727,45 @@ def test_fork_windows_stdout_archive_is_bound_to_the_exact_job(
         observed = result["archive_windows_helper"]
         assert observed["state"] == "windows-helper-version-reported"
         assert observed["archive_response_line"] == response["line"]
+
+
+@pytest.mark.parametrize(
+    "contrast", [None, "other-job", "basename-only", "wrong-directory", "unrelated-entry"]
+)
+def test_fork_archive_listing_identifies_the_selected_file_in_its_directory(
+    tmp_path, fork_upload, contrast
+):
+    member = "build/package.zip"
+    entries = [{"name": "package.zip", "path": member, "type": "file", "size": 124}]
+    if contrast == "unrelated-entry":
+        entries[0]["path"] = "dist/package.zip"
+    raw = json.dumps(entries).encode()
+    (tmp_path / "archive-tree.json").write_bytes(raw)
+    receipt = {
+        "project": 2,
+        "job": 33,
+        "url": "https://gitlab.com/api/v4/projects/2/jobs/33/artifacts/tree?path=build",
+        "status": 200,
+        "observed_at": fork_upload["job"]["finished_at"],
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "member": member,
+    }
+    if contrast == "other-job":
+        receipt["job"] = 34
+        receipt["url"] = receipt["url"].replace("/33/", "/34/")
+    elif contrast == "basename-only":
+        receipt["member"] = "package.zip"
+    elif contrast == "wrong-directory":
+        receipt["member"] = "dist/package.zip"
+    fork_upload["archive_tree"] = receipt
+
+    result = _evaluate_fork(tmp_path, fork_upload)
+    assert result["state"] == "fork-project-archive-upload-observed"
+    assert result["publication"]["http_status"] == 201
+    tree = result["archive_tree"]
+    if contrast is None:
+        assert tree["state"] == "archive-member-listed"
+        assert tree["member"] == member
+        assert tree["member_bytes"] == 124
+    else:
+        assert tree["state"] == "unresolved"
