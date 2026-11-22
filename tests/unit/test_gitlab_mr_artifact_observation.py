@@ -1170,6 +1170,45 @@ def target_head_upload(fork_upload):
     return data
 
 
+@pytest.mark.parametrize("status", ["failed", "success"])
+def test_explicit_origin_requires_failed_current_head_target_archive(
+    tmp_path, target_head_upload, status
+):
+    origin = "https://ci.example.org"
+    data = json.loads(json.dumps(target_head_upload).replace("https://gitlab.com", origin))
+    data["pipeline"]["status"] = data["job"]["status"] = status
+    data["job"]["pipeline"]["status"] = data["mr_pipeline"]["status"] = status
+    data["job"]["failure_reason"] = "script_failure" if status == "failed" else None
+    rows = data["log"]["rows"]
+    if status == "failed":
+        for index in (5, 7):
+            row = rows[index]
+            rows[index] = _failure_trace_row(
+                row["time"], row["value"].replace("on_success", "on_failure")
+            )
+    response = rows[6]
+    rows[6] = _failure_trace_row(
+        response["time"],
+        re.sub(r"correlation_id=\S+", "correlation_id=" + "0" * 26, response["value"]),
+    )
+    source = BUILDSPEC.encode()
+    (tmp_path / ".gitlab-ci.yml").write_bytes(source)
+    data["source_sha256"] = hashlib.sha256(source).hexdigest()
+    packet = tmp_path / "observation.json"
+    packet.write_text(json.dumps(data), encoding="utf-8")
+    result = mr_artifact_observation(packet, tmp_path, 1, 22, 33, origin=origin)
+    if status == "success":
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+    else:
+        assert result["state"] == "target-project-head-archive-upload-observed"
+        assert result["origin"] == origin
+        assert result["job_status"] == "failed"
+        assert result["upload_phase"] == "upload_artifacts_on_failure"
+        assert result["publication"]["http_status"] == 201
+        assert result["publication"]["target"] == f"{origin}/team/repo/-/jobs/33/artifacts/download"
+
+
 @pytest.mark.parametrize(
     "contrast",
     [
