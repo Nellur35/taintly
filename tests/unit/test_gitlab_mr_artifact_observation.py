@@ -861,6 +861,27 @@ def test_fork_archive_acceptance_identifies_fork_and_parent_separately(tmp_path,
     assert result["publication"]["retrieval"] == "unverified"
 
 
+@pytest.mark.parametrize("mismatched_url", [False, True])
+def test_fork_archive_keeps_gitlab_namespace_case(tmp_path, fork_upload, mismatched_url):
+    source = "https://gitlab.com/Contributor/fork"
+    fork_upload["fork"].update(path_with_namespace="Contributor/fork", web_url=source)
+    for record in ("pipeline", "mr_pipeline", "commit", "job"):
+        value = fork_upload[record]
+        value["web_url"] = value["web_url"].replace("https://gitlab.com/team/fork", source)
+    job = fork_upload["job"]
+    job["pipeline"]["web_url"] = fork_upload["pipeline"]["web_url"]
+    fork_upload["log"]["url"] = job["web_url"] + "/raw"
+    if mismatched_url:
+        fork_upload["commit"]["web_url"] = fork_upload["commit"]["web_url"].lower()
+    result = _evaluate_fork(tmp_path, fork_upload)
+    if mismatched_url:
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+    else:
+        assert result["repository"] == "Contributor/fork"
+        assert result["publication"]["target"] == source + "/-/jobs/33/artifacts/download"
+
+
 @pytest.mark.parametrize("contrast", [None, "wrong-phase", "failure-reason", "wrong-job"])
 def test_successful_fork_archive_requires_its_exact_success_phase_and_status(
     tmp_path, fork_upload, contrast
