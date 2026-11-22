@@ -668,6 +668,91 @@ saved projections.
   `include_retried=true&per_page=25`. Preserve `next_page` from the
   `X-Next-Page` header and the empty job list.
 
+## Saved GitLab generic package file provenance
+
+```console
+taintly . --format json --gitlab-package-file-observation observation.json PROJECT PIPELINE PACKAGE FILE
+```
+
+Use a trusted saved GitLab.com response packet and the exact pinned
+`.gitlab-ci.yml` bytes. `PROJECT`, `PIPELINE`, `PACKAGE`, and `FILE`
+are numeric IDs. `gitlab-package-file-v1` packets retain these records:
+
+| Key | GitLab API response, relative to `/api/v4/projects/PROJECT` |
+| --- | --- |
+| `project` | Project record |
+| `pipeline` | `/pipelines/PIPELINE` |
+| `package` | `/packages/PACKAGE` |
+| `files` | `/packages/PACKAGE/package_files?per_page=100` |
+| `source` | `/repository/files/.gitlab-ci.yml/raw?ref=FULL_SHA` |
+
+Record each full HTTPS endpoint as `url` and its HTTP status as `status`.
+Place the project, selected pipeline and package objects under `row`, and
+the list of individual file objects, with their per-file pipeline metadata,
+under `rows` for `files`. Save the SHA-256 of the raw workflow source under
+`source.sha256`. The command validates the packet offline. Capture its API
+responses through a trusted reader and keep credentials out of the packet.
+
+A resolved result identifies the file by ID and the provider-reported SHA-256.
+It either confirms the selected pipeline or identifies the different pipeline
+named in the file record. Both states exit 0 for this bounded provenance
+question. Missing or contradictory provenance exits 11. A file-level
+association is independent of pipeline success and remains insufficient to
+identify the publishing job, command, credential, or effective permission.
+The result supplies no general verdict on other files or future publication.
+
+### Optional corroboration from a verbose package upload
+
+An optional `upload` packet associates the exact recorded file with one
+job's redacted trace. This profile covers an owned literal upload command
+using the GitLab job-token header and a single reported HTTP/2 transaction
+to the same project's registry. A regular runner archive upload is outside
+that transaction.
+
+Under `upload.jobs`, record the exact Pipeline Jobs endpoint with
+`?include_retried=true&per_page=100`, its status, and the selected `row`.
+Retain its job identity and times, its `pipeline` ID, project, SHA and ref,
+and the selected job's commit SHA as `revision`.
+
+Under `upload.trace`, record the exact historical job's public `/raw`
+endpoint, its response status and original trace SHA-256. Provide redacted
+projections of the `checkout` and `command` markers and their line numbers.
+The `script` projection retains start and end lines and their epoch seconds,
+ordered command boundaries, and every relevant HTTP request, response and
+connection event inside that section. Do not discard intervening transactions
+or retain credential values. The profile accepts exactly one complete
+ordered sequence of this shape.
+
+- `tls` with value `true` and `connected` with value `gitlab.com:443`.
+- `request` with `method`, `path` and `protocol`, followed by `host` and
+  the class label `masked_header` (`JOB-TOKEN`).
+- `response` with the HTTP `status` and `protocol`, followed by the
+  `response_request_id` header value.
+
+Each event carries its original `line`. The `checkout` includes
+`revision_prefix`. The `command` includes `known_command_sha256`, the
+digest of the trimmed first command line with the shell continuation
+removed, excluding the runner display prefix and collapsed-command suffix.
+Store the command-line index as `line` and both marker and epoch under
+`script.start` and `script.end` using `line` and `epoch`.
+
+The report can corroborate a job's observed PUT, reported authentication
+header type, HTTP 201 response and request ID. The server-side credential
+identity and authorization decision stay unresolved. A missing or
+ambiguous trace leaves this additional question unresolved and preserves
+the outcome for file-to-pipeline attribution.
+
+
+A tagged publisher can supply `empty_checkout` in place of `checkout` when
+the owning job declares `GIT_STRATEGY: empty`. Include the native
+`source_start_line`, `setup_skipped_line`, `checkout_skipped_line` and
+`source_end_line` from that job's separate source phase. Retain the job's
+native `tag` field. The supported variable form reads the declared
+`PACKAGE_URL` and `PACKAGE_FILE` and checks them against the exact wire
+target. Curl's HTTP/2 `authority` for `gitlab.com` may supply the peer
+instead of its connection diagnostic. The report identifies the skipped
+runner checkout and leaves the package content's ancestry unresolved.
+
 ## Saved GitLab production branch publication
 
 ```sh
