@@ -708,9 +708,10 @@ def _detached_archive(
     explicit_origin = origin is not None
     canceled = explicit_origin and target_owned
     base = origin or "https://gitlab.com"
-    path_pattern = _CANONICAL_PROJECT if target_owned or explicit_origin else _PROJECT
-    source_path = _value(fork["path_with_namespace"], path_pattern, "GitLab fork project path")
-    target_path = _value(target["path_with_namespace"], path_pattern, "GitLab MR target path")
+    source_path = _value(
+        fork["path_with_namespace"], _CANONICAL_PROJECT, "GitLab fork project path"
+    )
+    target_path = _value(target["path_with_namespace"], _CANONICAL_PROJECT, "GitLab MR target path")
     source_project = _identifier(fork["id"], "fork project")
     destination = _identifier(target["id"], "MR target project")
     iid = _identifier(mr["iid"], "merge request IID")
