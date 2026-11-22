@@ -8,6 +8,7 @@ import pytest
 
 from taintly.baseline import BASELINE_VERSION, apply_diff, fingerprint, load_baseline, save_baseline
 from taintly.evidence_redaction import redact_snippet
+from taintly.fixes import fix_hoist_service_credentials, format_fix_results
 from taintly.models import AuditReport, Finding, Severity
 from taintly.reporters.csv_report import format_csv
 from taintly.reporters.html_report import format_html
@@ -42,6 +43,12 @@ def finding(snippet: str, rule: str = "TEST-002", line: int = 7) -> Finding:
         f"token: $VARIABLE and {_VALUE}",
         f"--password={_VALUE}",
         f"sh 'docker login -u user -p {_VALUE}'",
+        f'curl -k --user "build:{_VALUE}" https://example.invalid/',
+        f"curl -k -u 'build:{_VALUE}' https://example.invalid/",
+        f"curl -k --user=build:{_VALUE} https://example.invalid/",
+        f"/usr/bin/curl -u {_VALUE}: https://example.invalid/",
+        f"curl --user $CURL_AUTH,{_VALUE} https://example.invalid/",
+        f'https://hooks.slack.com/services/T00000000/B00000000/{_VALUE}',
         f"https://user:{_VALUE}@registry.example.invalid",
         f"private_key: |-\n  {_VALUE}\n  more key material",
         f'password: "first line\\n  {_VALUE}\\n  last line"',
@@ -65,6 +72,13 @@ def test_literal_preview_redaction_preserves_no_part_of_value(preview):
         "permissions: {contents: read, id-token: write}",
         "permissions: {id-token: none, contents: read}",
         'id-token: "write"',
+        'curl --user "$CURL_AUTH" https://example.invalid/',
+        'curl --user-agent "build:ci" https://example.invalid/',
+        'curl --user-agent=build:ci https://example.invalid/',
+        'curl -u "$CURL_AUTH" https://example.invalid/',
+        'curl -u $CURL_AUTH https://example.invalid/',
+        "DB_PASSWORD: $DB_PASSWORD  # configure the variable in CI settings",
+        'https://hooks.slack.com.evil.invalid/services/T00000000/B00000000/documentation',
     ],
 )
 def test_symbolic_references_and_other_evidence_remain_visible(preview):
@@ -89,6 +103,24 @@ def test_reports_redact_the_direct_finding_and_a_second_rule_on_its_line():
 
 def test_unknown_preview_from_literal_rule_is_withheld():
     assert finding(_VALUE, "SEC2-GH-003").report_snippet() == "[REDACTED]"
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_credential_fix_hides_the_before_value_and_shows_the_replacement(tmp_path, dry_run):
+    path = tmp_path / ".gitlab-ci.yml"
+    source = f"variables:\n  DB_PASSWORD: {_VALUE}\n"
+    path.write_text(source, encoding="utf8")
+
+    results = fix_hoist_service_credentials(str(path), dry_run=dry_run)
+    output = format_fix_results(results, dry_run=dry_run)
+
+    assert len(results) == 1
+    assert _VALUE not in output and "DB_PASSWORD: [REDACTED]" in output
+    assert "DB_PASSWORD: $DB_PASSWORD" in output
+    if dry_run:
+        assert path.read_text(encoding="utf8") == source
+    else:
+        assert _VALUE not in path.read_text(encoding="utf8")
 
 
 def test_new_and_legacy_baselines_keep_sensitive_findings_visible(tmp_path):

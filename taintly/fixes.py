@@ -21,6 +21,7 @@ import shlex
 import subprocess
 from dataclasses import dataclass
 
+from .evidence_redaction import redact_snippet
 from .models import _quoted_heredoc_body_lines
 from .parsers.structural import Event, EventKind, walk_workflow
 from .reporters._encoding import em_dash_char, sep_char
@@ -1685,8 +1686,8 @@ def format_fix_results(results: list[FixResult], dry_run: bool = False) -> str:
         out.append(f"  {'Would fix' if dry_run else 'Fixed'}: {len(fixes)}")
         for r in fixes:
             out.append(f"\n  \033[32m[{r.fix_type}]\033[0m {r.file}:{r.line}")
-            out.append(f"    - {r.original}")
-            out.append(f"    + {r.fixed}")
+            out.append(f"    - {redact_snippet(r.original)}")
+            out.append(f"    + {redact_snippet(r.fixed)}")
 
     visible_guidance = (
         [r for r in guidance if not r.error] if dry_run else [r for r in guidance if r.applied]
@@ -1698,7 +1699,7 @@ def format_fix_results(results: list[FixResult], dry_run: bool = False) -> str:
         for r in visible_guidance:
             out.append(f"\n  \033[36m[{r.fix_type}]\033[0m {r.file}:{r.line}")
             out.append("    Review hint (workflow policy values unchanged):")
-            for line in r.fixed.splitlines():
+            for line in redact_snippet(r.fixed).splitlines():
                 out.append(f"      {line}")
 
     if failed:

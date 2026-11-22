@@ -29,6 +29,11 @@ _FIELD = re.compile(
 _OPTION = re.compile(r"(?i)(?<!\S)--(?:password|token|api-key)(?:[ \t]+|=)")
 _DOCKER_LOGIN = re.compile(r"\bdocker[ \t]+login\b")
 _DOCKER_SHORT_PASSWORD = re.compile(r"(?<!\S)-p[ \t]+")
+_CURL_COMMAND = re.compile(r"(?<![\w.-])curl[ \t]+")
+_CURL_USER = re.compile(r"(?<!\S)(?:-u[ \t]+|--user(?:[ \t]+|=))")
+_SLACK_WEBHOOK = re.compile(
+    r"(?i)(https://hooks\.slack\.com/services/)[A-Z0-9_-]+/[A-Z0-9_-]+/[A-Z0-9_-]+"
+)
 _URI_USERINFO = re.compile(r"(https?://[^/\s:@]+:)([^/\s@]+)(@)")
 _GITHUB_TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})\b")
 _QUOTED = re.compile(r""""(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:''|\\[^\r\n]|[^'\\\r\n])*'""")
@@ -48,6 +53,9 @@ def _redact_line(line: str) -> str:
     matches.extend(_OPTION.finditer(line))
     if _DOCKER_LOGIN.search(line):
         matches.extend(_DOCKER_SHORT_PASSWORD.finditer(line))
+    if curl := _CURL_COMMAND.search(line):
+        # Authentication material can be passed as the username, too.
+        matches.extend(_CURL_USER.finditer(line, curl.end()))
     for match in sorted(matches, key=lambda item: item.end(), reverse=True):
         start = match.end()
         tail = line[start:]
@@ -67,8 +75,17 @@ def _redact_line(line: str) -> str:
             line = line[:start] + tail[0] + REDACTED + tail[0] + tail[quoted.end() :]
             continue
         ref = _REFERENCE.match(tail)
-        if ref and (not (suffix := tail[ref.end() :].lstrip()) or suffix[0] in ",;|>&)]}"):
-            continue
+        if ref:
+            rest = tail[ref.end() :]
+            suffix = rest.lstrip()
+            if (
+                not suffix
+                or suffix[0] in ";|>&)"
+                or (match.re is not _CURL_USER and suffix[0] in ",]}")
+            ):
+                continue
+            if rest[0] in " \t" and (match.re is _CURL_USER or suffix.startswith("#")):
+                continue
         # A plain or ambiguous scalar can contain whitespace and punctuation.
         # Stop the preview here instead of guessing where the value ends.
         line = line[:start] + REDACTED
@@ -89,6 +106,7 @@ def redact_snippet(snippet: str, rule_id: str = "") -> str:
         lines[index] = _redact_line(line)
     result = "\n".join(lines)
     result = _URI_USERINFO.sub(lambda match: match[1] + REDACTED + match[3], result)
+    result = _SLACK_WEBHOOK.sub(lambda match: match[1] + REDACTED, result)
     result = _GITHUB_TOKEN.sub(REDACTED, result)
     if result == snippet and snippet and rule_id in _LITERAL_CREDENTIAL_RULES:
         return REDACTED
