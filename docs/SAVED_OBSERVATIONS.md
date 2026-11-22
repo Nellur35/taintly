@@ -5,6 +5,7 @@ These commands review saved records for specific providers and operations. Each 
 - [Saved Jenkins Incrementals publications](#saved-jenkins-incrementals-publications)
 - [Saved ASF Jenkins Maven snapshot observations](#saved-asf-jenkins-maven-snapshot-observations)
 - [Saved GitLab fork MR artifact observations](#saved-gitlab-fork-mr-artifact-observations)
+- [Saved GitLab fork pipeline admission](#saved-gitlab-fork-pipeline-admission)
 - [Saved GitLab merge-request image pushes](#saved-gitlab-merge-request-image-pushes)
 - [Saved GitHub-to-CodeBuild start observations](#saved-github-to-codebuild-start-observations)
 - [Saved GitHub Release publication](#saved-github-release-publication)
@@ -557,6 +558,41 @@ Both pages must be complete. The result preserves the primary job
 artifact observation if the requested check returns `unresolved` and
 exit `11`. Historical includes, registry authorization, and other
 publication routes remain unverified.
+
+## Saved GitLab fork pipeline admission
+
+```sh
+taintly --format json --gitlab-fork-admission-observation observation.json PROJECT PIPELINE
+```
+
+Use this command for a historical GitLab.com fork MR pipeline where
+GitLab reports that user verification prevented the pipeline from
+starting. A resolved result identifies the selected pipeline and
+revision, records that the job inventory is empty, and exits 0.
+Incomplete, inconsistent, or other pipeline evidence exits 11.
+An archive upload or permission decision needs a separate observation.
+
+Use a trusted JSON receipt with schema `gitlab-fork-admission-v1`,
+an `observed_at` UTC time, and five entries under `sources`.
+Each entry contains its first-party `url`, HTTP `status`, original
+response `sha256`, and the response's relevant fields in `body`.
+Preserve the provider's original responses alongside their projections
+when applicable. The reader checks identity and consistency in the
+saved projections.
+
+- `mr` is the target project's MR response with `iid`, `web_url`,
+  `source_project_id` and `target_project_id`.
+- `mr_pipelines` contains the selected row from that MR's pipeline list
+  (`id`, `project_id`, `sha`, `source`, `ref`), using `per_page=12`.
+- `pipeline` is the fork project's pipeline detail with its IDs,
+  `sha`, `ref`, `source`, `status`, `web_url`, `started_at`,
+  `finished_at` and `yaml_errors`.
+- `graphql` is the response under `data.project` with `fullPath`
+  and `pipeline` fields `id`, `sha`, `ref`, `source`, `status`,
+  `startedAt`, `finishedAt`, `yamlErrors` and `failureReason`.
+- `jobs` is the pipeline jobs response for
+  `include_retried=true&per_page=25`. Preserve `next_page` from the
+  `X-Next-Page` header and the empty job list.
 
 ## Saved GitLab merge-request image pushes
 
