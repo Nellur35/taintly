@@ -307,7 +307,9 @@ response, with no token fields. For the compact merged-result observation
 response `line` and response `correlation_id` in the matching upload row
 of `trace`. The credential decision requires those three fields to agree
 with the optional Runner projection. An older upload row still
-corroborates the archive itself. Supported Runner revisions are
+corroborates the archive itself. For a failed job, the optional evidence
+requires the same trace digest, section start and end, and owning archive
+response in the validated failure-upload rows. Supported Runner revisions are
 `7a0f126423ab4aefa71be5cda32668e29bc59b2d` and
 `d22d8753a6b96df6131d1d500decb4192d7f6f31`, each with its own verified
 helper index and platform image configuration. Actual process bytes and

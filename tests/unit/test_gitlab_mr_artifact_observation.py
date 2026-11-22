@@ -400,6 +400,42 @@ def test_failed_job_has_an_observed_upload_independent_of_config_analysis(tmp_pa
     assert result["publication_admission"]["state"] == "unresolved"
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [(None, None), ("job", 34), ("archive_line", 11),
+     ("archive_end_line", 13), ("correlation_id", "f" * 32), ("trace_sha256", "b" * 64)],
+)
+def test_failed_archive_keeps_upload_when_runner_authority_disagrees(
+    tmp_path, failed_capture, field, replacement
+):
+    log = failed_capture["failed_archive"]["log"]
+    rows = log["rows"]
+    rows[8] = _failure_trace_row(
+        rows[8]["time"],
+        '01E Uploading artifacts as "archive" to coordinator... 201 Created '
+        f'correlation_id={"e" * 32} id=33 status=201',
+    )
+    evidence = _runner_archive_evidence()
+    for slot, key, line in [(6, "archive_start", 7), (8, "archive", 10), (9, "archive_end", 12)]:
+        rows[slot]["line"] = evidence[f"{key}_line"] = line
+        evidence[f"{key}_time"] = rows[slot]["time"]
+    evidence["trace_sha256"] = log["sha256"]
+    if field:
+        evidence[field] = replacement
+    failed_capture["archive_runner_evidence"] = evidence
+    result = evaluate(tmp_path, failed_capture)
+    assert result["state"] == "job-artifact-uploaded-after-failure"
+    assert result["publication"]["http_status"] == 201
+    authority = result["archive_runner_authority"]
+    if field:
+        assert authority["state"] == "unresolved"
+        assert "credential" not in authority
+    else:
+        assert authority["state"] == "native-archive-write-observed"
+        assert authority["route"] == "jobs/33/artifacts"
+        assert authority["credential"] == "runner-job-token"
+
+
 def test_failed_gradle_job_binds_recursive_artifact_selection(tmp_path, failed_capture):
     rows = failed_capture["failed_archive"]["log"]["rows"]
     for slot, message in (

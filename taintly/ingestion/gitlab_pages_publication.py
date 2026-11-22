@@ -275,13 +275,15 @@ def pages_publication(data: _Row, root: Path, mr_result: _Row) -> _Row:
             "scope": _SCOPE,
         }
         if "archive_runner_evidence" in publisher:
+            log = publisher["log"]
+            start, response, end = log["rows"][-3:]
             result["archive_runner_authority"] = _native_archive_authority(
                 publisher | {"pipeline": pipe},
                 pages_url,
                 data["project"]["path"],
-                pages_post | {"http_status": 201},
-                detached_log=publisher["log"],
-                detached_owner="Pages",
+                pages_post | {"http_status": 201, "trace_sha256": log["sha256"]},
+                phase_rows=(start, response, end),
+                phase_owner="Pages",
             )
         return result
     except RegistryJobError as exc:
