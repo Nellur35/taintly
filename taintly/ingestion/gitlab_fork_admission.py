@@ -102,15 +102,21 @@ def _assess(receipt: _Row, project: int, pipeline: int) -> _Row:
     mr_api = f"{api}/{target}/merge_requests/{iid}"
     _source(sources, "mr", mr_api)
     membership = _source(sources, "mr_pipelines", mr_api + "/pipelines?per_page=12")["body"]
+    membership_error = (
+        "the saved MR pipeline membership does not identify the selected fork revision"
+    )
+    _require(isinstance(membership, list), membership_error)
+    matches = [
+        row for row in membership if _identifier(row["id"], "MR pipeline membership") == pipeline
+    ]
+    _require(len(matches) == 1, membership_error)
+    member = matches[0]
     _require(
-        isinstance(membership, list)
-        and len(membership) == 1
-        and _identifier(membership[0]["id"], "MR pipeline membership") == pipeline
-        and _identifier(membership[0]["project_id"], "MR pipeline owner") == project
-        and membership[0]["source"] == _EVENT
-        and membership[0]["sha"] == revision
-        and membership[0]["ref"] == rest["ref"],
-        "the saved MR pipeline membership does not identify the selected fork revision",
+        _identifier(member["project_id"], "MR pipeline owner") == project
+        and member["source"] == _EVENT
+        and member["sha"] == revision
+        and member["ref"] == rest["ref"],
+        membership_error,
     )
     _require(
         rest["status"] == "failed"

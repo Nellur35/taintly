@@ -653,8 +653,11 @@ saved projections.
 
 - `mr` is the target project's MR response with `iid`, `web_url`,
   `source_project_id` and `target_project_id`.
-- `mr_pipelines` contains the selected row from that MR's pipeline list
-  (`id`, `project_id`, `sha`, `source`, `ref`), using `per_page=12`.
+- `mr_pipelines` contains rows from that MR's pipeline list using
+  `per_page=12`. Preserve the returned page when available, keeping
+  the `id`, `project_id`, `sha`, `source`, and `ref` fields for each row.
+  The requested pipeline ID must occur exactly once, and that row
+  must match the fork and revision.
 - `pipeline` is the fork project's pipeline detail with its IDs,
   `sha`, `ref`, `source`, `status`, `web_url`, `started_at`,
   `finished_at` and `yaml_errors`.

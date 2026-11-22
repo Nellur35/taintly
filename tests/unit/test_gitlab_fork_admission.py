@@ -95,6 +95,34 @@ def test_records_pre_job_stop_without_claiming_an_upload(tmp_path, receipt):
     )
 
 
+def test_selects_exact_membership_among_multiple_pipelines(tmp_path, receipt):
+    membership = receipt["sources"]["mr_pipelines"]["body"]
+    selected = membership[0]
+    membership[:] = [
+        {**selected, "id": 53, "sha": "c" * 40},
+        selected,
+        {**selected, "id": 50, "source": "push"},
+    ]
+    result = _observe(tmp_path, receipt)
+    assert result["state"] == "fork-pipeline-admission-blocked"
+    assert result["pipeline"] == 51
+
+
+@pytest.mark.parametrize("selected_matches", [[], [{"project_id": 34}], [{}, {}]])
+def test_missing_wrong_owner_or_duplicate_membership_remains_unresolved(
+    tmp_path, receipt, selected_matches
+):
+    membership = receipt["sources"]["mr_pipelines"]["body"]
+    selected = membership[0]
+    membership[:] = [
+        {**selected, "id": 50, "source": "push"},
+        *({**selected, **fields} for fields in selected_matches),
+    ]
+    result = _observe(tmp_path, receipt)
+    assert result["state"] == "unresolved"
+    assert "publication" not in result
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
