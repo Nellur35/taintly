@@ -1199,6 +1199,14 @@ contradictory selection leaves the observation unresolved. A compact log
 without this optional row can still bind the build response to the exact
 observed command.
 
+The runner's logged Bash selection appears as `source_plan.reported_shell`
+when it falls between inline buildspec selection and verified source
+workspace entry in DOWNLOAD_SOURCE. A conflicting shell record leaves
+command attribution unresolved. With missing selector or workspace
+evidence, the request can still be corroborated and the runner's shell
+selection remains unverified. Process path and binary identity require
+separate evidence.
+
 The Git file, command, request time, role and session, target, checksum,
 and version are checked when relevant. When the S3 data event includes
 `additionalEventData.AuthenticationMethod`, the supported direct AWS CLI

@@ -217,12 +217,12 @@ def _trace(
     return tail[: outcomes[0].start()], start, when
 
 
-def _source_workspace(
+def _source_launch_context(
     rows: list[tuple[int, str]],
     download: tuple[float, float],
     command_start: float,
     identity: str | None,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     lower, upper = download
     expected = r"/codebuild/output/src[0-9]+/src"
     if identity is not None:
@@ -233,7 +233,7 @@ def _source_workspace(
     messages = "".join(message for _, message in rows)
     kinds = (
         r"CODEBUILD_SRC_DIR=[^\n]*|Moving to directory [^\n]*"
-        r"|YAML location is [^\n]*"
+        r"|YAML location is [^\n]*|Selecting shell [^\n]*"
         r"|Phase complete: DOWNLOAD_SOURCE State: [^\n]*|Running command [^\n]*"
     )
     pattern = "(" + kinds + ")"
@@ -241,21 +241,43 @@ def _source_workspace(
         when, (record,) = _record(header[0], pattern)
         if when == command_start and record == "Running command set -euo pipefail":
             break
-        if lower <= when < command_start:
+        if record.startswith("Selecting shell ") or lower <= when < command_start:
             events.append((when, record))
+    shells = [
+        index for index, (_, record) in enumerate(events) if record.startswith("Selecting shell ")
+    ]
+    shell_time = None
+    shell_conflict = (
+        "The saved shell selection conflicts with the inline Bash plan in DOWNLOAD_SOURCE"
+    )
+    if shells:
+        index = shells[0]
+        shell_time, selection = events.pop(index)
+        _need(
+            len(shells) == 1
+            and lower <= shell_time <= upper
+            and selection == "Selecting shell bash as specified in buildspec."
+            and not any(
+                record.startswith(("Moving to directory ", "Phase complete: DOWNLOAD_SOURCE"))
+                for _, record in events[:index]
+            )
+            and not any(record.startswith("YAML location is ") for _, record in events[index:]),
+            shell_conflict,
+        )
     selections = [
         index for index, (_, record) in enumerate(events) if record.startswith("YAML location is ")
     ]
+    plan_time = None
     if selections:
         index = selections[0]
-        selected, location = events.pop(index)
+        plan_time, location = events.pop(index)
         _need(
             len(selections) == 1
-            and selected <= upper
+            and plan_time <= upper
             and location == "YAML location is /codebuild/readonly/buildspec.yml"
             and not any(
                 record.startswith("Phase complete: DOWNLOAD_SOURCE State: ")
-                and (position < index or completed < selected)
+                and (position < index or completed < plan_time)
                 for position, (completed, record) in enumerate(events)
             ),
             "The saved buildspec selection conflicts with the inline plan in DOWNLOAD_SOURCE",
@@ -263,7 +285,7 @@ def _source_workspace(
     if not any(
         record.startswith(("CODEBUILD_SRC_DIR=", "Moving to directory ")) for _, record in events
     ):
-        return None  # A compact receipt can still establish the request independently.
+        return None, None  # A compact receipt can still establish the request independently.
     _need(len(events) == 3, "The build lacks an unambiguous source workspace before its command")
     (declared, declaration), (entered, movement), (finished, completion) = events
     match = re.fullmatch("CODEBUILD_SRC_DIR=(" + expected + ")", declaration)
@@ -276,7 +298,10 @@ def _source_workspace(
         and completion == "Phase complete: DOWNLOAD_SOURCE State: SUCCEEDED",
         "Workspace entry does not match the selected source in the owning DOWNLOAD_SOURCE phase",
     )
-    return workspace
+    if shell_time is None or plan_time is None:
+        return workspace, None
+    _need(declared < plan_time < shell_time < entered, shell_conflict)
+    return workspace, "bash"
 
 
 def _request_transport(event: _Row, when: float, lower: float, upper: float, denied: bool) -> _Row:
@@ -690,7 +715,7 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
     role_name = re.escape(role_match[1])
     rows = _owned_log_rows(capture, build, region, account)
     trace, command_start, completion = _trace(rows, inline, lower, upper, status)
-    workspace = _source_workspace(
+    workspace, reported_shell = _source_launch_context(
         rows, download, command_start, identity if input_object is None else None
     )
     identity_and_request = re.compile(
@@ -809,6 +834,8 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
     }
     if workspace is not None:
         source_plan["workspace"] = workspace
+    if reported_shell is not None:
+        source_plan["reported_shell"] = reported_shell
     result = {
         "state": "direct-s3-write-observed" if allowed else "direct-s3-write-denied",
         "build": build_id,
