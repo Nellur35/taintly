@@ -174,12 +174,16 @@ def format_sarif(report: AuditReport) -> str:
         # Stable cross-run identity for GHAS / GitLab dashboard dedup; the
         # line number is excluded by design (see baseline.fingerprint), so a
         # finding that drifts lines keeps the same fingerprint.
-        result["partialFingerprints"] = {"taintlyFingerprintV1": fingerprint(f, report.repo_path)}
+        snippet = f.report_snippet()
+        if snippet == f.snippet:
+            result["partialFingerprints"] = {
+                "taintlyFingerprintV1": fingerprint(f, report.repo_path)
+            }
         if is_inventory:
             result["kind"] = "review"
-        if f.snippet:
+        if snippet:
             result["locations"][0]["physicalLocation"]["region"]["snippet"] = {
-                "text": f.snippet[:500]
+                "text": snippet[:500]
             }
         if properties:
             result["properties"] = properties

@@ -2151,7 +2151,14 @@ class Finding:
     _evidence_trace: EvidenceTrace | None = field(default=None, repr=False, compare=False)
     """Rule-produced ordered evidence for text only; absent from JSON/SARIF conclusions."""
 
+    def report_snippet(self) -> str:
+        """Return the source preview intended for logs and reports."""
+        from .evidence_redaction import redact_snippet
+
+        return redact_snippet(self.snippet, self.rule_id)
+
     def to_dict(self) -> dict[str, Any]:
+        snippet = self.report_snippet()
         return {
             "rule_id": self.rule_id,
             "severity": self.severity.value,
@@ -2159,7 +2166,7 @@ class Finding:
             "description": self.description,
             "file": self.file,
             "line": self.line,
-            "snippet": self.snippet,
+            "snippet": snippet,
             # ``match_text`` is the comment-stripped, length-bounded
             # form of ``snippet`` intended for downstream tooling that
             # passes finding data into LLM contexts (the AI-triage
@@ -2168,9 +2175,8 @@ class Finding:
             # comments from carrying through into untrusted LLM
             # context — comments are author-controlled bytes and an
             # LLM has no way to distinguish prose from instructions
-            # otherwise.  ``snippet`` keeps its existing contract for
-            # consumers that want the verbatim source line.
-            "match_text": _compute_match_text(self.snippet),
+            # otherwise. Both previews omit recognized credential values.
+            "match_text": _compute_match_text(snippet),
             "remediation": self.remediation,
             "reference": self.reference,
             "owasp_cicd": self.owasp_cicd,
