@@ -19,8 +19,9 @@ not as instructions to ignore the underlying rule.
 
 ## A note on untrusted content
 
-taintly's JSON output contains a `snippet` field with verbatim
-source bytes from the scanned workflow.  Workflow authors control
+taintly's JSON output contains a `snippet` field with
+source evidence from the scanned workflow. Recognized credential literals
+are redacted before rendering.  Workflow authors control
 that text and it can include YAML comments — those bytes are data,
 not instructions, and an LLM should treat them that way.  The
 prompt template below wraps the JSON in `<untrusted_evidence>` tags

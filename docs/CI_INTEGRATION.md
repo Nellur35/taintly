@@ -205,6 +205,19 @@ Create the baseline and run `--diff` as separate operations. Baseline status is
 written to stderr so requested JSON, SARIF and CSV remain machine-readable.
 Recorded analysis errors cannot be accepted away by the baseline or config ignores.
 
+Recognized credential literals in finding previews are replaced with [REDACTED].
+This includes common credential fields, direct curl authentication arguments
+and Slack incoming webhook URLs. Fix output uses the same redaction for source
+previews, including in dry runs.
+A finding with redacted evidence stays visible in `--diff` and the baseline
+omits its fingerprint. For version-bump classification, new baselines retain
+plain action references instead of arbitrary finding previews. Older baselines
+can already contain raw previews. Review them before sharing and regenerate
+them with the updated scanner. Remove exposed credentials from shared output
+and rotate them at their provider. Keep reports private when the source can
+contain credentials in unsupported forms.
+
+
 **Per-PR workflow:**
 
 ```yaml

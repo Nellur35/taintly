@@ -607,7 +607,7 @@ def _format_finding(f: Finding, c: dict[Severity, str], r: str, b: str, dim: str
         f"    File: {_safe(f.file)}:{f.line}",
     ]
     if f.snippet:
-        out.append(f"    Code: {_safe(f.snippet[:120])}")
+        out.append(f"    Code: {_safe(f.report_snippet()[:120])}")
     out.extend(_format_review_details(f))
     return out
 
@@ -626,6 +626,6 @@ def _format_collapsed_group(
     for f in group:
         out.append(f"      {_safe(f.file)}:{f.line}")
         if f.snippet:
-            out.append(f"        Code: {_safe(f.snippet[:120])}")
+            out.append(f"        Code: {_safe(f.report_snippet()[:120])}")
     out.extend(_format_review_details(sample))
     return out

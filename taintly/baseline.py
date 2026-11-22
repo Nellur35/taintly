@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .evidence_redaction import redact_snippet
+
 BASELINE_FILENAME = ".taintly-baseline.json"
 BASELINE_VERSION = 1
 
@@ -76,6 +78,7 @@ class Baseline:
     can recognise SHA bumps on previously-baselined ``uses:`` references.
     Older baseline files lack this field; the classifier degrades to
     ``new_finding`` rather than crashing in that case."""
+    redacted_count: int = 0
     resolved_refs: dict[str, str] = field(default_factory=dict)
     """``"owner/repo@ref"`` -> resolved upstream SHA at baseline time. Populated
     only under ``--check-ref-drift``; lets a later scan detect a mutable ref that
@@ -158,11 +161,19 @@ def save_baseline(
 
     resolved_refs = dict(resolved_refs or {})
 
+    fps: set[str] = set()
     snippets: dict[str, str] = {}
+    redacted_count = 0
     for f in findings:
+        raw = f.snippet or ""
+        if redact_snippet(raw, f.rule_id) != raw:
+            redacted_count += 1
+            continue
         fp = fingerprint(f, repo_path)
-        snippets[fp] = (f.snippet or "").strip()
-    fps = set(snippets)
+        fps.add(fp)
+        action_ref = _baseline_action_ref(raw)
+        if action_ref is not None:
+            snippets[fp] = action_ref
     scanned_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     payload = {
@@ -189,6 +200,7 @@ def save_baseline(
         fingerprints=fps,
         finding_count=len(findings),
         snippets=snippets,
+        redacted_count=redacted_count,
         resolved_refs=resolved_refs,
     )
 
@@ -246,11 +258,11 @@ def load_baseline(path: str) -> Baseline:
     snippets_raw = data.get("snippets", {})
     snippets: dict[str, str] = {}
     if isinstance(snippets_raw, dict):
-        snippets = {
-            k: v
-            for k, v in snippets_raw.items()
-            if isinstance(k, str) and len(k) == 64 and isinstance(v, str)
-        }
+        for key, value in snippets_raw.items():
+            if isinstance(key, str) and len(key) == 64 and isinstance(value, str):
+                action_ref = _baseline_action_ref(value)
+                if action_ref is not None:
+                    snippets[key] = action_ref
 
     # Resolved-ref map is optional (only present under --check-ref-drift); older
     # baselines won't have it and the drift check is simply skipped.
@@ -288,8 +300,10 @@ def apply_diff(findings: list[Any], baseline: Baseline, repo_path: str) -> tuple
     new = []
     suppressed = 0
     for f in findings:
-        if getattr(f, "rule_id", None) == "ENGINE-ERR":
-            # A snapshot accepts security debt, not missing analysis.
+        raw = f.snippet or ""
+        if f.rule_id == "ENGINE-ERR" or redact_snippet(raw, f.rule_id) != raw:
+            # Missing analysis and sensitive evidence remain visible even
+            # when an older baseline included their raw fingerprint.
             new.append(f)
             continue
         fp = fingerprint(f, repo_path)
@@ -307,10 +321,16 @@ def apply_diff(findings: list[Any], baseline: Baseline, repo_path: str) -> tuple
 
 def format_baseline_summary(baseline: Baseline, output_path: str) -> str:
     """One-line summary printed after writing a baseline."""
+    sensitive = (
+        f"  {baseline.redacted_count} finding(s) with sensitive evidence remain visible in diff mode.\n"
+        if baseline.redacted_count
+        else ""
+    )
     return (
         f"Baseline written: {output_path}\n"
-        f"  {baseline.finding_count} finding(s) fingerprinted, "
+        f"  {baseline.finding_count - baseline.redacted_count} finding(s) fingerprinted, "
         f"{len(baseline.fingerprints)} unique\n"
+        f"{sensitive}"
         f"  Commit this file to suppress these findings in future scans."
     )
 
@@ -332,6 +352,18 @@ def format_diff_summary(suppressed: int, new_count: int, baseline_path: str) -> 
 # ---------------------------------------------------------------------------
 
 _USES_REF_FOR_DIFF = re.compile(r"uses:\s*([^@\s]+)@(\S+)")
+_BASELINE_ACTION_REF = re.compile(
+    r"""^\s*(?:-\s+)?uses:\s*['"]?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+@[A-Za-z0-9_./-]+)"""
+    r"""['"]?(?=\s|$)"""
+)
+
+
+def _baseline_action_ref(snippet: str) -> str | None:
+    """Persist only the action reference needed for version-bump classification."""
+    match = _BASELINE_ACTION_REF.match(snippet)
+    if match and redact_snippet(match[1]) == match[1]:
+        return f"uses: {match[1]}"
+    return None
 
 
 def classify_diff_kind(
@@ -416,6 +448,8 @@ def iter_action_refs(findings: list[Any]) -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     for f in findings:
         snippet = getattr(f, "snippet", "") or ""
+        if redact_snippet(snippet, getattr(f, "rule_id", "")) != snippet:
+            continue
         for m in _USES_REF_FOR_DIFF.finditer(snippet):
             pkg, ref = m.group(1), m.group(2)
             if "/" not in pkg or not _is_mutable_ref(ref):
