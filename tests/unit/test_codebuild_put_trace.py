@@ -19,7 +19,7 @@ from taintly.ingestion.codebuild_put import (
     _owned_log_rows,
     _pinned_github_source,
     _request_transport,
-    _source_workspace,
+    _source_launch_context,
     _trace,
     _workspace_identity,
 )
@@ -259,10 +259,11 @@ def test_source_workspace_uses_the_runner_order_in_its_owned_stream(variant, rea
     ]
     if reason:
         with pytest.raises(SnapshotError, match=reason):
-            _source_workspace(rows, (start, start + 5), start + 7, identity)
+            _source_launch_context(rows, (start, start + 5), start + 7, identity)
     else:
-        assert _source_workspace(rows, (start, start + 5), start + 7, identity) == (
-            None if variant == "compact" else workspace
+        assert _source_launch_context(rows, (start, start + 5), start + 7, identity) == (
+            None if variant == "compact" else workspace,
+            None,
         )
 
 
@@ -299,9 +300,48 @@ def test_source_workspace_checks_only_the_owning_inline_selection(
     ]
     if conflict:
         with pytest.raises(SnapshotError, match="buildspec selection"):
-            _source_workspace(formatted, (start, start + 5), start + 7, None)
+            _source_launch_context(formatted, (start, start + 5), start + 7, None)
     else:
-        assert _source_workspace(formatted, (start, start + 5), start + 7, None) == workspace
+        assert _source_launch_context(formatted, (start, start + 5), start + 7, None) == (
+            workspace, None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("records", "expected_shell"),
+    [
+        ([(3, "bash")], "bash"),
+        ([(3, "/bin/sh")], None),
+        ([(3, "bash"), (3, "bash")], None),
+        ([(5, "bash")], None),
+        ([(7, "bash")], None),
+        ([(8, "bash")], None),
+    ],
+)
+def test_shell_selection_requires_the_owned_inline_launch(records, expected_shell):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+    workspace = "/codebuild/output/src123/src"
+    messages = [
+        (1, f"CODEBUILD_SRC_DIR={workspace}"),
+        (2, "YAML location is /codebuild/readonly/buildspec.yml"),
+        (4, f"Moving to directory {workspace}"),
+        (6, "Phase complete: DOWNLOAD_SOURCE State: SUCCEEDED"),
+        (8, "Running command set -euo pipefail"),
+    ]
+    messages.extend(
+        (when, f"Selecting shell {shell} as specified in buildspec.") for when, shell in records
+    )
+    rows = [
+        (int((start + 10) * 1000), f"[Container] 2026/01/01 00:00:{sec:02}.000000 {line}\n")
+        for sec, line in sorted(messages, key=lambda item: item[0])
+    ]
+    if records == [(8, "bash")] or expected_shell:
+        assert _source_launch_context(rows, (start, start + 6), start + 8, None) == (
+            workspace, expected_shell,
+        )
+    else:
+        with pytest.raises(SnapshotError, match="saved shell selection"):
+            _source_launch_context(rows, (start, start + 6), start + 8, None)
 
 
 @pytest.mark.parametrize(("second", "matches"), [(1, False), (2, True), (4, True), (5, False)])
