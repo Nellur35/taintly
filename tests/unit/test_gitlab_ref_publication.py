@@ -156,6 +156,41 @@ def test_local_include_follows_the_containing_revision(tmp_path, receipt):
     assert result["source"]["template_revision"] == REVISION
 
 
+def _add_push_destination(receipt):
+    receipt["trace"]["write"]["line"] = 6
+    receipt["trace"]["step_end"] = 10
+    receipt["trace"]["push_destination"] = {"line": 5, "header": f"To {URL}.git"}
+
+
+def test_git_push_destination_belongs_to_the_branch_update(tmp_path, receipt):
+    assert "reported_push_destination" not in _observe(tmp_path, receipt)
+    _add_push_destination(receipt)
+    result = _observe(tmp_path, receipt)
+    assert result["actor"] == 77
+    assert result["reported_push_destination"] == {"url": f"{URL}.git", "log_line": 5}
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        {"line": 5, "header": "To https://gitlab.com/example/sibling.git"},
+        {"line": 5, "header": "To https://gitlab.example/example/builds.git"},
+        {"line": 5, "header": "To https://gitlab.com:8443/example/builds.git"},
+        {"line": 5, "header": "To https://symbolic@gitlab.com/example/builds.git"},
+        {"line": 7, "header": f"To {URL}.git"},
+        {"line": 3, "header": f"To {URL}.git"},
+        None,
+    ],
+)
+def test_conflicting_destination_prevents_joining_the_event(tmp_path, receipt, destination):
+    _add_push_destination(receipt)
+    receipt["trace"]["push_destination"] = destination
+    result = _observe(tmp_path, receipt)
+    assert result["state"] == "unresolved"
+    assert "push destination" in result["reason"]
+    assert "actor" not in result
+
+
 def test_cross_project_include_has_its_own_revision(tmp_path, receipt):
     receipt["source"] = _source(
         tmp_path,
@@ -258,10 +293,17 @@ def test_assigned_runner_cannot_be_reported_as_unstarted(tmp_path, receipt):
     assert _observe(tmp_path, receipt)["state"] == "unresolved"
 
 
+def test_destination_evidence_conflicts_with_an_unstarted_job(tmp_path, receipt):
+    _fork(receipt, "manual")
+    _add_push_destination(receipt)
+    assert _observe(tmp_path, receipt)["state"] == "unresolved"
+
+
 @pytest.mark.parametrize("kind", ["json", "text"])
 def test_cli_preserves_observed_write_with_unresolved_rule(
     tmp_path, receipt, monkeypatch, capsys, kind
 ):
+    _add_push_destination(receipt)
     receipt["policy"]["url"] = "https://gitlab.com/api/v4/projects/91/protected_branches/production"
     fixture = _save(tmp_path, receipt)
     monkeypatch.setattr(
@@ -284,4 +326,5 @@ def test_cli_preserves_observed_write_with_unresolved_rule(
     output = capsys.readouterr()
     assert result.value.code == 11
     assert "77" in output.out and "unresolved" in output.out
+    assert f"{URL}.git" in output.out
     assert output.err == ""
