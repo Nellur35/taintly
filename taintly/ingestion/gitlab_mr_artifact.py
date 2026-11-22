@@ -703,7 +703,7 @@ def _detached_archive(
     explicit_origin = origin is not None
     canceled = explicit_origin and target_owned
     base = origin or "https://gitlab.com"
-    path_pattern = _CANONICAL_PROJECT if explicit_origin else _PROJECT
+    path_pattern = _CANONICAL_PROJECT if target_owned or explicit_origin else _PROJECT
     source_path = _value(fork["path_with_namespace"], path_pattern, "GitLab fork project path")
     target_path = _value(target["path_with_namespace"], path_pattern, "GitLab MR target path")
     source_project = _identifier(fork["id"], "fork project")
@@ -775,9 +775,10 @@ def _detached_archive(
                 "pages_preview",
                 "publication_admission",
             }.intersection(data)
-            and pipeline["status"] == job["status"] == "success"
+            and pipeline["status"] == job["status"]
+            and job["status"] in {"success", "failed"}
             and revision == current_head == job["commit"]["id"],
-            "target-project archive requires a successful job at the recorded fork head",
+            "target-project archive requires a matching terminal job at the recorded fork head",
         )
     _need(
         _identifier(pipeline["id"], "detached pipeline") == pipeline_id
@@ -868,8 +869,10 @@ def _detached_archive(
         if explicit_origin
         else r"(?:[0-9a-f]{32}|[0-9a-f]{16}-[A-Z]{3})"
     )
+    # A custom executor can relay the helper's failure-archive receipt on stdout.
+    receipt_stream = r"01[EO]" if target_owned and status == "failed" else "01E"
     reply = (
-        r'01E Uploading artifacts as "archive" to coordinator\.\.\. 201 Created +'
+        rf'{receipt_stream} Uploading artifacts as "archive" to coordinator\.\.\. 201 Created +'
         rf"correlation_id={correlation} id={job_id} (?:status=201|responseStatus=201 Created)"
     )
     trace_label = "target-project-job" if target_owned else "fork-job"

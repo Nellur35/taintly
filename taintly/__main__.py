@@ -2216,8 +2216,9 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
         )
     elif state == "target-project-head-archive-upload-observed":
         publication = report["publication"]
+        upload_label = "failure-path archive" if report["job_status"] == "failed" else "archive"
         print(
-            f"GitLab accepted the archive for job {report['job']} "
+            f"GitLab accepted the {upload_label} for job {report['job']} "
             f"in target project {report['repository']} (HTTP 201).\n"
             f"  MR !{report['mr']}, pipeline {report['pipeline']}, "
             f"checkout {report['revision']} from fork {report['source_repository']}.\n"

@@ -1285,6 +1285,74 @@ def test_target_head_archive_requires_consistent_source_execution_and_upload(
         assert "publication" not in result
 
 
+@pytest.mark.parametrize(
+    "contrast",
+    [
+        None,
+        "owner-case",
+        "phase",
+        "failure-reason",
+        "status",
+        "wrong-receipt",
+        "missing-archive",
+        "success-stdout",
+    ],
+)
+def test_target_head_failure_binds_own_archive_and_preserves_job_result(
+    tmp_path, target_head_upload, contrast
+):
+    # Keep the case used by the provider in every identity field.
+    data = json.loads(json.dumps(target_head_upload).replace("team/repo", "Team/Repo"))
+    pipeline, job = data["pipeline"], data["job"]
+    for item in (pipeline, job["pipeline"], data["mr_pipeline"], job):
+        item["status"] = "failed"
+    job["failure_reason"] = "script_failure"
+    rows = data["log"]["rows"]
+    for i in (5, 7):
+        item = rows[i]
+        rows[i] = _failure_trace_row(
+            item["time"], item["value"].replace("on_success", "on_failure")
+        )
+    rows[6] = _failure_trace_row(rows[6]["time"], rows[6]["value"].replace("01E ", "01O "))
+    if contrast == "owner-case":
+        data["target"]["web_url"] = data["target"]["web_url"].lower()
+    elif contrast == "phase":
+        for i in (5, 7):
+            item = rows[i]
+            rows[i] = _failure_trace_row(
+                item["time"], item["value"].replace("on_failure", "on_success")
+            )
+    elif contrast == "failure-reason":
+        job["failure_reason"] = "runner_system_failure"
+    elif contrast == "status":
+        pipeline["status"] = "success"
+    elif contrast == "wrong-receipt":
+        rows[6] = _failure_trace_row(rows[6]["time"], rows[6]["value"].replace("id=33", "id=34"))
+    elif contrast == "missing-archive":
+        job["artifacts"] = [item for item in job["artifacts"] if item["file_type"] != "archive"]
+    elif contrast == "success-stdout":
+        for item in (pipeline, job["pipeline"], data["mr_pipeline"], job):
+            item["status"] = "success"
+        job["failure_reason"] = None
+        for i in (5, 7):
+            item = rows[i]
+            rows[i] = _failure_trace_row(
+                item["time"], item["value"].replace("on_failure", "on_success")
+            )
+    result = _evaluate_fork(tmp_path, data, 1)
+    if contrast is None:
+        assert result["state"] == "target-project-head-archive-upload-observed"
+        assert result["repository"] == "Team/Repo"
+        assert result["job_status"] == "failed"
+        assert result["upload_phase"] == "upload_artifacts_on_failure"
+        assert result["publication"]["http_status"] == 201
+        assert result["publication"]["retrieval"] == "unverified"
+        assert "archive_runner_authority" not in result
+    else:
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+
+
 @pytest.mark.parametrize("bad_download", [False, True])
 def test_target_head_archive_download_preserves_upload_when_zip_fails(
     tmp_path, target_head_upload, bad_download, monkeypatch, capsys
