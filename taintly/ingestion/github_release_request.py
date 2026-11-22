@@ -36,7 +36,12 @@ _REQUEST_ACTION = (
     rf"release-drafter/release-drafter@(?:v6(?:\.[0-9]{{1,4}}\.[0-9]{{1,4}})?|{_V6_1_0})"
 )
 _PUSH_ACTION = "release-drafter/release-drafter@v7"
-_VERIFIED_ACTION = "978bb0b30c5ee8cdd332ced253758157150d43f0"
+_REVIEWED_V7_COMMITS = frozenset(
+    {
+        "978bb0b30c5ee8cdd332ced253758157150d43f0",
+        "d1a19e60e81a7e650d00a7de9277f87e439117ea",
+    }
+)
 _CHECKOUT = "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683"
 _LOGGED_ACTION_SHA = "34d80673e067bdc0c24568d3af899c216adcfaa9"
 _LOGGED_ACTION = f"release-drafter/release-drafter@{_LOGGED_ACTION_SHA}"
@@ -330,8 +335,10 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
         # it to the GitHub adapter. The supported step has no input override.
         configured["action_credential_input"] = "github.token"
         tag = rf"(?:{tag}| *)"
+    download_prefix = f"Download action repository '{_PUSH_ACTION}' (SHA:"
+    reviewed_commit = "(?:" + "|".join(sorted(_REVIEWED_V7_COMMITS)) + ")"
     patterns: tuple[str, ...] = (
-        re.escape(f"Download action repository '{_PUSH_ACTION}' (SHA:{_VERIFIED_ACTION})"),
+        re.escape(download_prefix) + reviewed_commit + r"\)",
         re.escape(f"##[group]Run {_PUSH_ACTION}"),
         r"  tag:" + tag,
         r"  targetCommitish: +" + re.escape(branch),
@@ -388,7 +395,7 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
             "draft": True,
             "requested_tag": rows[2]["value"].removeprefix("  tag:").strip() or None,
             "target_commitish": branch,
-            "action_commit": _VERIFIED_ACTION,
+            "action_commit": rows[0]["value"].removeprefix(download_prefix).removesuffix(")"),
             "completion_at": rows[-2]["time"],
             "completion_line_sha256": rows[-2]["sha256"],
             "log_sha256": creation["log_sha256"],
