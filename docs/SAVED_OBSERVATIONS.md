@@ -330,8 +330,11 @@ Use matching `created_at` and `updated_at` values in `pipeline` and
   from its repository commit response.
 - `log` with `job`, the owning job `/raw` URL, full log `sha256`, and `rows`.
   Retain the source section start, detached checkout, source section end,
-  script start, one supported literal `yarn` command or `./gradlew` with one
-  or two literal task names and no flags, script end,
+  script start, one supported command, and script end. The command can be
+  a literal `yarn` script name with at most one literal repository-relative
+  path argument, or `./gradlew` with one or two literal task names. A path
+  argument must include a directory component. Flags, variable expansion
+  and shell operators in these argument forms are unsupported. Retain
   failure-upload start, the runner's file or directory match, archive HTTP
   201, failure-upload end, and final job failure, in order. Every row keeps
   `time`, redacted `value`, and the SHA-256 of `time`, one space, and `value`.

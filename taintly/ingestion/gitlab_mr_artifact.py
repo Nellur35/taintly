@@ -34,7 +34,10 @@ _JOB = re.compile(r"[A-Za-z0-9_.-]{1,100}(?::[A-Za-z0-9_.-]{1,100})?")
 _FAILED_JOB = re.compile(r"[A-Za-z0-9_.-][A-Za-z0-9_.: -]{0,99}")
 _PART = r"[A-Za-z0-9_][A-Za-z0-9_.-]*"
 _PATH = re.compile(rf"{_PART}(?:/{_PART})*")
-_FAILED_COMMAND = r"(?:\./gradlew(?: :[A-Za-z0-9:_-]{1,128}){1,2}|yarn [A-Za-z0-9:_-]{1,128})"
+_FAILED_COMMAND = (
+    r"(?:\./gradlew(?: :[A-Za-z0-9:_-]{1,128}){1,2}|yarn [A-Za-z0-9:_-]{1,128}"
+    rf"|yarn [A-Za-z0-9_][A-Za-z0-9:_-]{{0,127}} {_PART}(?:/{_PART})+)"
+)
 _BUILD = re.compile(r"(?:bun|yarn) run build(?::[a-z0-9:_-]+)?")
 _MOVE = re.compile(rf"mv ({_PART}(?:/{_PART})*) ({_PART}(?:/{_PART})*)")
 # Verified GitLab.com linux/amd64 Runner revisions, helper index and config

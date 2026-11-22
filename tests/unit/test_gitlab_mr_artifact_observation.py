@@ -383,13 +383,19 @@ def failed_capture(capture):
     return capture
 
 
-def test_failed_job_has_an_observed_upload_independent_of_config_analysis(tmp_path, failed_capture):
+@pytest.mark.parametrize("command", [
+    "yarn test:integration",
+    "yarn test:integration tests/integration/example.test.ts",
+])
+def test_failed_job_has_an_observed_upload_independent_of_config_analysis(tmp_path, failed_capture, command):
+    rows = failed_capture["failed_archive"]["log"]["rows"]
+    rows[4] = _failure_trace_row(rows[4]["time"], f"01O $ {command}")
     result = evaluate(tmp_path, failed_capture, publisher="deploy")
     assert result["state"] == "job-artifact-uploaded-after-failure"
     assert result["fork_head"] == HEAD and result["job_status"] == "failed"
     assert result["publication"]["http_status"] == 201
     assert result["publication"]["member_path"] == "output/index.html"
-    assert result["command"] == "yarn test:integration"
+    assert result["command"] == command
     assert result["member_origin"] == result["effective_configuration"] == "unverified"
     assert result["publication_admission"]["state"] == "unresolved"
 
@@ -439,6 +445,10 @@ def test_failed_upload_refuses_foreign_evidence(tmp_path, failed_capture, record
     [
         (4, "01O $ echo yarn test:integration"),
         (4, "01O $ ./gradlew $FLAG :app:connectedAndroidTest"),
+        (4, "01O $ yarn test:integration $TEST_PATH"),
+        (4, "01O $ yarn test:integration tests/../example.test.ts"),
+        (4, "01O $ yarn test:integration --file tests/example.test.ts"),
+        (4, "01O $ yarn test:integration tests/example.test.ts && true"),
         (6, "00O+section_start:127:step_script"),
         (7, "01E output: found 1 matching artifact files and directories"),
         (8, '01E Uploading artifacts as "archive" to coordinator... 201 Created  id=34 status=201'),
