@@ -617,6 +617,17 @@ def test_success_is_scoped_to_owned_draft_create(push_capture):
     assert "effective_permission" not in result
 
 
+def test_push_binds_the_second_reviewed_drafter_commit(push_capture):
+    cap, _, _, assess = push_capture
+    commit = "d1a19e60e81a7e650d00a7de9277f87e439117ea"
+    row = cap["creation"]["rows"][0]
+    row["value"] = row["value"].replace("978bb0b30c5ee8cdd332ced253758157150d43f0", commit)
+    row["sha256"] = hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+    result = assess()
+    assert result["state"] == "draft-release-create-reported"
+    assert result["operation"]["action_commit"] == commit
+
+
 @pytest.mark.parametrize("denial_log", [None, {"run": 11, "job": 21, "attempt": 2}])
 def test_push_cannot_include_the_denial_permission_log(push_capture, denial_log):
     cap, _, _, assess = push_capture

@@ -21,16 +21,13 @@ from taintly.ingestion.github_preview import (
 )
 from taintly.ingestion.github_release_request import (
     _PUSH_ACTION,
+    _REVIEWED_V7_COMMITS,
     _bound_fork,
     _bound_job,
     _literal_push_branch,
     _reusable_plan,
 )
 
-_ACTION_COMMITS = {
-    "978bb0b30c5ee8cdd332ced253758157150d43f0",
-    "d1a19e60e81a7e650d00a7de9277f87e439117ea",
-}
 _TAG = r"  tag: +v?[0-9]{1,12}\.[0-9]{1,12}\.[0-9]{1,12}"
 _WRITES = {
     "create": ("Creating new release...", "Release created!"),
@@ -159,7 +156,7 @@ def reusable_v7_observation(cap: _Row, root: Path, repo: str, run_id: int, job_i
             _id(observation[key]) and observation[key] == identity
             for key, identity in (("run", run_id), ("job", job_id), ("attempt", run["run_attempt"]))
         )
-        and observation["action_commit"] in _ACTION_COMMITS
+        and observation["action_commit"] in _REVIEWED_V7_COMMITS
         and _matches(observation["log_sha256"], _DIGEST)
         and cap["custody"]["job_log_sha256"] == observation["log_sha256"],
         "Saved log lacks the selected reusable job, attempt or reviewed action identity",

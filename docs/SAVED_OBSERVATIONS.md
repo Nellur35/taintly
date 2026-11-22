@@ -831,8 +831,9 @@ is unknown and shown as `null` in JSON. An update, ambiguous permission
 group or unrelated log does not answer this question.
 
 The same command accepts a direct repository push with a single Release Drafter
-`@v7` step when the saved setup log identifies action commit
-`978bb0b30c5ee8cdd332ced253758157150d43f0`. Supply the matching job `steps`, run
+`@v7` step when the saved setup log identifies one of the reviewed action commits
+`978bb0b30c5ee8cdd332ced253758157150d43f0` or
+`d1a19e60e81a7e650d00a7de9277f87e439117ea`. Supply the matching job `steps`, run
 `head_branch`, the workflow from the push revision, and a `creation` record
 with `run`, `job`, `attempt`, `log_sha256`, and `rows`. Keep the action download
 line from setup, the action's `##[group]Run` marker, the logged tag, target
