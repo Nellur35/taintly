@@ -453,6 +453,16 @@ visible and exits 11. A verified download establishes byte identity at
 the recorded time. Content provenance, present access and authority in
 the MR target project require separate evidence.
 
+On GitLab.com the same schema can record an accepted archive from a completed
+job while the fork pipeline is still running. The job must have succeeded or
+failed its script at the current MR head. Supply the exact fork source record
+as `source_file` and a `live_pipeline_receipt` from the owning pipeline API.
+Include the exact API `url`, `http_status` 200, saved response `sha256` and a
+UTC `observed_at` after the job finished. Preserve the job's own archive
+inventory and its success- or failure-phase HTTP 201. The result retains the
+running parent status. Closing the pipeline or establishing the absence of a
+Pages job requires separate evidence.
+
 For a saved fork archive and a separate upstream Pages handoff, optionally
 include `pages_handoff` in a GitLab.com `gitlab-fork-project-archive-v1`
 receipt. This is an offline observation of the named jobs.
