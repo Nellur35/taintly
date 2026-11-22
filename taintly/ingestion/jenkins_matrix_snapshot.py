@@ -23,6 +23,7 @@ _TARGET = (_REGISTRY + _REPOSITORY).rstrip("/")
 _REPO = "apache/shiro"
 _PATH = ".jenkins.groovy"
 _DEFINITION = "17be97dabe8bb2d54afde62f35ee2ad251d5d016e83daafe0b030a731ad22ab1"
+_AXIS_DEFINITION = "ac30858ff34360b8108d789fae651610fe43e58da69280bb0b61b4ebbd461809"
 _STASH = "ci-build"
 _CHECKOUT = "Check out from version control"
 _VERIFY = (
@@ -41,15 +42,22 @@ _STAGES = {
     "Checkout and Restore build": 3,
     "Deploy": 3,
 }
+_AXIS_BRANCHES = {f"Matrix - MATRIX_JDK = 'jdk_{jdk}_latest'" for jdk in (21, 25, 26)}
+_AXIS_STAGES = {"Checkout": 3, "Deploy": 3, **dict.fromkeys(_AXIS_BRANCHES, 1)}
 _SHA = r"[0-9a-f]{40}"
 _DIGEST = r"[0-9a-f]{64}"
 _ID = r"[1-9][0-9]{0,9}"
 _Row = dict[str, Any]
 
 
-def _pinned_source(root: Path, source: _Row, revision: str, filename: str) -> None:
+def _pinned_source(
+    root: Path, source: _Row, revision: str, filename: str, *, allow_per_axis: bool = False
+) -> bool:
     body = _source_bytes(root, source, revision, filename, path=_PATH)
-    _require(hashlib.sha256(body).hexdigest() == _DEFINITION, "unreviewed matrix definition")
+    digest = hashlib.sha256(body).hexdigest()
+    per_axis = allow_per_axis and digest == _AXIS_DEFINITION
+    _require(digest == _DEFINITION or per_axis, "unreviewed matrix definition")
+    return per_axis
 
 
 def _owned_flow(record: _Row, job: str) -> str:
@@ -63,7 +71,7 @@ def _owned_flow(record: _Row, job: str) -> str:
     return route
 
 
-def _matrix_stages(data: _Row, job: str) -> dict[str, list[_Row]]:
+def _matrix_stages(data: _Row, job: str, *, per_axis: bool = False) -> dict[str, list[_Row]]:
     run, graph = data["run"], data["graph"]
     started, ended = _interval(graph)
     queued, delay, duration = run["timestamp"], graph["queueDurationMillis"], run["duration"]
@@ -87,18 +95,29 @@ def _matrix_stages(data: _Row, job: str) -> dict[str, list[_Row]]:
         "saved matrix graph and completed run do not match",
     )
     inventory = graph["stages"]
-    selected = [row for row in inventory if row["name"] in _STAGES]
-    tests = [row for row in inventory if row["name"] == "Run tests"]
+    stage_counts = _AXIS_STAGES if per_axis else _STAGES
+    selected = [row for row in inventory if row["name"] in stage_counts]
     branches = [row for row in inventory if row["name"].startswith("Matrix - ")]
+    tests = [row for row in inventory if row["name"] == ("Build" if per_axis else "Run tests")]
+    if per_axis:
+        tests.sort(key=lambda row: _interval(row)[0])
+        _require(
+            len(tests) == 4
+            and len(branches) == 3
+            and _interval(tests[0])[1] <= min(_interval(row)[0] for row in branches),
+            "saved graph lacks the reviewed outer matrix and three builds",
+        )
+        tests = tests[1:]
     _require(
         len(inventory) == len({row["id"] for row in inventory})
-        and Counter(row["name"] for row in selected) == _STAGES
-        and Counter(row["name"] for row in branches) == Counter(_BRANCHES)
+        and Counter(row["name"] for row in selected) == stage_counts
+        and Counter(row["name"] for row in branches)
+        == Counter(_AXIS_BRANCHES if per_axis else _BRANCHES)
         and len(tests) == 3
         and len(data["stages"]) == len(selected),
         "saved graph lacks the complete supported matrix inventory",
     )
-    result: dict[str, list[_Row]] = {name: [] for name in _STAGES}
+    result: dict[str, list[_Row]] = {name: [] for name in stage_counts}
     all_ids = {row["id"] for row in inventory}
     for stage in [*branches, *tests]:
         _owned_flow(stage, job)
@@ -143,11 +162,8 @@ def _matrix_stages(data: _Row, job: str) -> dict[str, list[_Row]]:
             all_ids.add(node["id"])
         result[stage["name"]].append(stage)
     # The flat inventory supports aggregate order, with no per-JDK predecessor attribution.
-    for before, after in (
-        (branches, result["Checkout and Restore build"]),
-        (result["Checkout and Restore build"], tests),
-        (tests, result["Deploy"]),
-    ):
+    checkouts = result["Checkout" if per_axis else "Checkout and Restore build"]
+    for before, after in ((branches, checkouts), (checkouts, tests), (tests, result["Deploy"])):
         ends = sorted(_interval(row)[1] for row in before)
         starts = sorted(_interval(row)[0] for row in after)
         _require(
@@ -166,9 +182,80 @@ def _stage_node(stage: _Row, name: str) -> _Row:
     return node
 
 
+def _owned_checkout_log(stage: _Row, job: str, logs: list[_Row]) -> tuple[_Row, _Row]:
+    checkout = _stage_node(stage, _CHECKOUT)
+    log = _one([row for row in logs if row["node"] == checkout["id"]], "ambiguous checkout log")
+    _require(
+        log["url"] == _owned_flow(checkout, job) + "wfapi/log"
+        and log["complete"] is True
+        and re.fullmatch(_DIGEST, log["sha256"]),
+        "matrix checkout log has the wrong revision or owner",
+    )
+    return checkout, log
+
+
+def _bind_axis_checkouts(
+    data: _Row, job: str, head: str, branch: str, base: str
+) -> tuple[list[_Row], list[_Row]]:
+    groups = _matrix_stages(data, job, per_axis=True)
+    logs = data["checkout_logs"]
+    wanted = f"Checking out Revision {head} ({branch})"
+    actions = data["run"]["actions"]
+    revision = _one(
+        [
+            row["revision"]
+            for row in actions
+            if row.get("_class") == "jenkins.scm.api.SCMRevisionAction"
+        ],
+        "ambiguous revision action",
+    )
+    build = _one(
+        [row for row in actions if row.get("_class") == "hudson.plugins.git.util.BuildData"],
+        "ambiguous matrix Git BuildData",
+    )
+    console = data["console"]
+    _require(
+        all(re.fullmatch(_ID, key) for key in console["markers"]),
+        "invalid matrix console positions",
+    )
+    markers = [
+        line for _, line in sorted((int(pos), line) for pos, line in console["markers"].items())
+    ]
+    _require(
+        revision["_class"] == "org.jenkinsci.plugins.github_branch_source.PullRequestSCMRevision"
+        and revision["pullHash"] == head
+        and build["lastBuiltRevision"]["SHA1"] == head
+        and build["remoteUrls"] == [f"https://github.com/{_REPO}.git"]
+        and console["url"] == job + "consoleText"
+        and re.fullmatch(_DIGEST, console["sha256"])
+        and bool(markers)
+        and markers[0] == f"Obtained {_PATH} from {base}"
+        and sum(value.startswith(f"Obtained {_PATH} from ") for value in markers) == 1
+        and [value for value in markers if value.startswith("Checking out Revision ")]
+        == [wanted] * 6
+        and isinstance(logs, list)
+        and len(logs) == 6,
+        "saved matrix source or complete fork-head checkouts are unverified",
+    )
+    checkouts = [groups[name][0] for name in sorted(_AXIS_BRANCHES)] + groups["Checkout"]
+    reported: list[_Row] = []
+    for stage in checkouts:
+        _require(stage["status"] == "SUCCESS", "matrix checkout stage did not succeed")
+        node, log = _owned_checkout_log(stage, job, logs)
+        _require(
+            log["line"] == wanted
+            and log["merge_line"]
+            == f"Merging remotes/origin/main commit {base} into PR head commit {head}"
+            and log["merge_result"] == f"Merge succeeded, producing {head}",
+            "matrix checkout does not report the selected fork head and historical base",
+        )
+        reported.append({"stage": stage["id"], "node": node["id"], "revision": head})
+    return groups["Deploy"], reported
+
+
 def _bind_build(
-    data: _Row, job: str, head: str, branch: str, loader: str
-) -> tuple[list[_Row], _Row]:
+    data: _Row, job: str, head: str, branch: str, loader: str, *, merge_base: str | None = None
+) -> tuple[list[_Row], _Row, list[_Row]]:
     groups = _matrix_stages(data, job)
     initial = groups["Checkout and Initialization"][0]
     compiled = groups["Compile and package"][0]
@@ -184,10 +271,15 @@ def _bind_build(
         ],
         "ambiguous revision action",
     )
-    checkout_data = _one(
-        [row for row in actions if row.get("_class") == "hudson.plugins.git.util.BuildData"],
-        "ambiguous matrix Git BuildData",
-    )
+    checkout_data = [
+        row for row in actions if row.get("_class") == "hudson.plugins.git.util.BuildData"
+    ]
+    if merge_base is None:
+        single = _one(checkout_data, "ambiguous matrix Git BuildData")
+        _require(
+            single["lastBuiltRevision"]["SHA1"] == head,
+            "selected matrix source, workspaces or checkpoint order is unverified",
+        )
     kind = (
         "org.jenkinsci.plugins.github_branch_source.PullRequestSCMRevision"
         if branch.startswith("PR-")
@@ -199,14 +291,13 @@ def _bind_build(
     _require(
         revision["_class"] == kind
         and revision.get("pullHash" if branch.startswith("PR-") else "hash") == head
-        and checkout_data["lastBuiltRevision"]["SHA1"] == head
         and console["url"] == job + "consoleText"
         and re.fullmatch(_DIGEST, console["sha256"])
         and bool(markers)
         and markers[0][0] > 0
         and markers[0][1] == loader
         and sum(value.startswith(f"Obtained {_PATH} from ") for _, value in markers) == 1
-        and checkouts == [expected_checkout] * 4
+        and (merge_base is not None or checkouts == [expected_checkout] * 4)
         and all(row["status"] == "SUCCESS" for row in [initial, compiled, *restores])
         and _interval(initial)[1] <= _interval(compiled)[0]
         and _interval(compiled)[1] <= min(_interval(row)[0] for row in restores)
@@ -215,6 +306,7 @@ def _bind_build(
     )
     logs = data["checkout_logs"]
     _require(len(logs) == 4, "saved matrix checkout inventory is incomplete")
+    reported_checkouts: list[_Row] = []
     for stage in [initial, *restores]:
         expected_nodes = [_CHECKOUT]
         if stage is not initial:
@@ -224,15 +316,31 @@ def _bind_build(
             == expected_nodes,
             "unsupported operation in the selected checkout and restore stage",
         )
-        checkout = _stage_node(stage, _CHECKOUT)
-        log = _one([row for row in logs if row["node"] == checkout["id"]], "ambiguous checkout log")
-        _require(
-            log["url"] == _owned_flow(checkout, job) + "wfapi/log"
-            and log["complete"] is True
-            and log["line"] == expected_checkout
-            and re.fullmatch(_DIGEST, log["sha256"]),
-            "matrix checkout log has the wrong revision or owner",
-        )
+        checkout, log = _owned_checkout_log(stage, job, logs)
+        if merge_base is None:
+            _require(
+                log["line"] == expected_checkout,
+                "matrix checkout log has the wrong revision or owner",
+            )
+        else:
+            merged = re.fullmatch(
+                rf"Checking out Revision ({_SHA}) \({re.escape(branch)}\)", log["line"]
+            )
+            if merged is None:
+                raise IncrementalsEvidenceError(
+                    "matrix checkout log has no reported merge revision"
+                )
+            revision_sha = merged[1]
+            _require(
+                revision_sha not in {head, merge_base}
+                and log["merge_line"]
+                == f"Merging remotes/origin/main commit {merge_base} into PR head commit {head}"
+                and log["merge_result"] == f"Merge succeeded, producing {revision_sha}",
+                "matrix checkout does not bind the selected PR head and historical base",
+            )
+            reported_checkouts.append(
+                {"stage": stage["id"], "node": checkout["id"], "revision": revision_sha}
+            )
         if stage is not initial:
             restore = _stage_node(stage, "Restore files previously stashed")
             _require(
@@ -240,6 +348,21 @@ def _bind_build(
                 and _interval(checkout)[1] <= _interval(restore)[0],
                 "unsupported stash restore or checkout order",
             )
+    if merge_base is not None:
+        revisions = {row["revision"] for row in reported_checkouts}
+        _require(
+            all(re.fullmatch(_ID, key) for key in console["markers"])
+            and Counter(checkouts)
+            == Counter(
+                f"Checking out Revision {row['revision']} ({branch})" for row in reported_checkouts
+            )
+            and len(checkout_data) == len(revisions)
+            and {row["lastBuiltRevision"]["SHA1"] for row in checkout_data} == revisions
+            and all(
+                row["remoteUrls"] == [f"https://github.com/{_REPO}.git"] for row in checkout_data
+            ),
+            "matrix console and controller BuildData do not match the owned checkout logs",
+        )
     package = _stage_node(compiled, "Shell Script")
     stash = _stage_node(compiled, "Stash some files to be used later in the build")
     _require(
@@ -250,7 +373,7 @@ def _bind_build(
         and _interval(package)[1] <= _interval(stash)[0],
         "saved package or stash does not match the reviewed route",
     )
-    return deploys, stash
+    return deploys, stash, reported_checkouts
 
 
 def _snapshot_record(root: Path, data: _Row, shell: _Row, target: str) -> _Row:
@@ -309,7 +432,9 @@ def _main_comparison(root: Path, data: _Row, target: str) -> _Row:
             "main comparison has a foreign run or revision",
         )
         _pinned_source(root, data["source"], revision, "main.groovy")
-        deploys, _ = _bind_build(data, job, revision, "main", f"Obtained {_PATH} from {revision}")
+        deploys, _, _ = _bind_build(
+            data, job, revision, "main", f"Obtained {_PATH} from {revision}"
+        )
         selected = _one(
             [row for row in deploys if row["status"] == "SUCCESS"], "no unique main deploy stage"
         )
@@ -377,8 +502,21 @@ def _skipped(stage: _Row) -> bool:
 def matrix_snapshot_observation(
     root: Path, data: _Row, repo: str, pr: int, job: str, target: str
 ) -> _Row:
-    pull, merge = data["pull"], data["merge"]
-    head, base, revision = pull["head"], pull["base"], merge["commit"]
+    pull = data["pull"]
+    head, base = pull["head"], pull["base"]
+    target_base = data.get("definition_role") == "target-base"
+    if target_base:
+        _require("merge" not in data, "target-base definition has conflicting merge evidence")
+        revision, loader_suffix = base, base
+    else:
+        _require("definition_role" not in data, "unsupported matrix definition role")
+        merge = data["merge"]
+        revision = merge["commit"]
+        _require(
+            revision not in {head, base} and merge["parents"] == [base, head],
+            "outside the reviewed Shiro fork matrix and snapshot profile",
+        )
+        loader_suffix = f"{head}+{base} ({revision})"
     branch = f"PR-{pr}"
     _require(
         repo == pull["target_repository"] == _REPO
@@ -390,15 +528,26 @@ def matrix_snapshot_observation(
         and target == _TARGET
         and re.fullmatch(re.escape(f"{_FOLDER}job/{branch}/") + rf"{_ID}/", job)
         and all(re.fullmatch(_SHA, value) for value in (head, base, revision))
-        and len({head, base, revision}) == 3
-        and merge["parents"] == [base, head],
+        and head != base,
         "outside the reviewed Shiro fork matrix and snapshot profile",
     )
-    _pinned_source(root, data["source"], revision, "pipeline.groovy")
-    fork = data["fork"]
-    deploys, stash = _bind_build(
-        fork, job, head, branch, f"Obtained {_PATH} from {head}+{base} ({revision})"
+    per_axis = _pinned_source(
+        root, data["source"], revision, "pipeline.groovy", allow_per_axis=target_base
     )
+    fork = data["fork"]
+    if per_axis:
+        _require("comparison" not in data, "comparison requires the reviewed shared-build matrix")
+        deploys, checkouts = _bind_axis_checkouts(fork, job, head, branch, base)
+        stash = None
+    else:
+        deploys, stash, checkouts = _bind_build(
+            fork,
+            job,
+            head,
+            branch,
+            f"Obtained {_PATH} from {loader_suffix}",
+            merge_base=base if target_base else None,
+        )
     markers = [(int(line), value) for line, value in fork["console"]["markers"].items()]
     skips = [(line, value) for line, value in markers if value.startswith('Stage "Deploy" skipped')]
     last_checkout = max(
@@ -413,14 +562,18 @@ def matrix_snapshot_observation(
         ),
         "saved run does not corroborate conditional skips for all remote publisher instances",
     )
-    result = {
+    result: _Row = {
         "state": "remote-matrix-publisher-skipped",
         "repository": repo,
         "pr": pr,
         "job": job,
         "head": head,
-        "source": {"path": _PATH, "revision": revision, "line": 180},
-        "stash": {"name": _STASH, "producer_node": stash["id"], "reported_restores": 3},
+        "source": {"path": _PATH, "revision": revision, "line": 152 if per_axis else 180},
+        **(
+            {"stash": {"name": _STASH, "producer_node": stash["id"], "reported_restores": 3}}
+            if stash is not None
+            else {"build_layout": "per-axis"}
+        ),
         "remote_publisher": {
             "stage": "Deploy",
             "stage_ids": [row["id"] for row in deploys],
@@ -428,8 +581,21 @@ def matrix_snapshot_observation(
             "candidate_repository": target,
         },
         "authority": "unresolved",
-        "scope": MATRIX_SCOPE,
+        "scope": (
+            "This profile covers the pinned remote stages in one matrix run. Actual workspace bytes, "
+            "registry permissions on PR executors, and other publication paths remain unverified."
+            if per_axis
+            else MATRIX_SCOPE
+        ),
     }
+    if target_base:
+        result["source"]["role"] = "target-base"
+        result["reported_checkouts"] = {
+            "head": head,
+            "base": base,
+            "nodes": checkouts,
+            "merge_bytes": "unverified",
+        }
     if "comparison" in data:
         result["comparison"] = _main_comparison(root, data["comparison"], target)
     return result

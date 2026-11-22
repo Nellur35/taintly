@@ -217,6 +217,176 @@ def test_conditional_skip_and_same_window_record_are_distinct(tmp_path, packet):
     assert comparison["registry_record"]["run_to_object"] == "unverified"
 
 
+@pytest.fixture
+def target_base_packet(packet):
+    packet.pop("merge")
+    packet["definition_role"] = "target-base"
+    packet["source"]["commit"] = BASE
+    fork = packet["fork"]
+    markers = fork["console"]["markers"]
+    markers["3"] = f"Obtained .jenkins.groovy from {BASE}"
+    revisions = [MERGE, "d" * 40, MERGE, "e" * 40]
+    for n, (entry, revision) in enumerate(zip(fork["checkout_logs"], revisions, strict=True), 5):
+        markers[str(n)] = entry["line"] = f"Checking out Revision {revision} (PR-7)"
+        entry["merge_line"] = (
+            f"Merging remotes/origin/main commit {BASE} into PR head commit {HEAD}"
+        )
+        entry["merge_result"] = f"Merge succeeded, producing {revision}"
+    actions = fork["run"]["actions"]
+    actions.pop()
+    actions.extend(
+        {
+            "_class": "hudson.plugins.git.util.BuildData",
+            "lastBuiltRevision": {"SHA1": revision},
+            "remoteUrls": ["https://github.com/apache/shiro.git"],
+        }
+        for revision in sorted(set(revisions))
+    )
+    return packet
+
+
+def test_target_base_definition_keeps_distinct_checkout_nodes(tmp_path, target_base_packet):
+    observed = _observe(tmp_path, target_base_packet)
+    assert observed["state"] == "remote-matrix-publisher-skipped"
+    assert observed["source"]["revision"] == BASE
+    assert observed["source"]["role"] == "target-base"
+    selected = observed["reported_checkouts"]
+    assert selected["head"] == HEAD
+    assert selected["base"] == BASE
+    assert [row["revision"] for row in selected["nodes"]] == [MERGE, "d" * 40, MERGE, "e" * 40]
+    assert len({row["node"] for row in selected["nodes"]}) == 4
+    assert selected["merge_bytes"] == "unverified"
+    assert observed["authority"] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    [
+        "role",
+        "loader",
+        "merge",
+        "checkout",
+        "remote",
+        "console",
+        "duplicate_line",
+        "earlier_failure",
+    ],
+)
+def test_target_base_requires_own_loader_and_checkout_logs(
+    tmp_path, target_base_packet, contradiction
+):
+    fork = target_base_packet["fork"]
+    markers = fork["console"]["markers"]
+    first = fork["checkout_logs"][0]
+    if contradiction == "role":
+        target_base_packet["definition_role"] = "fork-head"
+    elif contradiction == "loader":
+        markers["3"] = f"Obtained .jenkins.groovy from {HEAD}"
+    elif contradiction == "merge":
+        first["merge_line"] = first["merge_line"].replace(HEAD, "f" * 40)
+    elif contradiction == "checkout":
+        first["merge_result"] = "Merge succeeded, producing " + "f" * 40
+    elif contradiction == "remote":
+        fork["run"]["actions"][-1]["remoteUrls"] = ["https://github.com/fork/shiro.git"]
+    elif contradiction == "console":
+        markers["5"] = markers["6"]
+    elif contradiction == "duplicate_line":
+        markers["020"] = markers.pop("21")
+    else:
+        markers["20"] = 'Stage "Deploy" skipped due to earlier failure(s)'
+    assert _observe(tmp_path, target_base_packet)["state"] == "unresolved"
+
+
+@pytest.fixture
+def axis_packet(packet, monkeypatch):
+    monkeypatch.setattr(matrix, "_AXIS_DEFINITION", matrix._DEFINITION)
+    monkeypatch.setattr(matrix, "_DEFINITION", "f" * 64)
+    packet["definition_role"] = "target-base"
+    packet.pop("comparison")
+    packet.pop("merge")
+    packet["source"]["commit"] = BASE
+    fork = packet["fork"]
+    fork["run"]["actions"][-1]["remoteUrls"] = ["https://github.com/apache/shiro.git"]
+    fork["graph"]["stages"] = []
+    fork["stages"] = []
+    fork["checkout_logs"] = []
+    checkout = f"Checking out Revision {HEAD} (PR-7)"
+    fork["console"]["markers"] = {
+        "3": f"Obtained .jenkins.groovy from {BASE}",
+        **{str(i): checkout for i in range(5, 11)},
+        **{str(i): 'Stage "Deploy" skipped due to when conditional' for i in range(20, 23)},
+    }
+
+    def add_stage(identifier, name, start, duration, node_name=None):
+        route = FORK + f"execution/node/{identifier}/wfapi/describe"
+        stage = {
+            "name": name,
+            "id": str(identifier),
+            "startTimeMillis": START + start,
+            "durationMillis": duration,
+            "status": "NOT_EXECUTED" if name == "Deploy" else "SUCCESS",
+            "_links": {"self": {"href": route.removeprefix(matrix._CONTROLLER)}},
+        }
+        fork["graph"]["stages"].append(stage)
+        if node_name is None:
+            return
+        node_id = str(identifier + 100)
+        node_url = FORK + f"execution/node/{node_id}/wfapi/"
+        node = {
+            **stage,
+            "name": node_name,
+            "id": node_id,
+            "durationMillis": 3,
+            "status": "SUCCESS",
+            "_links": {"self": {"href": node_url.removeprefix(matrix._CONTROLLER) + "describe"}},
+        }
+        fork["stages"].append({**stage, "nodes": [node], "url": route, "receipt_sha256": RECEIPT})
+        if node_name == matrix._CHECKOUT:
+            fork["checkout_logs"].append({
+                "node": node_id, "url": node_url + "log", "complete": True,
+                "sha256": RECEIPT, "line": checkout,
+                "merge_line": f"Merging remotes/origin/main commit {BASE} into PR head commit {HEAD}",
+                "merge_result": f"Merge succeeded, producing {HEAD}",
+            })
+
+    add_stage(1, "Build", 10, 10)
+    for index, name in enumerate(sorted(matrix._AXIS_BRANCHES)):
+        add_stage(10 + index, name, 100, 80, matrix._CHECKOUT)
+        add_stage(20 + index, "Checkout", 250, 80, matrix._CHECKOUT)
+        add_stage(30 + index, "Build", 400, 80)
+        add_stage(40 + index, "Deploy", 600, 80, "Get contextual object from internal APIs")
+    return packet
+
+
+@pytest.mark.parametrize(
+    "contrast", [None, "missing-auto-checkout", "different-base", "sibling-log", "mixed-deploy", "changed-source"]
+)
+def test_per_axis_matrix_requires_owned_checkout_and_all_skips(tmp_path, axis_packet, contrast):
+    fork = axis_packet["fork"]
+    if contrast == "missing-auto-checkout":
+        fork["checkout_logs"].pop(0)
+    elif contrast == "different-base":
+        first = fork["checkout_logs"][0]
+        first["merge_line"] = first["merge_line"].replace(BASE, MERGE)
+    elif contrast == "sibling-log":
+        fork["checkout_logs"][0]["url"] = fork["checkout_logs"][2]["url"]
+    elif contrast == "mixed-deploy":
+        next(stage for stage in fork["graph"]["stages"] if stage["id"] == "40")["status"] = "SUCCESS"
+        next(stage for stage in fork["stages"] if stage["id"] == "40")["status"] = "SUCCESS"
+    elif contrast == "changed-source":
+        (tmp_path / "source" / "pipeline.groovy").write_bytes(b"// unrelated")
+    observation = _observe(tmp_path, axis_packet)
+    if contrast is not None:
+        assert observation["state"] == "unresolved"
+        return
+    assert observation["build_layout"] == "per-axis"
+    assert observation["remote_publisher"]["stage_ids"] == ["40", "41", "42"]
+    assert "stash" not in observation
+    assert observation["source"]["line"] == 152
+    assert len(observation["reported_checkouts"]["nodes"]) == 6
+    assert observation["authority"] == "unresolved"
+
+
 @pytest.mark.parametrize(
     "contradiction",
     ["source", "merge", "earlier_failure", "wrong_owner", "command", "stash", "missing"],

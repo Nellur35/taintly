@@ -187,10 +187,28 @@ URL. This offline profile accepts saved records from a trusted collector.
 Receipt hashes help retain provenance and do not authenticate the supplied
 controller records.
 
+When the controller reports loading the target-base definition, supply
+`definition_role: "target-base"` and use that historical commit in `source`
+and `pull.base`. In this profile omit the synthetic definition's `merge`
+record. Each scoped checkout log must include the exact `merge_line`,
+`merge_result` and checkout `line`. The recorded fork head and historical
+base must agree across those nodes. The console and Git BuildData must
+corroborate the reported revisions. Multiple checkout revisions can result
+from the same selected parents. The report lists the revisions by owning
+node and leaves exact merge bytes unverified.
+
+A second reviewed target-base definition runs a separate build in each
+matrix branch. Supply all three branch lifecycle stages, the three explicit
+checkout stages, the three Deploy stages and the six exact checkout logs.
+This profile corroborates the reported fork-head revision across those
+checkouts. Pass the same snapshot repository as the candidate destination.
+The report records the per-axis layout without a stash or registry write.
+
 `remote-matrix-publisher-skipped` reports that all three recorded `Deploy`
-instances were skipped by their conditions after the recorded build and
-stash restores. It identifies the change-request guard in the exact loaded
-definition. Skips caused by an earlier build failure are unresolved for
+instances were skipped by their conditions. For the shared-build layout,
+the result also verifies the recorded stash restores. For the per-axis
+layout, it verifies each branch's own checkouts. Both profiles identify the
+change-request guard in the exact loaded definition. Skips caused by an earlier build failure are unresolved for
 this profile. Stash contents, registry authority and other publication
 paths remain unresolved. If included, a `comparison` section can show an
 owned deploy invocation from the same definition on `main`. A separate
