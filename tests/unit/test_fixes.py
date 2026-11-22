@@ -1242,3 +1242,55 @@ def test_hoist_service_credentials_path_check_handles_windows_separators():
     )
     # Post-fix shape (correct on every OS):
     assert "/ci/" in windows_filepath.replace("\\", "/")
+
+
+def test_pin_resolution_cannot_overwrite_an_edit_during_preparation(tmp_path, monkeypatch):
+    from taintly import fixes
+
+    path = tmp_path / "ci.yml"
+    original = b"jobs:\n  build:\n    steps:\n      - uses: actions/checkout@v4\n"
+    edited = original + b"# keep concurrent edit\n"
+    path.write_bytes(original)
+
+    def resolve(*args):
+        path.write_bytes(edited)
+        return "f" * 40
+
+    monkeypatch.setattr(fixes, "resolve_action_sha", resolve)
+    outcome = apply_fixes(str(path), fix_types=["pin_sha"])
+    assert len(outcome) == 1
+    assert outcome[0].error and not outcome[0].applied
+    assert path.read_bytes() == edited
+    assert not list(tmp_path.glob(".taintly-*.tmp"))
+
+    monkeypatch.setattr(fixes, "resolve_action_sha", lambda *_: "f" * 40)
+    retry = apply_fixes(str(path), fix_types=["pin_sha"])
+    assert retry[0].applied
+    assert b"checkout@" + b"f" * 40 in path.read_bytes()
+    assert b"# keep concurrent edit" in path.read_bytes()
+
+
+def test_cli_fix_commit_failure_keeps_source_and_returns_error(tmp_path, monkeypatch, capsys):
+    import os
+    import sys
+
+    from taintly import fixes
+    from taintly.__main__ import main
+
+    path = tmp_path / ".github" / "workflows" / "ci.yml"
+    path.parent.mkdir(parents=True)
+    original = b"on: push\njobs:\n  build:\n    steps:\n      - uses: actions/checkout@v4\n"
+    path.write_bytes(original)
+    monkeypatch.setattr(fixes, "resolve_action_sha", lambda *_: "f" * 40)
+
+    def fail_replace(*args):
+        raise OSError("injected replacement failure")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    monkeypatch.setattr(sys, "argv", ["taintly", str(tmp_path), "--fix", "--platform", "github"])
+    with pytest.raises(SystemExit) as status:
+        main()
+    assert status.value.code == 3
+    assert "source could not be safely updated" in capsys.readouterr().out
+    assert path.read_bytes() == original
+    assert not list(path.parent.glob(".taintly-*.tmp"))

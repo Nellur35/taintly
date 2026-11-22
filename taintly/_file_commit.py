@@ -30,6 +30,9 @@ class FileSnapshot:
     data: bytes
     identity: tuple[int, int, int, int, int]
 
+    def text(self) -> str:
+        return io.StringIO(self.data.decode("utf-8"), newline=None).read()
+
     def lines(self) -> list[str]:
         # Match the existing UTF-8 text-mode fixers' universal newline behavior.
         return io.StringIO(self.data.decode("utf-8"), newline=None).readlines()
@@ -52,7 +55,7 @@ def read_snapshot(path: str | Path) -> FileSnapshot:
 
 @contextmanager
 def staged_text(
-    path: str | Path, *, expected: FileSnapshot | None = None
+    path: str | Path, *, expected: FileSnapshot | None = None, newline: str | None = None
 ) -> Iterator[tuple[TextIO, Path]]:
     """Commit only after a successful body and unchanged selected destination.
 
@@ -73,7 +76,7 @@ def staged_text(
         # Ownership transfers only after fdopen succeeds. A failed wrapper must
         # not leak the raw descriptor or hold its temporary path open on Windows.
         try:
-            stream = os.fdopen(descriptor, "w", encoding="utf-8")
+            stream = os.fdopen(descriptor, "w", encoding="utf-8", newline=newline)
         except BaseException:
             os.close(descriptor)
             raise
@@ -102,6 +105,8 @@ def staged_text(
             staged.unlink(missing_ok=True)
 
 
-def write_text_atomic(path: str | Path, text: str, *, expected: FileSnapshot | None = None) -> None:
-    with staged_text(path, expected=expected) as (output, _):
+def write_text_atomic(
+    path: str | Path, text: str, *, expected: FileSnapshot, newline: str | None = None
+) -> None:
+    with staged_text(path, expected=expected, newline=newline) as (output, _):
         output.write(text)
