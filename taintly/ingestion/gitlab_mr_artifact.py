@@ -706,7 +706,9 @@ def _detached_archive(
     target, fork, mr = data["target"], data["fork"], data["mr"]
     pipeline, job, log = data["pipeline"], data["job"], data["log"]
     explicit_origin = origin is not None
-    canceled = explicit_origin and target_owned
+    canceled = (
+        explicit_origin and target_owned and not (pipeline["status"] == job["status"] == "failed")
+    )
     base = origin or "https://gitlab.com"
     source_path = _value(
         fork["path_with_namespace"], _CANONICAL_PROJECT, "GitLab fork project path"
@@ -769,7 +771,9 @@ def _detached_archive(
             pipeline["status"] == job["status"] == "failed"
             and history is None
             and revision == current_head == job["commit"]["id"],
-            "the selected origin requires a failed fork-owned job at the recorded MR head",
+            "the selected origin requires a failed target-project job at the recorded MR head"
+            if target_owned
+            else "the selected origin requires a failed fork-owned job at the recorded MR head",
         )
     elif target_owned:
         _need(
@@ -1726,7 +1730,17 @@ def mr_artifact_observation(
                 "the explicit origin requires a detached archive observation schema",
             )
             target_owned = data["schema"] == _TARGET_HEAD_ARCHIVE_SCHEMA
-            scope = _DETACHED_CANCELED_SCOPE if target_owned else _EXPLICIT_FORK_ARCHIVE_SCOPE
+            if target_owned:
+                saved_pipeline, saved_job = data.get("pipeline"), data.get("job")
+                scope = (
+                    _TARGET_HEAD_ARCHIVE_SCOPE
+                    if isinstance(saved_pipeline, dict)
+                    and isinstance(saved_job, dict)
+                    and saved_pipeline.get("status") == saved_job.get("status") == "failed"
+                    else _DETACHED_CANCELED_SCOPE
+                )
+            else:
+                scope = _EXPLICIT_FORK_ARCHIVE_SCOPE
             return _detached_archive(
                 data,
                 root.resolve(),

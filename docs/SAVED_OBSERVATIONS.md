@@ -390,6 +390,15 @@ The observer runs offline and checks the saved project, MR, pipeline,
 job, trace and fork source URLs against that origin. Preserve canonical
 project path capitalization.
 
+
+The same target-project schema accepts a failed job and failed pipeline on
+an explicitly selected origin when the pipeline checked out the current
+fork head for the MR. Use the fork's source record and the exact
+target-project job inventory, with the eight ordered runner rows through
+the failure-phase archive HTTP 201 response. This reports acceptance of
+the exact target-project job archive. Contents, credentials, and
+deployment require separate evidence.
+
 For an explicitly selected origin, schema `gitlab-fork-project-archive-v1`
 also accepts a failed fork-owned pipeline and job at the recorded MR head.
 The job must report `script_failure`, one ZIP archive entry, and the eight
