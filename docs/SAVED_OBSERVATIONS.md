@@ -330,12 +330,16 @@ Use matching `created_at` and `updated_at` values in `pipeline` and
   from its repository commit response.
 - `log` with `job`, the owning job `/raw` URL, full log `sha256`, and `rows`.
   Retain the source section start, detached checkout, source section end,
-  script start, one supported literal `yarn` or Gradle command, script end,
+  script start, one supported literal `yarn` command or `./gradlew` with one
+  or two literal task names and no flags, script end,
   failure-upload start, the runner's file or directory match, archive HTTP
   201, failure-upload end, and final job failure, in order. Every row keeps
   `time`, redacted `value`, and the SHA-256 of `time`, one space, and `value`.
   Strip terminal escapes and omit token fields. Keep the runner's stream prefixes.
   Each runner section epoch must match the second recorded in its line timestamp.
+  A literal selection without a trailing slash can match a descendant when
+  the runner reports multiple matching entries. The member must come from
+  the selected job's exact artifact endpoint.
 
 `job-artifact-uploaded-after-failure` identifies an archive accepted by
 the coordinator and a member retrieved for that job. The command comes

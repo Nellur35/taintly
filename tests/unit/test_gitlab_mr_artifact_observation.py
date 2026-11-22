@@ -394,6 +394,28 @@ def test_failed_job_has_an_observed_upload_independent_of_config_analysis(tmp_pa
     assert result["publication_admission"]["state"] == "unresolved"
 
 
+def test_failed_gradle_job_binds_recursive_artifact_selection(tmp_path, failed_capture):
+    rows = failed_capture["failed_archive"]["log"]["rows"]
+    for slot, message in (
+        (4, "01O $ ./gradlew :app:assembleDefault :app:testFullDebugUnitTest"),
+        (7, "01E output: found 2 matching artifact files and directories"),
+        (8, '01E Uploading artifacts as "archive" to coordinator... 201 Created '
+            'correlation_id=0123456789abcdef-PDX id=33 status=201'),
+    ):
+        rows[slot] = _failure_trace_row(rows[slot]["time"], message)
+
+    result = evaluate(tmp_path, failed_capture)
+    assert result["state"] == "job-artifact-uploaded-after-failure"
+    assert result["command"] == "./gradlew :app:assembleDefault :app:testFullDebugUnitTest"
+    assert result["publication"]["member_path"] == "output/index.html"
+    assert result["member_origin"] == "unverified"
+
+    failed_capture["artifact"].update(
+        path="output-other/index.html", url=JOB + "/artifacts/raw/output-other/index.html"
+    )
+    assert evaluate(tmp_path, failed_capture)["state"] == "unresolved"
+
+
 @pytest.mark.parametrize(
     ("record", "key", "wrong"),
     [
@@ -416,6 +438,7 @@ def test_failed_upload_refuses_foreign_evidence(tmp_path, failed_capture, record
     ("slot", "replacement"),
     [
         (4, "01O $ echo yarn test:integration"),
+        (4, "01O $ ./gradlew $FLAG :app:connectedAndroidTest"),
         (6, "00O+section_start:127:step_script"),
         (7, "01E output: found 1 matching artifact files and directories"),
         (8, '01E Uploading artifacts as "archive" to coordinator... 201 Created  id=34 status=201'),

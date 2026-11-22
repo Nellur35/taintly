@@ -34,7 +34,7 @@ _JOB = re.compile(r"[A-Za-z0-9_.-]{1,100}(?::[A-Za-z0-9_.-]{1,100})?")
 _FAILED_JOB = re.compile(r"[A-Za-z0-9_.-][A-Za-z0-9_.: -]{0,99}")
 _PART = r"[A-Za-z0-9_][A-Za-z0-9_.-]*"
 _PATH = re.compile(rf"{_PART}(?:/{_PART})*")
-_FAILED_COMMAND = r"(?:\./gradlew :[A-Za-z0-9:_-]{1,128}|yarn [A-Za-z0-9:_-]{1,128})"
+_FAILED_COMMAND = r"(?:\./gradlew(?: :[A-Za-z0-9:_-]{1,128}){1,2}|yarn [A-Za-z0-9:_-]{1,128})"
 _BUILD = re.compile(r"(?:bun|yarn) run build(?::[a-z0-9:_-]+)?")
 _MOVE = re.compile(rf"mv ({_PART}(?:/{_PART})*) ({_PART}(?:/{_PART})*)")
 # Verified GitLab.com linux/amd64 Runner revisions, helper index and config
@@ -503,9 +503,10 @@ def _failed_upload(data: _Row, root: Path, job_url: str) -> _Row:
         rf"01O \$ ({_FAILED_COMMAND})",
         section_end + "step_script",
         section_start + "upload_artifacts_on_failure",
-        rf"01E ({_PART}(?:/{_PART})*/?): found [1-9][0-9]* matching artifact files and directories",
+        rf"01E ({_PART}(?:/{_PART})*/?): found ([1-9][0-9]*) matching artifact files and directories",
         r'01E Uploading artifacts as "archive" to coordinator\.\.\. 201 Created +'
-        rf"(?:correlation_id=[0-9a-f]+ +)?id={job['id']} (?:responseStatus=201 Created )?status=201(?: Created)?",
+        r"(?:correlation_id=(?:[0-9a-f]+|[0-9a-f]{16}-[A-Z]{3}) +)?"
+        rf"id={job['id']} (?:responseStatus=201 Created )?status=201(?: Created)?",
         section_end + "upload_artifacts_on_failure",
         r"00O ERROR: Job failed: exit code [1-9][0-9]{0,2}",
     )
@@ -535,10 +536,12 @@ def _failed_upload(data: _Row, root: Path, job_url: str) -> _Row:
         "saved failure-upload lines are outside the job or out of phase order",
     )
     member = _archived_member(data, root, job_url, end)
-    selection = markers[7][1]
+    selection, count = markers[7].groups()
+    # Runner recursively enumerates a literal directory even when the path has no trailing slash.
+    directory = selection.endswith("/") or count != "1"
     _need(
-        member["member_path"].startswith(selection)
-        if selection.endswith("/")
+        member["member_path"].startswith(selection.rstrip("/") + "/")
+        if directory
         else member["member_path"] == selection,
         "retrieved member is outside the runner-reported artifact selection",
     )
