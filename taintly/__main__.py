@@ -2201,6 +2201,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     preview_account = preview.get("account") if preview is not None else None
     archive_download = report.get("archive_download")
     archive_tree = report.get("archive_tree")
+    windows_helper = report.get("archive_windows_helper")
     archive_authority = report.get("archive_runner_authority")
     member_origin = report.get("archive_member_origin")
     handoff = report.get("pages_handoff")
@@ -2360,6 +2361,16 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             )
         else:
             print(f"Fork archive source comparison unresolved: {member_origin['reason']}.")
+    if windows_helper is not None and args.format == "text":
+        if windows_helper["state"] == "windows-helper-version-reported":
+            print(
+                f"  Archive helper reported {windows_helper['version']} "
+                f"({windows_helper['platform']}) for the response at "
+                f"trace line {windows_helper['archive_response_line']}.\n"
+                f"{windows_helper['scope']}"
+            )
+        else:
+            print(f"GitLab archive helper unresolved: {windows_helper['reason']}.")
     if archive_authority is not None and args.format == "text":
         if archive_authority["state"] == "native-archive-write-observed":
             print(
@@ -2413,6 +2424,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             preview_account,
             archive_download,
             archive_tree,
+            windows_helper,
             member_origin,
             archive_authority,
             handoff,
