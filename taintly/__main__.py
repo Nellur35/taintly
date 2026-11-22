@@ -250,6 +250,12 @@ def main():
         metavar=("JSON", "PROJECT", "PIPELINE", "JOB"),
         help="Check saved target-project fork MR artifact or manual job evidence.",
     )
+    evidence_input.add_argument(
+        "--gitlab-fork-admission-observation",
+        nargs=3,
+        metavar=("JSON", "PROJECT", "PIPELINE"),
+        help="Check whether a saved GitLab.com fork MR pipeline stopped before any job.",
+    )
     parser.add_argument(
         "--gitlab-artifact-origin",
         metavar="HTTPS_ORIGIN",
@@ -695,6 +701,9 @@ def main():
         return
     if args.gitlab_mr_artifact_observation:
         _check_gitlab_mr_artifact(parser, args)
+        return
+    if args.gitlab_fork_admission_observation:
+        _check_gitlab_fork_admission(parser, args)
         return
     if args.gitlab_mr_publish_job is not None:
         parser.error("--gitlab-mr-publish-job requires --gitlab-mr-artifact-observation")
@@ -2031,6 +2040,39 @@ def _check_jenkins_maven_snapshot(
     else:
         print(f"Maven snapshot write unresolved: {result['reason']}.\n{result['scope']}")
     sys.exit(0 if resolved and not incomplete_comparison else 11)
+
+
+def _check_gitlab_fork_admission(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from taintly.ingestion.gitlab_fork_admission import fork_admission_observation
+
+    mode = "gitlab_fork_admission_observation"
+    allowed = {"path", mode, "platform", "format", "no_config", "no_color"}
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(f"--{name.replace('_', '-')} is unavailable in GitLab fork admission mode")
+    if args.platform not in (None, "gitlab") or args.format not in ("text", "json"):
+        parser.error("GitLab fork admission mode requires gitlab and text or JSON format")
+    snapshot, project, pipeline = args.gitlab_fork_admission_observation
+    if any(
+        not value.isascii() or not value.isdecimal() or len(value) > 18
+        for value in (project, pipeline)
+    ):
+        parser.error("GitLab fork admission mode requires decimal project and pipeline IDs")
+    report = fork_admission_observation(Path(snapshot), int(project), int(pipeline))
+    unresolved = report["state"] == "unresolved"
+    if args.format == "json":
+        print(json.dumps({mode: report}, indent=2))
+    elif unresolved:
+        print(f"GitLab fork admission unresolved: {report['reason']}.\n{report['scope']}")
+    else:
+        print(
+            f"GitLab fork pipeline {report['pipeline']} stopped before any job.\n"
+            f"  {report['repository']} at {report['revision']} for MR !{report['mr']} "
+            f"in target project {report['target_project']}.\n"
+            "  GitLab reported a user verification requirement. No archive upload was reached.\n"
+            f"{report['scope']}"
+        )
+    sys.exit(11 if unresolved else 0)
 
 
 def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
