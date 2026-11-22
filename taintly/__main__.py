@@ -1943,12 +1943,35 @@ def _check_jenkins_maven_snapshot(
     elif result["state"] == "remote-matrix-publisher-skipped":
         remote = result["remote_publisher"]
         source = result["source"]
-        stash = result["stash"]
-        print(
+        stash = result.get("stash")
+        build_detail = (
             f"Jenkins PR #{result['pr']} reported {stash['reported_restores']} restores of "
             f"stash {stash['name']} from node {stash['producer_node']}.\n"
+            if stash is not None
+            else f"Jenkins PR #{result['pr']} used the per-axis checkout matrix.\n"
+        )
+        definition_detail = ""
+        if source.get("role") == "target-base":
+            checkouts = result["reported_checkouts"]
+            if stash is None:
+                checkout_detail = (
+                    f"  {len(checkouts['nodes'])} checkout nodes report the fork head {checkouts['head']}. "
+                    "Actual workspace bytes are unverified.\n"
+                )
+            else:
+                checkout_detail = (
+                    f"  {len(checkouts['nodes'])} checkout nodes report merges with PR head {checkouts['head']}. "
+                    "Exact merge bytes are unverified.\n"
+                )
+            definition_detail = (
+                f"  Jenkins loaded the target-base definition at {source['revision']}.\n"
+                f"{checkout_detail}"
+            )
+        print(
+            f"{build_detail}"
             f"  All {len(remote['stage_ids'])} Deploy stages were skipped by their conditions.\n"
             f"  The loaded definition requires {remote['condition']} ({source['path']}:{source['line']}).\n"
+            f"{definition_detail}"
             f"  Candidate snapshot repository: {remote['candidate_repository']}.\n{result['scope']}"
         )
         if comparison.get("state") == "deploy-command-observed":
