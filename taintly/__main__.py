@@ -251,6 +251,12 @@ def main():
         help="Check saved target-project fork MR artifact or manual job evidence.",
     )
     evidence_input.add_argument(
+        "--gitlab-package-file-observation",
+        nargs=5,
+        metavar=("JSON", "PROJECT", "PIPELINE", "PACKAGE", "FILE"),
+        help="Check which pipeline GitLab associated with a saved generic package file.",
+    )
+    evidence_input.add_argument(
         "--gitlab-ref-observation",
         nargs=4,
         metavar=("JSON", "PROJECT", "PIPELINE", "JOB"),
@@ -707,6 +713,9 @@ def main():
         return
     if args.gitlab_mr_artifact_observation:
         _check_gitlab_mr_artifact(parser, args)
+        return
+    if args.gitlab_package_file_observation:
+        _check_gitlab_package_file(parser, args)
         return
     if args.gitlab_ref_observation:
         _check_gitlab_ref_observation(parser, args)
@@ -2072,6 +2081,64 @@ def _check_jenkins_maven_snapshot(
     else:
         print(f"Maven snapshot write unresolved: {result['reason']}.\n{result['scope']}")
     sys.exit(0 if resolved and not incomplete_comparison else 11)
+
+
+def _check_gitlab_package_file(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from taintly.ingestion.gitlab_package_file import package_file_observation
+
+    mode = "gitlab_package_file_observation"
+    allowed = {"path", mode, "platform", "format", "no_config", "no_color"}
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(
+                f"--{name.replace('_', '-')} is unavailable in GitLab package file observation mode"
+            )
+    if args.platform not in (None, "gitlab") or args.format not in ("text", "json"):
+        parser.error("GitLab package file observation mode requires gitlab and text or JSON format")
+    snapshot, *ids = args.gitlab_package_file_observation
+    if any(not value.isascii() or not value.isdecimal() or len(value) > 18 for value in ids):
+        parser.error(
+            "GitLab package file observation requires decimal project, pipeline, package and file IDs"
+        )
+    project, pipeline, package, file_id = map(int, ids)
+    report = package_file_observation(
+        Path(snapshot), Path(args.path), project, pipeline, package, file_id
+    )
+    state = report["state"]
+    if args.format == "json":
+        print(json.dumps({mode: report}, indent=2))
+    elif state == "unresolved":
+        print(f"GitLab package file provenance unresolved: {report['reason']}.\n{report['scope']}")
+    else:
+        recorded = report["recorded_pipeline"]
+        content = report["file"]
+        print(
+            f"GitLab records file {content['id']} ({content['name']}) under pipeline "
+            f"{recorded['id']} ({recorded['event']}, {recorded['revision']})."
+        )
+        if state == "file-pipeline-differs":
+            print(
+                f"The selected pipeline is {pipeline}; the file is recorded under a different run."
+            )
+        print(f"  Provider-reported SHA-256: {content['provider_sha256']}.")
+        upload = report.get("upload")
+        if upload is not None and upload["state"] == "trace-request-observed":
+            print(
+                f"  Job {upload['job']} trace reports {upload['method']} {upload['target']} "
+                f"with HTTP {upload['response_status']} (request {upload['request_id']})."
+            )
+            print(
+                f"  Reported header: {upload['reported_credential_header']}. "
+                "The server-side credential instance and authorization decision remain unresolved."
+            )
+            if upload.get("runner_workspace") == "checkout-skipped":
+                print(
+                    "  Runner checkout was skipped. The uploaded bytes' source ancestry remains unresolved."
+                )
+        elif upload is not None:
+            print(f"  Upload trace unresolved: {upload['reason']}.")
+        print(report["scope"])
+    sys.exit(11 if state == "unresolved" else 0)
 
 
 def _check_gitlab_ref_observation(
