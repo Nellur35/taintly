@@ -1412,6 +1412,67 @@ def test_target_archive_tree_qualifies_named_member(tmp_path, target_head_upload
         assert result["archive_tree"]["state"] == "unresolved"
 
 
+@pytest.mark.parametrize(
+    "contrast", [None, "omitted", "other-job", "earlier-banner", "wrong-digest"]
+)
+def test_target_archive_helper_binds_reported_windows_banner(
+    tmp_path, target_head_upload, contrast
+):
+    data = target_head_upload
+    log = data["log"]
+    for index, row in enumerate(log["rows"], 1):
+        row["line"] = 10 * index
+    start, response, _ = log["rows"][-3:]
+    data["job"]["runner_manager"] = {"revision": "d22d8753"}
+    data["job"]["runner"] = {
+        "is_shared": True,
+        "description": "k8s.saas-windows-medium-amd64.runners-manager.gitlab.com",
+    }
+    banner = [
+        {
+            **_failure_trace_row(start["time"], value),
+            "line": start["line"] + index,
+        }
+        for index, value in enumerate(
+            (
+                "01O Version:      19.3.0",
+                "01O Git revision: 9cbf0074",
+                "01O OS/Arch:      windows/amd64",
+            ),
+            1,
+        )
+    ]
+    helper = {
+        "job": 33,
+        "trace_url": log["url"],
+        "trace_sha256": log["sha256"],
+        "executor": "custom",
+        "banner": banner,
+    }
+    if contrast != "omitted":
+        data["archive_windows_helper"] = helper
+    if contrast == "other-job":
+        helper["job"] = 34
+    elif contrast == "earlier-banner":
+        banner[0]["line"] = start["line"] - 1
+    elif contrast == "wrong-digest":
+        banner[1]["sha256"] = "0" * 64
+
+    result = _evaluate_fork(tmp_path, data, 1)
+    assert result["state"] == "target-project-head-archive-upload-observed"
+    assert result["publication"]["http_status"] == 201
+    assert "archive_runner_authority" not in result
+    if contrast == "omitted":
+        assert "archive_windows_helper" not in result
+    elif contrast is None:
+        observed = result["archive_windows_helper"]
+        assert observed["state"] == "windows-helper-version-reported"
+        assert observed["version"] == "19.3.0"
+        assert observed["archive_response_line"] == response["line"]
+    else:
+        assert result["archive_windows_helper"]["state"] == "unresolved"
+
+
 @pytest.mark.parametrize("bad_download", [False, True])
 def test_target_head_archive_download_preserves_upload_when_zip_fails(
     tmp_path, target_head_upload, bad_download, monkeypatch, capsys
@@ -1589,3 +1650,80 @@ def test_explicit_origin_binds_failed_fork_archive(tmp_path, fork_upload, contra
     assert result["publication"]["http_status"] == 201
     assert result["publication"]["retrieval"] == "unverified"
     assert "archive_runner_authority" not in result
+
+
+@pytest.mark.parametrize(
+    "contrast", [None, "withheld", "other-runner", "other-commit", "missing-source", "other-banner"]
+)
+def test_fork_windows_stdout_archive_is_bound_to_the_exact_job(
+    tmp_path, fork_upload, contrast
+):
+    data = fork_upload
+    job, log = data["job"], data["log"]
+    job.update(status="success", failure_reason=None, commit={"id": HEAD})
+    job["runner_manager"] = {"revision": "d22d8753"}
+    job["runner"] = {
+        "is_shared": True,
+        "description": "k8s.saas-windows-medium-amd64.runners-manager.gitlab.com",
+    }
+    for index, row in enumerate(log["rows"], 1):
+        value = row["value"].replace("upload_artifacts_on_failure", "upload_artifacts_on_success")
+        if index == 7:
+            value = value.replace("01E ", "01O ", 1)
+        row.update(_failure_trace_row(row["time"], value), line=10 * index)
+    start, response, _ = log["rows"][-3:]
+    data["source_file"] = {
+        "url": f"https://gitlab.com/api/v4/projects/2/repository/files/.gitlab-ci.yml?ref={HEAD}",
+        "file_path": ".gitlab-ci.yml",
+        "commit_id": HEAD,
+        "content_sha256": hashlib.sha256(BUILDSPEC.encode()).hexdigest(),
+    }
+    helper = {
+        "job": 33,
+        "trace_url": log["url"],
+        "trace_sha256": log["sha256"],
+        "executor": "custom",
+        "banner": [
+            {
+                **_failure_trace_row(start["time"], value),
+                "line": start["line"] + offset,
+            }
+            for offset, value in enumerate(
+                (
+                    "01O Version:      19.3.0",
+                    "01O Git revision: 9cbf0074",
+                    "01O OS/Arch:      windows/amd64",
+                ),
+                1,
+            )
+        ],
+    }
+    if contrast != "withheld":
+        data["archive_windows_helper"] = helper
+    if contrast == "other-runner":
+        job["runner"]["is_shared"] = False
+    elif contrast == "other-commit":
+        job["commit"]["id"] = BASE
+    elif contrast == "missing-source":
+        data.pop("source_file")
+    elif contrast == "other-banner":
+        helper["job"] = 34
+
+    result = _evaluate_fork(tmp_path, data)
+    if contrast in {"other-runner", "other-commit", "missing-source"}:
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+        return
+
+    assert result["state"] == "fork-project-archive-upload-observed"
+    assert result["project"] == 2
+    assert result["target_project"] == 1
+    assert result["publication"]["http_status"] == 201
+    if contrast == "withheld":
+        assert "archive_windows_helper" not in result
+    elif contrast == "other-banner":
+        assert result["archive_windows_helper"]["state"] == "unresolved"
+    else:
+        observed = result["archive_windows_helper"]
+        assert observed["state"] == "windows-helper-version-reported"
+        assert observed["archive_response_line"] == response["line"]

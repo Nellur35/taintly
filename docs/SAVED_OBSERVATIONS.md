@@ -527,6 +527,22 @@ reported size. ZIP bytes, content origin and later access require
 separate evidence. An invalid supplied listing returns exit `11` and
 retains the observed upload.
 
+For a saved GitLab.com job running the reviewed Windows custom executor,
+the observer binds an archive acceptance reported on stdout to its own
+checkout, job, phase and archive inventory. A fork-owned job also needs
+the revision-bound repository file receipt and an exact job commit.
+A push pipeline remains outside this merge-request profile.
+For the same job, `archive_windows_helper` can carry the helper version
+reported in the archive phase. Supply `job`, `trace_url`, `trace_sha256`,
+`executor: "custom"`, and the three original version, revision and platform
+rows as `banner`. Each row uses the same timestamp, line number, value and
+SHA-256 structure as the archived runner rows. The supported banner
+reports Windows amd64 release 19.3.0 for the hosted Windows runner
+with manager revision d22d8753. The report distinguishes the stock
+uploader's documented job-token class from the evidence available for the
+actual process and credential. An invalid supplied banner leaves the
+archive decision intact and returns exit `11`.
+
 To compare one Go coverage panel in that verified ZIP with its source, add
 `archive_member_origin` with `format: go-cover-html-v1`, the HTML `member`,
 Go file `path`, package name `package`, and `source` and `parent` file

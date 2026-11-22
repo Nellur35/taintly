@@ -854,26 +854,15 @@ def _detached_archive(
     _need(
         source_hash == data["source_sha256"], "GitLab configuration differs from saved fork source"
     )
-    if target_owned or explicit_origin:
-        source_file = data["source_file"]
-        expected_url = (
-            f"{base}/api/v4/projects/{source_project}/"
-            f"repository/files/.gitlab-ci.yml?ref={revision}"
-        )
-        _need(
-            source_file["url"] == expected_url
-            and source_file["file_path"] == ".gitlab-ci.yml"
-            and source_file["commit_id"] == revision
-            and source_file["content_sha256"] == source_hash,
-            "saved fork configuration record does not match the selected checkout and bytes",
-        )
     correlation = (
         r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
         if explicit_origin
         else r"(?:[0-9a-f]{32}|[0-9a-f]{16}-[A-Z]{3})"
     )
-    # A custom executor can relay the helper's failure-archive receipt on stdout.
-    receipt_stream = r"01[EO]" if target_owned and status == "failed" else "01E"
+    # The reviewed hosted Windows custom executor also relays successful uploads on stdout.
+    windows_runner = not explicit_origin and _hosted_windows_archive_runner(job)
+    accepts_stdout = windows_runner or (target_owned and status == "failed")
+    receipt_stream = r"01[EO]" if accepts_stdout else "01E"
     reply = (
         rf'{receipt_stream} Uploading artifacts as "archive" to coordinator\.\.\. 201 Created +'
         rf"correlation_id={correlation} id={job_id} (?:status=201|responseStatus=201 Created)"
@@ -889,6 +878,22 @@ def _detached_archive(
         if success
         else "fork archive is outside the failure-upload phase",
     )
+    windows_stdout_receipt = windows_runner and response["value"].startswith("01O ")
+    if target_owned or explicit_origin or windows_stdout_receipt:
+        source_file = data.get("source_file")
+        expected_url = (
+            f"{base}/api/v4/projects/{source_project}/"
+            f"repository/files/.gitlab-ci.yml?ref={revision}"
+        )
+        _need(
+            isinstance(source_file, dict)
+            and source_file["url"] == expected_url
+            and source_file["file_path"] == ".gitlab-ci.yml"
+            and source_file["commit_id"] == revision
+            and source_file["content_sha256"] == source_hash
+            and (not windows_stdout_receipt or job["commit"]["id"] == revision),
+            "saved fork configuration record does not match the selected checkout and bytes",
+        )
     publication = _archive_receipt(job_url, log, response, archives[0]["size"])
     result = {
         "state": (
@@ -936,6 +941,15 @@ def _detached_archive(
                 "reason": "archive tree requires a GitLab.com target-project job",
             }
         )
+    if "archive_windows_helper" in data:
+        result["archive_windows_helper"] = (
+            _windows_archive_helper(data["archive_windows_helper"], log, job)
+            if (target_owned and not explicit_origin) or windows_stdout_receipt
+            else {
+                "state": "unresolved",
+                "reason": "requires the reviewed GitLab.com Windows upload profile",
+            }
+        )
     if isinstance(history, dict):
         result["historical_pipeline"] = {
             "url": history["url"],
@@ -971,6 +985,80 @@ def _detached_archive(
             data, root, archive_bytes, result
         )
     return result
+
+
+def _hosted_windows_archive_runner(job: _Row) -> bool:
+    runner, manager = job.get("runner"), job.get("runner_manager")
+    return (
+        isinstance(runner, dict)
+        and isinstance(manager, dict)
+        and manager.get("revision") == "d22d8753"
+        and runner.get("is_shared") is True
+        and runner.get("description") == "k8s.saas-windows-medium-amd64.runners-manager.gitlab.com"
+    )
+
+
+def _windows_archive_helper(evidence: _Row, log: _Row, job: _Row) -> _Row:
+    """Bind the helper's reported version to the owned upload phase."""
+    try:
+        _need(
+            _identifier(evidence["job"], "Windows uploader job") == log["job"]
+            and evidence["trace_url"] == log["url"]
+            and evidence["trace_sha256"] == log["sha256"]
+            and evidence["executor"] == "custom"
+            and _hosted_windows_archive_runner(job),
+            "Windows uploader evidence belongs to another trace or executor",
+        )
+        start, response, _ = log["rows"][-3:]
+        version, revision, platform = evidence["banner"]
+        rows = (start, version, revision, platform, response)
+        _need(
+            all(
+                _identifier(a["line"], "Windows uploader trace line")
+                < _identifier(b["line"], "Windows uploader trace line")
+                and _time(a["time"], "Windows uploader trace time")
+                <= _time(b["time"], "Windows uploader trace time")
+                for a, b in pairwise(rows)
+            ),
+            "Windows helper banner is outside the owning archive request",
+        )
+        _need(
+            (
+                version["value"],
+                revision["value"],
+                platform["value"],
+            )
+            == (
+                "01O Version:      19.3.0",
+                "01O Git revision: 9cbf0074",
+                "01O OS/Arch:      windows/amd64",
+            )
+            and all(
+                hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+                == row["sha256"]
+                for row in (version, revision, platform)
+            ),
+            "Windows helper banner does not match the reviewed release",
+        )
+        return {
+            "state": "windows-helper-version-reported",
+            "executor": "custom",
+            "platform": "windows/amd64",
+            "version": "19.3.0",
+            "revision": "9cbf0074ddb0e2f79d79f44406cafebf09117b64",
+            "banner_lines": [row["line"] for row in (version, revision, platform)],
+            "archive_response_line": response["line"],
+            "scope": (
+                "The upload phase reports the helper version. The reviewed stock uploader uses "
+                "the runner job-token class for the archive POST. Actual process bytes, "
+                "credential identity, and permission beyond this operation remain unverified."
+            ),
+        }
+    except RegistryJobError as exc:
+        reason = str(exc)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        reason = "Windows helper evidence is incomplete or malformed"
+    return {"state": "unresolved", "reason": reason}
 
 
 def _archive_tree_member(receipt: _Row, root: Path, result: _Row) -> _Row:
