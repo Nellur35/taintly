@@ -848,6 +848,74 @@ def test_advanced_mr_head_requires_exact_detached_pipeline_view(tmp_path, fork_u
         assert result["historical_pipeline"]["current_mr_head"] == BASE
 
 
+@pytest.mark.parametrize(
+    ("status", "contrast"),
+    [
+        ("success", None),
+        ("failed", None),
+        ("running", None),
+        ("success", "missing-source"),
+        ("success", "different-checkout"),
+        ("success", "foreign-parent"),
+        ("success", "before-job-finish"),
+        ("success", "wrong-phase"),
+        ("success", "pages-handoff"),
+    ],
+)
+def test_completed_fork_job_archive_with_live_parent(tmp_path, fork_upload, status, contrast):
+    pipeline = fork_upload["pipeline"]
+    pipeline.update(status="running", updated_at=time(1))
+    job = fork_upload["job"]
+    job.update(status=status, commit={"id": HEAD})
+    if status == "success":
+        job["failure_reason"] = None
+    if status == "success" and contrast != "wrong-phase":
+        rows = fork_upload["log"]["rows"]
+        for index in (5, 7):
+            row = rows[index]
+            rows[index] = _failure_trace_row(
+                row["time"], row["value"].replace("on_failure", "on_success")
+            )
+    receipt = {
+        "url": "https://gitlab.com/api/v4/projects/2/pipelines/22",
+        "http_status": 200,
+        "observed_at": job["finished_at"],
+        "sha256": "a" * 64,
+    }
+    fork_upload["live_pipeline_receipt"] = receipt
+    if contrast != "missing-source":
+        fork_upload["source_file"] = {
+            "url": f"https://gitlab.com/api/v4/projects/2/repository/files/.gitlab-ci.yml?ref={HEAD}",
+            "file_path": ".gitlab-ci.yml",
+            "commit_id": HEAD,
+            "content_sha256": hashlib.sha256(BUILDSPEC.encode()).hexdigest(),
+        }
+    if contrast == "different-checkout":
+        job["commit"]["id"] = BASE
+    if contrast == "foreign-parent":
+        receipt["url"] = receipt["url"].replace("/22", "/23")
+    if contrast == "before-job-finish":
+        receipt["observed_at"] = pipeline["updated_at"]
+    if contrast == "pages-handoff":
+        fork_upload["pages_handoff"] = {}
+
+    result = _evaluate_fork(tmp_path, fork_upload)
+
+    if status == "running" or contrast not in {None, "pages-handoff"}:
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+    else:
+        assert result["state"] == "fork-project-archive-upload-observed"
+        assert result["pipeline_status"] == "running"
+        assert result["job_status"] == status
+        assert result["publication"]["http_status"] == 201
+        if contrast == "pages-handoff":
+            assert result["pages_handoff"] == {
+                "state": "unresolved",
+                "reason": "Pages handoff needs a terminal fork pipeline inventory",
+            }
+
+
 @pytest.mark.parametrize("suffix", ["status=201", "responseStatus=201 Created"])
 def test_fork_archive_acceptance_identifies_fork_and_parent_separately(tmp_path, fork_upload, suffix):
     row = fork_upload["log"]["rows"][6]

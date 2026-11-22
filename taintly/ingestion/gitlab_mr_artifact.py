@@ -624,6 +624,7 @@ def _archive_upload_rows(
     label: str,
     *,
     accept_plain_start: bool = False,
+    live_parent_observed_at: datetime | None = None,
 ) -> tuple[str, _Row]:
     _need("rows_format" not in log, "unsupported timestamped archive runner row format")
     rows = log["rows"]
@@ -680,13 +681,19 @@ def _archive_upload_rows(
             all(left < right for left, right in pairwise(positions)),
             "shared trace time lacks ordered runner row positions",
         )
+    parent_updated_at = _time(pipeline["updated_at"], "owning pipeline last update")
+    if live_parent_observed_at is not None:
+        _need(
+            parent_updated_at <= live_parent_observed_at,
+            "live pipeline receipt predates the saved parent update",
+        )
     _need(
         _time(pipeline["created_at"], "owning pipeline creation")
         <= _time(job["started_at"], f"{job_label} start")
         <= times[0]
         < times[-1]
         <= _time(job["finished_at"], f"{job_label} end")
-        <= _time(pipeline["updated_at"], "owning pipeline last update")
+        <= (live_parent_observed_at or parent_updated_at)
         and all(a <= b for a, b in pairwise(times)),
         f"saved {label} runner rows are outside the job or out of phase order",
     )
@@ -746,6 +753,13 @@ def _detached_archive(
     membership = data["mr_pipeline"]
     current_head = _value(mr["sha"], _SHA, "current MR head")
     history = data.get("historical_pipeline")
+    live_fork = (
+        not target_owned
+        and not explicit_origin
+        and pipeline["status"] == "running"
+        and history is None
+        and job["status"] in {"success", "failed"}
+    )
     if explicit_origin:
         _need(
             not {
@@ -794,7 +808,7 @@ def _detached_archive(
         _identifier(pipeline["id"], "detached pipeline") == pipeline_id
         and pipeline["project_id"] == owner
         and pipeline["source"] == "merge_request_event"
-        and (canceled or pipeline["status"] in {"success", "failed"})
+        and (live_fork or canceled or pipeline["status"] in {"success", "failed"})
         and pipeline["ref"] == ref
         and pipeline["web_url"] == pipeline_url
         and all(
@@ -830,6 +844,7 @@ def _detached_archive(
         and job["web_url"] == job_url
         and (canceled or success or status == "failed")
         and job.get("failure_reason") == expected_failure
+        and (not live_fork or job["commit"]["id"] == revision)
         and all(
             job["pipeline"][key] == pipeline[key]
             for key in ("id", "project_id", "sha", "ref", "source")
@@ -875,8 +890,30 @@ def _detached_archive(
         rf"correlation_id={correlation} id={job_id} (?:status=201|responseStatus=201 Created)"
     )
     trace_label = "target-project-job" if target_owned else "fork-job"
+    live_parent_observed_at = None
+    if live_fork:
+        receipt = data.get("live_pipeline_receipt")
+        if not (
+            isinstance(receipt, dict)
+            and receipt.get("url")
+            == f"https://gitlab.com/api/v4/projects/{owner}/pipelines/{pipeline_id}"
+            and type(receipt.get("http_status")) is int
+            and receipt["http_status"] == 200
+            and isinstance(receipt.get("sha256"), str)
+            and _SHA256.fullmatch(receipt["sha256"])
+        ):
+            raise RegistryJobError(
+                "the completed fork job needs a dated observation of its live pipeline"
+            )
+        live_parent_observed_at = _time(receipt.get("observed_at"), "live pipeline observation")
     phase, response = _archive_upload_rows(
-        log, pipeline, job, reply, trace_label, accept_plain_start=canceled
+        log,
+        pipeline,
+        job,
+        reply,
+        trace_label,
+        accept_plain_start=canceled,
+        live_parent_observed_at=live_parent_observed_at,
     )
     expected_phase = "upload_artifacts_on_success" if success else "upload_artifacts_on_failure"
     _need(
@@ -886,7 +923,7 @@ def _detached_archive(
         else "fork archive is outside the failure-upload phase",
     )
     windows_stdout_receipt = windows_runner and response["value"].startswith("01O ")
-    if target_owned or explicit_origin or windows_stdout_receipt:
+    if target_owned or explicit_origin or windows_stdout_receipt or live_fork:
         source_file = data.get("source_file")
         expected_url = (
             f"{base}/api/v4/projects/{source_project}/"
@@ -935,6 +972,8 @@ def _detached_archive(
     }
     if explicit_origin:
         result["origin"] = base
+    if live_parent_observed_at is not None:
+        result["pipeline_status"] = pipeline["status"]
     if target_owned:
         result["source_repository"] = source_path
         result["source_project"] = source_project
@@ -981,13 +1020,21 @@ def _detached_archive(
             publication["retrieval"] = "verified"
             result["scope"] = download["scope"]
     if "pages_handoff" in data:
-        from taintly.ingestion.gitlab_pages_handoff import pages_handoff
+        if live_fork:
+            result["pages_handoff"] = {
+                "state": "unresolved",
+                "reason": "Pages handoff needs a terminal fork pipeline inventory",
+            }
+        else:
+            from taintly.ingestion.gitlab_pages_handoff import pages_handoff
 
-        result["pages_handoff"] = pages_handoff(data, root)
+            result["pages_handoff"] = pages_handoff(data, root)
     if "archive_member_origin" in data:
         result["archive_member_origin"] = coverage_source_observation(
             data, root, archive_bytes, result
         )
+    if live_parent_observed_at is not None:
+        result["scope"] += " The parent pipeline was still running in the saved observation."
     return result
 
 
