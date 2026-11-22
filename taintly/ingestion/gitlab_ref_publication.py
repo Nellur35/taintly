@@ -56,47 +56,68 @@ def _shared_template(data: _Row, cfg: _Config, root: Path, revision: str) -> _Co
     common, template = data["shared_common"], data["historical_template"]
     repository = _value(template["repository"], _PROJECT, "shared template repository")
     template_revision = _value(template["commit_id"], _SHA, "historical template revision")
+    common_revision = _value(common["commit_id"], _SHA, "shared configuration revision")
     _need(
         common["repository"] == repository
         and common["file_path"] == _COMMON_PATH
-        and template["file_path"] == _TEMPLATE_PATH,
-        "shared materialization belongs to another project or path",
+        and template["file_path"] == _TEMPLATE_PATH
+        and template_revision == common_revision,
+        "nested local template must share the containing file project and revision",
     )
+    cfg.owner(("include",))
     include: tuple[object, ...] = ("include", 0)
+    fields = {key[-1] for key in cfg.keys if key[:-1] == include}
     if cfg.keys[(*include, "local")]:
         _need(
-            cfg.scalar((*include, "local")).value == _COMMON_PATH
+            fields == {"local"}
+            and cfg.scalar((*include, "local")).value == _COMMON_PATH
             and repository == data["repository"]
             and common["commit_id"] == revision,
             "local shared configuration does not belong to the selected source revision",
         )
     else:
         _need(
-            cfg.scalar((*include, "project")).value == repository
+            fields == {"project", "file", "ref"}
+            and cfg.scalar((*include, "project")).value == repository
             and cfg.scalar((*include, "file")).value == _COMMON_PATH
-            and cfg.scalar((*include, "ref")).value == _BRANCH
-            and common["commit_id"] == template_revision,
+            and cfg.scalar((*include, "ref")).value == _BRANCH,
             "project include does not identify the shared configuration",
         )
     reader = _configuration(root, common, "cki-common.yml", "shared configuration")
-    url = f"https://gitlab.com/{repository}/-/raw/{_BRANCH}/{_TEMPLATE_PATH}"
-    remote = [
-        key
+    reader.owner(("include",))
+    local = [
+        key[:-1]
         for key in reader.leaves
         if len(key) == 3
         and key[0] == "include"
-        and key[2] == "remote"
-        and reader.scalar(key).value == url
+        and key[2] == "local"
+        and reader.scalar(key).value == _TEMPLATE_PATH
     ]
-    _need(len(remote) == 1, "shared configuration does not identify the recorded template include")
+    _need(len(local) == 1, "shared configuration has no unique local template include")
+    selector = local[0]
+    _need(
+        {key[-1] for key in reader.keys if key[:-1] == selector} == {"local", "rules"}
+        and reader.scalar((*selector, "rules", 0, "if")).value
+        == '($CI_SERVER_URL == "https://gitlab.com")'
+        and set(key for key in reader.leaves if key[: len(selector) + 1] == (*selector, "rules"))
+        == {(*selector, "rules", 0, "if")}
+        and not any(
+            key[-2:] == ("variables", "CI_SERVER_URL") for c in (cfg, reader) for key in c.keys
+        ),
+        "local template is outside the supported GitLab.com include condition",
+    )
     return _configuration(root, template, "cki-templates.yml", "shared template")
 
 
 def _source_plan(data: _Row, root: Path, revision: str) -> _Row:
     source, template = data["source"], data["historical_template"]
-    _need(source["commit_id"] == revision, "root source does not own the selected checkout")
+    _need(
+        source["commit_id"] == revision and source["file_path"] == ".gitlab-ci.yml",
+        "root source does not own the selected checkout",
+    )
     cfg = _configuration(root, source, ".gitlab-ci.yml", "root configuration")
     library = _shared_template(data, cfg, root, revision)
+    cfg.owner((_JOB,))
     inherit = cfg.scalar((_JOB, "extends"))
     names = [entry.value for entry in library.sequence((".deploy_production_tag", "extends"))]
     target = library.scalar((".deploy_production", "variables", "DEPLOY_TAG"))
@@ -166,6 +187,8 @@ def _unstarted(data: _Row, identity: _Row) -> _Row:
         and _identifier(mr["source_project_id"], "fork project") != identity["project"]
         and isinstance(parents, list)
         and len(parents) == 2
+        and parents[0] != parents[1]
+        and identity["revision"] not in parents
         and _value(parents[0], _SHA, "target parent")
         and _value(parents[1], _SHA, "fork parent") == mr["source_head"],
         "saved evidence does not identify a target-owned fork merged result",
@@ -246,7 +269,10 @@ def _observed_write(data: _Row, identity: _Row) -> _Row:
     _need(
         run["ref"] == "main"
         and job["status"] == "success"
-        and _time(job["started_at"], "job start") <= when <= _time(job["finished_at"], "job end")
+        and _time(run["created_at"], "pipeline creation")
+        <= _time(job["started_at"], "job start")
+        <= when
+        <= _time(job["finished_at"], "job end")
         and first < _identifier(trace["step_start"], "script start") < push < final
         and trace["url"] == job["web_url"] + "/raw"
         and revision.startswith(_value(checkout["revision_prefix"], _PREFIX, "checkout prefix"))

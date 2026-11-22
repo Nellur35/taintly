@@ -594,6 +594,51 @@ saved projections.
   `include_retried=true&per_page=25`. Preserve `next_page` from the
   `X-Next-Page` header and the empty job list.
 
+## Saved GitLab production branch publication
+
+```sh
+taintly . --format json --gitlab-ref-observation observation.json PROJECT PIPELINE JOB
+```
+
+Use this offline profile for a trusted GitLab.com receipt for a selected
+`deploy-production` job using the supported shared branch-deployment
+template. It corroborates a native update to `refs/heads/production` or
+records that the selected external merged-result publisher remained
+manual or skipped before it got a runner.
+
+Use the `gitlab-production-ref-v1` JSON schema. Save the source files as
+`.gitlab-ci.yml`, `cki-common.yml` and `cki-templates.yml` under the
+input directory. The receipt includes these records:
+
+- `repository`, the project path, and the selected `pipeline` and `job`
+  from the provider. Include their IDs, project, checkout, ref and URLs.
+  A write needs the pipeline creation time and job start/finish times.
+- `source`, `shared_common` and `historical_template` with the original
+  `file_path`, content SHA-256 and commit ID. Shared records also need
+  their repository. Bind the nested local template to the repository
+  and revision of the containing configuration.
+- `trace`, with the selected job log URL and SHA-256. A write also
+  needs the checkout and write line references and ref/commit details
+  within the owning script phase. `ref_event` supplies the provider
+  event ID, actor ID, project, timestamp, action, ref type and before
+  and after commits for the exact branch update.
+- For an unstarted publisher, save the MR source/target and source
+  head, two merged-checkout parents, MR pipeline membership, the job's
+  status and empty start/finish/runner fields, and the empty trace
+  size and digest.
+- For the branch-rule comparison, save the exact project branch rule
+  URL and read time, its ID, name and inheritance status, and the
+  user-specific push entries. The result joins by numeric writer ID.
+
+A resolved observation exits 0. Incomplete or conflicting evidence
+exits 11. Missing or inconsistent branch-rule evidence leaves the
+rule comparison unresolved while preserving a verified historical
+write. Preserve the provider records with the receipt to review
+their provenance. The command does not connect to GitLab or run the
+saved commands. Compiled runtime configuration, credential contents,
+historical policy and whether a future fork request can write require
+separate evidence.
+
 ## Saved GitLab merge-request image pushes
 
 The same `--gitlab-mr-artifact-observation` command also reads
