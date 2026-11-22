@@ -462,8 +462,8 @@ handoff and retains uncertainty about live serving and broader authority.
 Missing or conflicting optional evidence returns exit 11 while retaining
 a verified fork archive.
 
-For a successful MR job that runs in the target project and checks out the
-fork head directly, use `gitlab-target-project-head-archive-v1`. Pass the
+For an MR job that runs in the target project and checks out the fork head
+directly, use `gitlab-target-project-head-archive-v1`. Pass the
 target project ID. Supply the same project, MR membership, commit, job,
 source and trace records, with these requirements.
 
@@ -474,10 +474,14 @@ source and trace records, with these requirements.
   `source_file` with the saved fork file response's `file_path`,
   `commit_id` and `content_sha256`, plus the canonical API URL
   `https://gitlab.com/api/v4/projects/FORK_ID/repository/files/.gitlab-ci.yml?ref=SHA`.
-- Both pipeline and job succeeded. The ordered trace must show checkout
-  of that head, the script section, and the owning job's HTTP 201 in the
-  success-upload section. This profile accepts the archive receipt alone
-  or with the same optional download evidence and byte limit as above.
+- Both pipeline and job succeeded or both failed with a script failure
+  recorded for the job. The ordered trace must show checkout of that head,
+  the script section, and the owning job's HTTP 201 in the corresponding
+  success- or failure-upload section. The report retains the job status
+  separately from archive acceptance. Use the canonical project paths
+  from the saved provider records, including capitalization. This
+  profile accepts the archive receipt alone or with the same optional
+  download evidence and byte limit as above.
 - Optional `archive_runner_evidence` uses the verified runner and helper
   profile below. The saved checkout directory must name the target project
   under `/builds/`. The trace digest, upload lines, timestamps and correlation
@@ -491,6 +495,19 @@ provenance and deployment require separate evidence. A stale MR head,
 failed admission with no job, mismatched job or missing 201 stays unresolved.
 A missing or mismatched optional download does not undo the observed
 upload. An explicitly supplied incompatible download exits 11.
+
+
+To check whether the accepted target job archive lists one specific root
+file, supply the unmodified response body from
+`https://gitlab.com/api/v4/projects/PROJECT_ID/jobs/JOB_ID/artifacts/tree`
+with no query parameters as `archive-tree.json`. Add an `archive_tree`
+entry to the saved packet with numeric `project` and `job`, exact `url`,
+integer `status` 200, UTC `observed_at`, response-body `sha256`, and the
+selected filename as `member`. The listing must follow the upload
+observation. The CLI reports the matching filename and its provider
+reported size. ZIP bytes, content origin and later access require
+separate evidence. An invalid supplied listing returns exit `11` and
+retains the observed upload.
 
 To compare one Go coverage panel in that verified ZIP with its source, add
 `archive_member_origin` with `format: go-cover-html-v1`, the HTML `member`,
