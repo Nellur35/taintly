@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections import Counter
 from datetime import datetime
@@ -22,8 +23,10 @@ from taintly.ingestion.gitlab_registry_job import (
     _identifier,
     _load_job_receipt,
     _owned_workflow_events,
+    _parse_int,
     _source_bytes,
     _time,
+    _unique_keys,
     _value,
 )
 from taintly.parsers.structural import Event, EventKind
@@ -924,6 +927,15 @@ def _detached_archive(
         result["source_repository"] = source_path
         result["source_project"] = source_project
         result["job_name"] = _value(job["name"], _FAILED_JOB, "target-project job name")
+    if "archive_tree" in data:
+        result["archive_tree"] = (
+            _archive_tree_member(data["archive_tree"], root, result)
+            if target_owned and not explicit_origin
+            else {
+                "state": "unresolved",
+                "reason": "archive tree requires a GitLab.com target-project job",
+            }
+        )
     if isinstance(history, dict):
         result["historical_pipeline"] = {
             "url": history["url"],
@@ -959,6 +971,58 @@ def _detached_archive(
             data, root, archive_bytes, result
         )
     return result
+
+
+def _archive_tree_member(receipt: _Row, root: Path, result: _Row) -> _Row:
+    """Verify one root entry in the saved native listing of the accepted archive."""
+    try:
+        project, job = result["project"], result["job"]
+        url = f"https://gitlab.com/api/v4/projects/{project}/jobs/{job}/artifacts/tree"
+        _need(
+            _identifier(receipt["project"], "archive tree project") == project
+            and _identifier(receipt["job"], "archive tree job") == job
+            and receipt["url"] == url
+            and _identifier(receipt["status"], "archive tree HTTP status") == 200
+            and _time(receipt["observed_at"], "archive tree observation time")
+            >= _time(result["publication"]["reported_at"], "archive upload time"),
+            "archive tree receipt does not match the selected job and upload",
+        )
+        name = _value(
+            receipt["member"], re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,239}"), "archive member"
+        )
+        raw = _source_bytes(root, root / "archive-tree.json", "archive tree", max_bytes=131_072)
+        digest = hashlib.sha256(raw).hexdigest()
+        _need(digest == receipt["sha256"], "saved archive tree does not match its receipt")
+        entries = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_unique_keys, parse_int=_parse_int
+        )
+        _need(isinstance(entries, list), "saved archive tree is not a native listing")
+        matches = [
+            entry
+            for entry in entries
+            if isinstance(entry, dict) and (entry.get("name") == name or entry.get("path") == name)
+        ]
+        _need(
+            len(matches) == 1
+            and matches[0].get("name") == matches[0].get("path") == name
+            and matches[0].get("type") == "file"
+            and type(matches[0].get("size")) is int
+            and matches[0]["size"] >= 0,
+            "saved archive tree does not identify the selected root file uniquely",
+        )
+        return {
+            "state": "archive-member-listed",
+            "member": name,
+            "member_bytes": matches[0]["size"],
+            "url": url,
+            "observed_at": receipt["observed_at"],
+            "tree_sha256": digest,
+        }
+    except RegistryJobError as exc:
+        reason = str(exc)
+    except (AttributeError, KeyError, TypeError, ValueError, RecursionError, OverflowError):
+        reason = "saved archive tree receipt is incomplete or malformed"
+    return {"state": "unresolved", "reason": reason}
 
 
 def _recorded_archive_download(

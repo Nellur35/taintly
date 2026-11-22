@@ -1162,6 +1162,7 @@ def target_head_upload(fork_upload):
         "foreign-file",
         "missing-history",
         "bad-epoch",
+        "foreign-tree",
     ],
 )
 def test_explicit_origin_binds_canceled_detached_archive(tmp_path, target_head_upload, contrast):
@@ -1212,6 +1213,18 @@ def test_explicit_origin_binds_canceled_detached_archive(tmp_path, target_head_u
         )
     elif contrast == "missing-history":
         del data["historical_pipeline"]
+    elif contrast == "foreign-tree":
+        body = b'[{"name":"build.zip","path":"build.zip","type":"file","size":25}]'
+        (tmp_path / "archive-tree.json").write_bytes(body)
+        data["archive_tree"] = {
+            "project": 1,
+            "job": 33,
+            "member": "build.zip",
+            "url": "https://gitlab.com/api/v4/projects/1/jobs/33/artifacts/tree",
+            "status": 200,
+            "observed_at": data["job"]["finished_at"],
+            "sha256": hashlib.sha256(body).hexdigest(),
+        }
     elif contrast == "bad-epoch":
         rows[5] = _failure_trace_row(
             rows[5]["time"], re.sub(r"section_start:\d+:", "section_start:0:", rows[5]["value"])
@@ -1222,10 +1235,12 @@ def test_explicit_origin_binds_canceled_detached_archive(tmp_path, target_head_u
     packet = tmp_path / "observation.json"
     packet.write_text(json.dumps(data), encoding="utf-8")
     result = mr_artifact_observation(packet, tmp_path, 1, 22, 33, origin=origin)
-    if contrast is not None:
+    if contrast not in {None, "foreign-tree"}:
         assert result["state"] == "unresolved"
         assert "publication" not in result
         return
+    if contrast == "foreign-tree":
+        assert result["archive_tree"]["state"] == "unresolved"
     assert result["state"] == "target-project-head-archive-accepted-canceled-job"
     assert result["job_status"] == "canceled"
     assert result["historical_pipeline"]["current_mr_head"] == BASE
@@ -1351,6 +1366,50 @@ def test_target_head_failure_binds_own_archive_and_preserves_job_result(
     else:
         assert result["state"] == "unresolved"
         assert "publication" not in result
+
+
+@pytest.mark.parametrize(
+    "contrast",
+    [None, "wrong-job", "wrong-url", "stale", "denied", "float-status", "digest", "duplicate", "other-member"],
+)
+def test_target_archive_tree_qualifies_named_member(tmp_path, target_head_upload, contrast):
+    data = target_head_upload
+    entry = {"name": "build.zip", "path": "build.zip", "type": "file", "size": 25}
+    body = json.dumps([entry, entry] if contrast == "duplicate" else [entry]).encode()
+    (tmp_path / "archive-tree.json").write_bytes(body)
+    tree = {
+        "project": 1,
+        "job": 33,
+        "member": "build.zip",
+        "url": "https://gitlab.com/api/v4/projects/1/jobs/33/artifacts/tree",
+        "status": 200,
+        "observed_at": data["job"]["finished_at"],
+        "sha256": hashlib.sha256(body).hexdigest(),
+    }
+    data["archive_tree"] = tree
+    if contrast == "wrong-job":
+        tree["job"] = 34
+    elif contrast == "wrong-url":
+        tree["url"] += "?path=other"
+    elif contrast == "stale":
+        tree["observed_at"] = data["job"]["started_at"]
+    elif contrast == "denied":
+        tree["status"] = 403
+    elif contrast == "float-status":
+        tree["status"] = 200.0
+    elif contrast == "digest":
+        tree["sha256"] = hashlib.sha256(b"foreign").hexdigest()
+    elif contrast == "other-member":
+        tree["member"] = "other.zip"
+    result = _evaluate_fork(tmp_path, data, 1)
+    assert result["state"] == "target-project-head-archive-upload-observed"
+    assert result["publication"]["retrieval"] == "unverified"
+    if contrast is None:
+        assert result["archive_tree"]["state"] == "archive-member-listed"
+        assert result["archive_tree"]["member"] == "build.zip"
+        assert result["archive_tree"]["member_bytes"] == 25
+    else:
+        assert result["archive_tree"]["state"] == "unresolved"
 
 
 @pytest.mark.parametrize("bad_download", [False, True])

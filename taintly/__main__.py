@@ -2177,6 +2177,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
     preview = report.get("pages_preview")
     preview_account = preview.get("account") if preview is not None else None
     archive_download = report.get("archive_download")
+    archive_tree = report.get("archive_tree")
     archive_authority = report.get("archive_runner_authority")
     member_origin = report.get("archive_member_origin")
     handoff = report.get("pages_handoff")
@@ -2307,6 +2308,15 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
                     print(f"Pages deployment account unresolved: {preview_account['reason']}.")
         else:
             print(f"Pages preview unresolved: {preview['reason']}.")
+    if archive_tree is not None and args.format == "text":
+        if archive_tree["state"] == "archive-member-listed":
+            print(
+                f"  Saved archive listing names {archive_tree['member']} "
+                f"({archive_tree['member_bytes']} bytes) at {archive_tree['observed_at']}. "
+                "Member bytes and content origin require separate evidence."
+            )
+        else:
+            print(f"GitLab archive member listing unresolved: {archive_tree['reason']}.")
     if archive_download is not None and args.format == "text":
         if archive_download["state"] != "unresolved":
             print(f"  Retrieved ZIP SHA-256: {archive_download['sha256']}.")
@@ -2379,6 +2389,7 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             preview,
             preview_account,
             archive_download,
+            archive_tree,
             member_origin,
             archive_authority,
             handoff,
