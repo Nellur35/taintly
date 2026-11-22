@@ -265,8 +265,8 @@ def _native_archive_authority(
     project_path: str,
     upload: _Row,
     *,
-    detached_log: _Row | None = None,
-    detached_owner: str = "fork",
+    phase_rows: tuple[_Row, _Row, _Row] | None = None,
+    phase_owner: str = "fork",
 ) -> _Row:
     """Bind the known native uploader to this previously corroborated archive."""
     try:
@@ -314,7 +314,7 @@ def _native_archive_authority(
         )
         correlation = _value(evidence["correlation_id"], _CORRELATION, "archive correlation ID")
         trace_digest = _value(evidence["trace_sha256"], _SHA256, "runner trace digest")
-        if detached_log is None:
+        if phase_rows is None:
             # The compact trace already corroborates the successful upload.
             # Bind its original response identity before adding a credential.
             _need(
@@ -325,19 +325,19 @@ def _native_archive_authority(
                 "runner evidence does not match the verified merged-job archive response",
             )
         else:
-            phase_start, phase_reply, phase_end = detached_log["rows"][-3:]
+            phase_start, phase_reply, phase_end = phase_rows
             phase_spans = [
                 (
-                    _identifier(row["line"], f"{detached_owner} archive trace line"),
-                    _time(row["time"], f"{detached_owner} archive trace time"),
+                    _identifier(row["line"], f"{phase_owner} archive trace line"),
+                    _time(row["time"], f"{phase_owner} archive trace time"),
                 )
                 for row in (phase_start, phase_reply, phase_end)
             ]
             _need(
-                trace_digest == detached_log["sha256"]
+                trace_digest == upload.get("trace_sha256")
                 and phase_spans == list(zip(lines[2:], (start, received, finish), strict=True))
                 and f" correlation_id={correlation} " in phase_reply["value"],
-                f"runner evidence does not match the verified {detached_owner} archive response",
+                f"runner evidence does not match the verified {phase_owner} archive response",
             )
         return {
             "state": "native-archive-write-observed",
@@ -932,9 +932,13 @@ def _detached_archive(
             data,
             job_url,
             target_path if target_owned else source_path,
-            {"time": response["time"], "http_status": publication["http_status"]},
-            detached_log=log,
-            detached_owner="target-project" if target_owned else "fork",
+            {
+                "time": response["time"],
+                "http_status": publication["http_status"],
+                "trace_sha256": log["sha256"],
+            },
+            phase_rows=(log["rows"][-3], response, log["rows"][-1]),
+            phase_owner="target-project" if target_owned else "fork",
         )
     archive_bytes = None
     if "archive_download" in data:
@@ -1481,14 +1485,30 @@ def _assess(
         if "pages_preview" in data:
             detail["pages_preview"] = _pages_preview(data, cfg, detail, path, job_url)
     if "archive_runner_evidence" in data:
-        detail["archive_runner_authority"] = (
-            _native_archive_authority(data, job_url, path, data["trace"][-1])
-            if detail["state"] == "job-artifact-observed"
-            else {
+        if failed_archive:
+            log = data["failed_archive"]["log"]
+            start, _, response, end, _ = log["rows"][-5:]
+            detail["archive_runner_authority"] = _native_archive_authority(
+                data,
+                job_url,
+                path,
+                {
+                    "time": response["time"],
+                    "http_status": detail["publication"]["http_status"],
+                    "trace_sha256": log["sha256"],
+                },
+                phase_rows=(start, response, end),
+                phase_owner="failed-job",
+            )
+        elif detail["state"] == "job-artifact-observed":
+            detail["archive_runner_authority"] = _native_archive_authority(
+                data, job_url, path, data["trace"][-1]
+            )
+        else:
+            detail["archive_runner_authority"] = {
                 "state": "unresolved",
                 "reason": "runner evidence requires an observed successful job archive",
             }
-        )
     if "pages_publication" in data:
         from taintly.ingestion.gitlab_pages_publication import pages_publication
 
