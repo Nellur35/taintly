@@ -251,6 +251,12 @@ def main():
         help="Check saved target-project fork MR artifact or manual job evidence.",
     )
     evidence_input.add_argument(
+        "--gitlab-ref-observation",
+        nargs=4,
+        metavar=("JSON", "PROJECT", "PIPELINE", "JOB"),
+        help="Check a saved GitLab production branch publisher outcome offline.",
+    )
+    evidence_input.add_argument(
         "--gitlab-fork-admission-observation",
         nargs=3,
         metavar=("JSON", "PROJECT", "PIPELINE"),
@@ -701,6 +707,9 @@ def main():
         return
     if args.gitlab_mr_artifact_observation:
         _check_gitlab_mr_artifact(parser, args)
+        return
+    if args.gitlab_ref_observation:
+        _check_gitlab_ref_observation(parser, args)
         return
     if args.gitlab_fork_admission_observation:
         _check_gitlab_fork_admission(parser, args)
@@ -2040,6 +2049,55 @@ def _check_jenkins_maven_snapshot(
     else:
         print(f"Maven snapshot write unresolved: {result['reason']}.\n{result['scope']}")
     sys.exit(0 if resolved and not incomplete_comparison else 11)
+
+
+def _check_gitlab_ref_observation(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    from taintly.ingestion.gitlab_ref_publication import ref_observation
+
+    mode = "gitlab_ref_observation"
+    allowed = {"path", mode, "platform", "format", "no_config", "no_color"}
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(
+                f"--{name.replace('_', '-')} is unavailable in GitLab ref observation mode"
+            )
+    if args.platform not in (None, "gitlab") or args.format not in ("text", "json"):
+        parser.error("GitLab ref observation mode requires gitlab and text or JSON format")
+    snapshot, project, pipeline, job = args.gitlab_ref_observation
+    if any(
+        not value.isascii() or not value.isdecimal() or len(value) > 18
+        for value in (project, pipeline, job)
+    ):
+        parser.error("GitLab ref observation mode requires decimal project, pipeline and job IDs")
+    report = ref_observation(Path(snapshot), Path(args.path), int(project), int(pipeline), int(job))
+    state = report["state"]
+    rule = report.get("current_rule")
+    incomplete = state == "unresolved" or (rule is not None and rule["state"] == "unresolved")
+    if args.format == "json":
+        print(json.dumps({mode: report}, indent=2))
+    elif state == "production-ref-update-observed":
+        print(
+            f"GitLab job {report['job']} recorded a write to {report['target']} by actor {report['actor']}.\n"
+            f"  {report['repository']} at {report['revision']}; provider event {report['event']}."
+        )
+        if rule is not None and rule["state"] == "writer-listed-in-current-project-rule":
+            print(
+                f"  Rule {rule['rule']} lists this actor in push entry {rule['entry']} "
+                f"at {rule['read_at']}."
+            )
+        elif rule is not None:
+            print(f"  Branch rule unresolved. {rule['reason']}.")
+        print(report["scope"])
+    elif state == "fork-publisher-not-started":
+        print(
+            f"GitLab fork MR !{report['mr']} publisher job {report['job']} was {report['job_status']} "
+            f"and did not start. Publication to {report['target']} was not reached.\n{report['scope']}"
+        )
+    else:
+        print(f"GitLab publication unresolved. {report['reason']}.\n{report['scope']}")
+    sys.exit(11 if incomplete else 0)
 
 
 def _check_gitlab_fork_admission(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
