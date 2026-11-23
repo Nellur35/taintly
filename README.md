@@ -21,7 +21,7 @@ Pure stdlib, zero deps — clone and run:
 ```bash
 git clone https://github.com/Nellur35/taintly.git
 cd taintly
-git checkout --detach a25451404a5b9e034565f2409bab3dddb3670a4e
+git checkout --detach e881504f662d75b9af0e28d00b250d323777beea
 python -m taintly /path/to/your/repo
 ```
 
@@ -62,9 +62,9 @@ The report distinguishes review-needed findings and incomplete analysis.
 **GitHub Actions** — after checking out the target repository:
 
 ```yaml
-- uses: Nellur35/taintly@a25451404a5b9e034565f2409bab3dddb3670a4e  # reviewed commit
+- uses: Nellur35/taintly@e881504f662d75b9af0e28d00b250d323777beea  # reviewed commit
   with:
-    version: a25451404a5b9e034565f2409bab3dddb3670a4e
+    version: e881504f662d75b9af0e28d00b250d323777beea
     fail-on: HIGH
 ```
 
