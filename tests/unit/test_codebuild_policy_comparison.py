@@ -109,6 +109,8 @@ def pair(tmp_path, monkeypatch):
         ("failed-policy", "unresolved", "exact bucket, S3 action, object and role denial"),
         ("same-build", "unresolved", "distinct earlier"),
         ("wrong-region", "unresolved", "same CodeBuild project"),
+        ("earlier-sts", "unresolved", "temporary credential belongs to another call"),
+        ("denied-sts", "unresolved", "temporary credential belongs to another call"),
         ("different-source", "unresolved", "build configuration, source or target"),
         ("other-revision", "unresolved", "build configuration, source or target"),
         ("same-request", "unresolved", "build configuration, source or target"),
@@ -142,6 +144,12 @@ def test_comparison_preserves_request_and_checks_exact_link(pair, tmp_path, defe
         earlier_build["arn"] = capture["build"]["arn"]
     elif defect == "wrong-region":
         earlier_build["arn"] = earlier_build["arn"].replace("us-east-1", "us-west-2")
+    elif defect in ("earlier-sts", "denied-sts"):
+        observation = earlier if defect == "earlier-sts" else denied
+        observation["publication"]["runtime_credential"] = {
+            "state": "unresolved",
+            "reason": "temporary credential belongs to another call",
+        }
     elif defect == "different-source":
         earlier_build["sourceVersion"] = "different-source"
     elif defect == "other-revision":

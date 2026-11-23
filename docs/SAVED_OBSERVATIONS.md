@@ -1458,6 +1458,10 @@ matched S3 data event. Keep the event identity and time and use
 `userIdentity.credential_id_sha256` for the STS event instead of its credential
 identifier. The report identifies the STS event and omits that identifier and
 its digest. Use captures made by a trusted operator and keep them private.
+If the optional STS record cannot be matched, the report preserves any
+independently verified S3 result and marks the temporary-credential join
+unresolved. A comparison using a conflicting STS record also remains
+unresolved. These cases return exit `11`.
 
 An optional `launch_event` can corroborate a same-account IAM user's
 `StartBuild` call. Preserve the CloudTrail management event identity,
