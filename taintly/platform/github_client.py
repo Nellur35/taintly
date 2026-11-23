@@ -145,8 +145,18 @@ class GitHubClient:
         return self._request(f"/repos/{owner_repo}/actions/permissions/workflow")
 
     def actions_permissions_access(self, owner_repo: str) -> dict[str, Any] | None:
-        """The fork-PR approval gate setting."""
+        """Access to this repository's actions and reusable workflows from other repositories."""
         return self._request(f"/repos/{owner_repo}/actions/permissions/access")
+
+    def fork_contributor_approval(self, owner_repo: str) -> dict[str, Any] | None:
+        return self._request(
+            f"/repos/{owner_repo}/actions/permissions/fork-pr-contributor-approval"
+        )
+
+    def private_fork_workflow_settings(self, owner_repo: str) -> dict[str, Any] | None:
+        return self._request(
+            f"/repos/{owner_repo}/actions/permissions/fork-pr-workflows-private-repos"
+        )
 
     def deploy_keys(self, owner_repo: str) -> list[dict[str, Any]]:
         data = self._request(f"/repos/{owner_repo}/keys")

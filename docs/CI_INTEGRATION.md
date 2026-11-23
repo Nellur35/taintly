@@ -430,6 +430,13 @@ See the [rule inventory](../README.md#coverage) for current counts.
 
 Local scans make no network calls. `--fix` calls `git ls-remote` to resolve action tags to commit SHAs. `--platform-audit`, `--github-org`, `--gitlab-group`, `--transitive`, and `--check-imposter-commits` call the GitHub or GitLab API and need a token.
 
+The GitHub posture check `PLAT-GH-005` reads the contributor approval
+policy for public repositories and the fork workflow settings for private
+repositories. Reading these settings requires repository Administration
+read access. The report describes configured admission to eligible workflows.
+The workflow event and the job's effective grant determine runtime access.
+Unavailable or unsupported settings produce an incomplete-analysis notice.
+
 GitLab group-source ingestion and project/group posture requests require an
 unambiguous HTTPS `GITLAB_URL` (default `https://gitlab.com`). HTTPS self-hosted
 prefixes are supported. In these routes, credentialed redirects stay on that

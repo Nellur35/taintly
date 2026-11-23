@@ -236,76 +236,101 @@ def check_branch_protection_requires_reviews(repo: str, client: GitHubClient) ->
 # ---------------------------------------------------------------------------
 
 
+def _fork_pr_approval_unknown(repo: str, reason: str) -> list[Finding]:
+    return [
+        Finding(
+            rule_id="ENGINE-ERR",
+            severity=Severity.LOW,
+            title="Platform check PLAT-GH-005 did not complete",
+            description=reason,
+            file=repo,
+            line=0,
+            origin="platform",
+        )
+    ]
+
+
 def check_fork_pr_approval_gate(repo: str, client: GitHubClient) -> list[Finding]:
-    """PLAT-GH-005: fork-PR workflow approval is not required.
+    """Check the configured fork workflow admission policy."""
+    try:
+        actions = client.actions_permissions_repo(repo)
+        enabled = actions.get("enabled") if isinstance(actions, dict) else None
+        if enabled is False:
+            return []
+        if enabled is not True:
+            return _fork_pr_approval_unknown(repo, "GitHub Actions enablement is unavailable.")
 
-    The API field is ``access_level`` under ``/actions/permissions/access``
-    for org-owned repos, or ``approval_for_external_contributors`` /
-    ``fork_pr_workflows_from_fork_contributors_permitted`` under
-    ``/actions/permissions``.  Different GitHub versions expose different
-    shapes; we check the most stable fields and treat anything other than
-    the strict options as a finding.
-    """
-    perms = client.actions_permissions_repo(repo)
-    if perms is None:
-        return []  # API not available or repo has Actions disabled
-
-    # The key field on many recent responses: fork PR workflows from first-
-    # time contributors can run without approval when this boolean is True.
-    #
-    # Field names observed across GitHub versions:
-    #   - fork_pr_workflows_from_fork_contributors_permitted (newer)
-    #   - allow_fork_pr_workflows_from_fork_collaborators (older)
-    #
-    # Normalise by checking any field whose name suggests allowance.
-    suspicious_allowed = any(
-        key.startswith(("allow_fork_pr", "fork_pr_workflows_from_fork")) and perms.get(key) is True
-        for key in perms
-    )
-
-    # "access level" shape — repositories can require approval based on
-    # organization membership tier.
-    access = client.actions_permissions_access(repo)
-    permissive_access = False
-    if access:
-        level = access.get("access_level")
-        # "none" = no cross-repo access is the tightest; anything else is
-        # already broader. We flag "organization" and "enterprise" only if
-        # they coincide with the boolean above.
-        permissive_access = level not in (None, "none")
-
-    if not (suspicious_allowed or permissive_access):
-        return []
+        metadata = client.repo(repo)
+        visibility = metadata.get("visibility") if isinstance(metadata, dict) else None
+        if visibility == "public":
+            settings = client.fork_contributor_approval(repo)
+            policy = settings.get("approval_policy") if isinstance(settings, dict) else None
+            if policy == "all_external_contributors":
+                return []
+            if policy not in ("first_time_contributors", "first_time_contributors_new_to_github"):
+                return _fork_pr_approval_unknown(
+                    repo, "GitHub's contributor approval policy is unavailable or unsupported."
+                )
+            description = (
+                f"GitHub reports the fork approval policy `{policy}` for {repo}. "
+                "Some external contributors can run eligible fork workflows without approval."
+            )
+            control = "select 'Require approval for all external contributors'"
+        elif visibility == "private":
+            settings = client.private_fork_workflow_settings(repo)
+            enabled = (
+                settings.get("run_workflows_from_fork_pull_requests")
+                if isinstance(settings, dict)
+                else None
+            )
+            if enabled is False:
+                return []
+            approval = (
+                settings.get("require_approval_for_fork_pr_workflows")
+                if isinstance(settings, dict)
+                else None
+            )
+            if enabled is not True or type(approval) is not bool:
+                return _fork_pr_approval_unknown(
+                    repo, "GitHub's private fork workflow settings are unavailable or unsupported."
+                )
+            if approval:
+                return []
+            description = (
+                f"GitHub reports that {repo} permits workflows from fork pull requests "
+                "and does not require approval for them."
+            )
+            control = "enable 'Require approval for fork pull request workflows'"
+        else:
+            return _fork_pr_approval_unknown(
+                repo, "Repository visibility is unavailable or outside the supported profile."
+            )
+    except APIError as exc:
+        return _fork_pr_approval_unknown(
+            repo, f"GitHub returned HTTP {exc.status} for the repository or fork policy settings."
+        )
+    except (OSError, ValueError):
+        return _fork_pr_approval_unknown(
+            repo, "GitHub's repository or fork policy settings could not be read."
+        )
 
     return [
         _finding(
             rule_id="PLAT-GH-005",
             severity=Severity.HIGH,
-            title="Fork pull-request workflows run without approval gate",
-            description=(
-                f"{repo}'s Actions settings permit workflows from fork "
-                "pull-requests to run without requiring approval from a "
-                "maintainer. An attacker can trigger any workflow simply "
-                "by opening a PR — the workflow runs with the same access "
-                "to repository secrets and tokens that a regular push "
-                "would have, unless the workflow itself gates that access."
-            ),
+            title="Fork workflow approval does not cover all external contributors",
+            description=description,
             repo=repo,
             remediation=(
-                "Settings > Actions > General > 'Approval for running fork "
-                "pull request workflows from contributors' > select "
-                "'Require approval for all outside collaborators' "
-                "(or 'Require approval for all external contributors' for "
-                "stricter policy). This is the setting that gates fork-PR "
-                "workflow execution; branch protection does NOT."
+                f"In Settings > Actions > General, {control}. Review fork-triggered jobs "
+                "and their effective grants separately."
             ),
             reference="https://docs.github.com/en/actions/how-tos/manage-workflow-runs/approve-runs-from-forks",
             owasp_cicd="CICD-SEC-4",
             threat_narrative=(
-                "Without the approval gate, a contributor who has never "
-                "pushed to the repository can execute arbitrary workflow "
-                "steps by crafting a PR. Combined with any secret the "
-                "workflow holds, this is the Ultralytics-shape attack path."
+                "A contributor covered by an exception can reach eligible CI jobs with "
+                "pull request changes. The selected event, workflow and job determine "
+                "which source runs and what authority it receives."
             ),
             stride=["E", "T"],
         )

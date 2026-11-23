@@ -178,23 +178,69 @@ def test_plat002_silent_when_no_classic_protection():
 # ---------------------------------------------------------------------------
 
 
-def test_plat005_fires_when_fork_pr_permitted():
+@pytest.mark.parametrize(
+    ("policy", "finding"),
+    [
+        ("first_time_contributors", True),
+        ("first_time_contributors_new_to_github", True),
+        ("all_external_contributors", False),
+    ],
+)
+def test_plat005_uses_public_contributor_approval_policy(policy, finding):
     client = StubClient({
-        f"/repos/{REPO}/actions/permissions": {
-            "fork_pr_workflows_from_fork_contributors_permitted": True,
-        },
+        f"/repos/{REPO}": {"visibility": "public"},
+        "/actions/permissions": {"enabled": True},
+        "/fork-pr-contributor-approval": {"approval_policy": policy},
+        "/actions/permissions/access": APIError("workflow sharing", 422),
     })
     findings = check_fork_pr_approval_gate(REPO, client)
-    assert len(findings) == 1
-    assert findings[0].rule_id == "PLAT-GH-005"
+    assert [item.rule_id for item in findings] == (["PLAT-GH-005"] if finding else [])
+    if findings:
+        assert policy in findings[0].description
+        assert "secrets" not in findings[0].description
 
 
-def test_plat005_silent_when_approval_required():
+@pytest.mark.parametrize(
+    ("run_workflows", "requires_approval", "expected"),
+    [
+        (True, False, ["PLAT-GH-005"]),
+        (True, True, []),
+        (False, False, []),
+        (True, None, ["ENGINE-ERR"]),
+        ("false", False, ["ENGINE-ERR"]),
+    ],
+)
+def test_plat005_uses_private_fork_settings(run_workflows, requires_approval, expected):
     client = StubClient({
-        f"/repos/{REPO}/actions/permissions": {
-            "fork_pr_workflows_from_fork_contributors_permitted": False,
+        f"/repos/{REPO}": {"visibility": "private"},
+        "/actions/permissions": {"enabled": True},
+        "/fork-pr-contributor-approval": APIError("public contributor policy", 422),
+        "/actions/permissions/access": {"access_level": "organization"},
+        "/fork-pr-workflows-private-repos": {
+            "run_workflows_from_fork_pull_requests": run_workflows,
+            "require_approval_for_fork_pr_workflows": requires_approval,
+            "send_write_tokens_to_workflows": True,
         },
-        f"/repos/{REPO}/actions/permissions/access": {"access_level": "none"},
+    })
+    assert [item.rule_id for item in check_fork_pr_approval_gate(REPO, client)] == expected
+
+
+@pytest.mark.parametrize("policy", [None, {"approval_policy": "future"}, APIError("policy", 403)])
+def test_plat005_unavailable_approval_settings_preserve_incomplete_coverage(policy):
+    client = StubClient({
+        f"/repos/{REPO}": {"visibility": "public"},
+        "/actions/permissions": {"enabled": True, "allow_fork_pr_unrelated": True},
+        "/actions/permissions/access": {"access_level": "organization"},
+        "/fork-pr-contributor-approval": policy,
+    })
+    findings = run_all_checks(REPO, client, checks=["PLAT-GH-005"])
+    assert [item.rule_id for item in findings] == ["ENGINE-ERR"]
+
+
+def test_plat005_disabled_actions_do_not_require_approval_lookup():
+    client = StubClient({
+        "/actions/permissions": {"enabled": False},
+        "/fork-pr-contributor-approval": APIError("public contributor policy", 403),
     })
     assert check_fork_pr_approval_gate(REPO, client) == []
 
@@ -317,14 +363,13 @@ def test_every_check_sets_origin_platform():
     """Regression guard: all platform findings must have origin='platform'."""
     # Construct a client that triggers every rule at least once.
     client = StubClient({
-        f"/repos/{REPO}": {"default_branch": "main"},
+        f"/repos/{REPO}": {"default_branch": "main", "visibility": "public"},
         f"/repos/{REPO}/branches/main/protection": {
             "required_pull_request_reviews": {"required_approving_review_count": 0},
         },
         f"/repos/{REPO}/rulesets": [],
-        f"/repos/{REPO}/actions/permissions": {
-            "fork_pr_workflows_from_fork_contributors_permitted": True,
-        },
+        f"/repos/{REPO}/actions/permissions": {"enabled": True},
+        "/fork-pr-contributor-approval": {"approval_policy": "first_time_contributors"},
         f"/repos/{REPO}/actions/permissions/workflow": {
             "default_workflow_permissions": "write",
         },
