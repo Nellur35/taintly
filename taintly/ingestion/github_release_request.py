@@ -866,7 +866,16 @@ def _draft_denial(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) ->
     if invocation is not None:
         result["reusable_invocation"] = invocation
     if "effective_permission_log" in cap:
-        result["effective_permission"] = _denial_grant(cap, request)
+        # The owned annotation already establishes the response. An invalid
+        # supplemental log leaves the grant unresolved without undoing that proof.
+        try:
+            result["effective_permission"] = _denial_grant(cap, request)
+        except PreviewEvidenceError as exc:
+            result["effective_permission_unresolved"] = str(exc)
+        except (AttributeError, IndexError, KeyError, RecursionError, TypeError, ValueError):
+            result["effective_permission_unresolved"] = (
+                "Saved grant log or its job setup metadata is unavailable or malformed"
+            )
     return result
 
 

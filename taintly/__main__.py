@@ -2877,11 +2877,14 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
                 f"at {called['revision']} (consumer at line {configured['credential_line']}).\n"
             )
         grant = result.get("effective_permission")
-        grant_line = (
-            f"  Job setup reports {grant['credential']} Contents: {grant['contents']}.\n"
-            if grant
-            else ""
-        )
+        grant_gap = result.get("effective_permission_unresolved")
+        grant_line = ""
+        if grant:
+            grant_line = (
+                f"  Job setup reports {grant['credential']} Contents: {grant['contents']}.\n"
+            )
+        elif grant_gap:
+            grant_line = f"  Job setup grant unresolved: {grant_gap}.\n"
         print(
             f"The saved GitHub check annotation reports HTTP {operation['status']} "
             f"for {operation['method']} "
@@ -3045,8 +3048,10 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
                 "The job's repository GITHUB_TOKEN was reported read-only."
             )
             print(f"  {artifact_authority['scope']}")
-    unresolved = state == "unresolved" or (
-        artifact_authority is not None and artifact_authority["state"] == "unresolved"
+    unresolved = (
+        state == "unresolved"
+        or "effective_permission_unresolved" in result
+        or (artifact_authority is not None and artifact_authority["state"] == "unresolved")
     )
     sys.exit(11 if unresolved else 0)
 
