@@ -924,6 +924,11 @@ def _detached_archive(
             and _SHA256.fullmatch(str(history["sha256"])),
             "saved detached pipeline does not match the selected fork, MR or checkout",
         )
+    job_commit = job.get("commit")
+    _need(
+        job_commit is None or (isinstance(job_commit, dict) and job_commit.get("id") == revision),
+        "saved job commit differs from the selected checkout",
+    )
     archives = [item for item in job["artifacts"] if item["file_type"] == "archive"]
     status = job.get("status")
     if "no_payload_runner" in log:
@@ -1048,7 +1053,13 @@ def _detached_archive(
         else "fork archive is outside the failure-upload phase",
     )
     windows_stdout_receipt = windows_runner and response["value"].startswith("01O ")
-    if target_owned or explicit_origin or windows_stdout_receipt or live_fork:
+    if (
+        target_owned
+        or explicit_origin
+        or windows_stdout_receipt
+        or live_fork
+        or "source_file" in data
+    ):
         source_file = data.get("source_file")
         expected_url = (
             f"{base}/api/v4/projects/{source_project}/"
@@ -1056,10 +1067,10 @@ def _detached_archive(
         )
         _need(
             isinstance(source_file, dict)
-            and source_file["url"] == expected_url
-            and source_file["file_path"] == ".gitlab-ci.yml"
-            and source_file["commit_id"] == revision
-            and source_file["content_sha256"] == source_hash
+            and source_file.get("url") == expected_url
+            and source_file.get("file_path") == ".gitlab-ci.yml"
+            and source_file.get("commit_id") == revision
+            and source_file.get("content_sha256") == source_hash
             and (not windows_stdout_receipt or job["commit"]["id"] == revision),
             "saved fork configuration record does not match the selected checkout and bytes",
         )
