@@ -463,9 +463,11 @@ fork pipeline's `.json` view. Include `url`, `sha256` of the saved response,
 numeric `project` and `pipeline`, `mr_url`, `event` (`detached`),
 `source`, `ref`, `revision` and `created_at`. The view must agree with
 the independently saved MR pipeline membership and checkout.
-Supply `.gitlab-ci.yml` at that exact commit. Preserve the eight runner
-rows above, with the upload section matching the job outcome and its owned
-HTTP 201. A successful job requires the success-upload section and no
+Supply `.gitlab-ci.yml` at that exact commit. If the saved job includes
+a commit record, its ID must match the selected checkout. A supplied
+`source_file` must also identify the exact fork file URL, path, commit
+and SHA-256. Preserve the eight runner rows above, with the upload
+section matching the job outcome and its owned HTTP 201. A successful job requires the success-upload section and no
 failure reason. A script failure requires the failure-upload section.
 The result `fork-project-archive-upload-observed` names the fork's job
 archive. To corroborate a saved download, supply `published-archive.zip`

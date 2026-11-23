@@ -1106,6 +1106,44 @@ def test_fork_archive_refuses_contradictory_source_or_result(tmp_path, fork_uplo
 
 
 @pytest.mark.parametrize(
+    "contrast",
+    [None, "foreign-job-commit", "foreign-source-owner", "foreign-source-commit",
+     "foreign-source-path", "foreign-source-digest"],
+)
+def test_terminal_fork_archive_checks_supplied_job_and_source_identity(tmp_path, fork_upload, contrast):
+    fork_upload["job"]["commit"] = {"id": HEAD}
+    source_file = {
+        "url": f"https://gitlab.com/api/v4/projects/2/repository/files/.gitlab-ci.yml?ref={HEAD}",
+        "file_path": ".gitlab-ci.yml",
+        "commit_id": HEAD,
+        "content_sha256": hashlib.sha256(BUILDSPEC.encode()).hexdigest(),
+    }
+    fork_upload["source_file"] = source_file
+    if contrast == "foreign-job-commit":
+        fork_upload["job"]["commit"]["id"] = BASE
+    elif contrast == "foreign-source-owner":
+        source_file["url"] = source_file["url"].replace("projects/2", "projects/1")
+    elif contrast == "foreign-source-commit":
+        source_file["commit_id"] = BASE
+    elif contrast == "foreign-source-path":
+        source_file["file_path"] = "other.yml"
+    elif contrast == "foreign-source-digest":
+        source_file["content_sha256"] = "0" * 64
+
+    result = _evaluate_fork(tmp_path, fork_upload)
+    if contrast is None:
+        assert result["state"] == "fork-project-archive-upload-observed"
+        assert result["publication"]["http_status"] == 201
+    else:
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+        if contrast == "foreign-job-commit":
+            assert "job commit differs" in result["reason"]
+        else:
+            assert "configuration record does not match" in result["reason"]
+
+
+@pytest.mark.parametrize(
     "contrast", [None, "direct", "wrong-job", "foreign-cdn", "bad-size", "bad-digest", "not-zip"]
 )
 def test_fork_archive_download_preserves_the_upload_decision(tmp_path, fork_upload, contrast):
