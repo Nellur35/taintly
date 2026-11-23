@@ -153,11 +153,11 @@ commit and the separate PR head. The registry writer remains unresolved
 for this result. A later PR checkout or an unsupported intermediate
 operation leaves the source unresolved.
 
-If a failed parent run has an owned, successful checkout and Maven
-node but the original Nexus record is missing, supply `registry: null`
+If a completed run has an owned, successful checkout and Maven node
+but the original Nexus record is unavailable, supply `registry: null`
 and the snapshot alias matching the archived JAR. The result preserves
-the checked-out commit and verified Jenkins artifact. Registry write
-and writer remain unresolved.
+the run outcome, checked-out commit and verified Jenkins artifact.
+Registry write and writer remain unresolved, with exit `11`.
 
 For a same-repository FileVault Package Maven Plugin PR with the reviewed
 shared library, use the same command with the Nexus snapshots repository URL
