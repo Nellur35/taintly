@@ -179,3 +179,19 @@ def test_unmodeled_child_environment_does_not_borrow_parent_name(tmp_path, value
         b"  extends: .deploy\n", f"  extends: .deploy\n  environment: {value}\n".encode()
     )
     assert observe(tmp_path, packet(source), source)["state"] == "unresolved"
+
+
+@pytest.mark.parametrize(
+    "extends", ["[.deploy, .rules:branch]", "\n    - .deploy\n    - .rules:branch"]
+)
+def test_two_local_templates_keep_name_and_action_precedence(tmp_path, extends):
+    source = (
+        f"publish:\n  extends: {extends}\n  environment:\n    name: pre-release\n"
+        ".deploy:\n  environment:\n    name: other\n    action: stop\n"
+        ".rules:branch:\n  environment:\n    name: last-parent\n    action: start\n"
+    ).encode()
+    report = observe(tmp_path, packet(source), source)
+    assert report["state"] == "deployment-blocked-before-job"
+    assert report["source"]["environment_owner"] == "publish"
+    wrong_action = source.replace(b"    action: start", b"    action: prepare")
+    assert observe(tmp_path, packet(wrong_action), wrong_action)["state"] == "unresolved"

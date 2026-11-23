@@ -32,44 +32,45 @@ _SCOPE = (
 )
 
 
-def _local_parent(cfg: _Config, job: str) -> str:
+def _local_parents(cfg: _Config, job: str) -> tuple[str, ...]:
     path = (job, "extends")
     if cfg.leaves.get(path):
-        parent = _value(cfg.scalar(path).value, _NAME, "local job template")
+        parents = (_value(cfg.scalar(path).value, _NAME, "local job template"),)
     else:
         items = cfg.sequence(path)
-        _need(len(items) == 1, "environment inheritance requires exactly one local template")
-        item = items[0]
-        parent = _value(item.value, _NAME, "local job template")
-        # The structural walk omits empty containers and bare null list entries.
-        # Confirm the complete supported one-element form at the owned item.
-        name = re.escape(parent)
-        word = rf"(?:{name}|'{name}'|\"{name}\")"
+        _need(1 <= len(items) <= 2, "deployment supports up to two local templates")
+        parents = tuple(_value(item.value, _NAME, "local job template") for item in items)
+        # Sequence leaf events omit empty containers and implicit nulls.
+        # Verify the complete flat shape at the already-owned source spans.
         key = r"""(?:extends|'extends'|"extends")\s*:"""
-        index = item.line - 1
-        line = cfg.lines[index]
-        flow = re.fullmatch(rf"\s*{key}\s*\[\s*{word}\s*,?\s*\]\s*(?:#.*)?", line)
+        words = [
+            rf"""(?:{escaped}|'{escaped}'|"{escaped}")""" for escaped in map(re.escape, parents)
+        ]
+        joined = r"\s*,\s*".join(words)
+        rows = [item.line - 1 for item in items]
+        first, last = rows[0], rows[-1]
+        flow = all(row == first for row in rows) and re.fullmatch(
+            rf"\s*{key}\s*\[\s*{joined}\s*,?\s*\]\s*(?:#.*)?",
+            cfg.lines[first],
+        )
         if not flow:
-            header = next(
-                (
-                    row
-                    for row in reversed(cfg.lines[:index])
-                    if row.strip() and not row.lstrip().startswith("#")
-                ),
-                "",
-            )
-            following = next(
-                (
-                    row
-                    for row in cfg.lines[index + 1 :]
-                    if row.strip() and not row.lstrip().startswith("#")
-                ),
-                "",
-            )
+            significant = [
+                i
+                for i, line in enumerate(cfg.lines)
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+            start = significant.index(first)
+            stop = significant.index(last)
+            header = cfg.lines[significant[start - 1]] if start else ""
+            following = cfg.lines[significant[stop + 1]] if stop + 1 < len(significant) else ""
             indentation = len(header) - len(header.lstrip())
             _need(
                 re.fullmatch(rf"\s*{key}\s*(?:#.*)?", header)
-                and re.fullmatch(rf"\s*-\s+{word}\s*(?:#.*)?", line)
+                and rows == significant[start : stop + 1]
+                and all(
+                    re.fullmatch(rf"\s*-\s+{word}\s*(?:#.*)?", cfg.lines[row])
+                    for row, word in zip(rows, words, strict=True)
+                )
                 and (
                     not following
                     or (
@@ -77,14 +78,17 @@ def _local_parent(cfg: _Config, job: str) -> str:
                         and not following.lstrip().startswith("-")
                     )
                 ),
-                "environment inheritance is outside the one-element sequence profile",
+                "environment inheritance is outside the flat local template profile",
             )
-    cfg.owner((parent,))
-    _need(
-        parent.startswith(".") and not cfg.keys[(parent, "extends")],
-        "environment inheritance is outside the single-template profile",
-    )
-    return parent
+    _need(len(set(parents)) == len(parents), "local templates must be distinct")
+    for parent in parents:
+        cfg.owner((parent,))
+        _need(
+            parent.startswith(".") and not cfg.keys[(parent, "extends")],
+            "nested or non-local environment inheritance is unsupported",
+        )
+    # GitLab uses reverse deep merge by key. The last parent wins.
+    return tuple(reversed(parents))
 
 
 def _source_plan(data: _Row, root: Path, run: _Pipeline, job: str, target: str) -> _Row:
@@ -100,7 +104,8 @@ def _source_plan(data: _Row, root: Path, run: _Pipeline, job: str, target: str) 
     )
     cfg = _Config(raw.decode("utf-8"))
     cfg.owner((job,))
-    owners = (job, _local_parent(cfg, job)) if cfg.keys[(job, "extends")] else (job,)
+    parents = _local_parents(cfg, job) if cfg.keys[(job, "extends")] else ()
+    owners = (job, *parents)
     for entry in owners:
         path = (entry, "environment")
         if cfg.keys[path]:
