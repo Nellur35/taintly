@@ -82,9 +82,9 @@ python -m taintly /path/to/repo --platform codebuild
 **GitHub Actions** — after checking out the target repository:
 
 ```yaml
-- uses: Nellur35/taintly@e881504f662d75b9af0e28d00b250d323777beea  # reviewed commit
+- uses: Nellur35/taintly@ca3b5dedb30fe5e3589fefb3f8f131384bc6fe60  # reviewed commit
   with:
-    version: e881504f662d75b9af0e28d00b250d323777beea
+    version: ca3b5dedb30fe5e3589fefb3f8f131384bc6fe60
     fail-on: HIGH
 ```
 
@@ -102,7 +102,7 @@ taintly:
   image: python:3.12-slim
   before_script:
     - apt-get update && apt-get install -y --no-install-recommends git ca-certificates
-    - python -m pip install "git+https://github.com/Nellur35/taintly@e881504f662d75b9af0e28d00b250d323777beea"
+    - python -m pip install "git+https://github.com/Nellur35/taintly@ca3b5dedb30fe5e3589fefb3f8f131384bc6fe60"
   script:
     - python -m taintly . --fail-on HIGH
 ```
@@ -123,9 +123,9 @@ On an Ubuntu runner, add these steps after checking out the target repository:
   run: |
     directory="$(mktemp -d -- "$RUNNER_TEMP/taintly-sarif.XXXXXX")"
     printf 'path=%s/report.sarif\n' "$directory" >> "$GITHUB_OUTPUT"
-- uses: Nellur35/taintly@e881504f662d75b9af0e28d00b250d323777beea  # reviewed commit
+- uses: Nellur35/taintly@ca3b5dedb30fe5e3589fefb3f8f131384bc6fe60  # reviewed commit
   with:
-    version: e881504f662d75b9af0e28d00b250d323777beea
+    version: ca3b5dedb30fe5e3589fefb3f8f131384bc6fe60
     fail-on: HIGH
     upload-sarif: true
     sarif-file: ${{ steps.sarif_path.outputs.path }}
@@ -181,9 +181,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
-      - uses: Nellur35/taintly@e881504f662d75b9af0e28d00b250d323777beea  # reviewed commit
+      - uses: Nellur35/taintly@ca3b5dedb30fe5e3589fefb3f8f131384bc6fe60  # reviewed commit
         with:
-          version: e881504f662d75b9af0e28d00b250d323777beea
+          version: ca3b5dedb30fe5e3589fefb3f8f131384bc6fe60
           fail-on: HIGH
 ```
 
@@ -231,9 +231,9 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
-      - uses: Nellur35/taintly@e881504f662d75b9af0e28d00b250d323777beea  # reviewed commit
+      - uses: Nellur35/taintly@ca3b5dedb30fe5e3589fefb3f8f131384bc6fe60  # reviewed commit
         with:
-          version: e881504f662d75b9af0e28d00b250d323777beea
+          version: ca3b5dedb30fe5e3589fefb3f8f131384bc6fe60
           extra-args: --diff .taintly-baseline.json --fail-on HIGH
 ```
 
@@ -263,7 +263,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install a reviewed scanner revision
-        run: python -m pip install "git+https://github.com/Nellur35/taintly@e881504f662d75b9af0e28d00b250d323777beea"
+        run: python -m pip install "git+https://github.com/Nellur35/taintly@ca3b5dedb30fe5e3589fefb3f8f131384bc6fe60"
       - name: Static scan and pinned-reference checks
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
