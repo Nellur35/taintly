@@ -1877,8 +1877,12 @@ def mr_artifact_observation(
     origin: str | None = None,
 ) -> _Row:
     scope = _DETACHED_CANCELED_SCOPE if origin is not None else _SCOPE
+    empty_upload = False
     try:
         data = _load_job_receipt(snapshot)
+        train = data.get("canceled_archive")
+        log = train.get("log") if isinstance(train, dict) else data.get("log")
+        empty_upload = isinstance(log, dict) and "no_payload_runner" in log
         _need(
             "pages_handoff" not in data
             or (data.get("schema") == _FORK_ARCHIVE_SCHEMA and origin is None),
@@ -1959,4 +1963,9 @@ def mr_artifact_observation(
         ValueError,
     ):
         reason = "required GitLab source, pipeline or artifact evidence is unavailable or malformed"
+    if empty_upload:
+        scope = (
+            "The selected uploader's pre-request stop has not been verified. "
+            "Receiver authorization, other requests and deployment remain unverified."
+        )
     return {"state": "unresolved", "reason": reason, "scope": scope}

@@ -826,6 +826,7 @@ def test_empty_uploader_needs_matching_runner_evidence(tmp_path, empty_upload, f
 
     assert result["state"] == "unresolved"
     assert "publication" not in result
+    assert "pre-request stop has not been verified" in result["scope"]
 
 
 def test_empty_marker_cannot_qualify_a_coordinator_refusal(tmp_path, empty_upload):
