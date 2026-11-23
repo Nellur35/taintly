@@ -416,6 +416,45 @@ def test_success_keeps_only_local_archive_when_nexus_is_unavailable(tmp_path, re
 
 
 @pytest.mark.parametrize(
+    ("corruption", "reason"),
+    [
+        ("registry-file", "Jenkins archive and Nexus object bytes or stored digests differ"),
+        ("registry-time", "Nexus object creation does not belong to the selected Maven command interval"),
+        ("registry-record", "saved Jenkins, source or Nexus evidence is unavailable or malformed"),
+        ("local-file", "exact Maven deployment node did not corroborate the published artifact digest"),
+    ],
+)
+def test_local_archive_and_registry_evidence_are_verified_separately(tmp_path, capture, corruption, reason):
+    if corruption == "registry-file":
+        (tmp_path / "registry-artifact.jar").write_bytes(b"Different receiver bytes.")
+    elif corruption == "registry-time":
+        created = str(START - 1)
+        capture["registry"]["stored_properties"]["created"] = created
+        capture["registry"]["stored_attributes"].update(
+            {"storageItem-created": created, "storageItem-modified": created}
+        )
+    elif corruption == "registry-record":
+        del capture["registry"]["response"]
+    else:
+        (tmp_path / "artifact.jar").write_bytes(b"Different local archive.")
+
+    result = evaluate(tmp_path, capture)
+
+    assert result["state"] == "unresolved"
+    assert result["reason"] == reason
+    assert "publication" not in result
+    assert "snapshot_evidence" not in result
+    if corruption != "local-file":
+        assert result["authority"] == "unresolved"
+        assert result["checkout"]["revision"] == HEAD
+        assert result["requested_snapshot"] == TARGET
+        assert result["jenkins_archive_sha256"] == hashlib.sha256(b"Inert authored bytes.").hexdigest()
+    else:
+        assert "checkout" not in result
+        assert "jenkins_archive_sha256" not in result
+
+
+@pytest.mark.parametrize(
     "corruption", ["target", "log", "archive", "zero-checkout", "stage", "flow"]
 )
 def test_failed_run_needs_an_owned_successful_command_and_exact_archive(
@@ -537,10 +576,14 @@ def test_maven_credential_selection_needs_unique_bound_evidence(tmp_path, captur
 
 @pytest.mark.parametrize(
     "variant",
-    ["supported", "wrong-run", "digest", "missing", "escaped", "other-allocation", "missing-start"],
+    [
+        "supported", "wrong-run", "digest", "missing", "escaped", "other-allocation",
+        "missing-start", "other-allocation-without-registry",
+    ],
 )
 def test_controller_allocation_is_bound_to_both_operations(tmp_path, capture, variant):
-    command_parent = "3" if variant in ("other-allocation", "missing-start") else "5"
+    other_allocation = variant.startswith("other-allocation")
+    command_parent = "3" if other_allocation or variant == "missing-start" else "5"
     html = f"""Obtained Jenkinsfile from {HEAD}
 <span class="pipeline-new-node" nodeId="2" startId="2">[Pipeline] node
 </span><span class="pipeline-node-2">Running on <a href="/computer/first/">first</a> in /ci/workspace/example
@@ -564,10 +607,15 @@ def test_controller_allocation_is_bound_to_both_operations(tmp_path, capture, va
         "complete": True,
         "sha256": "0" * 64 if variant == "digest" else hashlib.sha256(body).hexdigest(),
     }
-    result = evaluate(tmp_path, capture)
-    if variant == "other-allocation":
+    target = TARGET
+    if variant == "other-allocation-without-registry":
+        capture["registry"] = None
+        target = REGISTRY + "/content/repositories/snapshots/" + ARTIFACT
+    result = evaluate(tmp_path, capture, target)
+    if other_allocation:
         assert result["state"] == "unresolved"
         assert "different Jenkins allocations" in result["reason"]
+        assert "jenkins_archive_sha256" not in result
         assert "publication" not in result
     else:
         assert result["state"] == "snapshot-write-observed"
