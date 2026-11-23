@@ -6,6 +6,7 @@ These commands review saved records for specific providers and operations. Each 
 - [Saved ASF Jenkins Maven snapshot observations](#saved-asf-jenkins-maven-snapshot-observations)
 - [Saved GitLab fork MR artifact observations](#saved-gitlab-fork-mr-artifact-observations)
 - [Saved GitLab fork pipeline admission](#saved-gitlab-fork-pipeline-admission)
+- [Saved GitLab environment deployment](#saved-gitlab-environment-deployment)
 - [Saved GitLab merge-request image pushes](#saved-gitlab-merge-request-image-pushes)
 - [Saved GitHub-to-CodeBuild start observations](#saved-github-to-codebuild-start-observations)
 - [Saved GitHub Release publication](#saved-github-release-publication)
@@ -697,6 +698,39 @@ saved projections.
 - `jobs` is the pipeline jobs response for
   `include_retried=true&per_page=25`. Preserve `next_page` from the
   `X-Next-Page` header and the empty job list.
+
+## Saved GitLab environment deployment
+
+```sh
+taintly SOURCE_DIR --format json --gitlab-deployment-observation observation.json PROJECT PIPELINE JOB DEPLOYMENT
+```
+
+This offline check compares a selected GitLab.com deployment with its CI
+job, pipeline, environment and exact local workflow revision. It covers
+a blocked deployment with an unstarted manual job, a created deployment
+with a pending job, and a provider-reported success with a completed
+owning job. The selected job needs a literal `environment.name` in the
+pinned root workflow, directly or through one local job template. If
+the source or ownership is unavailable, incompatible or outside this
+profile, the check exits 11. A resolved lifecycle observation exits 0.
+
+Keep the trusted receipt as a `gitlab-environment-deployment-v1` JSON
+object. The `project`, `pipeline`, `job`, `deployment` and `source`
+entries each hold `url`, `status`, and `row`. Use responses from
+the exact project endpoint and its pipeline, job, deployment and
+`.gitlab-ci.yml` file-metadata endpoints. Request the file metadata
+with `?ref=FULL_SHA` and store the matching workflow bytes at the root
+of `SOURCE_DIR`. Keep each job's owning pipeline and commit identity,
+timestamps and status, both in the standalone job and in the
+deployment's `deployable` row. Preserve assignment as a Boolean
+`runner_assigned` derived from the corresponding API runner field.
+
+A positive provider count for a blocked deployment supports pending
+approvals. Missing or zero counts leave approval details unresolved.
+The deployment's recorded status and the workflow's source declaration
+are reported separately. The check does not establish historical
+effective configuration, approval policy, credential access, or the
+outcome of downstream requests.
 
 ## Saved GitLab generic package file provenance
 
@@ -1642,37 +1676,3 @@ and exit 11 indicates unresolved evidence. This query does no repository
 scan. Its result is limited to the supplied event and captured settings.
 Approval, actual execution and effective publication permissions require
 separate evidence.
-
-## Saved GitLab environment deployment
-
-```sh
-taintly SOURCE_DIR --format json --gitlab-deployment-observation observation.json PROJECT PIPELINE JOB DEPLOYMENT
-```
-
-This offline check compares a selected GitLab.com deployment with its CI
-job, pipeline, environment and exact local workflow revision. It covers
-a blocked deployment with an unstarted manual job, a created deployment
-with a pending job, and a provider-reported success with a completed
-owning job. The selected job needs a literal `environment.name` in the
-pinned root workflow, directly or through one local job template. If
-the source or ownership is unavailable, incompatible or outside this
-profile, the check exits 11. A resolved lifecycle observation exits 0.
-
-Keep the trusted receipt as a `gitlab-environment-deployment-v1` JSON
-object. The `project`, `pipeline`, `job`, `deployment` and `source`
-entries each hold `url`, `status`, and `row`. Use responses from
-the exact project endpoint and its pipeline, job, deployment and
-`.gitlab-ci.yml` file-metadata endpoints. Request the file metadata
-with `?ref=FULL_SHA` and store the matching workflow bytes at the root
-of `SOURCE_DIR`. Keep each job's owning pipeline and commit identity,
-timestamps and status, both in the standalone job and in the
-deployment's `deployable` row. Preserve assignment as a Boolean
-`runner_assigned` derived from the corresponding API runner field.
-
-A positive provider count for a blocked deployment supports pending
-approvals. Missing or zero counts leave approval details unresolved.
-The deployment's recorded status and the workflow's source declaration
-are reported separately. The check does not establish historical
-effective configuration, approval policy, credential access, or the
-outcome of downstream requests.
-
