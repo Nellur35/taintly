@@ -32,6 +32,61 @@ _SCOPE = (
 )
 
 
+def _local_parent(cfg: _Config, job: str) -> str:
+    path = (job, "extends")
+    if cfg.leaves.get(path):
+        parent = _value(cfg.scalar(path).value, _NAME, "local job template")
+    else:
+        items = cfg.sequence(path)
+        _need(len(items) == 1, "environment inheritance requires exactly one local template")
+        item = items[0]
+        parent = _value(item.value, _NAME, "local job template")
+        # The structural walk omits empty containers and bare null list entries.
+        # Confirm the complete supported one-element form at the owned item.
+        name = re.escape(parent)
+        word = rf"(?:{name}|'{name}'|\"{name}\")"
+        key = r"""(?:extends|'extends'|"extends")\s*:"""
+        index = item.line - 1
+        line = cfg.lines[index]
+        flow = re.fullmatch(rf"\s*{key}\s*\[\s*{word}\s*,?\s*\]\s*(?:#.*)?", line)
+        if not flow:
+            header = next(
+                (
+                    row
+                    for row in reversed(cfg.lines[:index])
+                    if row.strip() and not row.lstrip().startswith("#")
+                ),
+                "",
+            )
+            following = next(
+                (
+                    row
+                    for row in cfg.lines[index + 1 :]
+                    if row.strip() and not row.lstrip().startswith("#")
+                ),
+                "",
+            )
+            indentation = len(header) - len(header.lstrip())
+            _need(
+                re.fullmatch(rf"\s*{key}\s*(?:#.*)?", header)
+                and re.fullmatch(rf"\s*-\s+{word}\s*(?:#.*)?", line)
+                and (
+                    not following
+                    or (
+                        len(following) - len(following.lstrip()) <= indentation
+                        and not following.lstrip().startswith("-")
+                    )
+                ),
+                "environment inheritance is outside the one-element sequence profile",
+            )
+    cfg.owner((parent,))
+    _need(
+        parent.startswith(".") and not cfg.keys[(parent, "extends")],
+        "environment inheritance is outside the single-template profile",
+    )
+    return parent
+
+
 def _source_plan(data: _Row, root: Path, run: _Pipeline, job: str, target: str) -> _Row:
     url = f"{_ORIGIN}/api/v4/projects/{run.project}/repository/files/{_PATH}?ref={run.revision}"
     row = _record(_response(data, "source", url).get("row"), "source row")
@@ -45,23 +100,27 @@ def _source_plan(data: _Row, root: Path, run: _Pipeline, job: str, target: str) 
     )
     cfg = _Config(raw.decode("utf-8"))
     cfg.owner((job,))
-    owner = job
-    if cfg.keys[(job, "extends")]:
-        owner = _value(cfg.scalar((job, "extends")).value, _NAME, "local job template")
-        cfg.owner((owner,))
-        _need(
-            owner.startswith(".")
-            and not cfg.keys[(owner, "extends")]
-            and not cfg.keys[(job, "environment")],
-            "environment inheritance is outside the single-template profile",
-        )
+    owners = (job, _local_parent(cfg, job)) if cfg.keys[(job, "extends")] else (job,)
+    for entry in owners:
+        path = (entry, "environment")
+        if cfg.keys[path]:
+            cfg.owner(path)
+            _need(
+                any(key[:-1] == path for key in cfg.keys),
+                "environment declaration is outside the mapping profile",
+            )
+    owner = next((entry for entry in owners if cfg.keys[(entry, "environment", "name")]), job)
     environment = cfg.scalar((owner, "environment", "name"))
-    fields = {key[2] for key in cfg.keys if key[:2] == (owner, "environment") and len(key) == 3}
-    _need(
-        environment.value == target
-        and (
-            "action" not in fields or cfg.scalar((owner, "environment", "action")).value == "start"
+    action = next(
+        (
+            cfg.scalar((entry, "environment", "action")).value
+            for entry in owners
+            if cfg.keys[(entry, "environment", "action")]
         ),
+        "start",
+    )
+    _need(
+        environment.value == target and action == "start",
         "workflow does not declare this deployment target for the selected job",
     )
     return {

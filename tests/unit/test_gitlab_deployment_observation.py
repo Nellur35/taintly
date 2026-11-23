@@ -133,3 +133,49 @@ def test_rejects_incompatible_deployment_identity(tmp_path, altered):
 def test_dynamic_environment_remains_unresolved(tmp_path):
     source = SOURCE.replace(b"pre-release", b"$DEPLOY_TARGET")
     assert observe(tmp_path, packet(source), source)["state"] == "unresolved"
+
+
+@pytest.mark.parametrize("extends", [".deploy", "[.deploy]", "\n    - .deploy"])
+def test_local_environment_name_overrides_one_parent(tmp_path, extends):
+    source = (
+        f"publish:\n  extends: {extends}\n  environment:\n    name: pre-release\n"
+        ".deploy:\n  environment:\n    name: other\n    action: start\n"
+    ).encode()
+    report = observe(tmp_path, packet(source), source)
+    assert report["state"] == "deployment-blocked-before-job"
+    assert report["source"]["environment_owner"] == "publish"
+
+
+def test_inherited_stop_requires_explicit_start_override(tmp_path):
+    source = b"""publish:
+  extends:
+    - .deploy
+  environment:
+    name: pre-release
+.deploy:
+  environment:
+    name: other
+    action: stop
+"""
+    assert observe(tmp_path, packet(source), source)["state"] == "unresolved"
+    changed = source.replace(b"name: pre-release\n", b"name: pre-release\n    action: start\n")
+    assert observe(tmp_path, packet(changed), changed)["state"] == "deployment-blocked-before-job"
+
+
+@pytest.mark.parametrize(
+    "extends", ["[.deploy, .other]", "[.deploy, {}]", "[.deploy, []]", "\n    - .deploy\n    -"]
+)
+def test_other_parent_sequence_shapes_stay_unresolved(tmp_path, extends):
+    source = (
+        f"publish:\n  extends: {extends}\n  environment:\n    name: pre-release\n"
+        ".deploy:\n  environment:\n    url: https://example.test\n"
+    ).encode()
+    assert observe(tmp_path, packet(source), source)["state"] == "unresolved"
+
+
+@pytest.mark.parametrize("value", ["null", "{}", "pre-release"])
+def test_unmodeled_child_environment_does_not_borrow_parent_name(tmp_path, value):
+    source = SOURCE.replace(
+        b"  extends: .deploy\n", f"  extends: .deploy\n  environment: {value}\n".encode()
+    )
+    assert observe(tmp_path, packet(source), source)["state"] == "unresolved"

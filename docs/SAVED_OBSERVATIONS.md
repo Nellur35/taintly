@@ -710,9 +710,12 @@ job, pipeline, environment and exact local workflow revision. It covers
 a blocked deployment with an unstarted manual job, a created deployment
 with a pending job, and a provider-reported success with a completed
 owning job. The selected job needs a literal `environment.name` in the
-pinned root workflow, directly or through one local job template. If
-the source or ownership is unavailable, incompatible or outside this
-profile, the check exits 11. A resolved lifecycle observation exits 0.
+pinned root workflow, directly or through one local job template. A
+job can override the template's environment name. The observer checks
+the declared action independently and supports scalar or single-element
+list forms of `extends`. The check exits 11 when source or ownership is
+unavailable, incompatible or outside this profile. A resolved lifecycle
+observation exits 0.
 
 Keep the trusted receipt as a `gitlab-environment-deployment-v1` JSON
 object. The `project`, `pipeline`, `job`, `deployment` and `source`
