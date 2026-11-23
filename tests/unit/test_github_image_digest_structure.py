@@ -33,11 +33,15 @@ def test_matrix_image_values_and_script_text_are_not_direct_consumers():
         "      matrix:\n"
         "        include:\n"
         "          - image: ubuntu:rolling\n"
+        "    services: {}\n"
         "    steps:\n"
         "      - run: |\n"
         "          echo 'image: postgres:17'\n"
+        "          echo 'services: ${{ vars.SERVICE_MAP }}'\n"
     )
-    assert _matches(source) == []
+    result = _matches(source)
+    assert result == []
+    assert not isinstance(result, IncompletePatternMatches)
 
 
 def test_digest_pinned_and_dynamic_consumers_are_not_called_unpinned():
@@ -70,8 +74,7 @@ def test_dynamic_consumer_remains_unresolved_in_product_report(tmp_path):
     ]
     assert not any(f.rule_id in {"SEC3-GH-007", "SEC8-GH-001", "SEC8-GH-002"} for f in findings)
     assert any(
-        f.rule_id == "ENGINE-ERR" and "image reference" in f.description.lower()
-        for f in findings
+        f.rule_id == "ENGINE-ERR" and "image reference" in f.description.lower() for f in findings
     )
 
 
@@ -102,3 +105,32 @@ def test_latest_untagged_and_version_tags_keep_separate_rules(tmp_path):
         ("SEC8-GH-001", 8),
         ("SEC8-GH-002", 10),
     ]
+
+
+def test_unresolved_services_map_retains_other_job_image_findings(tmp_path):
+    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "on: push\n"
+        "jobs:\n"
+        "  expression:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    services: ${{ fromJSON(vars.SERVICE_MAP) }}\n"
+        "  literal:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    services:\n"
+        "      db:\n"
+        "        image: postgres:17\n",
+        encoding="utf-8",
+    )
+    (report,) = scan_repo(str(tmp_path), load_rules_for_platform(Platform.GITHUB))
+    assert [(f.rule_id, f.line) for f in report.findings if f.rule_id == "SEC3-GH-007"] == [
+        ("SEC3-GH-007", 10),
+    ]
+    assert (
+        sum(
+            f.rule_id == "ENGINE-ERR" and "image reference" in f.description.lower()
+            for f in report.findings
+        )
+        == 1
+    )
