@@ -478,7 +478,7 @@ def _partial_snapshot_archive(
         **result,
         "state": "unresolved",
         "reason": "original Nexus snapshot and write identity were not supplied",
-        "jenkins_run_result": "FAILURE",
+        "jenkins_run_result": capture["run"]["result"],
         "checkout": checkout,
         "jenkins_archive_sha256": hashlib.sha256(raw).hexdigest(),
         "requested_snapshot": target,
@@ -525,7 +525,7 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
         run, pull = capture["run"], capture["pull"]
         head = pull["observed_head"]
         failed = run["result"] == "FAILURE"
-        partial = failed and "registry" in capture and capture["registry"] is None
+        partial = "registry" in capture and capture["registry"] is None
         _require(
             pull["number"] == pr
             and pull["base_repository"] == repo
