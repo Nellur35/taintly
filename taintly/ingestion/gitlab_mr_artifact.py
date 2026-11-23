@@ -1876,7 +1876,10 @@ def mr_artifact_observation(
     publisher: str | None = None,
     origin: str | None = None,
 ) -> _Row:
-    scope = _DETACHED_CANCELED_SCOPE if origin is not None else _SCOPE
+    scope = (
+        "The archive upload outcome for the selected GitLab job remains unverified. "
+        "Other requests, credential authority and deployment require separate evidence."
+    )
     empty_upload = False
     try:
         data = _load_job_receipt(snapshot)
@@ -1906,17 +1909,6 @@ def mr_artifact_observation(
                 "the explicit origin requires a detached archive observation schema",
             )
             target_owned = data["schema"] == _TARGET_HEAD_ARCHIVE_SCHEMA
-            if target_owned:
-                saved_pipeline, saved_job = data.get("pipeline"), data.get("job")
-                scope = (
-                    _TARGET_HEAD_ARCHIVE_SCOPE
-                    if isinstance(saved_pipeline, dict)
-                    and isinstance(saved_job, dict)
-                    and saved_pipeline.get("status") == saved_job.get("status") == "failed"
-                    else _DETACHED_CANCELED_SCOPE
-                )
-            else:
-                scope = _EXPLICIT_FORK_ARCHIVE_SCOPE
             return _detached_archive(
                 data,
                 root.resolve(),
@@ -1936,7 +1928,6 @@ def mr_artifact_observation(
             return branch_image_observation(data, root.resolve(), project, pipeline, job)
         if data.get("schema") in (_FORK_ARCHIVE_SCHEMA, _TARGET_HEAD_ARCHIVE_SCHEMA):
             target_owned = data["schema"] == _TARGET_HEAD_ARCHIVE_SCHEMA
-            scope = _TARGET_HEAD_ARCHIVE_SCOPE if target_owned else _FORK_ARCHIVE_SCOPE
             _need(
                 publisher is None,
                 "target-project archive evidence covers its own upload only"

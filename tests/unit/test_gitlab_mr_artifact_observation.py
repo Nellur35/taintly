@@ -1428,10 +1428,12 @@ def test_explicit_origin_binds_canceled_detached_archive(tmp_path, target_head_u
     if contrast not in {None, "foreign-tree"}:
         assert result["state"] == "unresolved"
         assert "publication" not in result
+        assert "archive upload outcome for the selected GitLab job remains unverified" in result["scope"]
         return
     if contrast == "foreign-tree":
         assert result["archive_tree"]["state"] == "unresolved"
     assert result["state"] == "target-project-head-archive-accepted-canceled-job"
+    assert "HTTP 201 archive response" in result["scope"]
     assert result["job_status"] == "canceled"
     assert result["historical_pipeline"]["current_mr_head"] == BASE
     assert result["revision"] == HEAD
