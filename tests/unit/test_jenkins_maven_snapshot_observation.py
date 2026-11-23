@@ -397,6 +397,25 @@ def test_keeps_proven_upstream_path_when_parent_fails_and_nexus_is_unavailable(
 
 
 @pytest.mark.parametrize(
+    ("fixture", "revision"), [("capture", HEAD), ("upstream_capture", "b" * 40)]
+)
+def test_success_keeps_only_local_archive_when_nexus_is_unavailable(tmp_path, request, fixture, revision):
+    selected = request.getfixturevalue(fixture)
+    selected["registry"] = None
+    alias = REGISTRY + "/content/repositories/snapshots/" + ARTIFACT
+
+    result = evaluate(tmp_path, selected, alias)
+
+    assert result["state"] == result["authority"] == "unresolved"
+    assert result["jenkins_run_result"] == "SUCCESS"
+    assert result["checkout"]["revision"] == revision
+    assert result["jenkins_archive_sha256"] == hashlib.sha256(b"Inert authored bytes.").hexdigest()
+    assert result["requested_snapshot"] == alias
+    assert "publication" not in result
+    assert "snapshot_evidence" not in result
+
+
+@pytest.mark.parametrize(
     "corruption", ["target", "log", "archive", "zero-checkout", "stage", "flow"]
 )
 def test_failed_run_needs_an_owned_successful_command_and_exact_archive(
