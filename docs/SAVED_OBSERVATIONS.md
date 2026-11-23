@@ -1050,7 +1050,10 @@ request ID as the check annotation. The response block hash refers to
 that block in the trusted log, with line endings normalized to LF. Omit
 authorization headers and complete error bodies. A literal pin to the
 reviewed Release Drafter v6.1.0 also supports `disable-autolabeler: false`.
-The reported grant describes the owning job's token setup.
+The reported grant describes the owning job's token setup. If a supplied
+grant log cannot be verified, the report keeps the independently validated
+403 and reports `effective_permission_unresolved` with exit 11. Omitting
+the optional log allows a response-only observation with exit 0.
 
 The draft-request command also supports one explicit reusable invocation in a
 direct external fork PR. The saved job name identifies the caller and called

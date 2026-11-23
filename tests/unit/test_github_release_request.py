@@ -468,7 +468,11 @@ def test_exact_denial_correlates_own_job_reported_grant(denial_grant_capture):
 def test_denial_grant_rejects_different_owners(denial_grant_capture, key, value):
     cap, _, assess = denial_grant_capture
     cap["effective_permission_log"][key] = value
-    assert assess()["state"] == "unresolved"
+    result = assess()
+    assert result["state"] == "draft-release-create-denied"
+    assert result["operation"]["status"] == 403
+    assert "effective_permission" not in result
+    assert "does not identify" in result["effective_permission_unresolved"]
 
 
 def test_denial_grant_cannot_borrow_rows_outside_setup(denial_grant_capture):
@@ -476,7 +480,26 @@ def test_denial_grant_cannot_borrow_rows_outside_setup(denial_grant_capture):
     row = cap["effective_permission_log"]["rows"][1]
     row["time"] = "2026-05-13T00:23:19Z"
     row["sha256"] = hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
-    assert assess()["state"] == "unresolved"
+    result = assess()
+    assert result["state"] == "draft-release-create-denied"
+    assert "effective_permission" not in result
+    assert "owning step" in result["effective_permission_unresolved"]
+
+
+def test_denial_grant_malformed_log_keeps_only_owned_response(denial_grant_capture):
+    cap, _, assess = denial_grant_capture
+    cap["effective_permission_log"] = None
+    result = assess()
+    assert result["state"] == "draft-release-create-denied"
+    assert result["operation"]["request_id"] == cap["denial"]["request_id"]
+    assert "effective_permission" not in result
+    assert "malformed" in result["effective_permission_unresolved"]
+
+    cap["denial"]["check_run"] += 1
+    result = assess()
+    assert result["state"] == "unresolved"
+    assert "operation" not in result
+    assert "effective_permission_unresolved" not in result
 
 
 @pytest.mark.parametrize(
