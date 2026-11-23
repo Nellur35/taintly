@@ -699,13 +699,18 @@ def test_push_grant_requires_matching_setup_step_and_order(push_grant_capture, i
     row[field] = value
     row["sha256"] = hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
     result = assess()
-    assert result["state"] == "unresolved" and "effective_permission" not in result
+    assert result["state"] == "draft-release-create-reported"
+    assert "effective_permission" not in result
+    assert result["effective_permission_unresolved"]
 
 
 def test_push_grant_rejects_incomplete_group(push_grant_capture):
     rows, assess = push_grant_capture
     rows.pop()
-    assert assess()["state"] == "unresolved"
+    result = assess()
+    assert result["state"] == "draft-release-create-reported"
+    assert "effective_permission" not in result
+    assert "complete job token permission group" in result["effective_permission_unresolved"]
 
 
 def test_push_uses_workflow_permission_when_job_has_no_override(push_capture):
@@ -728,7 +733,7 @@ def test_push_uses_workflow_permission_when_job_has_no_override(push_capture):
 
 @pytest.mark.parametrize(
     "contrast",
-    [None, "missing-grant", "wrong-pin", "token-override", "not-created", "ambiguous-push"],
+    [None, "missing-grant", "malformed-grant", "wrong-pin", "token-override", "not-created", "ambiguous-push"],
 )
 def test_push_without_declared_grant_requires_bound_setup_and_completion(
     push_capture, push_grant_capture, contrast
@@ -744,6 +749,8 @@ def test_push_without_declared_grant_requires_bound_setup_and_completion(
     blank["sha256"] = hashlib.sha256(f"{blank['time']} {blank['value']}".encode()).hexdigest()
     if contrast == "missing-grant":
         del cap["creation"]["effective_permission_rows"]
+    elif contrast == "malformed-grant":
+        cap["creation"]["effective_permission_rows"] = None
     elif contrast == "wrong-pin":
         row = rows[0]
         row["value"] = row["value"].replace(

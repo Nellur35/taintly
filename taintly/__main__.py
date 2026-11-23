@@ -2913,11 +2913,14 @@ def _check_github_observation(parser: argparse.ArgumentParser, args: argparse.Na
         operation = result["operation"]
         configured = result["configured"]
         grant = result.get("effective_permission")
-        grant_text = (
-            f"  Job setup reports {grant['credential']} Contents: {grant['contents']}.\n"
-            if grant is not None
-            else ""
-        )
+        grant_gap = result.get("effective_permission_unresolved")
+        grant_text = ""
+        if grant:
+            grant_text = (
+                f"  Job setup reports {grant['credential']} Contents: {grant['contents']}.\n"
+            )
+        elif grant_gap:
+            grant_text = f"  Job setup grant unresolved: {grant_gap}.\n"
         tag = operation["requested_tag"]
         tag_text = f" for {tag}" if tag is not None else " (tag absent from the log)"
         permission = configured["requested_permission"]

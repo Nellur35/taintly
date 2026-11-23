@@ -1137,7 +1137,11 @@ with three `time`, `value` and `sha256` records from the same job log.
 Save the opening `GITHUB_TOKEN Permissions` group, its `Contents: write`
 row and the closing group marker. These rows must belong to the setup
 step and precede the action download. The result reports the grant
-separately from the workflow's requested permission.
+separately from the workflow's requested permission. When the workflow
+explicitly requests Contents write, unusable supplied grant rows leave
+that grant unresolved and preserve the independent creation report. This
+partial result exits 11. The no-declaration profile below requires an
+owned setup grant to report creation.
 
 The push profile accepts the workflow's literal `permissions.contents`
 when the owning job has no `permissions` declaration. If the job

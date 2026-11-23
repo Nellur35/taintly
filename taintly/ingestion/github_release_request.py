@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+from datetime import datetime
 from itertools import pairwise, takewhile
 from pathlib import Path
 
@@ -287,6 +288,26 @@ def _reusable_plan(
     }
 
 
+def _creation_log_times(
+    rows: list[_Row], patterns: tuple[str, ...], owners: tuple[_Row, ...]
+) -> list[datetime]:
+    times = []
+    for row, pattern, step in zip(rows, patterns, owners, strict=True):
+        when = _time(row["time"])
+        _require(
+            _matches(row["value"], pattern)
+            and _time(step["started_at"])
+            <= when.replace(microsecond=0)
+            <= _time(step["completed_at"])
+            and hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
+            == row["sha256"],
+            "Saved log row does not match its evidence, owned step or draft creation profile",
+        )
+        times.append(when)
+    _require(all(a < b for a, b in pairwise(times)), "Draft creation log order is ambiguous")
+    return times
+
+
 def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) -> _Row:
     run, job, creation = cap["run"], cap["job"], cap["creation"]
     _run_identity(run, job, repo, run_id, "push")
@@ -326,7 +347,8 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
         "Saved job does not have the supported single-action execution order",
     )
     tag = r" +v?[0-9]{1,12}\.[0-9]{1,12}\.[0-9]{1,12}"
-    if configured["requested_permission"] is None:
+    requires_grant = configured["requested_permission"] is None
+    if requires_grant:
         _require(
             "effective_permission_rows" in creation,
             "No workflow Contents grant is declared and the owned setup grant is missing",
@@ -353,33 +375,7 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
         "Saved log lacks the complete draft creation sequence",
     )
     owners = (setup,) + (drafter,) * (len(patterns) - 2) + (finish,)
-    grant_rows = creation.get("effective_permission_rows", [])
-    if "effective_permission_rows" in creation:
-        _require(
-            isinstance(grant_rows, list) and len(grant_rows) == 3,
-            "Saved log lacks the complete job token permission group",
-        )
-        patterns = (
-            re.escape("##[group]GITHUB_TOKEN Permissions"),
-            r"Contents: write",
-            re.escape("##[endgroup]"),
-            *patterns,
-        )
-        owners = (setup, setup, setup, *owners)
-    times = []
-    for row, pattern, step in zip([*grant_rows, *rows], patterns, owners, strict=True):
-        when = _time(row["time"])
-        _require(
-            _matches(row["value"], pattern)
-            and _time(step["started_at"])
-            <= when.replace(microsecond=0)
-            <= _time(step["completed_at"])
-            and hashlib.sha256(f"{row['time']} {row['value']}".encode()).hexdigest()
-            == row["sha256"],
-            "Saved log row does not match its evidence, owned step or draft creation profile",
-        )
-        times.append(when)
-    _require(all(a < b for a, b in pairwise(times)), "Draft creation log order is ambiguous")
+    times = _creation_log_times(rows, patterns, owners)
     result: _Row = {
         "state": "draft-release-create-reported",
         "repository": repo,
@@ -402,13 +398,38 @@ def _draft_creation(cap: _Row, root: Path, repo: str, run_id: int, job_id: int) 
         },
         "scope": _PUSH_SCOPE,
     }
-    if grant_rows:
-        result["effective_permission"] = {
-            "credential": "GITHUB_TOKEN",
-            "contents": "write",
-            "time": grant_rows[1]["time"],
-            "line_sha256": grant_rows[1]["sha256"],
-        }
+    if "effective_permission_rows" in creation:
+        grant_rows = creation["effective_permission_rows"]
+        try:
+            _require(
+                isinstance(grant_rows, list) and len(grant_rows) == 3,
+                "Saved log lacks the complete job token permission group",
+            )
+            grant_times = _creation_log_times(
+                grant_rows,
+                (
+                    re.escape("##[group]GITHUB_TOKEN Permissions"),
+                    "Contents: write",
+                    re.escape("##[endgroup]"),
+                ),
+                (setup,) * 3,
+            )
+            _require(grant_times[-1] < times[0], "Draft creation log order is ambiguous")
+        except (AttributeError, IndexError, KeyError, RecursionError, TypeError, ValueError) as exc:
+            if requires_grant:
+                raise
+            result["effective_permission_unresolved"] = (
+                str(exc)
+                if isinstance(exc, PreviewEvidenceError)
+                else "Saved job setup grant rows are malformed"
+            )
+        else:
+            result["effective_permission"] = {
+                "credential": "GITHUB_TOKEN",
+                "contents": "write",
+                "time": grant_rows[1]["time"],
+                "line_sha256": grant_rows[1]["sha256"],
+            }
     return result
 
 
