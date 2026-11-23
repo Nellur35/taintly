@@ -1,5 +1,6 @@
 """A single-command PutObject profile rejects conflicting runner records."""
 
+import json
 import sys
 from base64 import b64encode
 from datetime import datetime, timezone
@@ -73,6 +74,49 @@ def test_report_distinguishes_s3_request_actor_from_launcher_and_workspace(
     else:
         assert "S3 request actor: unverified." in output
         assert f"Runner-reported STS session: {session}." in output
+
+
+@pytest.mark.parametrize("fmt", ["json", "text"])
+def test_incompatible_optional_credential_preserves_s3_denial_and_fails_incomplete(
+    tmp_path, monkeypatch, capsys, fmt
+):
+    observation = {
+        "state": "direct-s3-write-denied",
+        "build": "build-id",
+        "repository": "example/project",
+        "head": "a" * 40,
+        "influence": {"path": "marker.txt"},
+        "publication": {
+            "operation": "s3:PutObject",
+            "object_arn": "arn:aws:s3:::bucket/marker.txt",
+            "service_role": "build-role",
+            "acting_session": "owning-session",
+            "audit": "bound-s3-data-event",
+            "runtime_credential": {
+                "state": "unresolved",
+                "reason": "temporary credential belongs to another call",
+            },
+        },
+        "scope": "One observed request.",
+    }
+    monkeypatch.setattr(codebuild_s3, "codebuild_s3_observation", lambda *_: observation)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["taintly", str(tmp_path), "--no-config", "--format", fmt,
+         "--codebuild-public-s3-observation", str(tmp_path / "receipt.json"),
+         "build-arn", "https://github.com/example/project"],
+    )
+    with pytest.raises(SystemExit) as exit_:
+        cli.main()
+    assert exit_.value.code == 11
+    output = capsys.readouterr().out
+    if fmt == "json":
+        assert json.loads(output)["codebuild_s3_observation"] == observation
+    else:
+        assert "was denied access to write" in output
+        assert "Runtime credential unresolved: temporary credential belongs to another call." in output
+        assert "CloudTrail ties the build's STS" not in output
 
 
 @pytest.mark.parametrize(
@@ -512,8 +556,9 @@ def test_precise_s3_transport_can_disprove_a_coarse_time_match(updates, message)
         ("different-version", None),
     ],
 )
+@pytest.mark.parametrize("runtime", [None, "bound", "wrong-key", "bad-timestamp"])
 def test_only_version_bound_audit_identifies_s3_writer(
-    tmp_path, monkeypatch, audit_version, audit_state
+    tmp_path, monkeypatch, audit_version, audit_state, runtime
 ):
     from taintly.ingestion import codebuild_put
 
@@ -602,6 +647,27 @@ def test_only_version_bound_audit_identifies_s3_writer(
             },
         },
     }
+    credential_identifier = "ASIA" + "A" * 16
+    if runtime is not None:
+        capture["runtime_sts_event"] = {
+            "eventID": "3f7948f9-c22a-4c21-af8d-5743b349a40a",
+            "eventSource": "sts.amazonaws.com",
+            "eventName": "GetCallerIdentity",
+            "eventCategory": "Management",
+            "readOnly": True,
+            "awsRegion": region,
+            "recipientAccountId": account,
+            "eventTime": "invalid" if runtime == "bad-timestamp" else "2026-01-01T00:00:00Z",
+            "userIdentity": {
+                "type": "AssumedRole",
+                "accountId": account,
+                "arn": session,
+                "credential_id_sha256": (
+                    "0" * 64 if runtime == "wrong-key"
+                    else sha256(credential_identifier.encode("ascii")).hexdigest()
+                ),
+            },
+        }
     if audit_version is not None:
         capture["s3_event"] = {
             "eventTime": "2026-01-01T00:00:01Z",
@@ -616,6 +682,7 @@ def test_only_version_bound_audit_identifies_s3_writer(
                 "type": "AssumedRole",
                 "accountId": account,
                 "arn": session,
+                "accessKeyId": credential_identifier,
                 "sessionContext": {"sessionIssuer": {"arn": role}},
             },
             "requestParameters": {"bucketName": "test-bucket", "key": "marker.txt"},
@@ -628,6 +695,25 @@ def test_only_version_bound_audit_identifies_s3_writer(
     result = codebuild_put.direct_s3_put(capture, tmp_path, arn, repo)
     assert result["state"] == "direct-s3-write-observed"
     assert result["publication"]["audit"] == audit_state
+    credential = result["publication"].get("runtime_credential")
+    if runtime is None:
+        assert credential is None
+    elif audit_state != "bound-s3-data-event":
+        assert credential == {
+            "state": "unresolved",
+            "reason": "An STS credential join requires an independently matched S3 event",
+        }
+    elif runtime == "bound":
+        assert credential == {
+            "source": "cloudtrail-sts-get-caller-identity",
+            "event_id": "3f7948f9-c22a-4c21-af8d-5743b349a40a",
+        }
+    else:
+        reason = (
+            "Malformed saved STS credential evidence" if runtime == "bad-timestamp"
+            else "Saved STS event does not identify the S3 request's temporary credential"
+        )
+        assert credential == {"state": "unresolved", "reason": reason}
     if audit_state == "bound-s3-data-event":
         assert result["publication"]["acting_session"] == session
         assert "reported_sts_session" not in result

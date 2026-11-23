@@ -2532,6 +2532,8 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
     capture, build_arn, origin = args.codebuild_public_s3_observation
     result = codebuild_s3_observation(Path(capture), Path(args.path), build_arn, origin)
     comparison = result.get("policy_comparison")
+    credential = result.get("publication", {}).get("runtime_credential")
+    credential_unresolved = credential is not None and credential.get("state") == "unresolved"
     if args.format == "json":
         print(json.dumps({"codebuild_s3_observation": result}, indent=2))
     elif result["state"] in ("direct-s3-write-observed", "direct-s3-write-denied"):
@@ -2590,7 +2592,9 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
             print(f"  Reported S3 HTTP status: {transport['http_status']}.")
         if publication.get("denial_reason") == "explicit-resource-policy-deny":
             print("  AWS reported an explicit deny in a resource-based policy.")
-        if "runtime_credential" in publication:
+        if credential_unresolved:
+            print(f"  Runtime credential unresolved: {credential['reason']}.")
+        elif credential is not None:
             print("  CloudTrail ties the build's STS identity call to the same S3 credential.")
         if "workspace_identity" in result:
             print("  The workspace STS event identifies the workspace session only.")
@@ -2651,7 +2655,10 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
     else:
         print(f"CodeBuild S3 observation unresolved: {result['reason']}")
         print(result["scope"])
-    complete = result["state"] in ("direct-s3-write-observed", "direct-s3-write-denied")
+    complete = not credential_unresolved and result["state"] in (
+        "direct-s3-write-observed",
+        "direct-s3-write-denied",
+    )
     if comparison is not None:
         complete = complete and comparison["state"] == "matched-policy-change"
     sys.exit(0 if complete else 11)

@@ -818,15 +818,27 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
     runtime_event = capture.get("runtime_sts_event")
     if runtime_event is not None:
         if event is None or request_id is None:
-            raise SnapshotError("An STS credential join requires an independently matched S3 event")
-        publication["runtime_credential"] = _runtime_credential(
-            _map(runtime_event, "STS management event"),
-            event,
-            region,
-            account,
-            session,
-            command_start,
-        )
+            publication["runtime_credential"] = {
+                "state": "unresolved",
+                "reason": "An STS credential join requires an independently matched S3 event",
+            }
+        else:
+            try:
+                publication["runtime_credential"] = _runtime_credential(
+                    _map(runtime_event, "STS management event"),
+                    event,
+                    region,
+                    account,
+                    session,
+                    command_start,
+                )
+            except SnapshotError as exc:
+                publication["runtime_credential"] = {"state": "unresolved", "reason": str(exc)}
+            except (TypeError, ValueError, OverflowError):
+                publication["runtime_credential"] = {
+                    "state": "unresolved",
+                    "reason": "Malformed saved STS credential evidence",
+                }
 
     source_plan: _Row = {
         "kind": "provider-inline",
@@ -920,6 +932,10 @@ def _compare_policy_change(capture: _Row, denied: _Row, root: Path, origin: str)
     )
     allowed = direct_s3_put(earlier, root, previous_arn, origin)
     prior = allowed["publication"]
+    for observation in (destination, prior):
+        credential = observation.get("runtime_credential", {})
+        if credential.get("state") == "unresolved":
+            raise SnapshotError(credential["reason"])
     _need(
         allowed["state"] == "direct-s3-write-observed"
         and prior.get("request_id") != destination["request_id"]
