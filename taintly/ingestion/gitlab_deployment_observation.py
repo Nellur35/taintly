@@ -34,6 +34,7 @@ _SCOPE = (
 
 def _local_parents(cfg: _Config, job: str) -> tuple[str, ...]:
     path = (job, "extends")
+    parents: tuple[str, ...]
     if cfg.leaves.get(path):
         parents = (_value(cfg.scalar(path).value, _NAME, "local job template"),)
     else:
