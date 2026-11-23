@@ -802,9 +802,14 @@ def _detached_archive(
     target, fork, mr = data["target"], data["fork"], data["mr"]
     pipeline, job, log = data["pipeline"], data["job"], data["log"]
     explicit_origin = origin is not None
-    canceled = (
-        explicit_origin and target_owned and not (pipeline["status"] == job["status"] == "failed")
+    status = job.get("status")
+    allowed_failure = (
+        explicit_origin
+        and status == "failed"
+        and pipeline["status"] == "success"
+        and job.get("allow_failure") is True
     )
+    canceled = explicit_origin and target_owned and status == "canceled"
     base = origin or "https://gitlab.com"
     source_path = _value(
         fork["path_with_namespace"], _CANONICAL_PROJECT, "GitLab fork project path"
@@ -871,7 +876,8 @@ def _detached_archive(
         )
     elif explicit_origin:
         _need(
-            pipeline["status"] == job["status"] == "failed"
+            status == "failed"
+            and (pipeline["status"] == "failed" or allowed_failure)
             and history is None
             and revision == current_head == job["commit"]["id"],
             "the selected origin requires a failed target-project job at the recorded MR head"
@@ -930,7 +936,6 @@ def _detached_archive(
         "saved job commit differs from the selected checkout",
     )
     archives = [item for item in job["artifacts"] if item["file_type"] == "archive"]
-    status = job.get("status")
     if "no_payload_runner" in log:
         _need(
             not (target_owned or explicit_origin or live_fork)
@@ -1108,8 +1113,13 @@ def _detached_archive(
     }
     if explicit_origin:
         result["origin"] = base
-    if live_parent_observed_at is not None:
+    if live_parent_observed_at is not None or allowed_failure:
         result["pipeline_status"] = pipeline["status"]
+    if allowed_failure:
+        result["job_allow_failure"] = True
+        result["scope"] += (
+            " GitLab marks this failed job as allowed to fail in a successful pipeline."
+        )
     if target_owned:
         result["source_repository"] = source_path
         result["source_project"] = source_project
