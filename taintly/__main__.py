@@ -263,6 +263,12 @@ def main():
         help="Check a saved GitLab production branch publisher outcome offline.",
     )
     evidence_input.add_argument(
+        "--gitlab-deployment-observation",
+        nargs=5,
+        metavar=("JSON", "PROJECT", "PIPELINE", "JOB", "DEPLOYMENT"),
+        help="Check a saved GitLab environment deployment and the owning CI job.",
+    )
+    evidence_input.add_argument(
         "--gitlab-fork-admission-observation",
         nargs=3,
         metavar=("JSON", "PROJECT", "PIPELINE"),
@@ -719,6 +725,9 @@ def main():
         return
     if args.gitlab_ref_observation:
         _check_gitlab_ref_observation(parser, args)
+        return
+    if args.gitlab_deployment_observation:
+        _check_gitlab_deployment(parser, args)
         return
     if args.gitlab_fork_admission_observation:
         _check_gitlab_fork_admission(parser, args)
@@ -2193,6 +2202,48 @@ def _check_gitlab_ref_observation(
     else:
         print(f"GitLab publication unresolved. {report['reason']}.\n{report['scope']}")
     sys.exit(11 if incomplete else 0)
+
+
+def _check_gitlab_deployment(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    from taintly.ingestion.gitlab_deployment_observation import deployment_observation
+
+    mode = "gitlab_deployment_observation"
+    allowed = {"path", mode, "platform", "format", "no_config", "no_color"}
+    for name, value in vars(args).items():
+        if name not in allowed and value != parser.get_default(name):
+            parser.error(f"--{name.replace('_', '-')} is unavailable in GitLab deployment mode")
+    if args.platform not in (None, "gitlab") or args.format not in ("text", "json"):
+        parser.error("GitLab deployment mode requires gitlab and text or JSON format")
+    snapshot, *identifiers = args.gitlab_deployment_observation
+    if any(
+        not value.isascii() or not value.isdecimal() or not 1 <= len(value) <= 18 or int(value) == 0
+        for value in identifiers
+    ):
+        parser.error("GitLab deployment mode requires positive decimal IDs")
+    project, pipeline, job, deployment = map(int, identifiers)
+    report = deployment_observation(
+        Path(snapshot), Path(args.path), project, pipeline, job, deployment
+    )
+    state = report["state"]
+    if args.format == "json":
+        print(json.dumps({mode: report}, indent=2))
+    elif state == "unresolved":
+        print(f"GitLab deployment unresolved. {report['reason']}.\n{report['scope']}")
+    else:
+        print(
+            f"GitLab deployment {report['deployment']} to {report['target']['name']}: {state}.\n"
+            f"  Pipeline {report['pipeline']} ({report['pipeline_event']}), "
+            f"job {report['job']} ({report['job_status']}).\n"
+            f"  {report['source']['path']}:{report['source']['environment_line']} "
+            f"at {report['source']['revision']}."
+        )
+        approval = report["approval"]
+        if approval["state"] == "pending-reported":
+            print(f"  GitLab reports {approval['count']} pending approval(s).")
+        else:
+            print("  Deployment approval details are unresolved.")
+        print(report["scope"])
+    sys.exit(11 if state == "unresolved" else 0)
 
 
 def _check_gitlab_fork_admission(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
