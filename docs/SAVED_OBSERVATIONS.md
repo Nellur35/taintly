@@ -45,11 +45,13 @@ available. A reported upload after the publication check leaves the
 historical attribution unresolved. Older captures without `lastUpdated`
 leave subsequent uploads unverified.
 
-For plugin HPIs, supported Maven groups are `org.jenkins-ci.plugins`,
+For plugin HPIs and the main plugin JAR (with no Maven classifier), supported
+Maven groups are `org.jenkins-ci.plugins`,
 `org.jenkins-ci.plugins.workflow` and `io.jenkins.plugins`. The plugin
 publisher check's target and its download link must identify the exact
-directory of the saved registry object. A Jenkins Core check can list
-several modules.
+directory of the saved registry object. A plugin JAR must declare the
+matching group ID, artifact ID and short name in its own manifest.
+A Jenkins Core check can list several modules.
 
 For a plugin whose Maven coordinate differs from the conventional
 repository name or group, also save the head `pom.xml` and the base version
@@ -57,9 +59,10 @@ as `base.pom.xml`. Add `coordinate_source` to the receipt with `head` and
 `base` records containing `commit`, `sha256`, Git `blob`, and the exact
 GitHub file `url` at that commit. The files must be identical and declare
 a literal artifact ID, `hpi` packaging and a literal group ID in the
-project or parent. The HPI manifest's group ID, artifact ID and short name
-must match that coordinate and the selected registry path. Changed POMs,
-dynamic coordinates and module selection are outside this profile.
+project or parent. The plugin package manifest's group ID, artifact ID
+and short name must match that coordinate and the selected registry path.
+Changed POMs, dynamic coordinates and module selection are outside this
+profile.
 
 The report links the observed registry operation, writing identity,
 package bytes, revision and exact target. It also reports the Jenkins PR
