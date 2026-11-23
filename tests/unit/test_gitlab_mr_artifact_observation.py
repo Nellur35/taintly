@@ -776,6 +776,67 @@ def test_canceled_job_requires_its_own_archive_acceptance(tmp_path, canceled_cap
 
 
 @pytest.fixture
+def empty_upload(canceled_capture):
+    log = canceled_capture["canceled_archive"]["log"]
+    job, pipeline = canceled_capture["job"], canceled_capture["pipeline"]
+    job["artifacts"] = [{"file_type": "trace"}]
+    row = log["rows"][6]
+    log["rows"][6] = _failure_trace_row(row["time"], "01E ERROR: No files to upload")
+    for line, item in enumerate(log["rows"], 10):
+        item["line"] = line
+    log["no_payload_runner"] = {
+        "job": job["id"],
+        "pipeline": pipeline["id"],
+        "revision": pipeline["sha"],
+        "trace_url": log["url"],
+        "trace_sha256": log["sha256"],
+        "executor": "docker+machine",
+        "runner_revision": "7a0f126423ab4aefa71be5cda32668e29bc59b2d",
+        "helper_index": "sha256:604025ad1395452e28268e5ca722452d8e3a3badfd7bee628941a6bfb7ead975",
+        "helper_config": "sha256:060c57dea4e06ce034c9959e734771d2542983156682d85447a6f9152e64ecd4",
+        "checkout_directory": "/builds/team/repo",
+        "runner_line": 1,
+        "helper_line": 9,
+    }
+    return canceled_capture
+
+
+def test_empty_uploader_stopped_before_the_request(tmp_path, empty_upload):
+    result = evaluate(tmp_path, empty_upload)
+
+    assert result["state"] == "artifact-upload-not-reached"
+    assert result["upload"]["authorization"] == "unverified"
+    assert [row["line"] for row in result["upload"]["markers"]] == [16]
+    assert "publication" not in result
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("job", 34),
+        ("trace_sha256", "0" * 64),
+        ("helper_index", "sha256:" + "0" * 64),
+        ("helper_line", 17),
+    ],
+)
+def test_empty_uploader_needs_matching_runner_evidence(tmp_path, empty_upload, field, value):
+    empty_upload["canceled_archive"]["log"]["no_payload_runner"][field] = value
+
+    result = evaluate(tmp_path, empty_upload)
+
+    assert result["state"] == "unresolved"
+    assert "publication" not in result
+
+
+def test_empty_marker_cannot_qualify_a_coordinator_refusal(tmp_path, empty_upload):
+    rows = empty_upload["canceled_archive"]["log"]["rows"]
+    reply = '01E Uploading artifacts as "archive" to coordinator... 403 Forbidden id=33 status=403'
+    rows[6] = {**_failure_trace_row(rows[6]["time"], reply), "line": 16}
+
+    assert evaluate(tmp_path, empty_upload)["state"] == "unresolved"
+
+
+@pytest.fixture
 def fork_upload(canceled_capture):
     target_url, fork_url = "https://gitlab.com/team/repo", "https://gitlab.com/team/fork"
     ref = "branch-from-fork"

@@ -264,6 +264,30 @@ def _archived_member(
     }
 
 
+def _verified_archive_helper(
+    evidence: _Row, job_url: str, project_path: str, job: _Row, pipe: _Row
+) -> tuple[str, str, str]:
+    """Check that saved helper evidence belongs to this job and reviewed runner."""
+    _need(
+        _identifier(evidence["job"], "runner evidence job") == job["id"]
+        and _identifier(evidence["pipeline"], "runner evidence pipeline") == pipe["id"]
+        and evidence["revision"] == pipe["sha"]
+        and evidence["trace_url"] == job_url + "/raw",
+        "runner evidence belongs to another job, pipeline or revision",
+    )
+    revision = _value(evidence["runner_revision"], _SHA, "archive runner revision")
+    _need(revision in _ARCHIVE_HELPERS, "runner is outside the verified archive profile")
+    helper = _ARCHIVE_HELPERS[revision]
+    _need(
+        evidence["executor"] == "docker+machine"
+        and (evidence["helper_index"], evidence["helper_config"]) == helper[:2],
+        "runner or helper image is outside the verified archive profile",
+    )
+    cwd = f"/builds/{project_path}"
+    _need(evidence["checkout_directory"] == cwd, "runner checkout directory does not match")
+    return revision, cwd, helper[2]
+
+
 def _native_archive_authority(
     data: _Row,
     job_url: str,
@@ -277,23 +301,9 @@ def _native_archive_authority(
     try:
         evidence = data["archive_runner_evidence"]
         job, pipe = data["job"], data["pipeline"]
-        _need(
-            _identifier(evidence["job"], "runner evidence job") == job["id"]
-            and _identifier(evidence["pipeline"], "runner evidence pipeline") == pipe["id"]
-            and evidence["revision"] == pipe["sha"]
-            and evidence["trace_url"] == job_url + "/raw",
-            "runner evidence belongs to another job, pipeline or revision",
+        revision, cwd, helper_digest = _verified_archive_helper(
+            evidence, job_url, project_path, job, pipe
         )
-        revision = _value(evidence["runner_revision"], _SHA, "archive runner revision")
-        _need(revision in _ARCHIVE_HELPERS, "runner is outside the verified archive profile")
-        helper = _ARCHIVE_HELPERS[revision]
-        _need(
-            evidence["executor"] == "docker+machine"
-            and (evidence["helper_index"], evidence["helper_config"]) == helper[:2],
-            "runner or helper image is outside the verified archive profile",
-        )
-        cwd = f"/builds/{project_path}"
-        _need(evidence["checkout_directory"] == cwd, "runner checkout directory does not match")
         lines = [
             _identifier(evidence[key], key)
             for key in (
@@ -357,7 +367,7 @@ def _native_archive_authority(
             "runner_revision": revision,
             "checkout_directory": cwd,
             "helper_image_executable": "/usr/bin/gitlab-runner-helper",
-            "helper_image_executable_sha256": helper[2],
+            "helper_image_executable_sha256": helper_digest,
             "scope": (
                 "The verified helper image and Runner implementation bind the credential class to "
                 "this job archive. The running process bytes, mounts, token instance, registry "
@@ -572,9 +582,88 @@ def _failed_upload(data: _Row, root: Path, job_url: str) -> _Row:
     }
 
 
-def _canceled_upload(data: _Row, job_url: str) -> _Row:
+def _no_payload_upload(
+    job: _Row, pipeline: _Row, log: _Row, job_url: str, project_path: str, *, plain_start: bool
+) -> _Row:
+    """Qualify a native uploader's recorded empty selection before any request."""
+    _need(
+        len(job["artifacts"]) == 1
+        and job["artifacts"][0]["file_type"] == "trace"
+        and all(job["pipeline"][key] == pipeline[key] for key in ("created_at", "updated_at"))
+        and _identifier(log["job"], "runner trace job") == job["id"]
+        and log["url"] == job_url + "/raw"
+        and _SHA256.fullmatch(str(log["sha256"])),
+        "saved trace and inventory do not identify the job's empty upload",
+    )
+    evidence = log["no_payload_runner"]
+    revision, cwd, _ = _verified_archive_helper(evidence, job_url, project_path, job, pipeline)
+    rows = log["rows"]
+    _need(
+        evidence["trace_sha256"] == log["sha256"]
+        and isinstance(rows, list)
+        and 8 <= len(rows) <= 16,
+        "runner evidence does not match the saved bounded upload trace",
+    )
+    lines = [_identifier(row["line"], "empty-upload trace line") for row in rows]
+    runner = _identifier(evidence["runner_line"], "runner identity line")
+    helper = _identifier(evidence["helper_line"], "runner helper line")
+    _need(
+        all(left < right for left, right in pairwise(lines))
+        and runner < min(helper, lines[0])
+        and helper < lines[6],
+        "empty-upload trace or helper evidence is out of order",
+    )
+    phase_name = "upload_artifacts_on_failure"
+    markers = []
+    for response in rows[6:-1]:
+        phase, marker = _archive_upload_rows(
+            log | {"rows": [*rows[:6], response, rows[-1]]},
+            pipeline,
+            job,
+            r"01E ERROR: No files to upload",
+            "empty-job",
+            accept_plain_start=plain_start,
+        )
+        _need(phase == phase_name, "empty upload is outside the reviewed failure phase")
+        markers.append({key: marker[key] for key in ("line", "time", "sha256")})
+    _need(
+        all(
+            _time(left["time"], "empty-upload marker")
+            <= _time(right["time"], "empty-upload marker")
+            for left, right in pairwise(markers)
+        ),
+        "empty-upload markers are out of time order",
+    )
+    return {
+        "state": "artifact-upload-not-reached",
+        "job_status": job["status"],
+        "upload_phase": phase_name,
+        "upload": {
+            "state": "no-files-selected",
+            "authorization": "unverified",
+            "markers": markers,
+            "trace_url": log["url"],
+            "trace_sha256": log["sha256"],
+            "runner_revision": revision,
+            "checkout_directory": cwd,
+        },
+        "scope": (
+            "The saved runner reports no files for these uploader invocations. "
+            "The reviewed helper returns before sending an upload request on this path. "
+            "Artifact type, receiver authorization, other requests and deployment remain unverified."
+        ),
+    }
+
+
+def _canceled_upload(data: _Row, job_url: str, project_path: str) -> _Row:
     job, pipeline = data["job"], data["pipeline"]
     log = data["canceled_archive"]["log"]
+    if "no_payload_runner" in log:
+        _need(
+            job["status"] == pipeline["status"] == "canceled",
+            "empty upload needs the canceled train job",
+        )
+        return _no_payload_upload(job, pipeline, log, job_url, project_path, plain_start=True)
     archives = [item for item in job["artifacts"] if item["file_type"] == "archive"]
     _need(
         job["status"] == pipeline["status"] == "canceled"
@@ -837,6 +926,42 @@ def _detached_archive(
         )
     archives = [item for item in job["artifacts"] if item["file_type"] == "archive"]
     status = job.get("status")
+    if "no_payload_runner" in log:
+        _need(
+            not (target_owned or explicit_origin or live_fork)
+            and status == "failed"
+            and job.get("failure_reason") == "script_failure"
+            and _identifier(job["id"], "fork job") == job_id
+            and job["web_url"] == job_url
+            and job["commit"]["id"] == revision
+            and all(
+                job["pipeline"][key] == pipeline[key]
+                for key in ("id", "project_id", "sha", "ref", "source")
+            )
+            and hashlib.sha256(
+                _source_bytes(root, root / ".gitlab-ci.yml", "selected fork GitLab source")
+            ).hexdigest()
+            == data["source_sha256"]
+            and not {
+                "archive_download",
+                "archive_runner_evidence",
+                "archive_tree",
+                "archive_windows_helper",
+                "archive_member_origin",
+                "pages_handoff",
+            }.intersection(data),
+            "empty upload needs the owned failed fork job and matching source without a publication claim",
+        )
+        return {
+            "repository": source_path,
+            "target_repository": target_path,
+            "project": owner,
+            "pipeline": pipeline_id,
+            "job": job_id,
+            "mr": iid,
+            "revision": revision,
+            **_no_payload_upload(job, pipeline, log, job_url, source_path, plain_start=False),
+        }
     success = status == "success"
     expected_failure = None if success or canceled else "script_failure"
     _need(
@@ -1670,7 +1795,7 @@ def _assess(
             publisher is None and "pages_preview" not in data,
             "canceled archive evidence covers its own upload only",
         )
-        detail = _canceled_upload(data, job_url)
+        detail = _canceled_upload(data, job_url, path)
     elif failed_archive:
         detail = _failed_upload(data, root, job_url)
         if publisher is not None:

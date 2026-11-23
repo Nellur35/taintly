@@ -268,6 +268,26 @@ corroborate an explicit same-project job guard and manual fallback using
 the supplied project IDs and a job with no recorded start. For that
 case use empty `trace` and null `artifact`.
 
+For a recorded failed fork job or canceled target-project merge-train job
+with only a trace in the job's artifact inventory, the observer can
+corroborate that a reviewed GitLab.com Linux Runner uploader found no
+files before sending an upload request. The JSON state is
+`artifact-upload-not-reached`. It exits 0 for that specific observation.
+Receiver authorization, artifact type and other requests remain unverified.
+
+Use the original source and the existing fork or canceled job receipt.
+Under `log` (or `canceled_archive.log` for the train), supply the checkout
+and script phase markers, the failure-upload start marker, the native
+`01E ERROR: No files to upload` rows, and the upload end marker, in trace
+order. Each row must retain its number, timestamp, ANSI-stripped text and
+digest as for other timed archive observations. In the same log object,
+add `no_payload_runner` with the native helper evidence (`job`, `pipeline`,
+`revision`, `trace_url`, `trace_sha256`, `executor`, `runner_revision`,
+`helper_index`, `helper_config`, `checkout_directory`, `runner_line`, and
+`helper_line`). Use trusted provider records to identify the runner and
+helper. A missing or unsupported helper or contradictory job record leaves
+the observation unresolved at exit 11.
+
 For the GitLab.com project Pages address
 `https://NAMESPACE.gitlab.io/PROJECT/`, a `pages_publication` object can
 corroborate selected responses from a later push to the default branch.
