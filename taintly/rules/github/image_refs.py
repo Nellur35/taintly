@@ -48,19 +48,21 @@ class GithubImageReferencePattern:
             if event.kind is not EventKind.LEAF_SCALAR or event.value is None:
                 continue
             path = event.path
+            if len(path) < 3 or path[0] != "jobs" or not isinstance(path[1], str):
+                continue
+            if path[2:] == ("services",):
+                # An expression can supply the entire map without a visible image leaf.
+                if event.value.lstrip().startswith("${{"):
+                    unresolved = True
+                continue
             if not (
-                len(path) >= 3
-                and path[0] == "jobs"
-                and isinstance(path[1], str)
-                and (
-                    path[2:] == ("container",)
-                    or path[2:] == ("container", "image")
-                    or (
-                        len(path) == 5
-                        and path[2] == "services"
-                        and isinstance(path[3], str)
-                        and path[4] == "image"
-                    )
+                path[2:] == ("container",)
+                or path[2:] == ("container", "image")
+                or (
+                    len(path) == 5
+                    and path[2] == "services"
+                    and isinstance(path[3], str)
+                    and path[4] == "image"
                 )
             ):
                 continue
