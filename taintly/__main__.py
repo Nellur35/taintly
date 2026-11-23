@@ -2288,6 +2288,13 @@ def _check_gitlab_mr_artifact(parser: argparse.ArgumentParser, args: argparse.Na
             f"  Managed artifact: {publication['target']}\n"
             f"  SHA-256: {publication['sha256']}\n{report['scope']}\n{report['review_action']}"
         )
+    elif state == "artifact-upload-not-reached":
+        lines = ", ".join(str(marker["line"]) for marker in report["upload"]["markers"])
+        print(
+            f"GitLab job {report['job']} found no files in its recorded failure-path uploader.\n"
+            f"  Pipeline {report['pipeline']}, MR !{report['mr']}, checkout {report['revision']}.\n"
+            f"  Runner trace lines: {lines}. Upload authorization is unverified.\n{report['scope']}"
+        )
     elif state == "job-artifact-accepted-canceled-job":
         publication = report["publication"]
         print(
