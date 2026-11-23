@@ -327,7 +327,7 @@ def _assess(data: _Row, root: Path, repository: str, number: int, check_id: int)
     artifact, version, extension = coordinate.groups()
     _require(
         (core and extension == "jar")
-        or (artifact == (pom["artifact"] if pom else repo[2]) and extension == "hpi"),
+        or (not core and artifact == (pom["artifact"] if pom else repo[2])),
         "registry artifact belongs to a different project profile",
     )
     created = _time(registry["created"])
@@ -374,12 +374,16 @@ def _assess(data: _Row, root: Path, repository: str, number: int, check_id: int)
         and fields.get("implementation-version") == version,
         "published package manifest differs from the exact PR revision or version",
     )
-    if pom is not None:
+    if pom is not None or (not core and extension == "jar"):
+        # The registry path has already been checked as group/artifact/version/file.
+        group = registry_path.rsplit("/", 3)[0][1:].replace("/", ".")
         _require(
-            fields.get("group-id") == pom["group"]
-            and fields.get("artifact-id") == fields.get("short-name") == pom["artifact"],
-            "Published HPI manifest does not match the selected Maven group and artifact",
+            fields.get("group-id") == group
+            and fields.get("artifact-id") == fields.get("short-name") == artifact,
+            f"Published {'HPI' if extension == 'hpi' else 'plugin JAR'} manifest does not match "
+            "the selected Maven group and artifact",
         )
+    if pom is not None:
         source["maven_coordinate"] = pom
     return {
         "state": "publication-observed",

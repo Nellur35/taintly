@@ -102,6 +102,36 @@ def test_successful_check_does_not_replace_artifact_bytes(tmp_path, capture):
 
 
 @pytest.mark.parametrize(
+    ("group", "artifact", "short_name", "filename", "expected"),
+    [
+        ("org.jenkins-ci.plugins", "git", "git", "git-1.2.jar", "publication-observed"),
+        ("org.jenkins-ci.plugins.workflow", "git", "git", "git-1.2.jar", "unresolved"),
+        ("org.jenkins-ci.plugins", "other", "git", "git-1.2.jar", "unresolved"),
+        ("org.jenkins-ci.plugins", "git", "other", "git-1.2.jar", "unresolved"),
+        ("org.jenkins-ci.plugins", "git", "git", "git-1.2-tests.jar", "unresolved"),
+    ],
+)
+def test_plugin_jar_requires_exact_unclassified_coordinate(
+    tmp_path, capture, group, artifact, short_name, filename, expected
+):
+    raw = package(
+        HEAD,
+        extra=f"Group-Id: {group}\r\nArtifact-Id: {artifact}\r\nShort-Name: {short_name}\r\n",
+    )
+    (tmp_path / "package.zip").write_bytes(raw)
+    capture["registry"].update(
+        path=f"/org/jenkins-ci/plugins/git/1.2/{filename}",
+        checksums={"sha256": hashlib.sha256(raw).hexdigest()},
+        size=str(len(raw)),
+    )
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == expected
+    if expected == "publication-observed":
+        assert result["publication"]["object_url"] == DIRECTORY + filename
+        assert result["jenkins"]["publisher_handoff"] == "unverified"
+
+
+@pytest.mark.parametrize(
     ("updated", "expected"),
     [
         ("2026-11-16T00:00:01.999Z", "publication-observed"),
