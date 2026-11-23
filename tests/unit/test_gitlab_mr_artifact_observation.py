@@ -1338,17 +1338,31 @@ def target_head_upload(fork_upload):
     return data
 
 
-@pytest.mark.parametrize("status", ["failed", "success"])
+@pytest.mark.parametrize(
+    ("job_status", "pipeline_status", "allow_failure", "accepted"),
+    [
+        ("failed", "failed", None, True),
+        ("success", "success", None, False),
+        ("failed", "success", True, True),
+        ("failed", "success", None, False),
+        ("failed", "success", False, False),
+        ("failed", "success", "true", False),
+        ("failed", "canceled", True, False),
+    ],
+)
 def test_explicit_origin_requires_failed_current_head_target_archive(
-    tmp_path, target_head_upload, status
+    tmp_path, target_head_upload, job_status, pipeline_status, allow_failure, accepted
 ):
     origin = "https://ci.example.org"
     data = json.loads(json.dumps(target_head_upload).replace("https://gitlab.com", origin))
-    data["pipeline"]["status"] = data["job"]["status"] = status
-    data["job"]["pipeline"]["status"] = data["mr_pipeline"]["status"] = status
-    data["job"]["failure_reason"] = "script_failure" if status == "failed" else None
+    data["job"]["status"] = job_status
+    data["pipeline"]["status"] = pipeline_status
+    data["job"]["pipeline"]["status"] = data["mr_pipeline"]["status"] = pipeline_status
+    data["job"]["failure_reason"] = "script_failure" if job_status == "failed" else None
+    if allow_failure is not None:
+        data["job"]["allow_failure"] = allow_failure
     rows = data["log"]["rows"]
-    if status == "failed":
+    if job_status == "failed":
         for index in (5, 7):
             row = rows[index]
             rows[index] = _failure_trace_row(
@@ -1365,7 +1379,7 @@ def test_explicit_origin_requires_failed_current_head_target_archive(
     packet = tmp_path / "observation.json"
     packet.write_text(json.dumps(data), encoding="utf-8")
     result = mr_artifact_observation(packet, tmp_path, 1, 22, 33, origin=origin)
-    if status == "success":
+    if not accepted:
         assert result["state"] == "unresolved"
         assert "publication" not in result
     else:
@@ -1375,6 +1389,11 @@ def test_explicit_origin_requires_failed_current_head_target_archive(
         assert result["upload_phase"] == "upload_artifacts_on_failure"
         assert result["publication"]["http_status"] == 201
         assert result["publication"]["target"] == f"{origin}/team/repo/-/jobs/33/artifacts/download"
+        if pipeline_status == "success":
+            assert result["pipeline_status"] == "success"
+            assert result["job_allow_failure"] is True
+        else:
+            assert "job_allow_failure" not in result
 
 
 @pytest.mark.parametrize(
@@ -1803,7 +1822,8 @@ def test_target_head_archive_keeps_accepted_upload_when_runner_evidence_disagree
         None, "alternate-origin", "wrong-project", "wrong-checkout", "missing-source",
         "wrong-source-commit", "wrong-job", "wrong-phase", "denied", "unsupported-runner",
         "unknown-format", "null-format", "ordered-tie", "missing-line", "duplicate-line",
-        "reversed-line", "tied-response",
+        "reversed-line", "tied-response", "allowed-failure", "missing-allow-failure",
+        "allowed-failure-parent-mismatch", "allowed-failure-wrong-phase",
     ],
 )
 def test_explicit_origin_binds_failed_fork_archive(tmp_path, fork_upload, contrast):
@@ -1825,6 +1845,15 @@ def test_explicit_origin_binds_failed_fork_archive(tmp_path, fork_upload, contra
     value = re.sub(r"correlation_id=\S+", "correlation_id=" + "0" * 26, response["value"])
     rows[6] = _failure_trace_row(response["time"], value)
     selected_project = 2
+    if contrast in {
+        "allowed-failure", "missing-allow-failure",
+        "allowed-failure-parent-mismatch", "allowed-failure-wrong-phase",
+    }:
+        data["pipeline"]["status"] = data["mr_pipeline"]["status"] = "success"
+        if contrast != "allowed-failure-parent-mismatch":
+            data["job"]["pipeline"]["status"] = "success"
+        if contrast != "missing-allow-failure":
+            data["job"]["allow_failure"] = True
     if contrast == "alternate-origin":
         origin = "https://other.example.org"
     elif contrast == "wrong-project":
@@ -1837,7 +1866,7 @@ def test_explicit_origin_binds_failed_fork_archive(tmp_path, fork_upload, contra
         data["source_file"]["commit_id"] = BASE
     elif contrast == "wrong-job":
         rows[6] = _failure_trace_row(response["time"], value.replace("id=33", "id=34"))
-    elif contrast == "wrong-phase":
+    elif contrast in {"wrong-phase", "allowed-failure-wrong-phase"}:
         for index in (5, 7):
             row = rows[index]
             rows[index] = _failure_trace_row(
@@ -1868,7 +1897,7 @@ def test_explicit_origin_binds_failed_fork_archive(tmp_path, fork_upload, contra
     packet = tmp_path / "observation.json"
     packet.write_text(json.dumps(data), encoding="utf-8")
     result = mr_artifact_observation(packet, tmp_path, selected_project, 22, 33, origin=origin)
-    if contrast not in {None, "ordered-tie"}:
+    if contrast not in {None, "ordered-tie", "allowed-failure"}:
         assert result["state"] == "unresolved"
         assert "publication" not in result
         return
@@ -1880,6 +1909,9 @@ def test_explicit_origin_binds_failed_fork_archive(tmp_path, fork_upload, contra
     assert result["publication"]["http_status"] == 201
     assert result["publication"]["retrieval"] == "unverified"
     assert "archive_runner_authority" not in result
+    if contrast == "allowed-failure":
+        assert result["pipeline_status"] == "success"
+        assert result["job_allow_failure"] is True
 
 
 @pytest.mark.parametrize(

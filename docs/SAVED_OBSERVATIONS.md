@@ -420,17 +420,19 @@ job, trace and fork source URLs against that origin. Preserve canonical
 project path capitalization.
 
 
-The same target-project schema accepts a failed job and failed pipeline on
-an explicitly selected origin when the pipeline checked out the current
-fork head for the MR. Use the fork's source record and the exact
+The same target-project schema accepts a failed job on an explicitly
+selected origin when the pipeline checked out the current fork head for
+the MR. The parent can be failed, or successful when the exact job's API
+record has Boolean `allow_failure: true`. Use the fork's source record and the exact
 target-project job inventory, with the eight ordered runner rows through
 the failure-phase archive HTTP 201 response. This reports acceptance of
 the exact target-project job archive. Contents, credentials, and
 deployment require separate evidence.
 
 For an explicitly selected origin, schema `gitlab-fork-project-archive-v1`
-also accepts a failed fork-owned pipeline and job at the recorded MR head.
-The job must report `script_failure`, one ZIP archive entry, and the eight
+also accepts a failed fork-owned job at the recorded MR head. The same
+parent status requirements apply. The
+job must report `script_failure`, one ZIP archive entry, and the eight
 ordered rows through its failure-phase archive response, with the runner's
 ULID correlation ID. When adjoining section end and start rows share a
 timestamp, preserve strictly increasing original trace row positions as
