@@ -157,7 +157,12 @@ If a completed run has an owned, successful checkout and Maven node
 but the original Nexus record is unavailable, supply `registry: null`
 and the snapshot alias matching the archived JAR. The result preserves
 the run outcome, checked-out commit and verified Jenkins artifact.
-Registry write and writer remain unresolved, with exit `11`.
+Registry write and writer remain unresolved, with exit `11`. The same
+archive result is available for an exact versioned target when the
+supplied Nexus evidence is incompatible, missing or malformed. The
+reason identifies the failed receiver check. The selected target must
+still match the Jenkins archive coordinate, and any supplied controller
+record establishing conflicting workspace allocations prevents the join.
 
 For a same-repository FileVault Package Maven Plugin PR with the reviewed
 shared library, use the same command with the Nexus snapshots repository URL

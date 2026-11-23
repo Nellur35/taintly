@@ -58,6 +58,11 @@ _SCOPE = (
     "The receipts corroborate the upload and matching reported workspace paths. A shared "
     "network request ID and underlying filesystem identity are unverified."
 )
+_UNRESOLVED_SCOPE = (
+    "The saved records leave the selected Jenkins Maven snapshot outcome unresolved. "
+    "The owning checkout, invocation and receiver require matching evidence."
+)
+_UNAVAILABLE = "saved Jenkins, source or Nexus evidence is unavailable or malformed"
 _Row = dict[str, Any]
 
 
@@ -298,15 +303,7 @@ def _stage(
     return command, workspaces[0], {"repository": repo, "ref": branch, "revision": revision}
 
 
-def _registry(
-    root: Path,
-    data: _Row,
-    archive_path: str,
-    target_url: str,
-    command: _Row,
-    *,
-    attribute_writer: bool,
-) -> _Row:
+def _exact_registry_target(target_url: str, archive_path: str) -> str:
     target = target_url.removeprefix(_REGISTRY + _REPOSITORY)
     coordinate = re.fullmatch(
         r"((?:[A-Za-z0-9_-]+/)+)([A-Za-z0-9_.-]+)/([0-9]+(?:\.[0-9]+)*-SNAPSHOT)/"
@@ -321,6 +318,20 @@ def _registry(
         and archive_path == f"{prefix}{name}/{snapshot}/{name}-{snapshot}.jar",
         "selected registry object differs from the Jenkins artifact coordinate",
     )
+    return target
+
+
+def _registry(
+    root: Path,
+    data: _Row,
+    target: str,
+    command: _Row,
+    job_bytes: bytes,
+    archive_sha512: str,
+    *,
+    attribute_writer: bool,
+) -> _Row:
+    target_url = _REGISTRY + _REPOSITORY + target
     stored = data["stored_attributes"]
     response = data["response"]
     milliseconds = data["stored_properties"]["created"]
@@ -343,13 +354,12 @@ def _registry(
         and response["responseUid"] == f"snapshots:/{target}",
         "Nexus hosted-object receipt does not identify the exact requested target",
     )
-    job_bytes = _project_file(root, "artifact.jar", 8 * 1024 * 1024)
     registry_bytes = _project_file(root, "registry-artifact.jar", 8 * 1024 * 1024)
     digest = hashlib.sha256(job_bytes).hexdigest()
     _require(
         job_bytes == registry_bytes
         and stored["digest.sha256"] == digest
-        and stored["digest.sha512"] == hashlib.sha512(job_bytes).hexdigest(),
+        and stored["digest.sha512"] == archive_sha512,
         "Jenkins archive and Nexus object bytes or stored digests differ",
     )
     result: _Row = {"object_url": target_url, "sha256": digest, "created_ms": int(milliseconds)}
@@ -449,10 +459,7 @@ def _record_maven_credential_selection(root: Path, deploy_log: _Row, result: _Ro
         result["maven_credential_selection"] = _maven_credential_selection(root, deploy_log)
 
 
-def _partial_snapshot_archive(
-    root: Path, target: str, capture: _Row, command: _Row, result: _Row, checkout: dict[str, str]
-) -> _Row:
-    archive = capture["archive_path"]
+def _require_snapshot_alias(target: str, archive: str) -> None:
     _require(
         re.fullmatch(
             r"(?:[A-Za-z0-9_-]+/)+(?P<name>[A-Za-z0-9_.-]+)/"
@@ -462,31 +469,6 @@ def _partial_snapshot_archive(
         and target == _REGISTRY + _REPOSITORY + archive,
         "requested snapshot does not match the selected Jenkins archive coordinate",
     )
-    raw = _project_file(root, "artifact.jar", 8 * 1024 * 1024)
-    _require(raw, "selected Jenkins archive is empty")
-    deploy_log = capture["deploy_log"]
-    _verify_deploy_log(
-        deploy_log,
-        result["job"],
-        command,
-        result["reported_workspace"],
-        archive.rsplit("/", 1)[1],
-        hashlib.sha512(raw).hexdigest(),
-    )
-    _record_maven_credential_selection(root, deploy_log, result)
-    return {
-        **result,
-        "state": "unresolved",
-        "reason": "original Nexus snapshot and write identity were not supplied",
-        "jenkins_run_result": capture["run"]["result"],
-        "checkout": checkout,
-        "jenkins_archive_sha256": hashlib.sha256(raw).hexdigest(),
-        "requested_snapshot": target,
-        "authority": "unresolved",
-        "scope": _FORK_ARCHIVE_SCOPE
-        if checkout["revision"] == result["head"]
-        else _UPSTREAM_ARCHIVE_SCOPE,
-    }
 
 
 def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target: str) -> _Row:
@@ -494,7 +476,7 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
     from .jenkins_matrix_snapshot import MATRIX_SCHEMA, MATRIX_SCOPE, matrix_snapshot_observation
     from .jenkins_sling_guard import SLING_SCHEMA, SLING_SCOPE, sling_exclusion
 
-    scope = _SCOPE
+    scope = _UNRESOLVED_SCOPE
     try:
         root = root.resolve()
         capture = json.loads(
@@ -574,17 +556,24 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             "reported_workspace": workspace,
             "jenkins_artifact": job + "artifact/" + artifact_path,
         }
+        exact_target = None
         if partial:
-            return _partial_snapshot_archive(root, target, capture, command, result, checkout)
-        if failed:
-            result["jenkins_run_result"] = run["result"]
-        publication = _registry(
-            root, capture["registry"], artifact_path, target, command, attribute_writer=not upstream
-        )
-        artifact_name = artifact_path.rsplit("/", 1)[1]
-        sha512 = capture["registry"]["stored_attributes"]["digest.sha512"]
-        _verify_deploy_log(capture["deploy_log"], job, command, workspace, artifact_name, sha512)
+            _require_snapshot_alias(target, artifact_path)
+        else:
+            exact_target = _exact_registry_target(target, artifact_path)
+
+        job_bytes = _project_file(root, "artifact.jar", 8 * 1024 * 1024)
+        _require(job_bytes, "selected Jenkins archive is empty")
+        archive_sha512 = hashlib.sha512(job_bytes).hexdigest()
         deploy_log = capture["deploy_log"]
+        _verify_deploy_log(
+            deploy_log,
+            job,
+            command,
+            workspace,
+            artifact_path.rsplit("/", 1)[1],
+            archive_sha512,
+        )
         _record_maven_credential_selection(root, deploy_log, result)
         if "workspace_console" in capture:
             from .jenkins_workspace import workspace_allocation
@@ -592,18 +581,59 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
             allocation = workspace_allocation(
                 root,
                 capture["workspace_console"],
-                job,
+                result["job"],
                 capture["jenkinsfile_loader"],
                 capture["stage"]["id"],
                 capture["checkout_log"]["nodeId"],
                 command["id"],
-                workspace,
+                result["reported_workspace"],
             )
             _require(
                 allocation["state"] != "conflicting-allocations",
                 allocation.get("reason", "Jenkins workspace allocation conflicts"),
             )
             result["workspace_allocation"] = allocation
+
+        publication = None
+        registry_reason = "original Nexus snapshot and write identity were not supplied"
+        if exact_target is not None:
+            try:
+                publication = _registry(
+                    root,
+                    capture["registry"],
+                    exact_target,
+                    command,
+                    job_bytes,
+                    archive_sha512,
+                    attribute_writer=not upstream,
+                )
+            except EvidenceError as exc:
+                registry_reason = str(exc)
+            except (
+                AttributeError,
+                KeyError,
+                OSError,
+                RecursionError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ):
+                registry_reason = _UNAVAILABLE
+        if publication is None:
+            return {
+                **result,
+                "state": "unresolved",
+                "reason": registry_reason,
+                "jenkins_run_result": run["result"],
+                "checkout": checkout,
+                "jenkins_archive_sha256": hashlib.sha256(job_bytes).hexdigest(),
+                "requested_snapshot": target,
+                "authority": "unresolved",
+                "scope": _UPSTREAM_ARCHIVE_SCOPE if upstream else _FORK_ARCHIVE_SCOPE,
+            }
+
+        if failed:
+            result["jenkins_run_result"] = run["result"]
         if upstream:
             result.update(
                 checkout=checkout,
@@ -631,5 +661,5 @@ def maven_snapshot_observation(root: Path, repo: str, pr: int, job: str, target:
     except EvidenceError as exc:
         reason = str(exc)
     except (AttributeError, KeyError, OSError, RecursionError, RuntimeError, TypeError, ValueError):
-        reason = "saved Jenkins, source or Nexus evidence is unavailable or malformed"
+        reason = _UNAVAILABLE
     return {"state": "unresolved", "reason": reason, "scope": scope}
