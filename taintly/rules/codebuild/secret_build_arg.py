@@ -81,6 +81,12 @@ def _direct_build_args(
     result: list[tuple[str, str]] = []
     unresolved = False
     for raw, cooked in zip(raw_args, args, strict=True):
+        # Docker resolves a bare name from its environment after shell quote removal.
+        if _IDENT.fullmatch(cooked) and cooked in names:
+            if raw not in (cooked, f"'{cooked}'", f'"{cooked}"'):
+                return None
+            result.append((cooked, cooked))
+            continue
         if raw.startswith("'"):
             continue  # The shell passes a literal dollar sign to Docker.
         if raw.strip('"') != cooked:
@@ -91,10 +97,6 @@ def _direct_build_args(
             source = simple or braced
             if source in names:
                 result.append((source, arg_name))
-            continue
-        # Docker also inherits the environment value for a bare --build-arg NAME.
-        if _IDENT.fullmatch(cooked) and cooked in names:
-            result.append((cooked, cooked))
             continue
         if any(re.search(r"\$\{?" + re.escape(name) + r"(?:\b|\})", cooked) for name in names):
             unresolved = True

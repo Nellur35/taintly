@@ -65,15 +65,30 @@ def test_two_source_bound_args_survive_engine_and_json(tmp_path: Path) -> None:
     assert len([item for item in output["findings"] if item["rule_id"] == "SEC6-CB-004"]) == 1
 
 
-def test_bare_arg_inherits_bound_environment_variable(tmp_path: Path) -> None:
-    findings = _scan(tmp_path, _source("docker build --build-arg TOKEN -t app ."))
-    assert len(_selected(findings)) == 1
+@pytest.mark.parametrize("argument", ["TOKEN", "'TOKEN'", '"TOKEN"'])
+def test_bare_arg_inherits_bound_environment_variable(tmp_path: Path, argument: str) -> None:
+    findings = _scan(tmp_path, _source(f"docker build --build-arg {argument} -t app ."))
+    (finding,) = _selected(findings)
+    assert finding.review_needed
+    assert "Docker --build-arg TOKEN" in " ".join(finding.context_notes)
+    assert not _incomplete(findings)
+
+
+def test_quoted_bare_arg_respects_prior_override(tmp_path: Path) -> None:
+    findings = _scan(
+        tmp_path,
+        _source("docker build --build-arg 'TOKEN' -t app .", preceding="      - TOKEN=public\n"),
+    )
+    assert not _selected(findings)
+    assert _incomplete(findings)
 
 
 @pytest.mark.parametrize(
     "command",
     [
         "docker build --build-arg TOKEN=public -t app .",
+        "docker build --build-arg 'TOKEN=public' -t app .",
+        "docker build --build-arg 'UNBOUND' -t app .",
         "docker build --build-arg 'TOKEN=$TOKEN' -t app .",
         "echo docker build --build-arg TOKEN=$TOKEN -t app .",
         "docker login -u user --password-stdin && docker build -t app .",
