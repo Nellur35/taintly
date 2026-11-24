@@ -486,14 +486,24 @@ class IssueContextAvailability:
             return EventSourceAvailability.ABSENT
         return base
 
+    @property
+    def issues_only(self) -> bool:
+        """Whether the structurally verified trigger set is exactly issues."""
+        return self._triggers == ("issues",)
+
     def script_owner_at_line(self, line: int) -> tuple[object, ...] | None:
         """Return a unique direct github-script owner for a physical line."""
+        leaf = self.script_leaf_at_line(line)
+        return leaf.path[:4] + ("script",) if leaf is not None else None
+
+    def script_leaf_at_line(self, line: int) -> Event | None:
+        """Return the same owned script's exact leaf for a bounded proof."""
         try:
-            return self._script_owner_at_line(line)
+            return self._script_leaf_at_line(line)
         except Exception:
             return None
 
-    def _script_owner_at_line(self, line: int) -> tuple[object, ...] | None:
+    def _script_leaf_at_line(self, line: int) -> Event | None:
         if self._owner_events is None:
             self._owner_events = list(
                 walk_workflow(
@@ -531,7 +541,7 @@ class IssueContextAvailability:
             line_owners.add(step_owner)
         if len(line_owners) != 1:
             return None
-        owners: set[tuple[object, ...]] = set()
+        owners: list[Event] = []
         for event in events:
             if event.kind is not EventKind.LEAF_SCALAR or event.path[-1:] != ("script",):
                 continue
@@ -594,8 +604,8 @@ class IssueContextAvailability:
                 .value.strip()
                 .startswith(("actions/github-script@", "actions/github-script/"))
             ):
-                owners.add(step_path + ("script",))
-        return next(iter(owners)) if len(owners) == 1 else None
+                owners.append(event)
+        return owners[0] if len(owners) == 1 else None
 
     def issue_field_at_script_line(self, field: str, line: int) -> EventSourceAvailability:
         base = self.issue_field(field)

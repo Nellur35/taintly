@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, cast
 
 from .parsers.shell_words import shell_words_with_expansion
 from .taint import TaintPath, _shell_quote_context_at, _sink_is_bare_assignment
+from .value_use import ConsumerRole, ValueDomain, ValueUse
 
 if TYPE_CHECKING:
     from .local_call_graph import _Document
@@ -54,6 +55,12 @@ class ShellUseEvidence:
     command_sha256: str
     shell_basis: str
     parameter_default: NonemptyParameterDefault | None = None
+    script_argument: bool = False
+
+    @property
+    def value_use(self) -> ValueUse:
+        """Expose the established shell role without claiming a source domain."""
+        return ValueUse(ValueDomain.UNKNOWN, ConsumerRole(self.disposition.value))
 
     @property
     def notes(self) -> tuple[str, ...]:
@@ -72,6 +79,10 @@ _PARAMETER_DEFAULT = re.compile(
     r"\$\{(?P<variable>[A-Za-z_][A-Za-z0-9_]*):-(?P<fallback>[A-Za-z0-9_]+)\}"
 )
 _PARAMETER_DEFAULT_FALLBACK = re.compile(r"[A-Za-z0-9_]+\Z")
+_DENO_SCRIPT_ARGUMENT = re.compile(
+    r"deno[ \t]+run[ \t]+https://[A-Za-z0-9.-]+/[A-Za-z0-9_./~-]+\.[jt]s[ \t]+"
+    r'"\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"'
+)
 
 
 def _valid_nonempty_parameter_default(value: object) -> bool:
@@ -111,6 +122,8 @@ def _make_evidence(
     command: str = "",
     shell_basis: str = "unresolved",
     parameter_default: NonemptyParameterDefault | None = None,
+    *,
+    script_argument: bool = False,
 ) -> ShellUseEvidence:
     return ShellUseEvidence(
         disposition=disposition,
@@ -123,6 +136,7 @@ def _make_evidence(
         command_sha256=_sha(command) if command else "",
         shell_basis=shell_basis,
         parameter_default=parameter_default,
+        script_argument=script_argument,
     )
 
 
@@ -634,6 +648,22 @@ def classify_shell_use(content: str, path: TaintPath, file: str = "") -> ShellUs
             command,
             basis,
             parameter_default,
+        )
+    # Deno passes arguments after the fixed script operand to Deno.args.
+    # The profile establishes the argument position only. The script body,
+    # effective runtime identity and later interpretation need separate proof.
+    script = _DENO_SCRIPT_ARGUMENT.fullmatch(command.strip(" \t"))
+    if script is not None and (script["braced"] or script["plain"]) == path.env_var:
+        return _make_evidence(
+            ShellUse.DATA,
+            "Tracked value reaches one quoted argument after the fixed Deno script operand.",
+            identity,
+            source_sha,
+            path,
+            owner,
+            command,
+            basis,
+            script_argument=True,
         )
     if _strict_assignment_data(role_command, path.env_var):
         return _make_evidence(

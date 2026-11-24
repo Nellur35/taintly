@@ -169,6 +169,21 @@ def test_unknown_stays_reviewable_without_mutating_shared_rules(tmp_path, github
     assert [(r.id, r.title, r.description, r.severity, list(r.stride)) for r in rules] == metadata
 
 
+def test_remote_script_argument_resolves_shell_role_but_keeps_review(tmp_path, github_rules):
+    content = _content("""'deno run https://example.invalid/check.js "$TITLE"'""")
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(content, encoding="utf-8")
+    rules = [rule for rule in github_rules if rule.id in {"TAINT-GH-001", "CHAIN-GH-103"}]
+    (report,) = scan_repo(str(tmp_path), rules, Platform.GITHUB)
+    assert report.engine_errors() == []
+    assert not any(f.rule_id == "CHAIN-GH-103" for f in report.findings)
+    (finding,) = [f for f in report.findings if f.rule_id == "TAINT-GH-001"]
+    assert finding.severity is Severity.MEDIUM and finding.review_needed
+    assert "argument" in finding.title and "outside" in finding.threat_narrative
+    assert "Pin" in finding.remediation
+
+
 @pytest.mark.parametrize(
     "command,expected",
     [

@@ -118,6 +118,32 @@ def test_quoted_argument_to_unprofiled_external_command_is_unknown():
     assert "insufficient" in evidence.reason or "did not establish" in evidence.reason
 
 
+def test_remote_script_argument_is_data_with_unreviewed_downstream_behavior():
+    for reference in ('"$TITLE"', '"${TITLE}"'):
+        content = _workflow(f"deno run https://example.invalid/check.ts {reference}")
+        path = _path(content)
+        evidence = classify_shell_use(content, path, "workflow.yml")
+        assert evidence.disposition is ShellUse.DATA
+        assert evidence.script_argument
+        assert validate_shell_use(evidence, content, "workflow.yml", path.sink_line)
+        forged = replace(evidence, script_argument=False)
+        assert not validate_shell_use(forged, content, "workflow.yml", path.sink_line)
+
+
+def test_remote_script_argument_proof_requires_fixed_target_and_quoted_position():
+    for command in (
+        'deno run "$TITLE"',
+        'deno eval "$TITLE"',
+        'deno run https://example.invalid/check.ts $TITLE',
+        'deno run https://example.invalid/check.ts "$TITLE" "$TITLE"',
+        'deno run https://example.invalid/check.ts "$TITLE" | cat',
+    ):
+        content = _workflow(command)
+        evidence = classify_shell_use(content, _path(content), "workflow.yml")
+        assert evidence.disposition is not ShellUse.DATA
+        assert not evidence.script_argument
+
+
 def test_exact_single_assignment_copy_is_data():
     content = _workflow("COPY=$TITLE")
     path = _path(content)

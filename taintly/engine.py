@@ -170,6 +170,27 @@ def _qualify_shell_use(finding: Finding, evidence: object, content: str) -> None
         "Review downstream option parsing, splitting/globbing, configured shell and runtime bindings. "
         "For workflow inputs, separately verify who can supply the caller's value."
     )
+    if witness is not None and validated and witness.script_argument:
+        finding.title = "Untrusted workflow value reaches a Deno script argument (review)"
+        finding.description = (
+            "In the configured command, the environment value occupies one quoted argument "
+            "after the fixed script operand. Deno exposes script arguments through Deno.args."
+        )
+        finding.threat_narrative = (
+            "The tracked value reaches the script as argument data at this boundary. "
+            "The loaded script's identity and its interpretation of the argument remain "
+            "outside this proof."
+        )
+        finding.remediation = (
+            "Keep the value in a quoted environment argument. Pin the remote script to a "
+            "reviewed revision and inspect how it handles the argument before trusting the "
+            "result."
+        )
+        finding.incidents = []
+        finding.reference = "https://docs.deno.com/runtime/run/#passing-script-arguments"
+        finding.calibration_reason = (
+            "Source-bound Deno argument; downstream behavior is unresolved."
+        )
     if condition_note is not None:
         finding.description += " " + condition_note
         finding.threat_narrative += " " + condition_note
@@ -923,6 +944,14 @@ def scan_file(
 
                         if isinstance(rule.pattern, TaintPattern):
                             _qualify_shell_use(finding, match_context, content)
+                    if rule.id == "TAINT-GH-013" and match_context is not None:
+                        from .rules.github.taint import (
+                            GithubScriptInterpolationPattern,
+                            qualify_github_script_use,
+                        )
+
+                        if isinstance(rule.pattern, GithubScriptInterpolationPattern):
+                            qualify_github_script_use(finding, match_context)
                     if rule.id == "TAINT-GL-001":
                         _qualify_gitlab_shell_use(finding, match_context, content)
                     if rule.id == "TAINT-GL-003":
