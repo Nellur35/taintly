@@ -48,10 +48,12 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field, replace
 
-from taintly.models import ContextPattern, Platform, RegexPattern, Rule, Severity
+from taintly.github_event_availability import IssueContextAvailability
+from taintly.models import ContextPattern, Finding, Platform, RegexPattern, Rule, Severity
 from taintly.shell_use import ShellUse, ShellUseEvidence, classify_shell_use
 from taintly.taint import TaintPath, _sink_is_safely_quoted
 from taintly.taint import analyze as taint_analyze
+from taintly.value_use import ConsumerRole, ValueDomain, ValueUse
 from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
 
 from ._workflow_input_sinks import (
@@ -59,6 +61,7 @@ from ._workflow_input_sinks import (
     _is_step_execution_path,
     is_workflow_input_executable_sink,
 )
+from .javascript_env import _js_tokens
 
 # ---------------------------------------------------------------------------
 # Pattern adapter
@@ -262,8 +265,105 @@ def _is_github_script_interpolation(
     )
 
 
+_ISSUE_NUMBER_INITIALIZER = re.compile(
+    r"\s*const[ \t]+[A-Za-z_$][A-Za-z0-9_$]*[ \t]*=[ \t]*"
+    r"\$\{\{[ \t]*github\.event\.issue\.number[ \t]*\}\}[ \t]*;\s*\Z"
+)
+
+
+@dataclass(frozen=True)
+class _ScriptUseEvidence:
+    use: ValueUse
+    owner_path: tuple[object, ...]
+    line: int
+    snippet: str
+
+
+def _starts_javascript_statement(prefix: str) -> bool:
+    """Accept a bounded, balanced prefix in the existing JS lexical subset."""
+    if len(prefix) > 16_384:
+        return False
+    tokens = _js_tokens(prefix)
+    if tokens is None or (tokens and tokens[-1] not in {";", "}"}):
+        return False
+    closers = {"(": ")", "[": "]", "{": "}"}
+    stack: list[str] = []
+    for token in tokens:
+        if token in closers:
+            stack.append(closers[token])
+        elif token in {")", "]", "}"} and (not stack or stack.pop() != token):
+            return False
+    return not stack
+
+
 class GithubScriptInterpolationPattern(WorkflowAwarePattern):
     """Structural matcher for expressions in executable github-script bodies."""
+
+    def context_notes_for_matches(
+        self, content: str, _filepath: str, matches: list[tuple[int, str]]
+    ) -> list[_ScriptUseEvidence | None]:
+        candidates: list[_ScriptUseEvidence | None] = []
+        profile: IssueContextAvailability | None = None
+        for line, snippet in matches:
+            evidence = None
+            if _ISSUE_NUMBER_INITIALIZER.fullmatch(snippet):
+                if profile is None:
+                    profile = IssueContextAvailability(content)
+                if profile.issues_only:
+                    evidence = self._numeric_script_use(profile, line, snippet)
+            candidates.append(evidence)
+        return candidates
+
+    @staticmethod
+    def _numeric_script_use(
+        profile: IssueContextAvailability, line: int, snippet: str
+    ) -> _ScriptUseEvidence | None:
+        leaf = profile.script_leaf_at_line(line)
+        if leaf is None or leaf.value_kind != "block_literal" or not leaf.block_lines:
+            return None
+        prefix: list[str] = []
+        for number, text in leaf.block_lines:
+            if number == line:
+                if text.strip() != snippet or not _starts_javascript_statement("\n".join(prefix)):
+                    return None
+                return _ScriptUseEvidence(
+                    ValueUse(ValueDomain.DECIMAL_INTEGER, ConsumerRole.CODE),
+                    leaf.path,
+                    line,
+                    snippet,
+                )
+            prefix.append(text)
+        return None
+
+
+def qualify_github_script_use(finding: Finding, evidence: object) -> None:
+    """Qualify only the precise numeric occurrence retained by the pattern."""
+    if (
+        not isinstance(evidence, _ScriptUseEvidence)
+        or evidence.line != finding.line
+        or evidence.snippet != finding.snippet
+        or evidence.use != ValueUse(ValueDomain.DECIMAL_INTEGER, ConsumerRole.CODE)
+    ):
+        return
+    finding.severity = Severity.INFO
+    finding.title = "GitHub issue number rendered into a JavaScript initializer"
+    finding.description = (
+        "The issues event supplies a GitHub-assigned integer at this initializer. "
+        "The number is rendered into the script source with a constrained representation."
+    )
+    finding.threat_narrative = (
+        "A decimal integer can supply the initializer's value. The constrained "
+        "representation cannot supply arbitrary JavaScript syntax at this location."
+    )
+    finding.incidents = []
+    finding.remediation = "Preserve the numeric value expected by the consuming JavaScript."
+    finding.exploitability = "low"
+    finding.review_needed = False
+    finding.calibration_reason = "Verified numeric issue field and owning JavaScript initializer."
+    finding.context_notes.append(
+        f"Numeric interpolation in job {evidence.owner_path[1]}, "
+        f"step {evidence.owner_path[3]}, line {evidence.line}."
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -96,3 +96,52 @@ def test_expression_in_github_script_header_input_is_not_script_source() -> None
         "            core.info(context.repo.owner);\n"
     )
     assert _findings(content) == []
+
+
+_ISSUE_NUMBER = "const issue_number = ${{ github.event.issue.number }};"
+_TEXT = "const display = '${{ github.event.issue.title }}';"
+
+
+def _issue_script(*lines: str, trigger: str = "on: issues\n") -> str:
+    return (
+        trigger + "jobs:\n  inspect:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/github-script@v7\n"
+        "        with:\n"
+        "          script: |\n" + "".join(f"            {line}\n" for line in lines)
+    )
+
+
+def test_issue_number_keeps_the_exact_location_as_an_observation() -> None:
+    (finding,) = _findings(_issue_script("const scope = 'local';", _ISSUE_NUMBER))
+    assert finding.severity is Severity.INFO
+    assert finding.line == 10
+    assert finding.snippet == _ISSUE_NUMBER
+    assert "issue number" in finding.title.lower()
+    assert "arbitrary JS" not in finding.description
+    assert "decimal integer" in finding.threat_narrative.lower()
+    assert not finding.incidents
+
+
+def test_numeric_use_leaves_independent_text_review_visible() -> None:
+    number, text = _findings(_issue_script(_ISSUE_NUMBER, _TEXT))
+    assert number.severity is Severity.INFO
+    assert text.severity is Severity.HIGH
+    assert text.snippet == _TEXT
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        _issue_script(_ISSUE_NUMBER + " " + _TEXT),
+        _issue_script(_ISSUE_NUMBER, trigger="on: [issues, workflow_call]\n"),
+        _issue_script(_ISSUE_NUMBER, trigger="on: issues\non: workflow_call\n"),
+        _issue_script(_ISSUE_NUMBER.replace("issue.number", "issue.number || inputs.number")),
+        _issue_script(_ISSUE_NUMBER.replace("github.event.issue.number", "inputs.number")),
+        _issue_script("/* open comment", _ISSUE_NUMBER, "*/"),
+        _issue_script("function initialize() {", _ISSUE_NUMBER, "}"),
+    ],
+)
+def test_numeric_proof_requires_supported_source_and_position(source: str) -> None:
+    (finding,) = _findings(source)
+    assert finding.severity is Severity.HIGH
+    assert finding.review_needed
