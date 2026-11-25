@@ -45,7 +45,7 @@ from .parsers.anchor_expander import expand_anchors
 from .parsers.segmentation import for_each_job, job_at_line
 from .path_safety import is_within_repo, iter_files_within_repo, resolve_local_include
 from .pse_enrichment import enrich_pse_findings
-from .source_inventory import SourceIssue
+from .source_inventory import SourceInventory, SourceIssue
 from .staticguard import WorkflowContext as StaticGuardContext
 from .staticguard import (
     detect_github_workflow_context,
@@ -1824,13 +1824,6 @@ def _gitlab_yaml_looks_like_ci(path: str) -> bool:
     return bool(re.search(r"(?m)^\s+script\s*:", head))  # job-shaped block
 
 
-# A GitLab ``include: local:`` path that interpolates a CI/CD variable or a
-# spec ``inputs:`` value (``$VAR`` / ``${VAR}`` / ``$[[ inputs.x ]]``) only
-# resolves at pipeline-run time — its target is unknowable from static bytes.
-# We count these so discovery can report "there is CI here we could not reach"
-# instead of silently pretending the pipeline is fully covered.
-_GITLAB_DYNAMIC_INCLUDE_RE = re.compile(r"\$\{|\$\[|\$[A-Za-z_]")
-
 # Bound the include-graph closure so a pathological / cyclic repo can't make
 # discovery walk forever.  Real pipelines are far below this.
 _INCLUDE_GRAPH_MAX_FILES = 200
@@ -1840,7 +1833,7 @@ def _resolve_local_include(repo_path: str, ref: str) -> list[str]:
     """Resolve one GitLab ``include: local:`` ref to existing repo files.
 
     GitLab resolves ``local:`` paths from the REPO ROOT — a leading ``/`` is
-    repo-root-absolute, not filesystem-absolute.  Globs (``*``/``**``/``?``)
+    repo-root-absolute, not filesystem-absolute.  Globs containing a star
     are expanded the way GitLab expands them.  Returns matching existing
     files (absolute paths); empty when the ref is a URL or matches nothing.
     """
@@ -1848,41 +1841,84 @@ def _resolve_local_include(repo_path: str, ref: str) -> list[str]:
 
 
 def _discover_gitlab_include_graph(
-    repo_path: str, seed_files: list[str], seen: set[str]
-) -> tuple[list[str], int]:
-    """Follow ``include: local:`` refs transitively from ``seed_files`` to CI
-    fragments that live OUTSIDE the ``ci/`` and ``.gitlab/`` glob roots (e.g.
-    ``templates/build.yml``).
+    repo_path: str,
+    seed_files: list[str],
+    seen: set[str],
+    *,
+    visited: set[str],
+    file_limit: int,
+) -> tuple[SourceInventory[str], int]:
+    """Follow local includes, separating files admitted from sources visited.
 
-    An explicit ``include:`` reference is an AUTHORITATIVE CI signal — the
-    pipeline author declared the file is part of the pipeline — so these files
-    are admitted WITHOUT the content-shape gate that weak path pickups must
-    pass.  ``seen`` (normalised paths) is shared with the caller and mutated.
-
-    Returns ``(new_files, n_dynamic)`` where ``n_dynamic`` counts include refs
-    that interpolate a runtime variable and so could not be resolved statically.
+    An already admitted file can still have unresolved transitive includes.
+    A source is only visited once, even when several references reach it.
     """
-    from taintly.gitlab_workflow_corpus import _extract_local_include_paths
+    from taintly.gitlab_workflow_corpus import (
+        _GITLAB_DYNAMIC_INCLUDE_RE,
+        _extract_local_include_paths,
+        _include_read_limit_issue,
+        _read_include_source,
+    )
 
     new_files: list[str] = []
+    issues: list[SourceIssue] = []
     n_dynamic = 0
-    queue = list(seed_files)
-    while queue and len(new_files) < _INCLUDE_GRAPH_MAX_FILES:
-        content = _read_text_head(queue.pop())
-        if not content:
+    queue = list(reversed(seed_files))
+    scheduled = {os.path.normpath(path) for path in queue}
+    while queue:
+        source = queue.pop()
+        norm_source = os.path.normpath(source)
+        if norm_source in visited:
             continue
-        for ref in _extract_local_include_paths(content):
+        visited.add(norm_source)
+        try:
+            content, truncated = _read_include_source(source)
+        except OSError:
+            issues.append(
+                SourceIssue(
+                    source,
+                    "GitLab include discovery could not read this local config.",
+                )
+            )
+            continue
+        if truncated:
+            issues.append(_include_read_limit_issue(source))
+        for ref in _extract_local_include_paths(content, truncated=truncated):
             if _GITLAB_DYNAMIC_INCLUDE_RE.search(ref):
                 n_dynamic += 1
                 continue
-            for hit in _resolve_local_include(repo_path, ref):
+            matches = _resolve_local_include(repo_path, ref)
+            # The shared resolver only expands refs with a star. An empty
+            # wildcard selection is valid; an unavailable literal is a gap.
+            if not matches and "*" not in ref:
+                issues.append(
+                    SourceIssue(
+                        source,
+                        f"GitLab local include {ref!r} has no available file in the scanned "
+                        "checkout. Its configuration was not scanned. Conditional applicability "
+                        "was not determined.",
+                    )
+                )
+            for hit in matches:
                 norm = os.path.normpath(hit)
-                if norm in seen:
-                    continue
-                seen.add(norm)
-                new_files.append(hit)
-                queue.append(hit)  # transitive: follow ITS includes too
-    return new_files, n_dynamic
+                if norm not in seen:
+                    if len(new_files) >= file_limit:
+                        issues.append(
+                            SourceIssue(
+                                source,
+                                f"GitLab include discovery reached its {_INCLUDE_GRAPH_MAX_FILES}-file "
+                                f"limit while resolving {ref!r}; the remaining frontier is unassessed.",
+                            )
+                        )
+                        return SourceInventory(
+                            tuple(new_files), tuple(dict.fromkeys(issues))
+                        ), n_dynamic
+                    seen.add(norm)
+                    new_files.append(hit)
+                if norm not in visited and norm not in scheduled:
+                    scheduled.add(norm)
+                    queue.append(hit)
+    return SourceInventory(tuple(new_files), tuple(dict.fromkeys(issues))), n_dynamic
 
 
 def _discover_gitlab_entry_files(repo_path: str) -> list[str]:
@@ -1898,7 +1934,7 @@ def _discover_gitlab_entry_files(repo_path: str) -> list[str]:
     return files
 
 
-def _discover_gitlab_files(repo_path: str) -> tuple[list[str], int]:
+def _discover_gitlab_files(repo_path: str) -> tuple[SourceInventory[str], int]:
     """Find repository-local GitLab CI files, including hidden canonical names.
 
     Preserve public discovery policy: YAML under ci/ is admitted; other
@@ -1921,9 +1957,38 @@ def _discover_gitlab_files(repo_path: str) -> tuple[list[str], int]:
             ):
                 files.append(candidate)
                 seen.add(normalized)
-    included, dynamic = _discover_gitlab_include_graph(repo_path, list(files), seen)
-    files.extend(included)
-    return files, dynamic
+    strong = _gitlab_authoritative_files(repo_path, files)
+    visited: set[str] = set()
+    included, dynamic = _discover_gitlab_include_graph(
+        repo_path, strong, seen, visited=visited, file_limit=_INCLUDE_GRAPH_MAX_FILES
+    )
+    # Keep available heuristic files and targets eligible for per-file
+    # review. Unknown edges in an unattached config do not establish a gap
+    # in the GitLab pipeline. Traverse strong sources first so a weak pickup
+    # can become authoritative via an explicit include.
+    weak, _ = _discover_gitlab_include_graph(
+        repo_path,
+        files,
+        seen,
+        visited=visited,
+        file_limit=_INCLUDE_GRAPH_MAX_FILES - len(included.items),
+    )
+    return SourceInventory((*files, *included.items, *weak.items), included.issues), dynamic
+
+
+def _gitlab_authoritative_files(repo_path: str, files: list[str]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            (
+                *_discover_gitlab_entry_files(repo_path),
+                *(
+                    p
+                    for p in files
+                    if os.path.basename(p).endswith((".gitlab-ci.yml", ".gitlab-ci.yaml"))
+                ),
+            )
+        )
+    )
 
 
 def _discovery_confidence(repo_path: str, platform: Platform, files: list[str]) -> dict[str, str]:
@@ -1956,17 +2021,18 @@ def _discovery_confidence(repo_path: str, platform: Platform, files: list[str]) 
     # configs are named ``main.gitlab-ci.yml`` and are TRIGGERED (not root-
     # included), so the include-graph never reaches them — but the filename is
     # itself authoritative. The remaining ci/ & .gitlab/ glob pickups are weak.
-    authoritative = {os.path.normpath(f) for f in _discover_gitlab_entry_files(repo_path)}
-    reached, _n = _discover_gitlab_include_graph(repo_path, list(authoritative), set(authoritative))
-    authoritative.update(os.path.normpath(f) for f in reached)
-
-    def _is_ci_named(p: str) -> bool:
-        return os.path.basename(p).endswith((".gitlab-ci.yml", ".gitlab-ci.yaml"))
-
+    seeds = _gitlab_authoritative_files(repo_path, files)
+    authoritative = {os.path.normpath(f) for f in seeds}
+    reached, _n = _discover_gitlab_include_graph(
+        repo_path,
+        seeds,
+        set(authoritative),
+        visited=set(),
+        file_limit=_INCLUDE_GRAPH_MAX_FILES,
+    )
+    authoritative.update(os.path.normpath(f) for f in reached.items)
     return {
-        os.path.normpath(f): (
-            "high" if (os.path.normpath(f) in authoritative or _is_ci_named(f)) else "low"
-        )
+        os.path.normpath(f): "high" if os.path.normpath(f) in authoritative else "low"
         for f in files
     }
 
@@ -2214,8 +2280,8 @@ def discover_files(repo_path: str, platform: Platform) -> list[str]:
                 files.append(dep)
 
     elif platform == Platform.GITLAB:
-        gl_files, _n_dynamic = _discover_gitlab_files(repo_path)
-        files.extend(gl_files)
+        inventory, _n_dynamic = _discover_gitlab_files(repo_path)
+        files.extend(inventory.items)
 
     elif platform == Platform.JENKINS:
         jenkins_files, _ = _discover_jenkins_files(repo_path)
@@ -2335,6 +2401,7 @@ def scan_repo(
         report = AuditReport(repo_path=repo_path, platform=plat.value)
         platform_rules = [r for r in rules if r.platform == plat]
         n_dynamic_includes = 0
+        gitlab_issues: tuple[SourceIssue, ...] = ()
         if explicit_files:
             # Scoped mode: caller named specific files; scan ONLY those
             # (and only the ones that match this platform).  The repo
@@ -2342,10 +2409,9 @@ def scan_repo(
             # rules, etc.) sees the file in its real location.
             files = [ef for ef in explicit_files if _file_matches_platform(ef, plat)]
         elif plat == Platform.GITLAB:
-            # Call the GitLab discoverer directly (not the generic
-            # ``discover_files``) so the dynamic-include count is captured
-            # for the coverage disclosure below.
-            files, n_dynamic_includes = _discover_gitlab_files(repo_path)
+            inventory, n_dynamic_includes = _discover_gitlab_files(repo_path)
+            files = list(inventory.items)
+            gitlab_issues = inventory.issues
         elif plat == Platform.JENKINS:
             files = jenkins_files
         else:
@@ -2354,18 +2420,18 @@ def scan_repo(
         report.rules_loaded = len(platform_rules)
         # Discovery-confidence map: findings on weakly-discovered files get
         # capped at review-needed by _apply_discovery_confidence below.
-        discovery_conf = _discovery_confidence(repo_path, plat, files)
+        if explicit_files and plat == Platform.GITLAB:
+            discovery_conf = {os.path.normpath(f): "high" for f in files}
+        else:
+            discovery_conf = _discovery_confidence(repo_path, plat, files)
 
-        all_findings = (
-            [issue.finding() for issue in jenkins_issues] if plat == Platform.JENKINS else []
-        )
+        source_issues = jenkins_issues if plat == Platform.JENKINS else gitlab_issues
+        all_findings = [issue.finding() for issue in source_issues]
         if n_dynamic_includes and files:
             # Coverage disclosure: GitLab ``include: local:`` refs that
             # interpolate a runtime variable resolve only at pipeline-run
-            # time, so their target is unknowable from static bytes. We
-            # scanned every statically-reachable file but could not reach
-            # the config behind these includes — surface it so "scan clean"
-            # isn't overstated. Attached to the primary entry file.
+            # time, so their target is unknowable from static bytes.
+            # Keep the aggregate disclosure attached to the primary file.
             all_findings.append(
                 Finding(
                     rule_id="ENGINE-ERR",
@@ -2379,9 +2445,8 @@ def scan_repo(
                         "An ``include: local:`` path containing a CI/CD variable "
                         "or spec input ($VAR / ${VAR} / $[[ inputs.x ]]) only "
                         "resolves at pipeline-run time, so its target file is "
-                        "unknowable from static bytes. taintly scanned every "
-                        "statically-reachable file but could not reach the "
-                        "configuration behind these dynamic includes. If they "
+                        "unknowable from static bytes. The configuration "
+                        "behind these dynamic includes was not scanned. If they "
                         "pull in security-relevant jobs, review those targets "
                         "manually or pin the include to a static path."
                     ),
@@ -2539,7 +2604,9 @@ def scan_repo(
             # calibration of the leg it was built on — propagate the leg's
             # low-exploitability + caveat onto the composite (never suppress).
             _propagate_guard_calibration_to_composites(all_findings)
-        if plat == Platform.GITLAB:
+        if plat == Platform.GITLAB and not explicit_files:
+            # Explicit selection promises only the named files. The GitLab
+            # corpus independently selects a repository entry point.
             # GitLab CHAIN composer pass: build the GitLabWorkflowCorpus
             # (entry file + resolved local includes) once per scan and
             # run any rule whose pattern is a GitLabCorpusPattern.
@@ -2556,7 +2623,13 @@ def scan_repo(
         all_findings = _dedupe_supersedes(all_findings, platform_rules)
         if coalesce_overlaps:
             all_findings = coalesce_input_script_findings(all_findings)
+        source_errors: set[tuple[str, str, int, str]] = set()
         for f in _dedupe_project_scope(all_findings):
+            if f._source_acquisition_issue:
+                error_key = (f.file, f.title, f.line, f.description)
+                if error_key in source_errors:
+                    continue
+                source_errors.add(error_key)
             report.add(f)
 
         report.summarize()
@@ -2718,7 +2791,10 @@ def _run_gitlab_corpus_rules(
         return []
 
     corpus = build_gitlab_corpus(repo_path)
-    findings: list[Finding] = []
+    findings = [
+        issue.finding()
+        for issue in sorted(corpus.issues, key=lambda item: (item.source, item.reason))
+    ]
     registry_gap: str | None = "No supported root-config path belongs to this GitLab registry job"
     with scan_session():
         for rule in corpus_rules:

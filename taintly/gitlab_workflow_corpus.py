@@ -59,6 +59,7 @@ from .models import _MAX_SAFE_TEXT_LEN
 from .parsers.structural import EventKind, walk_workflow
 from .parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
 from .path_safety import is_within_repo, resolve_local_include
+from .source_inventory import SourceIssue
 from .workflow_corpus import TriggerFamily
 
 if TYPE_CHECKING:
@@ -263,6 +264,7 @@ class GitLabWorkflowCorpus:
     repo_path: str
     workflows: dict[str, GitLabWorkflowSummary] = field(default_factory=dict)
     entry_filepath: str | None = None
+    issues: set[SourceIssue] = field(default_factory=set)
 
     def all(self) -> list[GitLabWorkflowSummary]:
         return list(self.workflows.values())
@@ -295,9 +297,8 @@ def build_gitlab_corpus(repo_path: str) -> GitLabWorkflowCorpus:
       * Per-file cycle detection by absolute path — once a file is in
         the corpus we don't re-walk its includes.
 
-    Files that fail to read (encoding, ENOENT for a relative include
-    target that doesn't exist) are skipped silently — the per-file
-    scan will still emit single-file rules against the entry.
+    Unreadable files and bounded portions of the graph are explicitly
+    unassessed. Per-file rules still run against the discovered inventory.
     """
     corpus = GitLabWorkflowCorpus(repo_path=repo_path)
     entry = _locate_entry_file(repo_path)
@@ -325,54 +326,70 @@ def _locate_entry_file(repo_path: str) -> str | None:
     return None
 
 
-def _walk_includes(
-    corpus: GitLabWorkflowCorpus,
-    filepath: str,
-    depth: int,
-) -> None:
-    """Recursive include walker.  Adds each file to the corpus once,
-    then recurses into the file's ``include: local:`` targets at depth
-    + 1, stopping at :data:`_MAX_INCLUDE_DEPTH` or once the corpus
-    holds :data:`_MAX_INCLUDE_FILES` entries.
+def _read_include_source(filepath: str) -> tuple[str, bool]:
+    """Read the bounded local config, checking whether its prefix is complete."""
+    with open(filepath, encoding="utf-8", errors="replace") as source:
+        content = source.read(_MAX_SAFE_TEXT_LEN + 1)
+    return content[:_MAX_SAFE_TEXT_LEN], len(content) > _MAX_SAFE_TEXT_LEN
 
-    Cycle handling: a file already in ``corpus.workflows`` is skipped
-    (no second visit, no re-walk of its includes).  This terminates
-    the walk for any cycle of any length without explicit cycle
-    detection state.
-    """
-    if depth > _MAX_INCLUDE_DEPTH:
-        return
-    if len(corpus.workflows) >= _MAX_INCLUDE_FILES:
-        return
+
+def _include_read_limit_issue(filepath: str) -> SourceIssue:
+    return SourceIssue(
+        filepath,
+        f"GitLab include analysis reached its {_MAX_SAFE_TEXT_LEN}-character read limit; "
+        "outgoing includes beyond the complete inspected block are unassessed.",
+    )
+
+
+def _walk_includes(
+    corpus: GitLabWorkflowCorpus, filepath: str, depth: int, *, including: str | None = None
+) -> None:
+    """Add a summary and traverse its complete local include declarations."""
     norm = os.path.normpath(filepath)
     if norm in corpus.workflows:
         return
+    if depth > _MAX_INCLUDE_DEPTH:
+        corpus.issues.add(
+            SourceIssue(
+                including or norm,
+                f"GitLab cross-file analysis reached its depth limit of {_MAX_INCLUDE_DEPTH}; "
+                "some outgoing include branches from this config are unassessed.",
+            )
+        )
+        return
+    if len(corpus.workflows) >= _MAX_INCLUDE_FILES:
+        # The remaining frontier could be large; record one count-limit issue.
+        corpus.issues.add(
+            SourceIssue(
+                corpus.entry_filepath or norm,
+                f"GitLab cross-file analysis reached its {_MAX_INCLUDE_FILES}-file limit; "
+                "remaining include branches are unassessed.",
+            )
+        )
+        return
 
     try:
-        with open(filepath, encoding="utf-8", errors="replace") as f:
-            content = f.read()
+        content, truncated = _read_include_source(norm)
     except OSError:
+        corpus.issues.add(
+            SourceIssue(
+                norm,
+                "GitLab cross-file analysis could not read this local config.",
+            )
+        )
         return
-    truncated = len(content) > _MAX_SAFE_TEXT_LEN
-    if truncated:
-        # Truncate beyond the cap.  The extractors are line-driven and
-        # bounded, but the byte-length cap is the shared invariant so
-        # one pathological file can't blow up corpus build time.
-        content = content[:_MAX_SAFE_TEXT_LEN]
 
     summary = _summarize_gitlab_file(norm, content)
     summary.content_truncated = truncated
     corpus.workflows[norm] = summary
+    if truncated:
+        corpus.issues.add(_include_read_limit_issue(norm))
 
-    # Recurse into local include targets.  Targets are resolved
-    # relative to the repo root per the GitLab docs ("file is searched
-    # relative to the project root"), NOT relative to the including
-    # file's directory.
-    for target in _extract_local_include_paths(content):
-        # The shared resolver handles root-relative syntax, globs, and
-        # real-path containment before this reader opens a target.
-        for sub in resolve_local_include(corpus.repo_path, target, expand_globs=True):
-            _walk_includes(corpus, sub, depth=depth + 1)
+    for target in _extract_local_include_paths(content, truncated=truncated):
+        if _GITLAB_DYNAMIC_INCLUDE_RE.search(target):
+            continue
+        for child in resolve_local_include(corpus.repo_path, target, expand_globs=True):
+            _walk_includes(corpus, child, depth=depth + 1, including=norm)
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +401,8 @@ def _walk_includes(
 _ROOT_INCLUDE_LINE_RE = re.compile(r"^(?:include|'include'|\"include\")\s*:")
 _ROOT_KEY_LINE_RE = re.compile(r"^(?:[A-Za-z_$][A-Za-z0-9_.-]*|\"[^\"]+\"|'[^']+')\s*:")
 _DOCUMENT_BOUNDARY_LINE_RE = re.compile(r"^(?:---|\.\.\.)(?:\s+#.*)?\s*$")
+
+_GITLAB_DYNAMIC_INCLUDE_RE = re.compile(r"\$\{|\$\[|\$[A-Za-z_]")
 
 _LOCAL_INCLUDE_PROVIDER_KEYS = frozenset({"project", "remote", "template", "component"})
 
@@ -403,7 +422,7 @@ _FILE_KEY_RE = re.compile(r"^\s*file\s*:\s*['\"]?(?P<value>[^\s'\"#]+)['\"]?\s*(
 _SHA40_RE = re.compile(r"^[a-f0-9]{40}$")
 
 
-def _extract_local_include_paths(content: str) -> list[str]:
+def _extract_local_include_paths(content: str, *, truncated: bool = False) -> list[str]:
     """Extract direct local include values from the first root include block.
 
     Accepted values are a bare include scalar, a bare scalar item in the
@@ -412,13 +431,34 @@ def _extract_local_include_paths(content: str) -> list[str]:
     Duplicate root include keys are invalid/unsupported. Cross-project refs
     are captured separately by :func:`_extract_cross_project_includes`.
     """
-    lines = content.splitlines()
+    # A prefix can end inside a scalar, a collection or an include item.
+    # A complete physical line and an observed end of its include block
+    # are both necessary before deriving any targets from a capped read.
+    lines = (content.rpartition("\n")[0] if truncated else content).splitlines()
+    at_document_start = True
     for start, line in enumerate(lines):
+        if _DOCUMENT_BOUNDARY_LINE_RE.match(line):
+            at_document_start = True
+            continue
+        visible = line.lstrip()
+        if not visible or visible.startswith(("#", "%")):
+            continue
+        if at_document_start and visible.startswith("{"):
+            # Inside a root flow map, a column-zero include key is not
+            # a standalone block. Its trailing comma belongs to the map.
+            return _local_paths_from_include_block(content) if not truncated else []
+        at_document_start = False
         if _ROOT_INCLUDE_LINE_RE.match(line):
             end = _include_block_end(lines, start)
+            if truncated and end == len(lines):
+                return []
             block = "\n".join(lines[start:end])
             return _local_paths_from_include_block(block) if block else []
-    return []
+    # The whole-document reader also recognizes an indented root mapping
+    # or a root flow map. This fallback requires a complete source.
+    return (
+        _local_paths_from_include_block(content) if not truncated and "include" in content else []
+    )
 
 
 def _include_block_end(lines: list[str], start: int) -> int:
@@ -497,6 +537,8 @@ def _local_paths_from_include_block(block: str) -> list[str]:
             include_keys=True,
         )
     )
+    if sum(event.kind is EventKind.MAP_KEY and event.path == ("include",) for event in events) != 1:
+        return []
     providers: dict[int | None, set[str]] = {}
     local_key_counts: dict[int | None, int] = {}
 

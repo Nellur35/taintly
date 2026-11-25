@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from taintly.families import cluster_findings
 from taintly.models import AuditReport, Finding, Severity
+from taintly.source_inventory import engine_error_message
 
 from ._encoding import arrow_char, check_char, sep_char, to_ascii
 from ._encoding import strip_terminal_controls as _safe
@@ -453,7 +454,7 @@ def format_text(
         affected_files = len({f.file for f in engine_errors})
         out.append(f"{warn_color}{b}! Coverage degraded on {affected_files} file(s){r}")
         for f in engine_errors[:5]:
-            out.append(f"  {arrow_char()} {_safe(f.file)}: {f.title}")
+            out.append(f"  {arrow_char()} {_safe(f.file)}: {_safe(engine_error_message(f))}")
         if len(engine_errors) > 5:
             out.append(f"  {arrow_char()} ... and {len(engine_errors) - 5} more")
         out.append(

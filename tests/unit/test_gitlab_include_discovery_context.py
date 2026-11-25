@@ -23,8 +23,8 @@ def _write(path: Path, content: str) -> Path:
 
 
 def _relative_files(root: Path) -> list[str]:
-    files, _dynamic = _discover_gitlab_files(str(root))
-    return [Path(path).relative_to(root).as_posix() for path in files]
+    inventory, _dynamic = _discover_gitlab_files(str(root))
+    return [Path(path).relative_to(root).as_posix() for path in inventory.items]
 
 
 def test_project_include_file_list_is_not_a_local_include(tmp_path: Path) -> None:
@@ -77,7 +77,7 @@ def test_only_local_dynamic_refs_count_as_unresolved_local_includes(tmp_path: Pa
         "  - local: 'ci/$CI_COMMIT_BRANCH.yml'\n",
     )
 
-    _files, dynamic = _discover_gitlab_files(str(tmp_path))
+    _inventory, dynamic = _discover_gitlab_files(str(tmp_path))
     # The project path is cross-project metadata. Only the explicit local ref
     # is a dynamic local include and should contribute to this count.
     assert dynamic == 1
@@ -199,8 +199,8 @@ def test_nested_canonical_hidden_entry_is_discovered_and_scanned(
         "stages: [test]\nnightly:\n  script:\n    - echo nested\n",
     )
 
-    files, _dynamic = _discover_gitlab_files(str(tmp_path))
-    confidence = _discovery_confidence(str(tmp_path), Platform.GITLAB, files)
+    inventory, _dynamic = _discover_gitlab_files(str(tmp_path))
+    confidence = _discovery_confidence(str(tmp_path), Platform.GITLAB, list(inventory.items))
     assert os.path.normpath(str(nested)) in confidence
     assert confidence[os.path.normpath(str(nested))] == "high"
 

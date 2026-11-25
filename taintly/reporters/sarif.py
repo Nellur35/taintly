@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
 from taintly.baseline import fingerprint
 from taintly.models import AuditReport, Severity
 from taintly.reporters.text import INVENTORY_RULE_IDS, _security_findings
+from taintly.source_inventory import engine_error_message
 
 
-def _finding_sort_key(f: Any) -> tuple[str, int, str, str]:
+def _finding_sort_key(f: Any) -> tuple[str, int, str, str, str]:
     """Deterministic, content-derived ordering for findings in machine-readable
     output (SARIF/JSON), so byte-identical input yields byte-identical output
     and GHAS/GitLab dashboards don't churn on incidental reordering."""
-    return (f.file or "", f.line or 0, f.rule_id or "", (f.snippet or "")[:200])
+    return (
+        f.file or "",
+        f.line or 0,
+        f.rule_id or "",
+        (f.snippet or "")[:200],
+        f.description if f._source_acquisition_issue else "",
+    )
 
 
 _LEVEL_MAP = {
@@ -89,7 +97,7 @@ def _build_notifications(report: AuditReport) -> list[dict[str, Any]]:
         out.append(
             {
                 "level": _LEVEL_MAP.get(f.severity, "warning"),
-                "message": {"text": f.title},
+                "message": {"text": engine_error_message(f)},
                 "descriptor": {"id": f.rule_id},
                 "locations": [
                     {
@@ -176,9 +184,14 @@ def format_sarif(report: AuditReport) -> str:
         # finding that drifts lines keeps the same fingerprint.
         snippet = f.report_snippet()
         if snippet == f.snippet:
-            result["partialFingerprints"] = {
-                "taintlyFingerprintV1": fingerprint(f, report.repo_path)
-            }
+            identity = fingerprint(f, report.repo_path)
+            if f._source_acquisition_issue:
+                # Same producer file, rule and empty code preview may still
+                # denote two distinct unavailable includes or limits.
+                identity = hashlib.sha256(
+                    f"{identity}|{f.description}".encode("utf-8", errors="replace")
+                ).hexdigest()
+            result["partialFingerprints"] = {"taintlyFingerprintV1": identity}
         if is_inventory:
             result["kind"] = "review"
         if snippet:

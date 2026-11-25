@@ -80,6 +80,9 @@ class Event:
     # destination mapping and its immediate child key that introduced this
     # inherited leaf. The default stream remains unchanged for other readers.
     merge_origins: tuple[tuple[tuple[object, ...], object], ...] = ()
+    # With provenance enabled, the original declaration of a replayed leaf.
+    # The event line above remains the consumer's alias line.
+    alias_origin_line: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +204,7 @@ class _Frame:
 class _Anchor:
     """Captured leaves under an anchor.
 
-    Each entry is ``(relative_path_from_anchor_root, value, value_kind, line_relative_to_anchor)``.
+    Each entry retains its relative path, scalar, merge provenance and source line.
     When a ``<<: *anchor`` merge-key fires, leaves are replayed at
     the alias's line under the alias's current path.
     """
@@ -212,6 +215,7 @@ class _Anchor:
             str,
             str,
             tuple[tuple[tuple[object, ...], object], ...],
+            int,
         ]
     ] = field(default_factory=list)
     root_indent: int = -1
@@ -761,6 +765,8 @@ class _Walker:
         value_kind: str,
         line: int,
         merge_origins: tuple[tuple[tuple[object, ...], object], ...] = (),
+        *,
+        origin_line: int | None = None,
     ) -> None:
         if not self._captures:
             return
@@ -779,7 +785,7 @@ class _Walker:
             # value``). It must be replayed at the alias's exact destination;
             # dropping it made valid scalar aliases disappear from structural
             # consumers such as checkout-ref provenance.
-            anchor.leaves.append((rel, value, value_kind, merge_origins))
+            anchor.leaves.append((rel, value, value_kind, merge_origins, origin_line or line))
 
     def _charge_anchor_work(
         self, path: tuple[object, ...], line: int, merge_origin_count: int = 0
@@ -815,7 +821,7 @@ class _Walker:
             (self._include_merge_origins and anchor.root_kind == "sequence")
             or any(
                 not rel_path or (self._include_merge_origins and not isinstance(rel_path[0], str))
-                for rel_path, _, _, _ in anchor.leaves
+                for rel_path, _, _, _, _ in anchor.leaves
             )
         ):
             yield Event(
@@ -828,12 +834,19 @@ class _Walker:
             return
         # Snapshot before replay: replayed leaves are captured by any active
         # enclosing anchors, and must not mutate this source template in place.
-        for rel_path, value, value_kind, prior_origins in tuple(anchor.leaves):
+        for rel_path, value, value_kind, prior_origins, origin_line in tuple(anchor.leaves):
             path = base + rel_path
             origins = prior_origins
             if merge and self._include_merge_origins:
                 origins = (*origins, (base, rel_path[0]))
-            self._record_anchor_leaf(path, value, value_kind, tok.line, origins)
+            self._record_anchor_leaf(
+                path,
+                value,
+                value_kind,
+                tok.line,
+                origins,
+                origin_line=origin_line,
+            )
             self._charge_anchor_work(path, tok.line, len(origins))
             yield Event(
                 EventKind.LEAF_SCALAR,
@@ -843,6 +856,7 @@ class _Walker:
                 value=value,
                 value_kind=value_kind,
                 merge_origins=origins if self._include_merge_origins else (),
+                alias_origin_line=origin_line if self._include_merge_origins else None,
             )
 
     # ------------------------------------------------------------------

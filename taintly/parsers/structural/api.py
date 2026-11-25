@@ -122,7 +122,7 @@ def walk_workflow(
             mapping keys (incl. keys with empty/null/nested-map values
             that produce no ``LEAF_SCALAR``).  Default False keeps the
             event stream byte-identical for leaf-only consumers.
-        include_merge_origins: if True, attach merge-destination provenance
+        include_merge_origins: if True, attach alias declaration lines and merge-destination provenance
             to replayed leaves and expose merge-site markers. Default False
             leaves existing event streams and anchor-work charging unchanged.
 
