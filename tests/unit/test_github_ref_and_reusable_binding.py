@@ -68,3 +68,22 @@ jobs:
     assert [(f.line, f.severity, f.review_needed) for f in findings] == [
         (7, Severity.MEDIUM, True)
     ]
+
+
+def test_only_rendered_ref_name_is_reported_at_the_shell_consumer(tmp_path: Path):
+    workflow = """on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          printf '%s' "${{ github.ref_type == 'tag' && format('release-{0}', github.ref_name) || 'default' }}"
+          printf '%s' "${{ format('{{0}}', github.ref_name) }}"
+          printf '%s' "${{ format('{1}', github.ref_name, 'fixed') }}"
+          printf '%s' "${{ false && format('{0}', github.ref_name) || 'default' }}"
+      - env:
+          REF: ${{ format('release-{0}', github.ref_name) }}
+        run: printf '%s' "$REF"
+"""
+    findings = _scan(tmp_path, workflow, "SEC4-GH-030")
+    assert [(f.line, f.severity, f.review_needed) for f in findings] == [(7, Severity.INFO, True)]

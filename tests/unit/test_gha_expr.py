@@ -12,6 +12,7 @@ from taintly.parsers.gha_expr import (
     context_paths,
     iter_expression_bodies,
     parse,
+    literal_format_result_paths,
     result_provenance_paths,
 )
 
@@ -172,3 +173,31 @@ def test_parse_bounds_arbitrary_paren_depth(n: int) -> None:
         raise AssertionError(f"parse() raised RecursionError at paren depth {n}") from None
     except Exception:
         pass
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("format('release-{0}', github.ref_name)", ["github.ref_name"]),
+        ("format('{{{1}}}', github.ref_name, github.sha)", ["github.sha"]),
+        ("format('{{0}}', github.ref_name)", []),
+        ("format('{0}-{0}', github.ref_name)", ["github.ref_name"]),
+        ("format('{0}-{1}', github.ref_name)", []),
+        ("format('{0', github.ref_name)", []),
+        ("format(env.TEMPLATE, github.ref_name)", []),
+        ("false && format('{0}', github.ref_name) || 'main'", []),
+        (
+            "github.ref_type == 'tag' && format('{0}', github.ref_name) || 'main'",
+            ["github.ref_name"],
+        ),
+        ("format('{0}', github.ref_name == 'main')", []),
+        ("join(github.ref_name, '-')", []),
+        ("format('{0}', github.sha) || github.ref_name", ["github.sha"]),
+    ],
+)
+def test_literal_format_result_provenance(expression: str, expected: list[str]) -> None:
+    assert literal_format_result_paths(parse(expression)) == expected
+
+
+def test_conservative_provenance_contract_for_existing_callers() -> None:
+    assert result_provenance_paths("format('{{0}}', github.ref_name)") == ["github.ref_name"]

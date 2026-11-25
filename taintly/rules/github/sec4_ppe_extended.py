@@ -26,6 +26,7 @@ from taintly.parsers.gha_expr import (
     ExprSyntaxError,
     canonical_path,
     iter_expression_bodies,
+    literal_format_result_paths,
     parse,
     result_provenance_paths,
 )
@@ -1214,24 +1215,27 @@ class WriteCapableReusableCachePattern:
         return findings
 
 
-def _direct_ref_name_in_run(value: str, _value_kind: str, _path: tuple[object, ...]) -> bool:
-    """Recognize a direct ref-name splice before classifying actor access."""
+def _ref_name_in_run(value: str, _value_kind: str, _path: tuple[object, ...]) -> bool:
+    """Locate ref-name bytes in a shell template before classifying actor access."""
     if value.lstrip().startswith("#") or "ref_name" not in value.lower():
         return False
     for body in iter_expression_bodies(value):
         if len(body) > 8192:
             continue
         try:
-            if canonical_path(parse(body)) == "github.ref_name":
+            expression = parse(body)
+            if canonical_path(
+                expression
+            ) == "github.ref_name" or "github.ref_name" in literal_format_result_paths(expression):
                 return True
         except (ExprSyntaxError, RecursionError):
             continue
     return False
 
 
-class _DirectRefNameInRunPattern(StructuralPattern):
+class _RefNameInRunPattern(StructuralPattern):
     def __init__(self) -> None:
-        super().__init__(path="jobs.*.steps[*].run", predicate=_direct_ref_name_in_run)
+        super().__init__(path="jobs.*.steps[*].run", predicate=_ref_name_in_run)
 
     def self_test_mutation_applicable(self, source: str, mutant: str, operator: str) -> bool:
         if operator == "whitespace_pad" and mutant == source.replace(": ", ":"):
@@ -2983,7 +2987,7 @@ RULES: list[Rule] = [
             "branch or tag to assess the impact. Those permissions and runtime execution remain "
             "unverified by the splice."
         ),
-        pattern=_DirectRefNameInRunPattern(),
+        pattern=_RefNameInRunPattern(),
         finding_family="script_injection",
         review_needed=True,
         confidence="high",
