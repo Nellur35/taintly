@@ -24,11 +24,15 @@ from taintly.models import (
 )
 from taintly.parsers.gha_expr import (
     ExprSyntaxError,
+    canonical_path,
     iter_expression_bodies,
+    literal_format_result_paths,
+    parse,
     result_provenance_paths,
 )
 from taintly.parsers.segmentation import StepSegment, for_each_job, for_each_step
 from taintly.parsers.structural import triggers
+from taintly.structural_pattern import StructuralPattern
 from taintly.workflow_aware_pattern import PredicateContext, WorkflowAwarePattern
 from taintly.workflow_corpus import is_fork_reachable
 
@@ -1211,6 +1215,61 @@ class WriteCapableReusableCachePattern:
         return findings
 
 
+def _ref_name_in_run(value: str, _value_kind: str, _path: tuple[object, ...]) -> bool:
+    """Locate ref-name bytes in a shell template before classifying actor access."""
+    if value.lstrip().startswith("#") or "ref_name" not in value.lower():
+        return False
+    for body in iter_expression_bodies(value):
+        if len(body) > 8192:
+            continue
+        try:
+            expression = parse(body)
+            if canonical_path(
+                expression
+            ) == "github.ref_name" or "github.ref_name" in literal_format_result_paths(expression):
+                return True
+        except (ExprSyntaxError, RecursionError):
+            continue
+    return False
+
+
+class _RefNameInRunPattern(StructuralPattern):
+    def __init__(self) -> None:
+        super().__init__(path="jobs.*.steps[*].run", predicate=_ref_name_in_run)
+
+    def self_test_mutation_applicable(self, source: str, mutant: str, operator: str) -> bool:
+        if operator == "whitespace_pad" and mutant == source.replace(": ", ":"):
+            # The mutation changes block YAML from an owned "run:" value
+            # to unowned scalar text such as "run:|".
+            return not re.search(r"(?m)^\s*(?:-\s+)?run:[^\S\n]+\S", source)
+        if operator == "quote_swap" and '["ref_name"]' in mutant:
+            # GitHub expression string literals use single quotes.
+            return "['ref_name']" not in source
+        return True
+
+
+def _external_reusable_event_input(
+    value: str, _value_kind: str, path: tuple[object, ...], ctx: PredicateContext
+) -> bool:
+    target = ctx.get_value(path[:2] + ("uses",)) or ""
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+/\.github/workflows/[^/@]+\.ya?ml@[^\s@]+", target):
+        return False
+    sources = set()
+    for body in iter_expression_bodies(value):
+        try:
+            sources.update(result_provenance_paths(body))
+        except (ExprSyntaxError, RecursionError):
+            # The binding is review-only. Preserve the original textual cue
+            # when its expression cannot be resolved.
+            if re.search(r"\bgithub\.event\.", body, re.IGNORECASE):
+                return not re.search(_NONINJECTABLE_ONLY_LINE_RE, value, re.IGNORECASE)
+    event_sources = {source for source in sources if source.startswith("github.event.")}
+    surface = " ".join("${{ " + source + " }}" for source in sorted(event_sources))
+    return bool(event_sources) and not re.search(
+        _NONINJECTABLE_ONLY_LINE_RE, surface, re.IGNORECASE
+    )
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # SEC4-GH-028: argument injection via a command-arg with: input
@@ -1966,49 +2025,30 @@ RULES: list[Rule] = [
     # =========================================================================
     Rule(
         id="SEC4-GH-016",
-        title="Reusable workflow called with attacker-controlled event context as input",
-        severity=Severity.HIGH,
+        title="Event value forwarded to an external reusable workflow input",
+        severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A GitHub Actions job calls an external reusable workflow and passes "
-            "a value sourced from the event context (github.event.*) as a `with:` "
-            "input parameter. "
-            "Reusable workflows run with the caller's permissions and secrets. "
-            "If the called workflow uses the passed input in a shell step without "
-            "sanitization, an attacker who controls the event payload can achieve "
-            "command injection inside the reusable workflow — with access to all "
-            "secrets available to the caller. "
-            "This risk is compounded because the injection point is in a different "
-            "repository from where the payload originates."
+            "The owning job passes a GitHub event value in a with input to an external "
+            "reusable workflow. The binding is visible. The called implementation at its "
+            "effective revision is needed to identify a code consumer. The triggering "
+            "event and its guards determine who can supply the value. Review named or "
+            "inherited secret forwarding separately from the GITHUB_TOKEN permission ceiling."
         ),
-        pattern=ContextPattern(
-            # github.event_name is the event type (not attacker-controlled)
-            # github.event.<field> is the payload (attacker-controlled)
-            anchor=r"\$\{\{.*github\.event\.[a-zA-Z]",
-            requires=r"uses:\s+[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+/\.github/workflows/",
-            exclude=[
-                r"^\s*#",
-                # A reusable-workflow input whose ONLY event source is a
-                # server-minted numeric/hex ID (``github.event.number`` — the
-                # PR number, ``github.run_id``, etc.) is not injectable: an
-                # integer cannot carry a shell metacharacter or break out of a
-                # downstream command.  Field-precision FP S040
-                # (``pull_request_number: ${{ github.event.number || 0 }}``).
-                _NONINJECTABLE_ONLY_LINE_RE,
-            ],
-            scope="job",
+        pattern=WorkflowAwarePattern(
+            path="jobs.*.with.*",
+            predicate=_external_reusable_event_input,
         ),
+        review_needed=True,
         remediation=(
-            "Reusable workflows run with the caller's secrets — treat their\n"
-            "`with:` inputs as a trust boundary.  Never pipe ${{ github.event.* }}\n"
-            "straight into a reusable workflow call.  Narrow the value at the\n"
-            "caller via `workflow_dispatch` with `type: choice`, and validate\n"
-            "again inside the reusable workflow with a Bash `case` allowlist.\n"
-            "Pin `uses:` to a full SHA, not a tag.\n"
-            "Run `taintly --guide SEC4-GH-016` for the full checklist."
+            "Resolve the called workflow at the selected revision and inspect how it consumes "
+            "this named input. If the input is data, keep it out of executable source. "
+            "Review caller access, the callee's declared input type, and any explicit secrets "
+            "mapping or secrets: inherit. Scope token permissions at the call and pin the "
+            "external workflow to a reviewed commit."
         ),
-        reference="https://docs.github.com/en/actions/sharing-automations/reusing-workflows",
+        reference="https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows",
         test_positive=[
             (
                 "jobs:\n  call:\n"
@@ -2933,5 +2973,40 @@ RULES: list[Rule] = [
         ),
         incidents=[],
         confidence="high",
+    ),
+    Rule(
+        id="SEC4-GH-030",
+        title="GitHub ref name interpolated into generated shell source",
+        severity=Severity.INFO,
+        platform=Platform.GITHUB,
+        owasp_cicd="CICD-SEC-4",
+        description=(
+            "GitHub substitutes the configured github.ref_name expression into the shell script "
+            "before the shell runs. Shell quotes in the template do not prevent this substitution. "
+            "Inspect the event, the owning guard and who can select or create the referenced "
+            "branch or tag to assess the impact. Those permissions and runtime execution remain "
+            "unverified by the splice."
+        ),
+        pattern=_RefNameInRunPattern(),
+        finding_family="script_injection",
+        review_needed=True,
+        confidence="high",
+        remediation=(
+            "If the ref name is an argument, bind it under the step's env and pass the shell "
+            "variable as quoted data. Validate the value against the receiving command's "
+            "expected argument format when needed."
+        ),
+        reference="https://docs.github.com/en/actions/concepts/security/script-injections",
+        test_positive=[
+            "on: push\njobs:\n  release:\n    steps:\n"
+            '      - run: |\n          deploy "${{ github.ref_name }}"\n',
+            "jobs:\n  release:\n    steps:\n      - run: deploy ${{ github['ref_name'] }}\n",
+        ],
+        test_negative=[
+            "jobs:\n  release:\n    steps:\n      - env:\n"
+            '          REF: ${{ github.ref_name }}\n        run: deploy "$REF"\n',
+            "jobs:\n  release:\n    steps:\n"
+            "      - if: github.ref_name == 'release'\n        run: deploy latest\n",
+        ],
     ),
 ]

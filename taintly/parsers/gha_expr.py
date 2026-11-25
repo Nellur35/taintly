@@ -453,7 +453,6 @@ _BOOLEAN_RESULT_FUNCTIONS = frozenset(
         "success",
     }
 )
-_COMPARISON_OPERATORS = frozenset({"==", "!=", "<", "<=", ">", ">="})
 
 
 def _truthiness(node: object, budget: int = 64) -> bool | None:
@@ -503,6 +502,66 @@ def _truthiness(node: object, budget: int = 64) -> bool | None:
     return visit(node)
 
 
+_LITERAL_FORMAT_TOKEN = re.compile(r"\{\{|\}\}|\{([0-9]{1,3})\}|[^{}]+")
+
+
+def _literal_format_args(node: Call) -> list[object]:
+    """Return the arguments inserted by the supported GitHub format profile."""
+    if node.name.lower() != "format" or len(node.args) < 2:
+        return []
+    template = node.args[0]
+    if not isinstance(template, Lit) or not isinstance(template.value, str):
+        return []
+    arguments: dict[int, None] = {}
+    end = 0
+    for token in _LITERAL_FORMAT_TOKEN.finditer(template.value):
+        if token.start() != end:
+            return []
+        end = token.end()
+        if digits := token.group(1):
+            index = int(digits)
+            if index > 255 or index + 1 >= len(node.args):
+                return []
+            arguments[index] = None
+    if end != len(template.value):
+        return []
+    return [node.args[index + 1] for index in arguments]
+
+
+def _result_alternatives(node: Binary) -> Iterator[object]:
+    """Select operands that can contribute bytes to a short-circuit result."""
+    if node.op == "&&" and _truthiness(node.left) is not False:
+        yield node.right
+    if node.op == "||":
+        yield node.left
+        if _truthiness(node.left) is not True:
+            yield node.right
+
+
+def _iter_literal_format_provenance(node: object, *, inside_format: bool = False) -> Iterator[str]:
+    path = canonical_path(node)
+    if path is not None:
+        if inside_format:
+            yield path
+        return
+    if isinstance(node, Call):
+        for arg in _literal_format_args(node):
+            yield from _iter_literal_format_provenance(arg, inside_format=True)
+    elif isinstance(node, Binary):
+        for arg in _result_alternatives(node):
+            yield from _iter_literal_format_provenance(arg, inside_format=inside_format)
+
+
+def literal_format_result_paths(node: object) -> list[str]:
+    """Return paths inserted by a literal format on a selectable result branch.
+
+    Dynamic templates and other calls fall outside this exact profile.
+    A reference used only as a condition, or in an unused format argument,
+    does not establish a value contribution.
+    """
+    return list(dict.fromkeys(_iter_literal_format_provenance(node)))
+
+
 def _iter_result_provenance(node: object) -> Iterator[str]:
     """Yield paths whose bytes can contribute to ``node``'s result value.
 
@@ -531,18 +590,8 @@ def _iter_result_provenance(node: object) -> Iterator[str]:
         # The only supported unary operator is ``!``; its result is boolean.
         return
     if isinstance(node, Binary):
-        if node.op in _COMPARISON_OPERATORS:
-            return
-        if node.op == "&&":
-            # The left side controls selection. Only the right side can become
-            # arbitrary bytes in the result; a proven falsy left skips it.
-            if _truthiness(node.left) is not False:
-                yield from _iter_result_provenance(node.right)
-            return
-        if node.op == "||":
-            yield from _iter_result_provenance(node.left)
-            if _truthiness(node.left) is not True:
-                yield from _iter_result_provenance(node.right)
+        for arg in _result_alternatives(node):
+            yield from _iter_result_provenance(arg)
 
 
 def result_provenance_paths(body: str) -> list[str]:
