@@ -39,6 +39,29 @@ _REEVALUATION_CI_VARIABLE_RE = re.compile(
 )
 
 
+def _is_gitlab_script_path(path: tuple[object, ...], *, allow_template: bool = False) -> bool:
+    from taintly.gitlab_taint import _RESERVED_GITLAB_TOP_KEYS
+
+    if not path:
+        return False
+    owner, *tail = path
+    if owner in {"before_script", "after_script"}:
+        return not tail or (len(tail) == 1 and isinstance(tail[0], int))
+    return (
+        len(tail) in {1, 2}
+        and tail[0] in {"script", "before_script", "after_script"}
+        and (len(tail) == 1 or isinstance(tail[1], int))
+        and isinstance(owner, str)
+        and (
+            owner == "default"
+            or (
+                owner not in _RESERVED_GITLAB_TOP_KEYS
+                and (allow_template or not owner.startswith("."))
+            )
+        )
+    )
+
+
 class _GitLabShellExpansionPattern(RegexPattern):
     """Remove matches on rows proven to belong to GitLab include configuration."""
 
@@ -62,8 +85,9 @@ class _GitLabShellExpansionPattern(RegexPattern):
             (e.line for e in events if e.kind in {EventKind.CUTOFF, EventKind.ERROR}),
             default=len(lines) + 1,
         )
-        include_lines: set[int] = set()
+        include_rows_by_line: dict[int, set[int]] = {}
         other_lines: set[int] = set()
+        reused_include_origins: set[int] = set()
         for event in events:
             if event.kind not in {EventKind.MAP_KEY, EventKind.LEAF_SCALAR}:
                 continue
@@ -73,17 +97,30 @@ class _GitLabShellExpansionPattern(RegexPattern):
             if (
                 event.kind is EventKind.LEAF_SCALAR
                 and event.path[:1] == ("include",)
+                and event.alias_origin_line is None
                 and not event.merge_origins
                 and not (event.value_kind == "quoted" and "\n" in (event.value or ""))
             ):
-                include_lines.update(rows)
+                include_rows_by_line.setdefault(event.line, set()).update(rows)
             elif event.kind is EventKind.LEAF_SCALAR or event.path[:1] != ("include",):
                 other_lines.update(rows)
+                if event.alias_origin_line is not None and _is_gitlab_script_path(
+                    event.path, allow_template=True
+                ):
+                    reused_include_origins.add(event.alias_origin_line)
 
+        # A value replayed as a job or default script has another owner. Keep the raw
+        # candidate at its actual declaration, including block scalar rows.
+        include_only_lines = {
+            row
+            for origin, rows in include_rows_by_line.items()
+            if origin not in reused_include_origins
+            for row in rows
+        }
         return [
             match
             for match in matches
-            if match[0] >= stop or match[0] not in include_lines or match[0] in other_lines
+            if match[0] >= stop or match[0] not in include_only_lines or match[0] in other_lines
         ]
 
 
@@ -113,15 +150,6 @@ def _gitlab_command_scalar_events(
     for event in all_events:
         if event.kind == EventKind.MAP_KEY:
             key_counts[event.path] = key_counts.get(event.path, 0) + 1
-    script_keys = {"script", "before_script", "after_script"}
-    from taintly.gitlab_taint import _RESERVED_GITLAB_TOP_KEYS
-
-    def is_job_name(value: object) -> bool:
-        return (
-            isinstance(value, str)
-            and value not in _RESERVED_GITLAB_TOP_KEYS
-            and not value.startswith(".")
-        )
 
     for event in all_events:
         if event.kind in {EventKind.CUTOFF, EventKind.ERROR}:
@@ -134,25 +162,11 @@ def _gitlab_command_scalar_events(
             continue
         if event.kind != EventKind.LEAF_SCALAR:
             continue
-        path = event.path
-        owned = (
-            (len(path) == 1 and path[0] in {"before_script", "after_script"})
-            or (
-                len(path) == 2
-                and (
-                    (path[0] in {"before_script", "after_script"} and isinstance(path[1], int))
-                    or (path[0] == "default" and path[1] in script_keys)
-                    or (is_job_name(path[0]) and path[1] in script_keys)
-                )
-            )
-            or (
-                len(path) == 3
-                and (path[0] == "default" or is_job_name(path[0]))
-                and path[1] in script_keys
-                and isinstance(path[2], int)
-            )
-        )
-        if not owned or event.line not in command_lines or not (0 < event.line <= len(lines)):
+        if (
+            not _is_gitlab_script_path(event.path)
+            or event.line not in command_lines
+            or not (0 < event.line <= len(lines))
+        ):
             continue
         if event.merge_origins:
             incomplete.append("GitLab script command is inherited through a YAML merge")

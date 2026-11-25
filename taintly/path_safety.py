@@ -97,7 +97,8 @@ def resolve_local_include(repo_path: str, ref: str, *, expand_globs: bool = Fals
         return []
 
     base = os.path.join(repo_path, *rel.split("/"))
-    has_glob = any(character in rel for character in "*?[")
+    # GitLab only dispatches local path expansion when a star is present.
+    has_glob = "*" in rel
     if has_glob and not expand_globs:
         return []
     if has_glob:

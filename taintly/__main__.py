@@ -48,12 +48,13 @@ from .engine import (
 )
 from .ingestion.gitlab_registry_job import RegistryJobError, load_registry_job
 from .models import Finding, Platform, Severity, _defer_context_regex_compilation
-from .reporters._encoding import ensure_utf8_stdout
+from .reporters._encoding import ensure_utf8_stdout, strip_terminal_controls
 from .reporters.json_report import format_json
 from .reporters.sarif import format_sarif, format_sarif_reports
 from .reporters.text import format_text
 from .rules import registry as _rule_registry
 from .rules.registry import load_all_rules, load_rules_for_platform
+from .source_inventory import engine_error_message
 
 # Map AuditReport.platform string to the Platform enum the scorer
 # uses for bonus gating. Keeps the call sites readable.
@@ -3291,12 +3292,13 @@ def _print_engine_errors_to_stderr(report) -> None:
     """
     seen: set[tuple[str, str]] = set()
     for f in report.engine_errors():
-        key = (f.file or "", f.title)
+        message = engine_error_message(f)
+        key = (f.file or "", message)
         if key in seen:
             continue
         seen.add(key)
-        loc = f"{f.file}: " if f.file else ""
-        print(f"taintly: engine error: {loc}{f.title}", file=sys.stderr)
+        loc = f"{strip_terminal_controls(f.file)}: " if f.file else ""
+        print(f"taintly: engine error: {loc}{strip_terminal_controls(message)}", file=sys.stderr)
 
 
 def _output_report(report, args, score_report=None):

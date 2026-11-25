@@ -211,14 +211,27 @@ outside the isolated block are unsupported; they do not receive regex-based
 fallback classification. Existing path containment and include-depth/file
 limits still apply after extraction.
 
-During repository discovery, a literal local include with no available
-target produces a source-acquisition diagnostic attached to the including
-file. Conditional applicability remains unassessed. A wildcard can select
-zero files. Runtime-dependent
-local paths retain their separate coverage diagnostic. Shell-expansion
-rules exclude rows established as include configuration by the structural
-reader. Mixed or structurally uncertain rows keep the existing matching
-behavior.
+During repository discovery, an unavailable literal local include from an
+entry, CI-named source or include-reached source produces a diagnostic
+attached to the including file. Heuristically admitted files can still
+receive per-file review without asserting that their unknown includes
+belong to the pipeline. Conditional applicability remains unassessed.
+A local path containing '*' can expand to zero matches, while brackets
+and question marks alone are literal. Runtime-dependent local paths retain
+their coverage diagnostic.
+
+The structural reader also recognizes root include keys in indented block
+and flow mappings. When the source read reaches its cap, a partial path
+does not select a file or produce a missing-target diagnostic. The scanner
+reports the read limit and uses only an include block with an observed end.
+Discovery and cross-file traversal report their independent limit hits.
+Explicit file scans analyze the selected files. Use repository mode to
+follow the GitLab include graph and run cross-file rules.
+
+Shell-expansion rules exclude rows established as include configuration
+by the structural reader. Mixed or structurally uncertain rows keep the
+existing matching behavior. An alias that reuses an include value as a
+script preserves the candidate on the original value.
 
 # Local workflow and action call graph (XF-GH-005/006)
 

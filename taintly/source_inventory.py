@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
+from .evidence_redaction import redact_snippet
 from .models import Finding, Severity
 
 T = TypeVar("T")
@@ -24,9 +25,17 @@ class SourceIssue:
             rule_id="ENGINE-ERR",
             severity=Severity.LOW,
             title="Source acquisition incomplete",
-            description=self.reason,
+            description=redact_snippet(self.reason),
             file=self.source,
+            _source_acquisition_issue=True,
         )
+
+
+def engine_error_message(finding: Finding) -> str:
+    """Keep specific acquisition evidence in compact diagnostic output."""
+    if finding._source_acquisition_issue:
+        return f"{finding.title}: {finding.description}"
+    return finding.title
 
 
 @dataclass(frozen=True)

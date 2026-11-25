@@ -2151,6 +2151,9 @@ class Finding:
     _evidence_trace: EvidenceTrace | None = field(default=None, repr=False, compare=False)
     """Rule-produced ordered evidence for text only; absent from JSON/SARIF conclusions."""
 
+    _source_acquisition_issue: bool = field(default=False, repr=False, compare=False)
+    """Internal origin marker for reports of unavailable source."""
+
     def report_snippet(self) -> str:
         """Return the source preview intended for logs and reports."""
         from .evidence_redaction import redact_snippet
