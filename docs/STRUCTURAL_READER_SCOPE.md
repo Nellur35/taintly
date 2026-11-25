@@ -210,6 +210,16 @@ treated as local. Multiple root `include:` keys and aliases whose anchors are
 outside the isolated block are unsupported; they do not receive regex-based
 fallback classification. Existing path containment and include-depth/file
 limits still apply after extraction.
+
+During repository discovery, a literal local include with no available
+target produces a source-acquisition diagnostic attached to the including
+file. Conditional applicability remains unassessed. A wildcard can select
+zero files. Runtime-dependent
+local paths retain their separate coverage diagnostic. Shell-expansion
+rules exclude rows established as include configuration by the structural
+reader. Mixed or structurally uncertain rows keep the existing matching
+behavior.
+
 # Local workflow and action call graph (XF-GH-005/006)
 
 The scanner follows statically configured local reusable-workflow and composite-action

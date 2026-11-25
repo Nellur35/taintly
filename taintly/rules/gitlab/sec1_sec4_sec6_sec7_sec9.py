@@ -39,6 +39,54 @@ _REEVALUATION_CI_VARIABLE_RE = re.compile(
 )
 
 
+class _GitLabShellExpansionPattern(RegexPattern):
+    """Remove matches on rows proven to belong to GitLab include configuration."""
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        matches = super().check(content, lines)
+        if not matches or "include" not in content:
+            return matches
+
+        events = tuple(
+            walk_workflow(
+                ".gitlab-ci.yml",
+                content=content,
+                recover=True,
+                include_keys=True,
+                include_merge_origins=True,
+            )
+        )
+        if sum(e.kind is EventKind.MAP_KEY and e.path == ("include",) for e in events) != 1:
+            return matches
+        stop = min(
+            (e.line for e in events if e.kind in {EventKind.CUTOFF, EventKind.ERROR}),
+            default=len(lines) + 1,
+        )
+        include_lines: set[int] = set()
+        other_lines: set[int] = set()
+        for event in events:
+            if event.kind not in {EventKind.MAP_KEY, EventKind.LEAF_SCALAR}:
+                continue
+            # A mixed physical row can also contain a command. Only a
+            # source-owned include scalar on its own supplies exclusion proof.
+            rows = (event.line, *(line for line, _ in event.block_lines or ()))
+            if (
+                event.kind is EventKind.LEAF_SCALAR
+                and event.path[:1] == ("include",)
+                and not event.merge_origins
+                and not (event.value_kind == "quoted" and "\n" in (event.value or ""))
+            ):
+                include_lines.update(rows)
+            elif event.kind is EventKind.LEAF_SCALAR or event.path[:1] != ("include",):
+                other_lines.update(rows)
+
+        return [
+            match
+            for match in matches
+            if match[0] >= stop or match[0] not in include_lines or match[0] in other_lines
+        ]
+
+
 def _shell_words_with_expansion(line: str) -> list[tuple[str, bool, bool]]:
     return shell_words_with_expansion(line, _REEVALUATION_CI_VARIABLE_RE)
 
@@ -566,7 +614,7 @@ RULES: list[Rule] = [
             "are excluded (though sanitization is still recommended for values passed to "
             "subcommands)."
         ),
-        pattern=RegexPattern(
+        pattern=_GitLabShellExpansionPattern(
             match=r"\$\{?(CI_COMMIT_MESSAGE|CI_COMMIT_TITLE|CI_COMMIT_AUTHOR|CI_MERGE_REQUEST_TITLE|CI_MERGE_REQUEST_DESCRIPTION|CI_COMMIT_BRANCH|CI_MERGE_REQUEST_SOURCE_BRANCH_NAME)\}?",
             exclude=[
                 r"^\s*#",
@@ -1226,7 +1274,7 @@ RULES: list[Rule] = [
             "source branch (dogfood on gitlab.com/gitlab-org/gitlab-runner "
             "surfaced this FP; removed from the match set)."
         ),
-        pattern=RegexPattern(
+        pattern=_GitLabShellExpansionPattern(
             match=r"\$\{?(CI_COMMIT_REF_NAME|CI_COMMIT_TAG|CI_BUILD_REF_NAME)\}?",
             exclude=[
                 r"^\s*#",

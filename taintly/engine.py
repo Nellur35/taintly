@@ -45,7 +45,7 @@ from .parsers.anchor_expander import expand_anchors
 from .parsers.segmentation import for_each_job, job_at_line
 from .path_safety import is_within_repo, iter_files_within_repo, resolve_local_include
 from .pse_enrichment import enrich_pse_findings
-from .source_inventory import SourceIssue
+from .source_inventory import SourceInventory, SourceIssue
 from .staticguard import WorkflowContext as StaticGuardContext
 from .staticguard import (
     detect_github_workflow_context,
@@ -1849,7 +1849,7 @@ def _resolve_local_include(repo_path: str, ref: str) -> list[str]:
 
 def _discover_gitlab_include_graph(
     repo_path: str, seed_files: list[str], seen: set[str]
-) -> tuple[list[str], int]:
+) -> tuple[SourceInventory[str], int]:
     """Follow ``include: local:`` refs transitively from ``seed_files`` to CI
     fragments that live OUTSIDE the ``ci/`` and ``.gitlab/`` glob roots (e.g.
     ``templates/build.yml``).
@@ -1859,30 +1859,43 @@ def _discover_gitlab_include_graph(
     are admitted WITHOUT the content-shape gate that weak path pickups must
     pass.  ``seen`` (normalised paths) is shared with the caller and mutated.
 
-    Returns ``(new_files, n_dynamic)`` where ``n_dynamic`` counts include refs
-    that interpolate a runtime variable and so could not be resolved statically.
+    Return the local files and unavailable targets, plus a separate count
+    for runtime-dependent paths that the scan describes as a group.
     """
     from taintly.gitlab_workflow_corpus import _extract_local_include_paths
 
     new_files: list[str] = []
+    issues: list[SourceIssue] = []
     n_dynamic = 0
     queue = list(seed_files)
     while queue and len(new_files) < _INCLUDE_GRAPH_MAX_FILES:
-        content = _read_text_head(queue.pop())
+        source = queue.pop()
+        content = _read_text_head(source)
         if not content:
             continue
         for ref in _extract_local_include_paths(content):
             if _GITLAB_DYNAMIC_INCLUDE_RE.search(ref):
                 n_dynamic += 1
                 continue
-            for hit in _resolve_local_include(repo_path, ref):
+            matches = _resolve_local_include(repo_path, ref)
+            # GitLab expands '*' to zero or more concrete includes.
+            if not matches and "*" not in ref:
+                issues.append(
+                    SourceIssue(
+                        source,
+                        f"GitLab local include {ref!r} has no available file in the scanned "
+                        "checkout. Its configuration was not scanned. Conditional applicability "
+                        "was not determined.",
+                    )
+                )
+            for hit in matches:
                 norm = os.path.normpath(hit)
                 if norm in seen:
                     continue
                 seen.add(norm)
                 new_files.append(hit)
                 queue.append(hit)  # transitive: follow ITS includes too
-    return new_files, n_dynamic
+    return SourceInventory(tuple(new_files), tuple(dict.fromkeys(issues))), n_dynamic
 
 
 def _discover_gitlab_entry_files(repo_path: str) -> list[str]:
@@ -1898,7 +1911,7 @@ def _discover_gitlab_entry_files(repo_path: str) -> list[str]:
     return files
 
 
-def _discover_gitlab_files(repo_path: str) -> tuple[list[str], int]:
+def _discover_gitlab_files(repo_path: str) -> tuple[SourceInventory[str], int]:
     """Find repository-local GitLab CI files, including hidden canonical names.
 
     Preserve public discovery policy: YAML under ci/ is admitted; other
@@ -1922,8 +1935,7 @@ def _discover_gitlab_files(repo_path: str) -> tuple[list[str], int]:
                 files.append(candidate)
                 seen.add(normalized)
     included, dynamic = _discover_gitlab_include_graph(repo_path, list(files), seen)
-    files.extend(included)
-    return files, dynamic
+    return SourceInventory((*files, *included.items), included.issues), dynamic
 
 
 def _discovery_confidence(repo_path: str, platform: Platform, files: list[str]) -> dict[str, str]:
@@ -1958,7 +1970,7 @@ def _discovery_confidence(repo_path: str, platform: Platform, files: list[str]) 
     # itself authoritative. The remaining ci/ & .gitlab/ glob pickups are weak.
     authoritative = {os.path.normpath(f) for f in _discover_gitlab_entry_files(repo_path)}
     reached, _n = _discover_gitlab_include_graph(repo_path, list(authoritative), set(authoritative))
-    authoritative.update(os.path.normpath(f) for f in reached)
+    authoritative.update(os.path.normpath(f) for f in reached.items)
 
     def _is_ci_named(p: str) -> bool:
         return os.path.basename(p).endswith((".gitlab-ci.yml", ".gitlab-ci.yaml"))
@@ -2214,8 +2226,8 @@ def discover_files(repo_path: str, platform: Platform) -> list[str]:
                 files.append(dep)
 
     elif platform == Platform.GITLAB:
-        gl_files, _n_dynamic = _discover_gitlab_files(repo_path)
-        files.extend(gl_files)
+        inventory, _n_dynamic = _discover_gitlab_files(repo_path)
+        files.extend(inventory.items)
 
     elif platform == Platform.JENKINS:
         jenkins_files, _ = _discover_jenkins_files(repo_path)
@@ -2335,6 +2347,7 @@ def scan_repo(
         report = AuditReport(repo_path=repo_path, platform=plat.value)
         platform_rules = [r for r in rules if r.platform == plat]
         n_dynamic_includes = 0
+        gitlab_issues: tuple[SourceIssue, ...] = ()
         if explicit_files:
             # Scoped mode: caller named specific files; scan ONLY those
             # (and only the ones that match this platform).  The repo
@@ -2342,10 +2355,9 @@ def scan_repo(
             # rules, etc.) sees the file in its real location.
             files = [ef for ef in explicit_files if _file_matches_platform(ef, plat)]
         elif plat == Platform.GITLAB:
-            # Call the GitLab discoverer directly (not the generic
-            # ``discover_files``) so the dynamic-include count is captured
-            # for the coverage disclosure below.
-            files, n_dynamic_includes = _discover_gitlab_files(repo_path)
+            inventory, n_dynamic_includes = _discover_gitlab_files(repo_path)
+            files = list(inventory.items)
+            gitlab_issues = inventory.issues
         elif plat == Platform.JENKINS:
             files = jenkins_files
         else:
@@ -2356,16 +2368,13 @@ def scan_repo(
         # capped at review-needed by _apply_discovery_confidence below.
         discovery_conf = _discovery_confidence(repo_path, plat, files)
 
-        all_findings = (
-            [issue.finding() for issue in jenkins_issues] if plat == Platform.JENKINS else []
-        )
+        source_issues = jenkins_issues if plat == Platform.JENKINS else gitlab_issues
+        all_findings = [issue.finding() for issue in source_issues]
         if n_dynamic_includes and files:
             # Coverage disclosure: GitLab ``include: local:`` refs that
             # interpolate a runtime variable resolve only at pipeline-run
-            # time, so their target is unknowable from static bytes. We
-            # scanned every statically-reachable file but could not reach
-            # the config behind these includes — surface it so "scan clean"
-            # isn't overstated. Attached to the primary entry file.
+            # time, so their target is unknowable from static bytes.
+            # Keep the aggregate disclosure attached to the primary file.
             all_findings.append(
                 Finding(
                     rule_id="ENGINE-ERR",
@@ -2379,9 +2388,8 @@ def scan_repo(
                         "An ``include: local:`` path containing a CI/CD variable "
                         "or spec input ($VAR / ${VAR} / $[[ inputs.x ]]) only "
                         "resolves at pipeline-run time, so its target file is "
-                        "unknowable from static bytes. taintly scanned every "
-                        "statically-reachable file but could not reach the "
-                        "configuration behind these dynamic includes. If they "
+                        "unknowable from static bytes. The configuration "
+                        "behind these dynamic includes was not scanned. If they "
                         "pull in security-relevant jobs, review those targets "
                         "manually or pin the include to a static path."
                     ),
