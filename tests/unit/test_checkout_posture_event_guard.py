@@ -174,3 +174,63 @@ def test_two_event_guards_jointly_exclude_all_fork_paths():
 )
 def test_unconditional_pr_shapes_still_fire(events):
     assert fires(workflow(events=events))
+
+
+@pytest.mark.parametrize("consumer", ["echo test", "git push origin HEAD"])
+@pytest.mark.parametrize(
+    "first,second,expected",
+    [
+        ("", "", [6, 7]),
+        ("        # persist-credentials: false\n", "", [6, 8]),
+        ('        with: {"persist-credentials": "false"}\n', "", [8]),
+        ("", "        with:\n          persist-credentials: false\n", [6]),
+        ("        with:\n          persist-credentials: ${{ inputs.persist }}\n", "", [6, 9]),
+        ("        with:\n          persist-credentials: false\n          persist-credentials: true\n", "", [6, 10]),
+    ],
+)
+def test_checkout_persistence_belongs_to_the_invocation(consumer, first, second, expected):
+    source = (
+        "on: pull_request\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n"
+        f"      - uses: actions/checkout@v4\n{first}"
+        f"      - uses: actions/checkout@v4\n{second}"
+        f"      - run: {consumer}\n"
+    )
+    rule_id = "SEC4-GH-005B" if consumer == "echo test" else "SEC4-GH-005"
+    rule = next(rule for rule in RULES if rule.id == rule_id)
+    assert [line for line, _ in rule.pattern.check(source, source.splitlines())] == expected
+
+
+@pytest.mark.parametrize(
+    "settings,expected",
+    [
+        ("        with:\n          <<: *options\n", False),
+        ("        with:\n          <<: *options\n          persist-credentials: true\n", True),
+        ("        with:\n          persist-credentials: true\n          <<: *options\n", True),
+        ("        with:\n          persist-credentials: false\n        with: {}\n", True),
+    ],
+)
+def test_checkout_persistence_keeps_effective_yaml_value(settings, expected):
+    source = "options: &options\n  persist-credentials: false\n" + workflow()
+    source = source.replace("      - run:", settings + "      - run:")
+    assert bool(fires(source)) is expected
+
+
+def test_checkout_looking_text_is_not_an_invocation():
+    source = workflow().replace(
+        "      - uses: actions/checkout@v4",
+        "      - run: |\n          uses: actions/checkout@v4\n          persist-credentials: false",
+    )
+    assert not fires(source)
+
+
+def test_checkout_does_not_inherit_a_shadowed_with_mapping():
+    source = (
+        "checkout_options: &checkout_options\n"
+        "  with:\n"
+        "    persist-credentials: false\n"
+    ) + workflow()
+    source = source.replace(
+        "      - run:",
+        "        <<: *checkout_options\n        with: {fetch-depth: 1}\n      - run:",
+    )
+    assert fires(source)

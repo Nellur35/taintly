@@ -60,7 +60,7 @@
   "github/edge_cases/whole_dead_workflow.yml": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "github/kill_chains/tanstack/.github/workflows/pr-comment.yml": "f0664154362d84a97b37598d485a1818f18cc2332587aa05623184a19ce1a11b",
   "github/kill_chains/tanstack/.github/workflows/pr-validate.yml": "0273c55538a4f39e91d5637e72c9e289c64b7a83c1d36dd3a1a656ede859511d",
-  "github/kill_chains/tanstack/.github/workflows/release.yml": "628ecc4fc1d14207475e0865e7c51181efc37bdf3049b3bd698de9b802524cc5",
+  "github/kill_chains/tanstack/.github/workflows/release.yml": "825b4690e559edb2728597b1cfb39d9c113d24dc3141a4bdffea904f39218a7c",
   "github/mechanical/dead_job_literal_false.yml": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
   "github/mechanical/dead_job_repo_mismatch.yml": "78491a78cf63bd1e8cb6019ba64e816247a692f34260a8704830bc207a7c8358",
   "github/mechanical/dead_step_inside_live_job.yml": "04499d5c8ec0db4349d1643e910e104093597e2dacf77ba23b4a66ff712f2485",
