@@ -386,9 +386,10 @@ def _registry(
 def _verify_deploy_log(
     deploy_log: _Row, job: str, command: _Row, workspace: str, artifact_name: str, sha512: str
 ) -> None:
+    endpoint = f"{job}execution/node/{command['id']}/log/logText/progressiveText"
+    # Jenkins starts at offset zero when the start parameter is omitted.
     _require(
-        deploy_log["url"]
-        == f"{job}execution/node/{command['id']}/log/logText/progressiveText?start=0"
+        deploy_log["url"] in (endpoint, endpoint + "?start=0")
         and deploy_log["node_id"] == command["id"]
         and deploy_log["complete"] is True
         and deploy_log["command_line"] == f"+ {_COMMAND}"
