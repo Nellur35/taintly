@@ -353,6 +353,7 @@ def test_missing_project_stays_actionable_in_text(source):
     result = scan(source, "absent", output="text")
     assert result.returncode == 11
     assert "projectsNotFound" in result.stdout
+    assert result.stderr.count("projectsNotFound") == 1
 
 
 def test_rule_budget_keeps_selection_but_reports_incomplete(source):

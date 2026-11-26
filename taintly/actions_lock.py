@@ -117,9 +117,9 @@ class ActionsLockAwarePattern:
         self, content: str, lines: list[str], filepath: str
     ) -> list[tuple[int, str]]:
         candidates = self._pattern.check(content, lines)
-        if isinstance(candidates, IncompletePatternMatches):
-            # Preserve the scanner's coverage state. Partial matches are not
-            # evidence that a missing reference was safely locked.
+        if not candidates or isinstance(candidates, IncompletePatternMatches):
+            # A lock can only filter complete matches. Preserve partial results
+            # and their coverage state, even when they contain no matches.
             return candidates
         try:
             source_agrees = Path(filepath).read_text(encoding="utf-8") == content
