@@ -9,7 +9,7 @@ import re
 import stat
 from datetime import datetime
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from zipfile import ZIP_STORED, BadZipFile, ZipFile
 
@@ -112,11 +112,11 @@ _S3_PLAN_RE = _plan_pattern(
 _OPERATOR_PLAN_SHA256 = "7ff740ec800aec936828853fb418723846a10cf6fc12d00e0c0d162717921800"
 _CLOUDTRAIL_REDACTION = "HIDDEN_DUE_TO_SECURITY_REASONS"
 _OPERATOR_EXE = r"/usr/local/aws-cli/v2/[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/dist/aws"
-_OPERATOR_CWD = r"/tmp/taintly-collector\.[a-zA-Z0-9]{8}"
+_OPERATOR_SCRATCH_NAME = re.compile(r"taintly-collector\.[a-zA-Z0-9]{8}")
 _OPERATOR_HEADER = (
     rf"operator_cli_path=(?P<executable>{_OPERATOR_EXE})\n"
     r"operator_cli_sha256=(?P<digest>[0-9a-f]{64})\n"
-    rf"operator_directory=(?P<directory>{_OPERATOR_CWD})\n"
+    r"operator_directory=(?P<directory>/[A-Za-z0-9./-]{1,64})\n"
 )
 _PROCESS_LINE = re.compile(r"^taintly_process_receipt=([^\n]*)$", re.M)
 _PROCESS_FIELDS = {
@@ -843,8 +843,19 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
         len(matches) == 1,
         "Owning log does not link the selected source, role, checksum and operation",
     )
-    session = matches[0]["session"]
-    outcome = trace[matches[0].end() :]
+    request_trace = matches[0]
+    if operator_plan:
+        # This is the path reported by the remote Linux process. Parse it
+        # lexically and require the canonical single private scratch directory.
+        scratch = PurePosixPath(request_trace["directory"])
+        _need(
+            scratch.parts == ("/", "tmp", scratch.name)
+            and scratch.as_posix() == request_trace["directory"]
+            and _OPERATOR_SCRATCH_NAME.fullmatch(scratch.name),
+            "Operator preparation reports an unsupported scratch directory",
+        )
+    session = request_trace["session"]
+    outcome = trace[request_trace.end() :]
     object_arn = f"arn:aws:s3:::{bucket}/{key}"
     publication: _Row = {
         "authorization": "allowed-observed" if allowed else "denied-observed",
@@ -938,7 +949,11 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
             publication["transport"] = transport
     if operator_plan:
         publication["runtime_process"] = _runtime_process(
-            trace, matches[0].end() + response_end, matches[0], request_id, 200 if allowed else 403
+            trace,
+            request_trace.end() + response_end,
+            request_trace,
+            request_id,
+            200 if allowed else 403,
         )
 
     runtime_event = capture.get("runtime_sts_event")
