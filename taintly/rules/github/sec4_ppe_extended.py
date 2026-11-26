@@ -2077,12 +2077,10 @@ RULES: list[Rule] = [
         ],
         stride=["T", "E"],
         threat_narrative=(
-            "Passing event-sourced values to a reusable workflow as with: inputs creates an "
-            "injection path that crosses repository boundaries, making it harder to trace and "
-            "review in code. "
-            "If the called workflow uses the input in a shell step, an attacker who controls the "
-            "event payload can inject commands that run with the caller's secrets in a different "
-            "repository's workflow context."
+            "Execution risk depends on who can supply the forwarded value and whether the called "
+            "workflow interprets it as code. Assess named or inherited secret forwarding on the "
+            "owning call. Evaluate the called workflow's effective GITHUB_TOKEN permissions "
+            "separately."
         ),
         confidence="high",
     ),

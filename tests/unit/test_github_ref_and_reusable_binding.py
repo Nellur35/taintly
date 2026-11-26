@@ -53,6 +53,11 @@ jobs:
     assert "called implementation at its effective revision" in findings[0].description
     assert "explicit secrets mapping or secrets: inherit" in findings[0].remediation
     assert "all secrets" not in findings[0].description
+    narrative = findings[0].threat_narrative
+    assert "whether the called workflow interprets it as code" in narrative
+    assert "secret forwarding on the owning call" in narrative
+    assert "effective GITHUB_TOKEN permissions" in narrative
+    assert "run with the caller's secrets" not in narrative
 
 
 def test_local_call_guard_does_not_become_an_input_binding(tmp_path: Path):
