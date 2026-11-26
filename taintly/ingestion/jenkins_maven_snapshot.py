@@ -282,6 +282,8 @@ def _stage(
         "missing or ambiguous checkout record for the selected repository",
     )
     saved_checkout = selected_action["lastBuiltRevision"]
+    # Jenkins can include the branch SHA alongside the revision SHA.
+    branch_records = ([{"name": branch}], [{"name": branch, "SHA1": revision}])
     _require(
         checkout_log["nodeId"] == checkout["id"]
         and checkout_log["nodeStatus"] == "SUCCESS"
@@ -289,7 +291,7 @@ def _stage(
         and checkout_log["consoleUrl"] == f"{base}execution/node/{checkout['id']}/log"
         and selected_action["remoteUrls"] == [url]
         and saved_checkout["SHA1"] == revision
-        and saved_checkout["branch"] == [{"name": branch}],
+        and saved_checkout["branch"] in branch_records,
         "selected upstream checkout node cannot establish the exact base revision and repository"
         if upstream
         else "selected checkout node cannot establish the exact fork revision and repository",
