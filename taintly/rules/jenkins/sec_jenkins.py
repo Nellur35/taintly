@@ -25,6 +25,7 @@ from taintly.models import (
 )
 from taintly.parsers.jenkinsfile.groovy_lex import Token, TokKind, tokenize
 from taintly.rules.jenkins.http_tls import HttpRequestTLSOptionPattern
+from taintly.rules.jenkins.library_annotation import LibraryAnnotationPinPattern
 
 
 class _GitCheckoutHttpPattern:
@@ -1087,54 +1088,46 @@ class _SecretExfilTransformPattern:
 
 RULES: list[Rule] = [
     # =========================================================================
-    # SEC3-JK-001: Shared library loaded without SHA pinning
+    # SEC3-JK-001: @Library explicitly requests a non-commit version
     # =========================================================================
     Rule(
         id="SEC3-JK-001",
-        title="Jenkins shared library loaded without commit-SHA pinning",
+        title="Jenkins @Library requests a version other than a full commit SHA",
         severity=Severity.HIGH,
         platform=Platform.JENKINS,
         owasp_cicd="CICD-SEC-3",
         description=(
-            "A Jenkins shared library is loaded via @Library without pinning to a full "
-            "40-character commit SHA. Without a SHA pin, Jenkins resolves the library "
-            "each time it needs the code for a build — against a branch head or tag, "
-            "both of which are mutable references (branches can be force-pushed, tags "
-            "can be deleted and recreated). Only a 40-char commit SHA is immutable. "
-            "Shared library code executes on the Jenkins controller with the same "
-            "trust level as the Jenkinsfile itself, giving an attacker who controls "
-            "the library repo arbitrary code execution on your CI infrastructure."
+            "This @Library argument explicitly requests a version other than a full "
+            "40-character commit SHA. A symbolic Git version can change between builds. "
+            "The controller's library retrieval settings and version override policy "
+            "determine which revision the build actually loads."
         ),
-        pattern=RegexPattern(
-            match=r"@Library\s*\(['\"][\w.-]+",
-            exclude=[r"^\s*//", r"@[a-f0-9]{40}\b"],
-        ),
+        pattern=LibraryAnnotationPinPattern(),
         remediation=(
-            "Pin shared libraries to a full commit SHA:\n"
-            "  @Library('my-shared-lib@abc123def456abc123def456abc123def456abc1') _\n\n"
-            "Find the current SHA:\n"
-            "  git ls-remote https://github.com/org/my-shared-lib refs/heads/main\n\n"
-            "Add a comment with the human-readable ref for maintainability:\n"
-            "  @Library('my-shared-lib@abc123def456...') _ // v2.1.0"
+            "For a Git-backed library, pin a reviewed full commit SHA. Update the "
+            "annotation where the controller allows overrides, or pin the controller's "
+            "configured default and verify the effective library revision. Review "
+            "who may change the library repository and whether it is trusted."
         ),
-        reference="https://www.jenkins.io/doc/book/pipeline/shared-libraries/",
+        reference="https://www.jenkins.io/doc/book/pipeline/shared-libraries/#library-versions",
         test_positive=[
-            "@Library('my-shared-lib') _",
             "@Library('my-shared-lib@main') _",
             "@Library('corp-lib@v1.2.3') _",
             "  @Library('utils@develop') _",
+            "@Library(['pinned@abc123def456abc123def456abc123def456abc1', 'utils@develop']) _",
         ],
         test_negative=[
             "@Library('my-shared-lib@abc123def456abc123def456abc123def456abc1') _",
-            "// @Library('my-shared-lib') _",
+            "// @Library('my-shared-lib@main') _",
+            "/*\n@Library('my-shared-lib@main') _\n*/",
+            "echo \"Example: @Library('my-shared-lib@main')\"",
         ],
         stride=["T"],
         threat_narrative=(
-            "A shared library loaded without a pinned commit SHA changes with every push to "
-            "the library repository, meaning any contributor to that repository can "
-            "silently modify what your pipeline executes on the next run. Shared libraries "
-            "run as trusted code in the Jenkins Groovy sandbox with full access to the "
-            "pipeline's credentials and workspace."
+            "If the effective library version is a movable Git ref, a change to that "
+            "ref can change code loaded by the pipeline. Controller configuration "
+            "determines the library's trust level and whether the requested version "
+            "is honored."
         ),
         confidence="high",
     ),
