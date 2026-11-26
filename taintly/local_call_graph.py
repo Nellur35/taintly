@@ -32,6 +32,7 @@ _MAX_FILES = 512
 _MAX_FRAMES = 4096
 _MAX_DEPTH = 20
 _MAX_EVENTS = 20_000
+_MAX_SOURCE_GAPS = 20_000
 _MAX_BYTES = 400_000
 _MAX_FLOWS = 8192
 _MAX_BINDINGS = 16_384
@@ -847,6 +848,15 @@ def find_local_flows(
     binding_count = 0
     authority_indexes: dict[str, _Index] = {}
 
+    def record_source_gap(gap: CorpusAnalysisGap) -> None:
+        if source_gaps is None:
+            return
+        source_gaps.add(gap)
+        if len(source_gaps) > _MAX_SOURCE_GAPS:
+            raise LocalGraphLimitError(
+                "Local call graph source gap limit reached. Coverage incomplete."
+            )
+
     def authority_index(file: str) -> _Index:
         key = os.path.normcase(os.path.abspath(file))
         if key not in authority_indexes:
@@ -1017,27 +1027,22 @@ def find_local_flows(
                 and (checkout := _checkout_overlaps_action(doc, owner, call.value or ""))
                 is not None
             ):
-                if source_gaps is not None:
-                    source_gaps.add(
-                        CorpusAnalysisGap(
-                            doc.file,
-                            call.line,
-                            f"Checkout at line {checkout.line} selects an explicit repository "
-                            "in the action's workspace; its identity and revision are not "
-                            "bound to the scanned action definition.",
-                        )
+                record_source_gap(
+                    CorpusAnalysisGap(
+                        doc.file,
+                        call.line,
+                        f"Checkout at line {checkout.line} selects an explicit repository "
+                        "in the action's workspace; its identity and revision are not "
+                        "bound to the scanned action definition.",
                     )
+                )
                 continue
             try:
                 target = _resolve(root, call.value or "", kind)
             except _MissingLocalSource as exc:
                 if source_gaps is None:
                     raise
-                source_gaps.add(CorpusAnalysisGap(doc.file, call.line, str(exc)))
-                if len(source_gaps) > _MAX_EVENTS:
-                    raise LocalGraphLimitError(
-                        "Local call graph source gap limit; coverage incomplete"
-                    ) from exc
+                record_source_gap(CorpusAnalysisGap(doc.file, call.line, str(exc)))
                 continue
             if target is None:
                 continue

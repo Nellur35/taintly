@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import cast
 
 from .agentguards import AgentGuardIndex
+from .evidence_redaction import redact_snippet
 from .families import classify_rule, default_confidence, default_review_needed
 from .gitlabguard import (
     GitLabContext,
@@ -2765,7 +2766,10 @@ def _run_corpus_rules(
                     )
                 )
             for filepath, reasons in source_gaps.items():
-                reasons_text = "\n".join(dict.fromkeys(reasons))
+                # Redact each source reference before joining independent gaps.
+                reasons_text = "\n".join(
+                    dict.fromkeys(redact_snippet(reason) for reason in reasons)
+                )
                 findings.append(SourceIssue(filepath, f"Rule {rule.id}.\n{reasons_text}").finding())
     return findings
 

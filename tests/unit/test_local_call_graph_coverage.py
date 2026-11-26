@@ -57,6 +57,8 @@ def test_missing_local_target_reports_incomplete_coverage(tmp_path):
         for f in findings
     )
     assert not any(f.rule_id == "XF-GH-006" for f in findings)
+    with pytest.raises(local_call_graph.LocalGraphLimitError, match="is unavailable"):
+        local_call_graph.find_local_flows(build_corpus(str(tmp_path)))
 
 
 def test_reusable_flow_survives_missing_sibling_sources(tmp_path):
@@ -147,6 +149,38 @@ jobs:
         "Source acquisition incomplete: Rule XF-GH-006.",
     }
     assert all(refs[-1] in message for message in messages)
+
+
+def test_acquisition_redaction_preserves_later_gaps(tmp_path):
+    _write(tmp_path, ".github/workflows/check.yml", """on: push
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: "./.github/actions/token='test-placeholder"
+      - uses: ./.github/actions/ordinary-source
+""")
+    gap, = _run_corpus_rules(str(tmp_path), RULES)
+    assert gap.rule_id == "ENGINE-ERR"
+    assert "token=[REDACTED]" in gap.description
+    assert "test-placeholder" not in gap.description
+    assert "Line 7: Referenced local action './.github/actions/ordinary-source'" in gap.description
+
+
+@pytest.mark.parametrize("checkout", [False, True])
+def test_missing_and_unbound_sources_share_the_gap_budget(tmp_path, monkeypatch, checkout):
+    step = "      - uses: ./.github/actions/fixture\n"
+    if checkout:
+        step = "      - uses: actions/checkout@v5\n        with:\n          repository: example/fixture\n" + step
+    workflow = "on: push\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n" + step
+    _write(tmp_path, ".github/workflows/first.yml", workflow)
+    _write(tmp_path, ".github/workflows/second.yml", workflow)
+    monkeypatch.setattr(local_call_graph, "_MAX_SOURCE_GAPS", 1)
+
+    findings = _run_corpus_rules(str(tmp_path), RULES)
+    gap, = findings
+    assert gap.rule_id == "ENGINE-ERR"
+    assert "source gap limit reached" in gap.title
 
 
 @pytest.mark.parametrize("guard", ["false", "${{ vars.ALLOW_OUTPUT }}", ""])

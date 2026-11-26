@@ -665,7 +665,10 @@ jobs:
     findings = _engine_findings(tmp_path)
     observed = {f.line for f in findings if f.rule_id == "XF-GH-006"}
     assert observed == ({local_line} if blocked else {foreign_line, local_line})
-    gaps = [f for f in findings if f.rule_id == "ENGINE-ERR" and "XF-GH-006" in f.title]
+    gaps = [
+        f for f in findings
+        if f.rule_id == "ENGINE-ERR" and f.description.startswith("Rule XF-GH-006.\n")
+    ]
     if blocked:
         gap, = gaps
         assert f"Line {foreign_line}:" in gap.description
