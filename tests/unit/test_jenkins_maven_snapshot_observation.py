@@ -144,6 +144,21 @@ def test_correlates_owned_fork_command_with_stored_writer(tmp_path, capture):
     assert result["source"]["line"] == 3
 
 
+@pytest.mark.parametrize("branch_sha", [HEAD, "b" * 40, None])
+def test_checkout_branch_sha_must_match_when_reported(tmp_path, capture, branch_sha):
+    capture["run"]["actions"][0]["lastBuiltRevision"]["branch"][0]["SHA1"] = branch_sha
+
+    result = evaluate(tmp_path, capture)
+
+    if branch_sha == HEAD:
+        assert result["state"] == "snapshot-write-observed"
+        assert result["publication"]["registry_actor"] == "writer"
+    else:
+        assert result["state"] == "unresolved"
+        assert "publication" not in result
+        assert "exact fork revision and repository" in result["reason"]
+
+
 @pytest.mark.parametrize("defect", [None, "flow", "publisher", "older-object", "zero-checkout"])
 def test_snapshot_write_is_decided_by_the_owned_node_and_registry(tmp_path, capture, defect):
     capture["run"]["result"] = "FAILURE"
