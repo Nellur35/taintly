@@ -50,13 +50,14 @@ from __future__ import annotations
 
 import os
 import re
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from .models import _MAX_SAFE_TEXT_LEN
-from .parsers.structural import EventKind, walk_workflow
+from .parsers.structural import Event, EventKind, walk_workflow
 from .parsers.structural.tokenizer import TokenizerError, TokenKind, tokenize
 from .path_safety import is_within_repo, resolve_local_include
 from .source_inventory import SourceIssue
@@ -182,8 +183,8 @@ class GitLabIncludeRef:
     :attr target: A human-readable identifier — for ``project`` the
         ``project/path:ref:file`` triple; for ``remote`` the URL; for
         ``template`` / ``component`` the literal name.
-    :attr ref: For ``project`` includes, the ``ref:`` value (or empty
-        when omitted).  Used by CHAIN-GL-102 to detect unpinned refs.
+    :attr ref: A project include's literal selector. An empty string means
+        omitted (default branch); None means the selector is unresolved.
     :attr filepath: The file in which the include was declared (so
         composer findings can cite the call site, not the included
         body).
@@ -192,9 +193,17 @@ class GitLabIncludeRef:
 
     kind: str
     target: str
-    ref: str
+    ref: str | None
     filepath: str
     line: int
+
+    @property
+    def is_unpinned_project(self) -> bool:
+        return (
+            self.kind == "project"
+            and self.ref is not None
+            and _SHA40_RE.fullmatch(self.ref) is None
+        )
 
 
 @dataclass
@@ -379,7 +388,7 @@ def _walk_includes(
         )
         return
 
-    summary = _summarize_gitlab_file(norm, content)
+    summary = _summarize_gitlab_file(norm, content, truncated=truncated)
     summary.content_truncated = truncated
     corpus.workflows[norm] = summary
     if truncated:
@@ -406,20 +415,11 @@ _GITLAB_DYNAMIC_INCLUDE_RE = re.compile(r"\$\{|\$\[|\$[A-Za-z_]")
 
 _LOCAL_INCLUDE_PROVIDER_KEYS = frozenset({"project", "remote", "template", "component"})
 
-# Cross-project / remote / template / component keys inside a block
-# include item.  Each one shifts the include's kind classification.
-_PROJECT_KEY_RE = re.compile(r"^\s*project\s*:\s*['\"]?(?P<value>[^\s'\"#]+)['\"]?\s*(?:#.*)?$")
-_REMOTE_KEY_RE = re.compile(r"^\s*remote\s*:\s*['\"]?(?P<value>\S+)['\"]?\s*(?:#.*)?$")
-_TEMPLATE_KEY_RE = re.compile(r"^\s*template\s*:\s*['\"]?(?P<value>\S+)['\"]?\s*(?:#.*)?$")
-_COMPONENT_KEY_RE = re.compile(r"^\s*component\s*:\s*['\"]?(?P<value>\S+)['\"]?\s*(?:#.*)?$")
-_REF_KEY_RE = re.compile(r"^\s*ref\s*:\s*['\"]?(?P<value>[^\s'\"#]+)['\"]?\s*(?:#.*)?$")
-_FILE_KEY_RE = re.compile(r"^\s*file\s*:\s*['\"]?(?P<value>[^\s'\"#]+)['\"]?\s*(?:#.*)?$")
-
 # Detect 40-char hex SHA refs (matches GitLab's strictest pinning
 # guidance, mirroring SEC3-GL-002's check).  Shorter abbreviated SHAs
 # are allowed by Git but not considered pinned for supply-chain
 # purposes because they collide more readily.
-_SHA40_RE = re.compile(r"^[a-f0-9]{40}$")
+_SHA40_RE = re.compile(r"[a-fA-F0-9]{40}")
 
 
 def _extract_local_include_paths(content: str, *, truncated: bool = False) -> list[str]:
@@ -595,126 +595,117 @@ def _local_paths_from_include_block(block: str) -> list[str]:
     return paths
 
 
-def _extract_cross_project_includes(filepath: str, content: str) -> list[GitLabIncludeRef]:
-    """Return every cross-project / remote / template / component
-    include reference declared in ``content``.
-
-    Each include in the GitLab YAML can carry multiple keys
-    (``project: file: ref:``); we group adjacent keys into a single
-    block by tracking indentation and emit one :class:`GitLabIncludeRef`
-    per logical block.
-    """
-    out: list[GitLabIncludeRef] = []
-    lines = content.splitlines()
-    in_include_block = False
-    n = len(lines)
-    i = 0
-    while i < n:
-        line = lines[i]
-        stripped = line.lstrip()
-        if not stripped or stripped.startswith("#"):
-            i += 1
-            continue
-        indent = len(line) - len(stripped)
-        if indent == 0 and re.match(r"^include\s*:\s*", line):
-            in_include_block = True
-            i += 1
-            continue
-        if in_include_block:
-            if indent == 0:
-                in_include_block = False
-                continue
-            # A block include item starts with `-`.  Collect every
-            # mapping key (project / remote / template / component /
-            # ref / file) inside the item until the next `-` at the
-            # same indent or a parent-level key.
-            if stripped.startswith("-"):
-                # Determine the item's indent — the body of the item
-                # is at a deeper indent than the dash line.
-                item_indent = indent
-                # Process the dash line as a key-value too: it can be
-                # `- project: '...'` directly.
-                block_lines: list[str] = [line[item_indent + 1 :]]
-                j = i + 1
-                while j < n:
-                    nxt = lines[j]
-                    nxt_stripped = nxt.lstrip()
-                    if not nxt_stripped or nxt_stripped.startswith("#"):
-                        j += 1
-                        continue
-                    nxt_indent = len(nxt) - len(nxt_stripped)
-                    if nxt_indent <= item_indent:
-                        break
-                    block_lines.append(nxt)
-                    j += 1
-                ref = _build_include_ref_from_block(filepath, i + 1, block_lines)
-                if ref is not None:
-                    out.append(ref)
-                i = j
-                continue
-        i += 1
-    return out
-
-
-def _build_include_ref_from_block(
-    filepath: str,
-    start_line: int,
-    block_lines: list[str],
-) -> GitLabIncludeRef | None:
-    """Pick the include kind from a block item's keys.  Returns None
-    for local-only items (those are handled by the include walker).
-    """
-    kind: str | None = None
-    target_value = ""
-    ref_value = ""
-    file_value = ""
-    for body in block_lines:
-        m_project = _PROJECT_KEY_RE.match(body)
-        if m_project:
-            kind = "project"
-            target_value = m_project.group("value")
-            continue
-        m_remote = _REMOTE_KEY_RE.match(body)
-        if m_remote:
-            kind = "remote"
-            target_value = m_remote.group("value")
-            continue
-        m_template = _TEMPLATE_KEY_RE.match(body)
-        if m_template:
-            kind = "template"
-            target_value = m_template.group("value")
-            continue
-        m_component = _COMPONENT_KEY_RE.match(body)
-        if m_component:
-            kind = "component"
-            target_value = m_component.group("value")
-            continue
-        m_ref = _REF_KEY_RE.match(body)
-        if m_ref:
-            ref_value = m_ref.group("value")
-            continue
-        m_file = _FILE_KEY_RE.match(body)
-        if m_file:
-            file_value = m_file.group("value")
-            continue
-    if kind is None:
-        return None
-    # Compose a stable target identifier for project includes:
-    # `project:file[@ref]`.
-    if kind == "project":
-        composed = target_value
-        if file_value:
-            composed = f"{composed}:{file_value}"
-        if ref_value:
-            composed = f"{composed}@{ref_value}"
-        target_value = composed
-    return GitLabIncludeRef(
-        kind=kind,
-        target=target_value,
-        ref=ref_value,
-        filepath=filepath,
-        line=start_line,
+def inspect_gitlab_include_refs(
+    filepath: str, content: str, *, truncated: bool = False
+) -> tuple[list[GitLabIncludeRef], bool]:
+    """Read source-owned cross-project include selectors and report unresolved portions."""
+    if "include" not in content:
+        return [], False
+    if truncated:
+        content = content.rpartition("\n")[0]
+    events = tuple(
+        walk_workflow(filepath, content=content, include_keys=True, include_merge_origins=True)
     )
+    root = ("include",)
+    keys = Counter(
+        event.path
+        for event in events
+        if event.kind is EventKind.MAP_KEY and not event.merge_origins
+    )
+    if keys[root] > 1:
+        return [], True
+
+    fields: dict[tuple[object, ...], dict[str, list[Event]]] = {}
+    include_errors = []
+    include_open = False
+    last_item = None
+    cut_off = truncated
+    for event in events:
+        path = event.path
+        if event.kind is EventKind.CUTOFF:
+            cut_off = True
+        elif event.kind is EventKind.MAP_KEY and len(path) == 1:
+            include_open = path == root
+        elif event.kind is EventKind.ERROR and path[:1] == root:
+            include_errors.append(path)
+        if path[:1] == root and len(path) > 1 and isinstance(path[1], int):
+            last_item = path[1]
+        if event.kind not in {EventKind.LEAF_SCALAR, EventKind.MAP_KEY} or path[:1] != root:
+            continue
+        if not (len(path) == 2 or (len(path) == 3 and isinstance(path[1], int))):
+            continue
+        key = path[-1]
+        if not isinstance(key, str) or key not in (_LOCAL_INCLUDE_PROVIDER_KEYS | {"ref", "file"}):
+            continue
+        if any(base + (name,) in keys for base, name in event.merge_origins):
+            continue
+        slot = fields.setdefault(path[:-1], {}).setdefault(key, [])
+        if event.kind is EventKind.LEAF_SCALAR:
+            slot.append(event)
+
+    # A later root key establishes the include block ended before a cutoff.
+    unfinished = cut_off and (not keys[root] or include_open)
+    unresolved = unfinished or bool(include_errors)
+    refs: list[GitLabIncludeRef] = []
+    for owner, values in fields.items():
+        kinds = [kind for kind in values if kind in _LOCAL_INCLUDE_PROVIDER_KEYS]
+        if len(kinds) != 1 or keys[owner + ("local",)]:
+            unresolved |= "project" in kinds
+            continue
+        kind = kinds[0]
+        provider_path = owner + (kind,)
+        providers = values[kind]
+        if len(providers) != 1 or keys[provider_path] > 1:
+            unresolved |= kind == "project"
+            continue
+        provider = providers[0]
+        target = (provider.value or "").strip()
+        if not target:
+            unresolved |= kind == "project"
+            continue
+        ref: str | None = ""
+        if kind == "project":
+            selectors = values.get("ref", [])
+            ref_path = owner + ("ref",)
+            if (
+                (unfinished and (owner == root or owner[1] == last_item))
+                or keys[ref_path] > 1
+                or len(selectors) > 1
+                or any(error[: len(owner)] == owner or error == root for error in include_errors)
+                or _GITLAB_DYNAMIC_INCLUDE_RE.search(target)
+            ):
+                ref = None
+            elif selectors:
+                selector = selectors[0]
+                value = selector.value or ""
+                ambiguous_scalar = selector.value_kind == "plain" and value.lower() in {
+                    "null",
+                    "~",
+                    "true",
+                    "false",
+                }
+                ref = (
+                    value
+                    if value
+                    and not ambiguous_scalar
+                    and not any(char.isspace() for char in value)
+                    and not _GITLAB_DYNAMIC_INCLUDE_RE.search(value)
+                    else None
+                )
+            elif keys[ref_path]:
+                ref = None
+            files = values.get("file", [])
+            if len(files) == 1 and files[0].value:
+                target = f"{target}:{files[0].value}"
+            if ref:
+                target = f"{target}@{ref}"
+            unresolved |= ref is None
+        refs.append(GitLabIncludeRef(kind, target, ref, filepath, provider.line))
+    return refs, unresolved
+
+
+def _extract_cross_project_includes(filepath: str, content: str) -> list[GitLabIncludeRef]:
+    return inspect_gitlab_include_refs(filepath, content)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -722,7 +713,9 @@ def _build_include_ref_from_block(
 # ---------------------------------------------------------------------------
 
 
-def _summarize_gitlab_file(filepath: str, content: str) -> GitLabWorkflowSummary:
+def _summarize_gitlab_file(
+    filepath: str, content: str, *, truncated: bool = False
+) -> GitLabWorkflowSummary:
     """Run every extractor against a single GitLab CI file and return
     the assembled :class:`GitLabWorkflowSummary`."""
     lines = content.splitlines()
@@ -746,10 +739,8 @@ def _summarize_gitlab_file(filepath: str, content: str) -> GitLabWorkflowSummary
         workflow_bot_gate=workflow_bot_gate,
         default_id_tokens=default_id_tokens,
     )
-    cross_project = _extract_cross_project_includes(filepath, content)
-    unpinned = tuple(
-        r for r in cross_project if r.kind == "project" and not _SHA40_RE.match(r.ref or "")
-    )
+    cross_project, _ = inspect_gitlab_include_refs(filepath, content, truncated=truncated)
+    unpinned = tuple(r for r in cross_project if r.is_unpinned_project)
     return GitLabWorkflowSummary(
         filepath=filepath,
         content=content,
