@@ -19,6 +19,6 @@ def find_cross_artifact_taint(
     """Return action sinks, including reusable-workflow-to-action chains."""
     return [
         CrossArtifactFlow(**flow.__dict__)
-        for flow in find_local_flows(corpus, action_source_gaps=action_source_gaps)
+        for flow in find_local_flows(corpus, source_gaps=action_source_gaps)
         if flow.callee_kind == "action"
     ]

@@ -44,6 +44,7 @@ from taintly.cross_workflow_facts import find_cross_file_taint
 from taintly.local_call_graph import flow_evidence
 from taintly.models import Platform, Rule, Severity
 from taintly.workflow_corpus import (
+    CorpusAnalysisGap,
     CorpusEvidence,
     CorpusFindings,
     CorpusPattern,
@@ -1011,7 +1012,8 @@ def _xf_gh_005_callback(corpus: WorkflowCorpus) -> CorpusFindings:
     or sanitise it before the call).
     """
     findings: CorpusFindings = []
-    for flow in find_cross_file_taint(corpus):
+    source_gaps: set[CorpusAnalysisGap] = set()
+    for flow in find_cross_file_taint(corpus, source_gaps=source_gaps):
         chain = " -> ".join(f"{os.path.basename(c)}:{ln}" for c, ln, _ in flow.hop_chain)
         snippet = (
             f"{flow.source_expr} forwarded via {chain} into "
@@ -1020,6 +1022,8 @@ def _xf_gh_005_callback(corpus: WorkflowCorpus) -> CorpusFindings:
             f"{flow.sink_line}: {flow.sink_snippet}"
         )
         findings.append(flow_evidence(flow, snippet))
+    gaps = sorted(source_gaps, key=lambda gap: (gap.file, gap.line, gap.reason))
+    findings.extend(gaps)
     return findings
 
 
