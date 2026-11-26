@@ -137,11 +137,23 @@ def evaluate(tmp_path, capture, target=TARGET):
     return maven_snapshot_observation(tmp_path, REPO, 7, JOB, target)
 
 
-def test_correlates_owned_fork_command_with_stored_writer(tmp_path, capture):
+@pytest.mark.parametrize("log_query", ["?start=0", ""])
+def test_correlates_owned_fork_command_with_stored_writer(tmp_path, capture, log_query):
+    log = capture["deploy_log"]
+    log["url"] = log["url"].removesuffix("?start=0") + log_query
     result = evaluate(tmp_path, capture)
     assert result["state"] == "snapshot-write-observed"
     assert result["publication"]["registry_actor"] == "writer"
     assert result["source"]["line"] == 3
+
+
+@pytest.mark.parametrize("log_query", ["?start=1", "?start=0&start=1", "?start=0#other"])
+def test_refuses_other_maven_log_url_forms(tmp_path, capture, log_query):
+    log = capture["deploy_log"]
+    log["url"] = log["url"].removesuffix("?start=0") + log_query
+    result = evaluate(tmp_path, capture)
+    assert result["state"] == "unresolved"
+    assert "exact Maven deployment node" in result["reason"]
 
 
 @pytest.mark.parametrize("branch_sha", [HEAD, "b" * 40, None])
