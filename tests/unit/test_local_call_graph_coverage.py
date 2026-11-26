@@ -1,5 +1,9 @@
 """Cross-file coverage diagnostics and original-line propagation evidence."""
 
+import json
+import subprocess
+import sys
+
 import pytest
 
 from taintly import local_call_graph
@@ -108,6 +112,41 @@ def test_total_binding_limit_reports_incomplete_coverage(tmp_path, monkeypatch):
     monkeypatch.setattr(local_call_graph, "_MAX_BINDINGS", 0)
     findings = _run_corpus_rules(str(tmp_path), RULES)
     assert any(f.rule_id == "ENGINE-ERR" and "binding limit" in f.title for f in findings)
+
+
+def test_cli_reports_full_missing_source_evidence(tmp_path):
+    header = """on: push
+permissions: {}
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+"""
+    refs = [f"./.github/actions/example-local-action-{index:02d}" for index in range(14)]
+    _write(tmp_path, ".github/workflows/check.yml", header + "".join(f"      - uses: {ref}\n" for ref in refs))
+    args = [sys.executable, "-X", "utf8", "-m", "taintly", str(tmp_path), "--platform", "github",
+            "--no-config", "--no-color", "--min-severity", "HIGH", "--format"]
+    terminal = subprocess.run([*args, "text"], capture_output=True, encoding="utf-8", timeout=30)
+    sarif = subprocess.run([*args, "sarif"], capture_output=True, encoding="utf-8", timeout=30)
+    assert terminal.returncode == sarif.returncode == 11
+    for line, ref in enumerate(refs, start=8):
+        expected = f"Line {line}: Referenced local action {ref!r}"
+        assert expected in terminal.stdout
+        assert expected in terminal.stderr
+
+    run, = json.loads(sarif.stdout)["runs"]
+    assert run["properties"]["coverage_status"] == "incomplete"
+    results = [row for row in run["results"] if row["ruleId"] == "ENGINE-ERR"]
+    assert len(results) == 2
+    assert len({row["partialFingerprints"]["taintlyFingerprintV1"] for row in results}) == 2
+    notifications = run["invocations"][0]["toolExecutionNotifications"]
+    messages = [note["message"]["text"] for note in notifications]
+    assert {message.splitlines()[0] for message in messages} == {
+        "Source acquisition incomplete: Rule XF-GH-005.",
+        "Source acquisition incomplete: Rule XF-GH-006.",
+    }
+    assert all(refs[-1] in message for message in messages)
 
 
 @pytest.mark.parametrize("guard", ["false", "${{ vars.ALLOW_OUTPUT }}", ""])

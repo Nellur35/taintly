@@ -2765,7 +2765,8 @@ def _run_corpus_rules(
                     )
                 )
             for filepath, reasons in source_gaps.items():
-                _append_incomplete_pattern_diagnostic(findings, rule.id, filepath, reasons)
+                reasons_text = "\n".join(dict.fromkeys(reasons))
+                findings.append(SourceIssue(filepath, f"Rule {rule.id}.\n{reasons_text}").finding())
     return findings
 
 

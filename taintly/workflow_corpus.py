@@ -1390,7 +1390,7 @@ class CorpusEvidence:
 
 @dataclass(frozen=True)
 class CorpusAnalysisGap:
-    """An unresolved relationship alongside any established corpus findings."""
+    """Unavailable or unbound source for a relationship in the corpus."""
 
     file: str
     line: int
