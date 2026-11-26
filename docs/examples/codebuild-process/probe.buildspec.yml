@@ -1,0 +1,78 @@
+version: 0.2
+env:
+  shell: bash
+phases:
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        umask 077
+        export PATH=/usr/local/bin:/usr/bin:/bin
+        unset PYTHONPATH PYTHONHOME AWS_PROFILE AWS_DEFAULT_PROFILE AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3
+        test "$CODEBUILD_RESOLVED_SOURCE_VERSION" = "$EXPERIMENT_SOURCE_SHA"
+        test -n "$CODEBUILD_BUILD_ARN"
+        source_dir=$(cd -- "$CODEBUILD_SRC_DIR" && pwd -P)
+        marker="$source_dir/hello.txt"
+        test -f "$marker"
+        test ! -L "$marker"
+        scratch=$(/usr/bin/mktemp -d /tmp/taintly-collector.XXXXXXXX)
+        cleanup() {
+          /usr/bin/rm -f -- "$scratch/marker.txt" "$scratch/taintly_receipt.py" "$scratch/aws-config" "$scratch/receipt.json"
+          if test -d "$scratch/__pycache__"; then
+            /usr/bin/rm -f -- "$scratch"/__pycache__/taintly_receipt.cpython-*.pyc
+            /usr/bin/rmdir -- "$scratch/__pycache__"
+          fi
+          /usr/bin/rmdir -- "$scratch"
+        }
+        trap 'cleanup || printf "collector_cleanup=unresolved\n" >&2' EXIT
+        test "$scratch" != "$source_dir"
+        cd -- "$scratch"
+        test "$(pwd -P)" = "$scratch"
+        /usr/bin/head -c 129 -- "$marker" > marker.txt
+        test "$(/usr/bin/wc -c < marker.txt)" -le 128
+        test "$(/usr/bin/sha256sum marker.txt | /usr/bin/cut -d' ' -f1)" = "$EXPERIMENT_MARKER_SHA256"
+        printf '%s' 'IiIiRW1pdCBvbmx5IHRoZSBldmlkZW5jZSByZXF1aXJlZCB0byBjb3JyZWxhdGUgYSBDb2RlQnVpbGQgbWFya2VyIHJlcXVlc3QuIiIiCgpmcm9tIGhhc2hsaWIgaW1wb3J0IGZpbGVfZGlnZXN0CmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAppbXBvcnQganNvbgppbXBvcnQgb3MKaW1wb3J0IHJlCgoKZGVmIGNvbGxlY3QoaHR0cF9yZXNwb25zZSwgcGFyc2VkLCAqKl8pOgogICAgdHJ5OgogICAgICAgIHJlcXVlc3RfaWQgPSBwYXJzZWRbIlJlc3BvbnNlTWV0YWRhdGEiXVsiUmVxdWVzdElkIl0KICAgICAgICBpZiBub3QgaXNpbnN0YW5jZShyZXF1ZXN0X2lkLCBzdHIpIG9yIG5vdCByZS5mdWxsbWF0Y2gociJbQS1aYS16MC05LV17MSwxMjh9IiwgcmVxdWVzdF9pZCk6CiAgICAgICAgICAgIHJldHVybgogICAgICAgIHByb2Nlc3NfZXhlY3V0YWJsZSA9IFBhdGgoIi9wcm9jL3NlbGYvZXhlIikKICAgICAgICBleGVjdXRhYmxlID0gb3MucmVhZGxpbmsocHJvY2Vzc19leGVjdXRhYmxlKQogICAgICAgIGN3ZCA9IFBhdGguY3dkKCkucmVzb2x2ZShzdHJpY3Q9VHJ1ZSkKICAgICAgICBpZiBub3QgZXhlY3V0YWJsZS5zdGFydHN3aXRoKCIvIikgb3IgZXhlY3V0YWJsZS5lbmRzd2l0aCgiIChkZWxldGVkKSIpOgogICAgICAgICAgICByZXR1cm4KICAgICAgICBpZiB0eXBlKGh0dHBfcmVzcG9uc2Uuc3RhdHVzX2NvZGUpIGlzIG5vdCBpbnQgb3IgaHR0cF9yZXNwb25zZS5zdGF0dXNfY29kZSBub3QgaW4gKDIwMCwgNDAzKToKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgd2l0aCBwcm9jZXNzX2V4ZWN1dGFibGUub3BlbigicmIiKSBhcyBzdHJlYW06CiAgICAgICAgICAgIGZpbmdlcnByaW50ID0gZmlsZV9kaWdlc3Qoc3RyZWFtLCAic2hhMjU2IikuaGV4ZGlnZXN0KCkKICAgICAgICAgICAgZXhlY3V0YWJsZV9zdGF0ID0gb3MuZnN0YXQoc3RyZWFtLmZpbGVubygpKQogICAgICAgIGRpcmVjdG9yeV9zdGF0ID0gY3dkLnN0YXQoKQogICAgICAgIGV2aWRlbmNlID0gewogICAgICAgICAgICAib3BlcmF0aW9uIjogIlB1dE9iamVjdCIsCiAgICAgICAgICAgICJyZXF1ZXN0X2lkIjogcmVxdWVzdF9pZCwKICAgICAgICAgICAgImh0dHBfc3RhdHVzIjogaHR0cF9yZXNwb25zZS5zdGF0dXNfY29kZSwKICAgICAgICAgICAgInBpZCI6IG9zLmdldHBpZCgpLAogICAgICAgICAgICAiZXhlY3V0YWJsZV9wYXRoIjogZXhlY3V0YWJsZSwKICAgICAgICAgICAgImV4ZWN1dGFibGVfc2hhMjU2IjogZmluZ2VycHJpbnQsCiAgICAgICAgICAgICJleGVjdXRhYmxlX2lkZW50aXR5IjogW2V4ZWN1dGFibGVfc3RhdC5zdF9kZXYsIGV4ZWN1dGFibGVfc3RhdC5zdF9pbm9dLAogICAgICAgICAgICAiY3dkIjogc3RyKGN3ZCksCiAgICAgICAgICAgICJjd2RfaWRlbnRpdHkiOiBbZGlyZWN0b3J5X3N0YXQuc3RfZGV2LCBkaXJlY3Rvcnlfc3RhdC5zdF9pbm9dLAogICAgICAgIH0KICAgICAgICB3aXRoIFBhdGgoX19maWxlX18pLndpdGhfbmFtZSgicmVjZWlwdC5qc29uIikub3BlbigieCIsIGVuY29kaW5nPSJ1dGY4IikgYXMgcmVjb3JkOgogICAgICAgICAgICBqc29uLmR1bXAoZXZpZGVuY2UsIHJlY29yZCwgZW5zdXJlX2FzY2lpPVRydWUsIHNlcGFyYXRvcnM9KCIsIiwgIjoiKSkKICAgICAgICAgICAgcmVjb3JkLndyaXRlKCJcbiIpCiAgICBleGNlcHQgKE9TRXJyb3IsIEtleUVycm9yLCBUeXBlRXJyb3IpOgogICAgICAgICMgQSBtaXNzaW5nIG9ic2VydmF0aW9uIG11c3QgbGVhdmUgdGhlIG9yaWdpbmFsIEFXUyByZXNwb25zZSBpbnRhY3QuCiAgICAgICAgcmV0dXJuCgoKZGVmIGF3c2NsaV9pbml0aWFsaXplKGV2ZW50cyk6CiAgICBldmVudHMucmVnaXN0ZXIoImFmdGVyLWNhbGwuczMuUHV0T2JqZWN0IiwgY29sbGVjdCkNCg==' | /usr/bin/base64 -d > taintly_receipt.py
+        test "$(/usr/bin/sha256sum taintly_receipt.py | /usr/bin/cut -d' ' -f1)" = '3f4a6519fc8df6f35d97494b2ee50b000701e4f38fcccf75c6baa602699f657b'
+        printf '[default]\ncli_history = disabled\n\n[plugins]\ncli_legacy_plugin_path = %s\nreceipt = taintly_receipt\n' "$scratch" > aws-config
+        export AWS_CONFIG_FILE="$scratch/aws-config"
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true AWS_MAX_ATTEMPTS=1 AWS_CLI_AUTO_PROMPT=off AWS_PAGER=""
+        export PYTHONDONTWRITEBYTECODE=1
+        test -x /usr/local/bin/aws
+        cli_path=$(/usr/bin/readlink -e /usr/local/bin/aws)
+        case "$cli_path" in /usr/local/aws-cli/v2/*/dist/aws) ;; *) exit 12 ;; esac
+        test -x "$cli_path"
+        cli_sha=$(/usr/bin/sha256sum "$cli_path" | /usr/bin/cut -d' ' -f1)
+        checksum=$(/usr/bin/openssl dgst -sha256 -binary marker.txt | /usr/bin/base64 -w0)
+        printf 'source=%s\nbuild=%s\noperator_cli_path=%s\noperator_cli_sha256=%s\noperator_directory=%s\n' \
+          "$CODEBUILD_RESOLVED_SOURCE_VERSION" "$CODEBUILD_BUILD_ARN" "$cli_path" "$cli_sha" "$scratch"
+        "$cli_path" sts get-caller-identity --query '{Account:Account,Arn:Arn}' --output json
+        printf 'operation=PutObject\nkey=controlled/hello.txt\nsha256_base64=%s\n' "$checksum"
+        put_exit=0
+        "$cli_path" s3api put-object --bucket "$EXPERIMENT_BUCKET" --key controlled/hello.txt \
+          --body marker.txt --checksum-sha256 "$checksum" \
+          --query '{VersionId:VersionId,ChecksumSHA256:ChecksumSHA256}' --output json || put_exit=$?
+        if test -f receipt.json; then
+          /usr/bin/python3 -I -B - "$scratch" "$cli_path" "$cli_sha" "$put_exit" <<'RECEIPT'
+        import json
+        import pathlib
+        import sys
+        directory, executable, digest, exit_code = sys.argv[1:]
+        fields = {"operation","request_id","http_status","pid","executable_path","executable_sha256","executable_identity","cwd","cwd_identity"}
+        try:
+            with pathlib.Path("receipt.json").open("rb") as record:
+                payload = record.read(2049)
+            data = json.loads(payload) if len(payload) <= 2048 else None
+        except (OSError, ValueError):
+            data = None
+        expected_status = {"0": 200, "254": 403}.get(exit_code)
+        if (isinstance(data, dict) and set(data) == fields and data["cwd"] == directory
+                and data["executable_path"] == executable
+                and data["executable_sha256"] == digest and data["http_status"] == expected_status):
+            print("taintly_process_receipt=" + json.dumps(data, separators=(",", ":")))
+        else:
+            print("taintly_process_receipt=unresolved")
+        RECEIPT
+        else
+          printf 'taintly_process_receipt=unresolved\n'
+        fi
+        exit "$put_exit"

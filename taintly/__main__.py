@@ -2586,6 +2586,8 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
     comparison = result.get("policy_comparison")
     credential = result.get("publication", {}).get("runtime_credential")
     credential_unresolved = credential is not None and credential.get("state") == "unresolved"
+    process = result.get("publication", {}).get("runtime_process")
+    process_unresolved = process is not None and process.get("state") == "unresolved"
     if args.format == "json":
         print(json.dumps({"codebuild_s3_observation": result}, indent=2))
     elif result["state"] in ("direct-s3-write-observed", "direct-s3-write-denied"):
@@ -2621,6 +2623,10 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
             print(
                 f"  CloudTrail StartBuild caller: {launch['actor']} (event {launch['event_id']})."
             )
+            if launch.get("buildspec_override_state") == "cloudtrail-redacted":
+                print(
+                    "  CloudTrail redacted the override. The build and its log match the reviewed plan."
+                )
         if publication["audit"] == "unresolved-version-binding":
             print("  CloudTrail did not identify the observed S3 object version.")
         else:
@@ -2648,6 +2654,14 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
             print(f"  Runtime credential unresolved: {credential['reason']}.")
         elif credential is not None:
             print("  CloudTrail ties the build's STS identity call to the same S3 credential.")
+        if process_unresolved:
+            print(f"  Runtime process unresolved: {process['reason']}.")
+        elif process is not None:
+            print(
+                f"  Operator receipt for S3 request {process['request_id']}: "
+                f"{process['executable_path']} (PID {process['pid']})."
+            )
+            print(f"  Process working directory: {process['cwd']}.")
         if "workspace_identity" in result:
             print("  The workspace STS event identifies the workspace session only.")
         if comparison is not None:
@@ -2707,9 +2721,14 @@ def _assess_codebuild_s3(parser: argparse.ArgumentParser, args: argparse.Namespa
     else:
         print(f"CodeBuild S3 observation unresolved: {result['reason']}")
         print(result["scope"])
-    complete = not credential_unresolved and result["state"] in (
-        "direct-s3-write-observed",
-        "direct-s3-write-denied",
+    complete = (
+        not credential_unresolved
+        and not process_unresolved
+        and result["state"]
+        in (
+            "direct-s3-write-observed",
+            "direct-s3-write-denied",
+        )
     )
     if comparison is not None:
         complete = complete and comparison["state"] == "matched-policy-change"

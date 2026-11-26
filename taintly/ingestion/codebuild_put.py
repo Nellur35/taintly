@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 import stat
 from datetime import datetime
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from zipfile import ZIP_STORED, BadZipFile, ZipFile
 
@@ -19,6 +20,7 @@ from taintly.ingestion.codebuild_snapshot import (
     _github_identity,
     _regular_blob,
     _require_git_revision,
+    _unique_keys,
 )
 from taintly.ingestion.codebuild_start import _blob, _need, _sha
 
@@ -105,6 +107,29 @@ _S3_PLAN_RE = _plan_pattern(
         "EXPERIMENT_SOURCE_SHA", "EXPERIMENT_SOURCE_VERSION"
     )
 )
+# Lab-only collector profile. The digest pins the whole operator-owned buildspec,
+# including the collector and cleanup. No receipt-supplied digest grants admission.
+_OPERATOR_PLAN_SHA256 = "7ff740ec800aec936828853fb418723846a10cf6fc12d00e0c0d162717921800"
+_CLOUDTRAIL_REDACTION = "HIDDEN_DUE_TO_SECURITY_REASONS"
+_OPERATOR_EXE = r"/usr/local/aws-cli/v2/[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/dist/aws"
+_OPERATOR_SCRATCH_NAME = re.compile(r"taintly-collector\.[a-zA-Z0-9]{8}")
+_OPERATOR_HEADER = (
+    rf"operator_cli_path=(?P<executable>{_OPERATOR_EXE})\n"
+    r"operator_cli_sha256=(?P<digest>[0-9a-f]{64})\n"
+    r"operator_directory=(?P<directory>/[A-Za-z0-9./-]{1,64})\n"
+)
+_PROCESS_LINE = re.compile(r"^taintly_process_receipt=([^\n]*)$", re.M)
+_PROCESS_FIELDS = {
+    "operation",
+    "request_id",
+    "http_status",
+    "pid",
+    "executable_path",
+    "executable_sha256",
+    "executable_identity",
+    "cwd",
+    "cwd_identity",
+}
 _PHASE_END = r"Phase complete: BUILD State: "
 _Row = dict[str, Any]
 
@@ -384,6 +409,59 @@ def _audit(
     return request_id, _request_transport(event, when, lower, upper, error is not None)
 
 
+def _runtime_process(
+    trace: str,
+    after_response: int,
+    header: re.Match[str],
+    request_id: str | None,
+    status: int,
+) -> _Row:
+    try:
+        _need(request_id is not None, "A process join requires an independently matched S3 event")
+        lines = list(_PROCESS_LINE.finditer(trace))
+        _need(
+            len(lines) == 1
+            and lines[0].start() >= after_response
+            and len(lines[0][1]) <= 2048
+            and lines[0][1] != "unresolved",
+            "No unique process receipt follows the owning PutObject response",
+        )
+        receipt = _map(json.loads(lines[0][1], object_pairs_hook=_unique_keys), "process receipt")
+        _need(set(receipt) == _PROCESS_FIELDS, "Process receipt has unexpected or missing fields")
+        _need(
+            receipt["operation"] == "PutObject"
+            and receipt["request_id"] == request_id
+            and type(receipt["http_status"]) is int
+            and receipt["http_status"] == status,
+            "Process receipt identifies a different S3 request or result",
+        )
+        _need(
+            receipt["executable_path"] == header["executable"]
+            and receipt["executable_sha256"] == header["digest"]
+            and receipt["cwd"] == header["directory"],
+            "Process executable or working directory differs from the operator preparation",
+        )
+        pid = receipt["pid"]
+        identities = (receipt["executable_identity"], receipt["cwd_identity"])
+        _need(
+            type(pid) is int
+            and 0 < pid < 2**31
+            and all(
+                isinstance(value, list)
+                and len(value) == 2
+                and all(type(part) is int and 0 <= part < 2**64 for part in value)
+                and value[1] > 0
+                for value in identities
+            ),
+            "Malformed process or file identity",
+        )
+    except SnapshotError as exc:
+        return {"state": "unresolved", "reason": str(exc)}
+    except (ValueError, RecursionError):
+        return {"state": "unresolved", "reason": "Malformed saved process receipt"}
+    return {"state": "request-bound-operator-receipt", **receipt}
+
+
 def _matches_sts_caller(
     receipt: _Row, identity: _Row, event_id: str, region: str, account: str, session: str
 ) -> bool:
@@ -524,6 +602,28 @@ def _bound_launch(receipt: _Row, build: _Row, region: str, account: str) -> _Row
     return {"operation": "codebuild:StartBuild", "actor": actor, "event_id": event}
 
 
+def _operator_launch(receipt: _Row, build: _Row, region: str, account: str) -> _Row:
+    launch = _bound_launch(receipt, build, region, account)
+    source = build["source"]
+    supplied = receipt["requestParameters"].get("buildspecOverride")
+    if supplied == source["buildspec"]:
+        return launch
+
+    # In the observed native event, CloudTrail hides the inline bytes in both
+    # request and response. BatchGetBuilds and the owning command trace still
+    # have to match the digest-pinned plan. Do not accept a missing override,
+    # a conflicting visible override, or a different effective source or role.
+    started = receipt["responseElements"]["build"]
+    _need(
+        supplied == _CLOUDTRAIL_REDACTION
+        and started.get("source") == {**source, "buildspec": _CLOUDTRAIL_REDACTION}
+        and started.get("serviceRole") == build["serviceRole"]
+        and started.get("initiator") == build["initiator"],
+        "Operator launch does not bind the reviewed plan or its native CloudTrail redaction",
+    )
+    return {**launch, "buildspec_override_state": "cloudtrail-redacted"}
+
+
 def _bound_s3_input(
     evidence: _Row, source: _Row, version: str, member: str, git_bytes: bytes
 ) -> _Row:
@@ -658,16 +758,24 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
         head, fork_pr = _pinned_github_source(build, source, selector, identity, capture.get("pr"))
     _require_git_revision(root, identity, head, "Pinned GitHub source")
     inline = _text(source.get("buildspec"), "inline buildspec")
-    _need(
-        len(inline) <= 4096,
-        "A bounded trusted inline buildspec is required",
+    operator_plan = (
+        fork_pr is not None
+        and len(inline) <= 8192
+        and hashlib.sha256(inline.encode("utf-8")).hexdigest() == _OPERATOR_PLAN_SHA256
     )
-    plan = (_S3_PLAN_RE if s3_input is not None else _PLAN_RE).fullmatch(inline.rstrip("\n"))
-    if plan is None:
-        raise SnapshotError(
-            "The inline buildspec is outside the supported direct PutObject command profile"
-        )
-    file, key = plan.group("file", "key")
+    launch = None
+    if operator_plan:
+        launch_event = _map(capture.get("launch_event"), "CodeBuild operator launch event")
+        launch = _operator_launch(launch_event, build, region, account)
+        file, key = "hello.txt", "controlled/hello.txt"
+    else:
+        _need(len(inline) <= 4096, "A bounded trusted inline buildspec is required")
+        plan = (_S3_PLAN_RE if s3_input is not None else _PLAN_RE).fullmatch(inline.rstrip("\n"))
+        if plan is None:
+            raise SnapshotError(
+                "The inline buildspec is outside the supported direct PutObject command profile"
+            )
+        file, key = plan.group("file", "key")
     _need(
         len(file) <= 200 and len(key) <= 512,
         "The file or key exceeds the supported direct request profile",
@@ -718,9 +826,15 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
     workspace, reported_shell = _source_launch_context(
         rows, download, command_start, identity if input_object is None else None
     )
+    if operator_plan:
+        _need(
+            workspace is not None and reported_shell == "bash",
+            "Operator plan requires the owning source workspace and Bash selection records",
+        )
+    process_header = _OPERATOR_HEADER if operator_plan else ""
     identity_and_request = re.compile(
-        rf"^source={re.escape(runtime_source)}\nbuild={re.escape(build_arn)}\n[ \t]*"
-        rf'{{\n[ \t]*"Account": "{account}",\n[ \t]*"Arn": "(arn:aws:sts::{account}:assumed-role/{role_name}/'
+        rf"^source={re.escape(runtime_source)}\nbuild={re.escape(build_arn)}\n{process_header}[ \t]*"
+        rf'{{\n[ \t]*"Account": "{account}",\n[ \t]*"Arn": "(?P<session>arn:aws:sts::{account}:assumed-role/{role_name}/'
         rf'{_ROLE})"\n}}\noperation=PutObject\nkey={re.escape(key)}\nsha256_base64={re.escape(digest)}\n',
         re.M,
     )
@@ -729,8 +843,19 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
         len(matches) == 1,
         "Owning log does not link the selected source, role, checksum and operation",
     )
-    session = matches[0][1]
-    outcome = trace[matches[0].end() :]
+    request_trace = matches[0]
+    if operator_plan:
+        # This is the path reported by the remote Linux process. Parse it
+        # lexically and require the canonical single private scratch directory.
+        scratch = PurePosixPath(request_trace["directory"])
+        _need(
+            scratch.parts == ("/", "tmp", scratch.name)
+            and scratch.as_posix() == request_trace["directory"]
+            and _OPERATOR_SCRATCH_NAME.fullmatch(scratch.name),
+            "Operator preparation reports an unsupported scratch directory",
+        )
+    session = request_trace["session"]
+    outcome = trace[request_trace.end() :]
     object_arn = f"arn:aws:s3:::{bucket}/{key}"
     publication: _Row = {
         "authorization": "allowed-observed" if allowed else "denied-observed",
@@ -760,6 +885,7 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
         )
         if response is None or response[1] == "null":
             raise SnapshotError("Owning PutObject response lacks the version or expected checksum")
+        response_end = response.end()
         version = response[1]
         if event is not None:
             response_elements = event.get("responseElements")
@@ -795,10 +921,17 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
         if event is None:
             raise SnapshotError("A matching S3 data event is required to establish denial")
         prefix = (
-            "aws: [ERROR]: An error occurred (AccessDenied) when calling the PutObject operation: "
+            "aws: [ERROR]: An error occurred (AccessDenied) when calling the PutObject operation"
         )
         subject = f'User: {session} is not authorized to perform: s3:PutObject on resource: "{object_arn}"'
         runner_line = outcome.lstrip().partition("\n")[0]
+        # The reviewed collector sets AWS_MAX_ATTEMPTS=1. On a native denial
+        # the AWS CLI can include this exact detail in its rendered error.
+        no_retries = " (reached max retries: 0)"
+        if operator_plan and runner_line.startswith(prefix + no_retries):
+            prefix += no_retries
+        prefix += ": "
+        response_end = len(outcome) - len(outcome.lstrip()) + len(runner_line) + 1
         _need(
             runner_line.startswith(prefix + subject),
             "Owning PutObject response lacks the exact AccessDenied identity and target",
@@ -814,6 +947,14 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
         publication["audit"] = "bound-s3-data-event"
         if transport:
             publication["transport"] = transport
+    if operator_plan:
+        publication["runtime_process"] = _runtime_process(
+            trace,
+            request_trace.end() + response_end,
+            request_trace,
+            request_id,
+            200 if allowed else 403,
+        )
 
     runtime_event = capture.get("runtime_sts_event")
     if runtime_event is not None:
@@ -841,8 +982,8 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
                 }
 
     source_plan: _Row = {
-        "kind": "provider-inline",
-        "line": inline[: inline.index("aws s3api put-object")].count("\n") + 1,
+        "kind": "operator-inline-process-receipt" if operator_plan else "provider-inline",
+        "line": inline[: inline.index(" s3api put-object")].count("\n") + 1,
     }
     if workspace is not None:
         source_plan["workspace"] = workspace
@@ -885,7 +1026,9 @@ def direct_s3_put(capture: _Row, root: Path, build_arn: str, origin: str) -> _Ro
             scope=SCOPE
             + " The S3 input file matches the supplied Git revision. AWS selected the ZIP version.",
         )
-    if "launch_event" in capture:
+    if launch is not None:
+        result["launch"] = launch
+    elif "launch_event" in capture:
         result["launch"] = _bound_launch(
             _map(capture["launch_event"], "CodeBuild launch event"), build, region, account
         )

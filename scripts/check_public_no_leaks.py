@@ -36,6 +36,7 @@ ALLOWED_FILES: dict[str, str] = {
     ".gitleaks.toml": "secret-scanning config",
     ".pre-commit-hooks.yaml": "pre-commit hooks manifest",
     ".taintly.yml": "taintly's own config — ignores tests/ so a self-scan of this repo doesn't score its intentionally-vulnerable fixtures",
+    ".gitattributes": "reproducible line endings for the published CodeBuild probe",
     "CHANGELOG.md": "user-facing changelog",
     "CONTRIBUTING.md": "user-facing contribution guide",
     "LICENSE": "license",
@@ -60,6 +61,9 @@ ALLOWED_FILES: dict[str, str] = {
     "docs/SECRET_CACHE.md": "user-facing secret-bearing cache usage and triage guide",
     "docs/SECRET_NETWORK_FLOW.md": "user-facing secret-to-request-body detection scope and limits",
     "docs/STRUCTURAL_READER_SCOPE.md": "user-facing parser-scope contract",
+    "docs/examples/codebuild-process/README.md": "user-facing saved CodeBuild process recipe",
+    "docs/examples/codebuild-process/probe.buildspec.yml": "reviewed public CodeBuild diagnostic buildspec",
+    "docs/examples/codebuild-process/taintly_receipt.py": "readable source of the public diagnostic collector",
     # Ephemeral dev fixture (kept minimal)
     "dev/jenkins-test/docker-compose.yml": "Jenkins test-fixture compose file",
 }
