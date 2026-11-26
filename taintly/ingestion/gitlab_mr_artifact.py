@@ -486,13 +486,26 @@ def _historical_head(
 def _failed_upload(data: _Row, root: Path, job_url: str) -> _Row:
     job, pipeline = data["job"], data["pipeline"]
     log = data["failed_archive"]["log"]
-    archives = [part for part in job["artifacts"] if part["file_type"] == "archive"]
+    inventory = job["artifacts"]
+    archives = [part for part in inventory if part["file_type"] == "archive"]
+    has_archive = (
+        len(archives) == 1
+        and _identifier(archives[0]["size"], "saved archive size")
+        and archives[0]["file_format"] == "zip"
+    )
+    # GitLab can later list only the trace. The owned upload and saved member
+    # retrieval below are still required to establish the historical upload.
+    trace_only = (
+        len(inventory) == 1
+        and inventory[0]["file_type"] == "trace"
+        and inventory[0]["filename"] == "job.log"
+        and inventory[0]["file_format"] is None
+        and _identifier(inventory[0]["size"], "saved trace size")
+    )
     _need(
         job["status"] == "failed"
         and job["failure_reason"] == "script_failure"
-        and len(archives) == 1
-        and _identifier(archives[0]["size"], "saved archive size")
-        and archives[0]["file_format"] == "zip"
+        and (has_archive or trace_only)
         and all(job["pipeline"][key] == pipeline[key] for key in ("created_at", "updated_at"))
         and _identifier(log["job"], "runner trace job") == job["id"]
         and log["url"] == job_url + "/raw"
