@@ -74,6 +74,28 @@ def test_without_lock_the_findings_remain(tmp_path: Path):
     assert {finding.rule_id for finding in findings} == _IDS
 
 
+def test_reference_decisions_use_direct_dependency_fields(tmp_path: Path):
+    path = _case(tmp_path, None)
+    path.write_text(
+        "jobs:\n  build:\n    steps:\n"
+        "      - {uses: other/real@main}\n"
+        "      - run: |\n"
+        "          echo uses: other/printed@main\n"
+        f"      - uses: other/committed@{'a' * 40}\n"
+        "        with:\n"
+        "          uses: other/input@v1\n"
+        "      - 'uses': other/tagged@v1\n"
+        "      - uses: ./local@main\n"
+        "      - uses: ../local@v1\n",
+        encoding="utf8",
+    )
+    findings = _scan(path)
+    assert {(f.rule_id, f.line) for f in findings} == {
+        ("SEC3-GH-001", 10),
+        ("SEC3-GH-002", 4),
+    }
+
+
 @pytest.mark.parametrize(
     "changed",
     [

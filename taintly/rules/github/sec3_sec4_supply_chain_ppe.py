@@ -49,6 +49,29 @@ _EXTERNAL_USES_RE = re.compile(r"([\w.-]+/(?:[\w.-]+/)*[\w.-]+)@([^@\s]+)\Z")
 _MAX_SEC3_CONTEXT_EVENTS = 20_000
 
 
+def _is_github_uses_field(path: tuple[object, ...], *, composite: bool) -> bool:
+    if (
+        len(path) == 5
+        and path[0] == "jobs"
+        and isinstance(path[1], str)
+        and path[2] == "steps"
+        and isinstance(path[3], int)
+        and path[4] == "uses"
+    ):
+        return True
+    if len(path) == 3 and path[0] == "jobs" and isinstance(path[1], str) and path[2] == "uses":
+        return True
+    if len(path) == 2 and isinstance(path[0], int) and path[1] == "uses":
+        return True
+    return (
+        composite
+        and len(path) == 4
+        and path[:2] == ("runs", "steps")
+        and isinstance(path[2], int)
+        and path[3] == "uses"
+    )
+
+
 def _sec3_gh_006_occurrences(
     content: str,
     lines: list[str],
@@ -81,7 +104,7 @@ def _sec3_gh_006_occurrences(
     for event in events:
         if event.kind is not EventKind.LEAF_SCALAR or event.path[-1:] != ("uses",):
             continue
-        if not _GitHubUsesInventoryPattern._is_occurrence(event.path, composite=composite):
+        if not _is_github_uses_field(event.path, composite=composite):
             continue
         if not _GitHubUsesInventoryPattern._is_external(event.value or ""):
             continue
@@ -173,29 +196,6 @@ class _GitHubUsesInventoryPattern:
         return not (
             package.startswith(("actions/", "github/", "./", "../", "docker://"))
             or package.count("/") < 1
-        )
-
-    @staticmethod
-    def _is_occurrence(path: tuple[object, ...], *, composite: bool) -> bool:
-        if (
-            len(path) == 5
-            and path[0] == "jobs"
-            and isinstance(path[1], str)
-            and path[2] == "steps"
-            and isinstance(path[3], int)
-            and path[4] == "uses"
-        ):
-            return True
-        if len(path) == 3 and path[0] == "jobs" and isinstance(path[1], str) and path[2] == "uses":
-            return True
-        if len(path) == 2 and isinstance(path[0], int) and path[1] == "uses":
-            return True
-        return (
-            composite
-            and len(path) == 4
-            and path[:2] == ("runs", "steps")
-            and isinstance(path[2], int)
-            and path[3] == "uses"
         )
 
     def _check(self, content: str, lines: list[str], filepath: str) -> list[tuple[int, str]]:
@@ -1160,42 +1160,6 @@ class _EventAwareScriptInjectionPattern(StructuralPattern):
         return StructuralPattern(path="**.run", predicate=predicate).check(content, lines)
 
 
-def _is_unpinned_uses_value(value: str, _value_kind: str, _path: tuple[object, ...]) -> bool:
-    """Predicate for SEC3-GH-001 (unpinned action).
-
-    Equivalent to the regex
-    ``uses:\\s*([^@\\s]+)@(?![a-f0-9]{40}\\b)(\\S+)`` plus the
-    historical exclude list (``./``, ``../``, ``docker://``,
-    branch-ref dedup with SEC3-GH-002).
-    """
-    v = value.strip()
-    if not v or "@" not in v:
-        return False
-    # Local action references (./local-action, ../shared) — not
-    # remote, not a supply-chain risk in this rule's scope.
-    if v.startswith(("./", "../")):
-        return False
-    if v.startswith("docker://"):
-        return False
-    head, _, ref = v.partition("@")
-    if not ref:
-        return False
-    # First-party allowlist: platform-vendor-published action
-    # namespaces are operationally trusted; SEC3-GH-006 is the right
-    # channel for any inventory review of these.  GitHub matches
-    # ``uses:`` owner/repo case-insensitively, so we lowercase to
-    # match the set's canonical form.
-    org = head.split("/", 1)[0].lower() if "/" in head else ""
-    if org in _FIRST_PARTY_ACTION_ORGS:
-        return False
-    # Branch refs are SEC3-GH-002's scope; don't double-
-    # report at HIGH here.
-    ref_token = ref.split()[0].split("#")[0]
-    if ref_token in _BRANCH_REF_NAMES:
-        return False
-    return not _FULL_SHA_RE.match(ref_token)
-
-
 # ---------------------------------------------------------------------------
 # SEC3-GH-009 — imposter-commit detection (opt-in, network-dependent)
 # ---------------------------------------------------------------------------
@@ -1328,63 +1292,35 @@ _TRUSTED_FIRST_PARTY_OWNERS: frozenset[str] = frozenset(
 )
 
 
-_FIRST_PARTY_OWNER_PREFIX_RE = (
-    r"uses:\s*['\"]?(?:" + "|".join(sorted(_TRUSTED_FIRST_PARTY_OWNERS)) + r")/"
-)
+def _action_reference_at_uses(value: str, path: tuple[object, ...]) -> tuple[str, str] | None:
+    """Return an external reference from a direct dependency field."""
+    if not _is_github_uses_field(path, composite=True):
+        return None
+    value = value.strip()
+    if value.startswith(("./", "../")):
+        return None
+    match = _EXTERNAL_USES_RE.fullmatch(value)
+    if match is None:
+        return None
+    return match.group(1), match.group(2)
 
 
-def _unpinned_classify(value: str) -> str:
-    """Classify a ``uses:`` value into one of three buckets:
-
-    * ``"third_party"`` — unpinned, owner not in
-      ``_TRUSTED_FIRST_PARTY_OWNERS``.  HIGH severity (SEC3-GH-001).
-    * ``"first_party"`` — unpinned, owner in
-      ``_TRUSTED_FIRST_PARTY_OWNERS``.  LOW + ``review_needed=True``
-      (SEC3-GH-001A) — flagged for trust-posture review, not
-      confirmed risk.
-    * ``""`` (empty string) — does not match the rule (pinned to
-      40-char SHA, local action, docker URI, branch ref, a
-      reusable-workflow call, or absent ``@``).  Caller should not fire
-      either rule.
-    """
-    v = value.strip()
-    if not v or "@" not in v:
-        return ""
-    if v.startswith(("./", "../")):
-        return ""
-    if v.startswith("docker://"):
-        return ""
-    head, _, ref = v.partition("@")
-    if not ref:
-        return ""
-    # Reusable-workflow calls (owner/repo/.github/workflows/x.yml@ref)
-    # are SEC8-GH-003's territory — not an action. Classifying them
-    # here double-fires SEC3-GH-001 alongside SEC8-GH-003 on the same
-    # unpinned line.
-    if "/.github/workflows/" in head:
-        return ""
-    # Branch refs are SEC3-GH-002's scope; don't double-report here.
-    ref_token = ref.split()[0].split("#")[0]
-    if ref_token in _BRANCH_REF_NAMES:
-        return ""
-    if _FULL_SHA_RE.match(ref_token):
-        return ""
-    owner = head.split("/", 1)[0].lower()
-    if owner in _TRUSTED_FIRST_PARTY_OWNERS:
-        return "first_party"
-    return "third_party"
+def _is_unpinned_third_party_action(value: str, _value_kind: str, path: tuple[object, ...]) -> bool:
+    """Apply the mutable-tag rule's existing third-party policy."""
+    reference = _action_reference_at_uses(value, path)
+    if reference is None:
+        return False
+    action, ref = reference
+    # Reusable workflows and common branch names have separate rules.
+    if "/.github/workflows/" in action or ref in _BRANCH_REF_NAMES:
+        return False
+    owner = action.split("/", 1)[0].lower()
+    return owner not in _TRUSTED_FIRST_PARTY_OWNERS and not _FULL_SHA_RE.fullmatch(ref)
 
 
-def _is_unpinned_third_party_action(
-    value: str, _value_kind: str, _path: tuple[object, ...]
-) -> bool:
-    """Predicate for SEC3-GH-001 (unpinned third-party action).
-
-    Fires when the action's owner is NOT in
-    ``_TRUSTED_FIRST_PARTY_OWNERS``.  Confirmed-risk supply-chain
-    finding at HIGH severity.
-    """
-    return _unpinned_classify(value) == "third_party"
+def _is_mutable_action_branch(value: str, _value_kind: str, path: tuple[object, ...]) -> bool:
+    reference = _action_reference_at_uses(value, path)
+    return reference is not None and reference[1] in _BRANCH_REF_NAMES
 
 
 _UPLOAD_ARTIFACT_RE = re.compile(r"uses:\s*\S*upload-artifact", re.IGNORECASE)
@@ -1548,11 +1484,11 @@ RULES: list[Rule] = [
             "      - uses: ../shared-action",
             "      # uses: tj-actions/changed-files@v40",
             "      - uses: docker://alpine:3.18",
-            # First-party orgs: covered by SEC3-GH-001A, must NOT fire here.
+            # First-party tags are outside the default third-party policy.
             "      - uses: actions/checkout@v4",
             "      - uses: aws-actions/configure-aws-credentials@v4",
             "      - uses: azure/login@v2",
-            # dependabot/* is GitHub-operated — first-party (SEC3-GH-001A).
+            # dependabot/* is a GitHub-operated namespace.
             "      - uses: dependabot/fetch-metadata@v2",
             # Reusable-workflow calls are SEC8-GH-003's territory, not here.
             "      - uses: some-org/shared/.github/workflows/ci.yml@v4",
@@ -1584,10 +1520,7 @@ RULES: list[Rule] = [
             "The effective impact depends on the permissions, secrets, and trust of the consuming job."
         ),
         pattern=ActionsLockAwarePattern(
-            RegexPattern(
-                match=r"uses:\s*[^@\s]+@(main|master|develop|dev)(\s*(#.*)?)?\s*$",
-                exclude=[r"^\s*#", r"docker://", r"uses:\s*\./"],
-            )
+            StructuralPattern(path="**.uses", predicate=_is_mutable_action_branch)
         ),
         remediation="Pin to a specific commit SHA, not a branch name.",
         reference="https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions",
