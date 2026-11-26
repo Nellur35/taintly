@@ -33,8 +33,11 @@ class SourceIssue:
 
 def engine_error_message(finding: Finding) -> str:
     """Keep specific acquisition evidence in compact diagnostic output."""
-    if finding._source_acquisition_issue:
-        return f"{finding.title}: {finding.description}"
+    if finding._source_acquisition_issue and finding.description:
+        # Some producers retain the detail in the title for structured consumers.
+        detail = f": {finding.description}"
+        if finding.title != finding.description and not finding.title.endswith(detail):
+            return finding.title + detail
     return finding.title
 
 

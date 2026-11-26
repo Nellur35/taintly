@@ -130,8 +130,20 @@ def test_changed_scan_content_cannot_borrow_physical_lockfile(tmp_path: Path):
     assert any(finding.rule_id == "SEC3-GH-001" for finding in findings)
 
 
-def test_incomplete_underlying_pattern_keeps_coverage_signal(tmp_path: Path):
-    partial = IncompletePatternMatches([(1, "uses: other/tagged@v1")], reason="budget exhausted")
+def test_empty_candidate_does_not_reread_source(tmp_path: Path, monkeypatch):
+    empty = []
+    wrapped = ActionsLockAwarePattern(SimpleNamespace(check=lambda _content, _lines: empty))
+
+    def unexpected_read(_path, **_kwargs):
+        pytest.fail("a lockfile cannot affect an empty result")
+
+    monkeypatch.setattr(Path, "read_text", unexpected_read)
+    assert wrapped.check_with_filepath("", [], str(tmp_path / "ci.yml")) == []
+
+
+@pytest.mark.parametrize("matches", [[], [(1, "uses: other/tagged@v1")]])
+def test_incomplete_underlying_pattern_keeps_coverage_signal(tmp_path: Path, matches):
+    partial = IncompletePatternMatches(matches, reason="budget exhausted")
     wrapped = ActionsLockAwarePattern(SimpleNamespace(check=lambda _content, _lines: partial))
     result = wrapped.check_with_filepath(
         "uses: other/tagged@v1\n", ["uses: other/tagged@v1"], str(tmp_path / "ci.yml")
