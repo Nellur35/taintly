@@ -831,14 +831,8 @@ _DANGEROUS_GITHUB_CONTEXT_RE = re.compile(
 # credential.  Implementing that requires a job-scoped scan, which
 # this custom pattern provides.
 
-_CHECKOUT_USES_RE = re.compile(r"uses:\s*actions/checkout@", re.IGNORECASE)
-# YAML boolean false accepts ``false``/``False``/``FALSE`` and
-# ``no``/``No``/``NO``; quote the value or not.  IGNORECASE matches
-# all surface forms.
-_PERSIST_FALSE_RE = re.compile(
-    r"""persist-credentials:\s*['"]?(?:false|no)['"]?\b""",
-    re.IGNORECASE,
-)
+_CHECKOUT_USES_RE = re.compile(r"actions/checkout@[^@\s]+", re.IGNORECASE)
+_CHECKOUT_SURFACE_RE = re.compile(r"^\s*(?:-\s+)?uses:\s*actions/checkout@", re.IGNORECASE)
 # Shell git operations that consume the persisted credential.
 # - ``git push`` / ``git push origin foo``
 # - ``git fetch <url>`` for cross-repo where the persisted helper is reused
@@ -904,14 +898,69 @@ def _credential_consumer_surface(lines: list[str]) -> str:
     return "\n".join(surface)
 
 
+def _checkout_candidate_lines(content: str, lines: list[str]) -> set[int]:
+    """Find checkout invocations whose own configuration may persist credentials."""
+    events = tuple(
+        walk_workflow(
+            "workflow.yml", content=content, include_keys=True, include_merge_origins=True
+        )
+    )
+    if any(event.kind in {EventKind.ERROR, EventKind.CUTOFF} for event in events):
+        # Keep the existing conservative candidate route when ownership is incomplete.
+        return {line for line, text in enumerate(lines, 1) if _CHECKOUT_SURFACE_RE.match(text)}
+
+    keys: set[tuple[object, ...]] = set()
+    duplicate_keys: set[tuple[object, ...]] = set()
+    for event in events:
+        if event.kind is EventKind.MAP_KEY:
+            if event.path in keys:
+                duplicate_keys.add(event.path)
+            keys.add(event.path)
+
+    uses: dict[tuple[object, ...], list[Event]] = {}
+    persistence: dict[tuple[object, ...], list[Event]] = {}
+    for event in events:
+        path = event.path
+        if (
+            event.kind is not EventKind.LEAF_SCALAR
+            or len(path) < 5
+            or path[0] != "jobs"
+            or path[2] != "steps"
+            or not isinstance(path[3], int)
+            or any(base + (key,) in keys for base, key in event.merge_origins)
+        ):
+            continue
+        if path[4:] == ("uses",):
+            uses.setdefault(path[:4], []).append(event)
+        elif path[4:] == ("with", "persist-credentials"):
+            persistence.setdefault(path[:4], []).append(event)
+
+    candidates: set[int] = set()
+    for step, invocations in uses.items():
+        settings = persistence.get(step, [])
+        option = step + ("with", "persist-credentials")
+        if (
+            len(invocations) == len(settings) == 1
+            and (settings[0].value or "").strip().lower() in {"false", "no"}
+            and step + ("uses",) not in duplicate_keys
+            and not any(option[:size] in duplicate_keys for size in range(1, len(option) + 1))
+        ):
+            continue
+        candidates.update(
+            event.line
+            for event in invocations
+            if _CHECKOUT_USES_RE.fullmatch((event.value or "").strip())
+        )
+    return candidates
+
+
 class _CheckoutDownstreamCredentialConsumerPattern:
     """Pattern for SEC4-GH-005 — downstream-consumer form.
 
     Fires when ALL of:
 
     * a step uses ``actions/checkout@<ref>`` AND
-    * that step does NOT explicitly set ``persist-credentials: false``
-      within an 8-line lookahead AND
+    * that step does NOT explicitly disable credential persistence AND
     * a subsequent step IN THE SAME JOB contains a possible credential
       consumer — either a ``git push`` / ``git fetch <url>`` shell op,
       OR a recognized git-pushing
@@ -925,8 +974,12 @@ class _CheckoutDownstreamCredentialConsumerPattern:
     Conforms to ``PatternProtocol``.
     """
 
-    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
         from taintly.models import _split_into_job_segments
+
+        candidates = _checkout_candidate_lines(content, lines)
+        if not candidates:
+            return []
 
         results: list[tuple[int, str]] = []
         for seg_start, seg_lines in _split_into_job_segments(lines):
@@ -937,12 +990,7 @@ class _CheckoutDownstreamCredentialConsumerPattern:
             if not has_consumer:
                 continue
             for j, line in enumerate(seg_lines):
-                if _LINE_COMMENT_RE.match(line):
-                    continue
-                if not _CHECKOUT_USES_RE.search(line):
-                    continue
-                window = "\n".join(seg_lines[j : j + 8])
-                if _PERSIST_FALSE_RE.search(window):
+                if seg_start + j + 1 not in candidates:
                     continue
                 downstream = _credential_consumer_surface(seg_lines[j + 1 :])
                 if not (
@@ -1022,6 +1070,9 @@ class _CheckoutNoPersistPostureSiblingPattern:
         if not events:
             return []
         excluded_lines = _event_excluded_checkout_lines(content, events)
+        candidates = _checkout_candidate_lines(content, lines) - excluded_lines
+        if not candidates:
+            return []
 
         results: list[tuple[int, str]] = []
         for seg_start, seg_lines in _split_into_job_segments(lines):
@@ -1030,16 +1081,7 @@ class _CheckoutNoPersistPostureSiblingPattern:
                 _GIT_PUSH_ACTION_RE.search(seg_text)
             )
             for j, line in enumerate(seg_lines):
-                if seg_start + j + 1 in excluded_lines:
-                    continue
-                if _LINE_COMMENT_RE.match(line):
-                    continue
-                if not _CHECKOUT_USES_RE.search(line):
-                    continue
-                # ``persist-credentials: false`` makes this checkout
-                # safe regardless of consumer presence.
-                window = "\n".join(seg_lines[j : j + 8])
-                if _PERSIST_FALSE_RE.search(window):
+                if seg_start + j + 1 not in candidates:
                     continue
                 # If a consumer exists DOWNSTREAM of this checkout,
                 # SEC4-GH-005 owns this finding — don't co-fire.

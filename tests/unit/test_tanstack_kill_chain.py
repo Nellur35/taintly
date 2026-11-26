@@ -44,9 +44,12 @@ def _fires_of(findings, rule_id: str) -> list:
 def test_kill_chain_fires_sec4_gh_005(kill_chain_findings):
     fires = _fires_of(kill_chain_findings, "SEC4-GH-005")
 
-    assert len(fires) == 1
-    assert "pr-comment.yml" in fires[0].file
-    assert fires[0].severity == Severity.MEDIUM
+    # The comment after the release checkout is not a persistence setting.
+    assert {(Path(finding.file).name, finding.line) for finding in fires} == {
+        ("pr-comment.yml", 33),
+        ("release.yml", 44),
+    }
+    assert all(finding.severity == Severity.MEDIUM for finding in fires)
 
 
 def test_kill_chain_fires_sec4_gh_005b_posture_sibling(kill_chain_findings):
