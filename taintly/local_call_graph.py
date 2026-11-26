@@ -10,6 +10,9 @@ from __future__ import annotations
 import os
 import re
 import shlex
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from .authority_context import _Index
@@ -68,6 +71,42 @@ class LocalFlow:
     event: str = ""
     propagation_lines: tuple[tuple[str, int, str, str], ...] = ()
     authority: CallAuthorityEvidence = field(default_factory=CallAuthorityEvidence)
+
+
+@dataclass
+class _LocalFlowScan:
+    corpus: WorkflowCorpus
+    result: tuple[tuple[LocalFlow, ...], frozenset[CorpusAnalysisGap]] | None = None
+
+
+_LOCAL_FLOW_SCAN: ContextVar[_LocalFlowScan | None] = ContextVar("_LOCAL_FLOW_SCAN", default=None)
+
+
+@contextmanager
+def share_local_flows(corpus: WorkflowCorpus) -> Iterator[None]:
+    """Share one graph across the rules in this corpus pass."""
+    token = _LOCAL_FLOW_SCAN.set(_LocalFlowScan(corpus))
+    try:
+        yield
+    finally:
+        _LOCAL_FLOW_SCAN.reset(token)
+
+
+def local_flows_for_rule(
+    corpus: WorkflowCorpus, *, source_gaps: set[CorpusAnalysisGap] | None
+) -> Sequence[LocalFlow]:
+    scan = _LOCAL_FLOW_SCAN.get()
+    # A prefilled or absent gap set changes the graph's error and budget behavior.
+    if scan is None or scan.corpus is not corpus or source_gaps is None or source_gaps:
+        return find_local_flows(corpus, source_gaps=source_gaps)
+    if scan.result is None:
+        flows = find_local_flows(corpus, source_gaps=source_gaps)
+        # Store only results from returned traversals. Preserve retries after errors.
+        scan.result = tuple(flows), frozenset(source_gaps)
+        return flows
+    cached_flows, gaps = scan.result
+    source_gaps.update(gaps)
+    return cached_flows
 
 
 def flow_evidence(flow: LocalFlow, snippet: str) -> CorpusEvidence:

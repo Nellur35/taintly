@@ -2666,6 +2666,8 @@ def _run_corpus_rules(
     ``finding_family`` — so a family rename for presentation can never
     silently re-route the composer (R5/P3.1a decoupling).
     """
+    from .local_call_graph import share_local_flows
+
     corpus_rules = [r for r in rules if isinstance(r.pattern, CorpusPattern)]
     if composer_only:
         corpus_rules = [r for r in corpus_rules if "chain-composition" in r.composition_tags]
@@ -2689,7 +2691,7 @@ def _run_corpus_rules(
         from .composer import composer_execution_structure_cache
 
         composer_cache = composer_execution_structure_cache()
-    with composer_cache, scan_session():
+    with composer_cache, scan_session(), share_local_flows(corpus):
         for rule in corpus_rules:
             # The isinstance(r.pattern, CorpusPattern) filter above
             # guarantees this method exists; assert the narrow type
