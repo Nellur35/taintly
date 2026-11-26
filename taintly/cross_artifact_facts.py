@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .local_call_graph import LocalFlow, find_local_flows
+from .local_call_graph import LocalFlow, local_flows_for_rule
 from .workflow_corpus import CorpusAnalysisGap, WorkflowCorpus
 
 
@@ -19,6 +19,6 @@ def find_cross_artifact_taint(
     """Return action sinks, including reusable-workflow-to-action chains."""
     return [
         CrossArtifactFlow(**flow.__dict__)
-        for flow in find_local_flows(corpus, source_gaps=action_source_gaps)
+        for flow in local_flows_for_rule(corpus, source_gaps=action_source_gaps)
         if flow.callee_kind == "action"
     ]

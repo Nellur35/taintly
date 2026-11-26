@@ -61,6 +61,43 @@ def test_missing_local_target_reports_incomplete_coverage(tmp_path):
         local_call_graph.find_local_flows(build_corpus(str(tmp_path)))
 
 
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_local_rules_share_success_and_retry_failure(tmp_path, monkeypatch, fail_first):
+    _repo(tmp_path)
+    caller = tmp_path / ".github/workflows/caller.yml"
+    with caller.open("a", encoding="utf-8") as stream:
+        stream.write("      - uses: ./.github/actions/missing\n")
+    original = local_call_graph.find_local_flows
+    calls = 0
+
+    def traverse(corpus, *, source_gaps=None):
+        nonlocal calls
+        calls += 1
+        if fail_first and calls == 1:
+            raise OSError("unavailable during first traversal")
+        return original(corpus, source_gaps=source_gaps)
+
+    monkeypatch.setattr(local_call_graph, "find_local_flows", traverse)
+    workflow_rule = next(rule for rule in WORKFLOW_RULES if rule.id == "XF-GH-005")
+    rules = [workflow_rule, *RULES]
+    findings = _run_corpus_rules(str(tmp_path), rules)
+    assert calls == (2 if fail_first else 1)
+    assert any(f.rule_id == "XF-GH-006" for f in findings)
+    workflow_gap, action_gap = [f for f in findings if f.rule_id == "ENGINE-ERR"]
+    assert "XF-GH-005" in workflow_gap.title + workflow_gap.description
+    assert ("unavailable during first traversal" if fail_first else "actions/missing") in (
+        workflow_gap.description
+    )
+    assert "XF-GH-006" in action_gap.description
+    assert "actions/missing" in action_gap.description
+
+    caller.write_text(caller.read_text(encoding="utf-8").replace("      - uses: ./.github/actions/missing\n", ""),
+                      encoding="utf-8")
+    rescanned = _run_corpus_rules(str(tmp_path), rules)
+    assert calls == (3 if fail_first else 2)
+    assert [f.rule_id for f in rescanned] == ["XF-GH-006"]
+
+
 def test_reusable_flow_survives_missing_sibling_sources(tmp_path):
     caller = ".github/workflows/caller.yml"
     callee = ".github/workflows/callee.yml"
