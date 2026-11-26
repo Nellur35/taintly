@@ -400,6 +400,29 @@ def test_failed_job_has_an_observed_upload_independent_of_config_analysis(tmp_pa
     assert result["publication_admission"]["state"] == "unresolved"
 
 
+@pytest.mark.parametrize("missing", [None, "response", "member", "member-bytes"])
+def test_historical_failure_upload_with_trace_only_inventory(tmp_path, failed_capture, missing):
+    failed_capture["job"]["artifacts"] = [
+        {"file_type": "trace", "filename": "job.log", "file_format": None, "size": 456}
+    ]
+    if missing == "response":
+        del failed_capture["failed_archive"]["log"]["rows"][8]
+    elif missing == "member":
+        del failed_capture["artifact"]
+    elif missing == "member-bytes":
+        (tmp_path / "published-file.bin").unlink()
+
+    result = evaluate(tmp_path, failed_capture)
+
+    if missing is None:
+        assert result["state"] == "job-artifact-uploaded-after-failure"
+        assert result["publication"]["http_status"] == 201
+        assert result["publication"]["member_path"] == "output/index.html"
+        assert result["member_origin"] == "unverified"
+    else:
+        assert result["state"] == "unresolved" and "publication" not in result
+
+
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [(None, None), ("job", 34), ("archive_line", 11),
