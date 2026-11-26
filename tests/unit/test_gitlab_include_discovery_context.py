@@ -12,6 +12,7 @@ from taintly.gitlab_workflow_corpus import (
     _extract_cross_project_includes,
     _extract_local_include_paths,
     build_gitlab_corpus,
+    inspect_gitlab_include_refs,
 )
 from taintly.models import Platform, RegexPattern, Rule, Severity
 
@@ -52,6 +53,45 @@ def test_project_include_file_list_is_not_a_local_include(tmp_path: Path) -> Non
         str(tmp_path / ".gitlab-ci.yml"), (tmp_path / ".gitlab-ci.yml").read_text()
     )
     assert [(item.kind, item.target) for item in cross] == [("project", "group/shared")]
+
+
+def test_truncated_ref_keeps_completed_sibling_evidence() -> None:
+    source = (
+        "include:\n"
+        "  - project: group/first\n"
+        "    file: /first.yml\n"
+        "    ref: main\n"
+        "  - project: group/second\n"
+        "    file: /second.yml\n"
+        "    ref: " + "a7" * 20
+    )
+    refs, unresolved = inspect_gitlab_include_refs(".gitlab-ci.yml", source, truncated=True)
+    assert unresolved
+    assert [(ref.ref, ref.is_unpinned_project) for ref in refs] == [("main", True), (None, False)]
+
+
+@pytest.mark.parametrize("explicit", [True, False])
+def test_project_include_uses_unshadowed_merge_values(explicit: bool) -> None:
+    source = (
+        "defaults: &include_defaults\n"
+        "  project: group/templates\n"
+        "  ref: main\n"
+        "include:\n"
+        "  - <<: *include_defaults\n"
+        "    file: /ci.yml\n"
+    )
+    pin = "a7" * 20
+    if explicit:
+        source += f"    project: group/override\n    ref: {pin}\n"
+    refs, unresolved = inspect_gitlab_include_refs(".gitlab-ci.yml", source)
+    assert not unresolved
+    ref, = refs
+    if explicit:
+        assert ref.target == f"group/override:/ci.yml@{pin}"
+        assert not ref.is_unpinned_project
+    else:
+        assert ref.target == "group/templates:/ci.yml@main"
+        assert ref.is_unpinned_project
 
 
 def test_local_include_resolution_cannot_escape_repository_root(tmp_path: Path) -> None:

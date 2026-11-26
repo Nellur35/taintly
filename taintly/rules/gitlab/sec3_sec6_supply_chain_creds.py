@@ -2,6 +2,7 @@
 
 import re
 
+from taintly.gitlab_workflow_corpus import inspect_gitlab_include_refs
 from taintly.models import (
     ContextPattern,
     IncompletePatternMatches,
@@ -146,86 +147,37 @@ class ArchivedIncludeProjectPattern:
         return results
 
 
-_LINE_COMMENT_RE = re.compile(r"^\s*#")
-
-
-_INCLUDE_HEADER_RE = re.compile(r"^include:\s*(?:#.*)?$")
-
-
-_TOP_LEVEL_KEY_RE = re.compile(r"^[A-Za-z_][\w-]*\s*:")
-
-
-_SHA_REF_RE = re.compile(r"ref:\s*['\"]?[a-f0-9]{40}['\"]?")
-
-
 class _IncludeProjectMutableRefPattern:
-    """SEC3-GL-002 walker.
+    """Check the revision selector of each owned include:project item."""
 
-    Fires when a ``project:`` key INSIDE an ``include:`` block is
-    not followed by a SHA-pinned ``ref:`` within 5 lines.
+    def self_test_mutation_applicable(self, source: str, mutant: str, operator: str) -> bool:
+        # Removing the required separator from a block project entry makes
+        # it a plain scalar. Padding or editing a flow mapping is still tested.
+        return not (
+            operator == "whitespace_pad"
+            and mutant == source.replace(": ", ":")
+            and re.search(r"(?m)^include:\n[ \t]*-[ \t]+project: \S", source)
+        )
 
-    The ``include:`` ancestry requirement prevents accidental fires
-    on ``trigger: project:`` cross-project triggers (which use
-    ``branch:`` instead of ``ref:`` and live under a job, not under
-    a top-level ``include:`` block).  The previous regex-only
-    pattern matched any ``project:`` line regardless of context;
-    widening to support unquoted values made the trigger-context
-    FP recurrent.  Walker form scopes to include blocks only.
+    def check_with_filepath(
+        self, content: str, lines: list[str], filepath: str
+    ) -> list[tuple[int, str]]:
+        if not filepath.lower().endswith((".yml", ".yaml")):
+            return []
+        return self.check(content, lines)
 
-    Block tracking: ``include:`` is always a top-level key (column
-    0).  The block ends at the next top-level key (any non-
-    whitespace start) or end-of-file.
-    """
-
-    _PROJECT_RE = re.compile(r"project:\s*['\"]?[\w.-]+/[\w./-]+['\"]?")
-
-    def check(self, _content: str, lines: list[str]) -> list[tuple[int, str]]:
-        results: list[tuple[int, str]] = []
-        i = 0
-        n = len(lines)
-        while i < n:
-            line = lines[i]
-            stripped = line.lstrip(" \t")
-            if not stripped or stripped.startswith("#"):
-                i += 1
-                continue
-            if not _INCLUDE_HEADER_RE.match(line):
-                i += 1
-                continue
-            # Found an include: block header at column 0.  Walk
-            # forward until the next top-level key or EOF.
-            block_end = n
-            for k in range(i + 1, n):
-                kline = lines[k]
-                kstripped = kline.lstrip(" \t")
-                if not kstripped or kstripped.startswith("#"):
-                    continue
-                kindent = len(kline) - len(kstripped)
-                if kindent == 0 and _TOP_LEVEL_KEY_RE.match(kline):
-                    block_end = k
-                    break
-            # Walk the include block looking for project: keys.
-            for j in range(i + 1, block_end):
-                jline = lines[j]
-                jstripped = jline.lstrip(" \t")
-                if not jstripped or jstripped.startswith("#"):
-                    continue
-                if not self._PROJECT_RE.search(jline):
-                    continue
-                # Found a project: in include scope.  Look ahead
-                # 5 lines for a SHA-pinned ref.
-                lookahead_end = min(j + 6, block_end)
-                pinned = False
-                for k in range(j, lookahead_end):
-                    if _LINE_COMMENT_RE.match(lines[k]):
-                        continue
-                    if _SHA_REF_RE.search(lines[k]):
-                        pinned = True
-                        break
-                if not pinned:
-                    results.append((j + 1, jline.strip()))
-            i = block_end
-        return results
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        refs, unresolved = inspect_gitlab_include_refs(".gitlab-ci.yml", content)
+        matches = [
+            (ref.line, lines[ref.line - 1].strip())
+            for ref in refs
+            if ref.is_unpinned_project and 0 < ref.line <= len(lines)
+        ]
+        if unresolved:
+            return IncompletePatternMatches(
+                matches, reason="GitLab project include revision could not be resolved"
+            )
+        return matches
 
 
 class _PoisonableCacheKeyPattern:
@@ -430,14 +382,6 @@ RULES: list[Rule] = [
             "commit SHA. The included file can change without notice, and mutable branch/tag "
             "refs can be force-pushed to point at malicious content."
         ),
-        # Walker-based pattern requiring ``include:`` block ancestry.
-        # The previous SequencePattern fired on any ``project:`` line
-        # in the file; widening it to accept unquoted values introduced
-        # FPs on ``trigger: project:`` cross-project triggers (which
-        # use ``branch:`` instead of ``ref:``, not ``include:``-scoped).
-        # The walker is the smallest fix that handles the unquoted
-        # form correctly without bleeding into trigger context.
-        # See docs/lab/sec3-gl-002-unquoted-project-note.md (2026-05-11).
         pattern=_IncludeProjectMutableRefPattern(),
         remediation=(
             "Pin the include to a full 40-character commit SHA. Quote the SHA so YAML "
