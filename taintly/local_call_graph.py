@@ -45,6 +45,10 @@ class LocalGraphLimitError(ValueError):
     """The configured graph could not be completely evaluated within bounds."""
 
 
+class _MissingLocalSource(LocalGraphLimitError):
+    """A supported local reference could not be resolved in the scan root."""
+
+
 @dataclass(frozen=True)
 class LocalFlow:
     caller: str
@@ -792,7 +796,7 @@ def _resolve(root: str, ref: str, kind: str) -> str | None:
             normalized = os.path.normpath(path)
             return normalized.replace(os.sep, "/") if kind == "action" else normalized
     if all(is_within_repo(root, path) for path in candidates):
-        raise LocalGraphLimitError(
+        raise _MissingLocalSource(
             f"Referenced local {kind} {ref!r} is unavailable; coverage incomplete"
         )
     return None
@@ -824,9 +828,9 @@ def _checkout_overlaps_action(doc: _Document, owner: tuple[object, ...], ref: st
 
 
 def find_local_flows(
-    corpus: WorkflowCorpus, *, action_source_gaps: set[CorpusAnalysisGap] | None = None
+    corpus: WorkflowCorpus, *, source_gaps: set[CorpusAnalysisGap] | None = None
 ) -> list[LocalFlow]:
-    """Follow actual local invocations with isolated input bindings and traces."""
+    """Follow isolated invocations, retaining source gaps if the caller reports them."""
     root = corpus.repo_path
     if not root:
         return []
@@ -1013,8 +1017,8 @@ def find_local_flows(
                 and (checkout := _checkout_overlaps_action(doc, owner, call.value or ""))
                 is not None
             ):
-                if action_source_gaps is not None:
-                    action_source_gaps.add(
+                if source_gaps is not None:
+                    source_gaps.add(
                         CorpusAnalysisGap(
                             doc.file,
                             call.line,
@@ -1024,7 +1028,17 @@ def find_local_flows(
                         )
                     )
                 continue
-            target = _resolve(root, call.value or "", kind)
+            try:
+                target = _resolve(root, call.value or "", kind)
+            except _MissingLocalSource as exc:
+                if source_gaps is None:
+                    raise
+                source_gaps.add(CorpusAnalysisGap(doc.file, call.line, str(exc)))
+                if len(source_gaps) > _MAX_EVENTS:
+                    raise LocalGraphLimitError(
+                        "Local call graph source gap limit; coverage incomplete"
+                    ) from exc
+                continue
             if target is None:
                 continue
             key = os.path.normcase(os.path.abspath(target))

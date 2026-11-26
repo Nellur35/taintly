@@ -2708,11 +2708,10 @@ def _run_corpus_rules(
                     )
                 )
                 continue
+            source_gaps: dict[str, list[str]] = {}
             for hit in hits:
                 if isinstance(hit, CorpusAnalysisGap):
-                    _append_incomplete_pattern_diagnostic(
-                        findings, rule.id, hit.file, [f"Line {hit.line}: {hit.reason}"]
-                    )
+                    source_gaps.setdefault(hit.file, []).append(f"Line {hit.line}: {hit.reason}")
                     continue
                 # A corpus callback may emit a 4-tuple to override the
                 # static rule title per-finding (e.g. XF-GH-004 names the
@@ -2765,6 +2764,8 @@ def _run_corpus_rules(
                         else "",
                     )
                 )
+            for filepath, reasons in source_gaps.items():
+                _append_incomplete_pattern_diagnostic(findings, rule.id, filepath, reasons)
     return findings
 
 
