@@ -1517,6 +1517,13 @@ time, account, region, request and returned build. The request and response
 must agree with the saved build and exact source selector. The caller who
 started the build is reported separately from the build role and S3 session.
 
+For the specific operator-controlled marker probe, follow the
+[CodeBuild process-observation recipe](examples/codebuild-process/README.md).
+It supplies the reviewed buildspec and explains how to assemble a native
+process receipt, including a launch event whose inline plan AWS redacts.
+The report retains the source workspace separately from the process working
+directory and requires an independent S3 request match for the process.
+
 For a single request, exit `0` indicates a corroborated write or denial. Read the reported state to
 tell which occurred. Missing or mismatched evidence exits `11`. A successful
 write can be corroborated by the independent version retrieval when the

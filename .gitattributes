@@ -1,0 +1,3 @@
+# The diagnostic verifies the exact reviewed plan and collector bytes.
+docs/examples/codebuild-process/probe.buildspec.yml text eol=lf
+docs/examples/codebuild-process/taintly_receipt.py text eol=lf
