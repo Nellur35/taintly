@@ -667,6 +667,9 @@ def _crossjob_edges_in_content(content: str) -> list[_CrossJobEdge]:
     """
     from taintly.models import _split_into_job_segments
 
+    # The edge matcher requires this literal before the producer name.
+    if "needs." not in content:
+        return []
     lines = content.splitlines()
     producers = _producer_jobs_in_lines(lines)
     declarations = build_crossjob_declaration_view(content)

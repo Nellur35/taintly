@@ -104,6 +104,8 @@ def test_safe_quoted_taint_stays_low_confidence_review_needed(content, tmp_path,
     assert lint[0].review_needed is True
     assert lint[0].exploitability != "high"
     assert lint[0].severity == Severity.MEDIUM
+    assert "Inspect how the receiving command" in lint[0].remediation
+    assert "Pass untrusted values through an environment variable" not in lint[0].remediation
     assert not any(finding.rule_id == "TAINT-GH-001" for finding in findings)
 
     score = compute_score([lint[0]], files_scanned=1, platforms_scanned={Platform.GITHUB})

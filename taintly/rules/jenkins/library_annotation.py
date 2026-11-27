@@ -7,7 +7,9 @@ import re
 from taintly.models import IncompletePatternMatches
 from taintly.parsers.jenkinsfile.groovy_lex import Token, TokKind, tokenize
 
-_NAME = re.compile(r"[a-zA-Z0-9_.-]+")
+# The automatic GitHub retriever accepts github.com/owner/repository names.
+# This classifies the declared request without asserting a retriever is installed.
+_NAME = re.compile(r"(?:github[.]com/[a-zA-Z0-9-]+/)?[a-zA-Z0-9_.-]+")
 _COMMIT = re.compile(r"[0-9a-fA-F]{40}")
 
 

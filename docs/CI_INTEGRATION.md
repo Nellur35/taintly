@@ -178,6 +178,10 @@ step's exit status alongside the SARIF.
 
 Choose a gate according to whether the codebase already has findings.
 
+An unavailable scan path reports incomplete coverage and exits with code `11`.
+It does not replace an existing baseline. An existing directory with no pipeline
+files can still be scanned by default.
+
 Pass `--require-files` to a local scan when CI expects at least one pipeline
 configuration file. If the selected path and platform yield zero files,
 taintly emits a coverage diagnostic and exits with code `11`. With

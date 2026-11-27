@@ -171,6 +171,13 @@ def _qualify_shell_use(finding: Finding, evidence: object, content: str) -> None
         "Review downstream option parsing, splitting/globbing, configured shell and runtime bindings. "
         "For workflow inputs, separately verify who can supply the caller's value."
     )
+    if finding.rule_id == "TAINT-GH-012":
+        finding.remediation = (
+            "Inspect how the receiving command interprets the tracked argument, including "
+            "whether it can treat the value as an option or pass it to a code interpreter. "
+            "Verify the configured shell and exact command implementation. Use the receiver's "
+            "documented validation or encoding where its input format requires it."
+        )
     if witness is not None and validated and witness.script_argument:
         finding.title = "Untrusted workflow value reaches a Deno script argument (review)"
         finding.description = (
@@ -498,6 +505,7 @@ def _append_incomplete_pattern_diagnostic(
                 f"are retained. Reasons: {joined_reasons}"
             ),
             file=filepath,
+            _pattern_analysis_incomplete=True,
         )
     )
 
@@ -1671,7 +1679,7 @@ def _normalize_input_path(path: str) -> tuple[str, list[str]]:
         return (os.path.dirname(abs_path), [abs_path])
 
     if not os.path.isdir(abs_path):
-        # Doesn't exist — let the caller's existing error path handle it.
+        # Keep the unavailable path so the scan can report it.
         return (abs_path, [])
 
     # Recognise common scope-narrowing directory names and walk up.
@@ -2344,6 +2352,15 @@ def scan_repo(
         if platform not in (None, Platform.GITLAB) or explicit_files:
             raise ValueError("GitLab job evidence requires a local GitLab repository scan")
         platform = Platform.GITLAB
+    if not os.path.isdir(repo_path):
+        report = AuditReport(repo_path=repo_path, platform=platform.value if platform else "")
+        report.add(
+            SourceIssue(
+                repo_path, "Scan path is unavailable. Check that it exists and is accessible."
+            ).finding()
+        )
+        report.summarize()
+        return [report]
     # Explicit paths bypass discovery, so enforce the real-path boundary
     # before platform classification can inspect file content.
     explicit_issues = [

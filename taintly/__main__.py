@@ -1595,8 +1595,9 @@ def main():
         gitlab_registry_job=registry_job,
     )
 
-    missing_scan_files = args.require_files and not any(report.files_scanned for report in reports)
-    if missing_scan_files:
+    empty_scan = not any(report.files_scanned for report in reports)
+    incomplete_empty_scan = empty_scan and any(report.engine_errors() for report in reports)
+    if args.require_files and empty_scan and not incomplete_empty_scan:
         reports[0].add(
             Finding(
                 rule_id="ENGINE-ERR",
@@ -1606,6 +1607,8 @@ def main():
                 file=reports[0].repo_path,
             )
         )
+
+        incomplete_empty_scan = True
 
     # Surface config-driven exclusions on every report so the summary
     # reporter can disclose them.  CLI-only exclusions are operator
@@ -1668,7 +1671,7 @@ def main():
 
     # Save observations after requested analysis, then use the same report
     # dispatch as ordinary scanning, including aggregate machine formats.
-    if args.baseline and not missing_scan_files:
+    if args.baseline and not incomplete_empty_scan:
         baseline_path = args.baseline
         resolved_refs = _resolve_current_refs(all_findings)
         try:
@@ -3190,9 +3193,9 @@ def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Nam
     for name, value in vars(args).items():
         if name not in allowed and value != parser.get_default(name):
             parser.error(f"--{name.replace('_', '-')} is unavailable in CodeBuild snapshot mode")
-    if args.platform not in (None, "codebuild") or args.format not in ("text", "json"):
+    if args.platform not in (None, "codebuild") or args.format not in ("text", "json", "sarif"):
         parser.error(
-            "CodeBuild snapshot mode requires the codebuild platform and text or JSON format"
+            "CodeBuild snapshot mode requires the codebuild platform and text, JSON or SARIF format"
         )
 
     bind: Callable[[Path, str, Path, str], BoundBuildspec]
@@ -3263,9 +3266,8 @@ def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Nam
         "depends on the working directory and filesystem state. Execution and "
         "authority are unverified."
     )
-    if args.format == "json":
-        data = json.loads(format_json(report))
-        data[report_key] = {
+    if args.format in ("json", "sarif"):
+        evidence: dict[str, object] = {
             subject_key: subject,
             "selection_state": "bound" if selection else "unresolved",
             "scope": scope,
@@ -3279,7 +3281,7 @@ def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Nam
             else None,
         }
         if selection and selection.checkout_scripts:
-            data[report_key]["checkout_scripts"] = {
+            evidence["checkout_scripts"] = {
                 "scope": script_scope,
                 "pull_request_ref": selection.pull_request_ref,
                 "references": [
@@ -3294,6 +3296,12 @@ def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Nam
                     for item in selection.checkout_scripts
                 ],
             }
+        if args.format == "json":
+            data = json.loads(format_json(report))
+            data[report_key] = evidence
+        else:
+            data = json.loads(format_sarif(report))
+            data["runs"][0]["properties"][report_key] = evidence
         print(json.dumps(data, indent=2))
     else:
         print(f"{subject_label} {subject}\n{scope}")

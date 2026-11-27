@@ -12,6 +12,7 @@ import shlex
 from dataclasses import dataclass
 
 from taintly.models import (
+    _MAX_SAFE_TEXT_LEN,
     ContextPattern,
     IncompletePatternMatches,
     Platform,
@@ -19,7 +20,7 @@ from taintly.models import (
     Severity,
 )
 from taintly.parsers.shell_words import shell_words_with_expansion
-from taintly.parsers.structural import Event, EventKind
+from taintly.parsers.structural import Event, EventKind, walk_workflow
 
 _MAX_ARTIFACT_EVENTS = 20_000
 _BUILD_COMMANDS: dict[str, set[tuple[str, ...]]] = {
@@ -679,6 +680,98 @@ class _ArtifactRetentionPattern:
         return contexts
 
 
+class _JobTimeoutPattern:
+    """Check the timeout declaration owned by each runner job."""
+
+    def check(self, content: str, lines: list[str]) -> list[tuple[int, str]]:
+        return self.check_with_filepath(content, lines, "workflow.yml")
+
+    def check_with_filepath(
+        self, content: str, lines: list[str], filepath: str
+    ) -> list[tuple[int, str]]:
+        if not filepath.lower().endswith((".yml", ".yaml")):
+            return []
+        if any(len(line) > _MAX_SAFE_TEXT_LEN for line in lines):
+            return IncompletePatternMatches(
+                [], reason="line length exceeds the timeout analysis bound"
+            )
+
+        declared: set[tuple[object, ...]] = set()
+        ambiguous: set[str] = set()
+        owned_fields = {"runs-on", "steps", "timeout-minutes"}
+        runners: dict[str, Event] = {}
+        job_by_line: dict[int, str] = {}
+        shared_lines: set[int] = set()
+        for index, event in enumerate(
+            walk_workflow(
+                filepath,
+                content=content,
+                recover=True,
+                include_keys=True,
+                include_merge_origins=True,
+            )
+        ):
+            if index >= _MAX_ARTIFACT_EVENTS:
+                return IncompletePatternMatches(
+                    [], reason="job timeout analysis event bound reached"
+                )
+            if event.kind in {EventKind.ERROR, EventKind.CUTOFF}:
+                return IncompletePatternMatches(
+                    [], reason="structural YAML parsing reported an error or cutoff"
+                )
+            path = event.path
+            if path == ("jobs",) and event.kind is EventKind.MAP_KEY:
+                if path in declared:
+                    return IncompletePatternMatches([], reason="duplicate jobs mapping")
+                declared.add(path)
+            if path == ("jobs", "<<") and event.value_kind == "merge_key":
+                return IncompletePatternMatches([], reason="inherited jobs mapping")
+            if len(path) < 2 or path[0] != "jobs" or not isinstance(path[1], str):
+                continue
+            job = path[1]
+            field = path[2] if len(path) > 2 else None
+            if job_by_line.setdefault(event.line, job) != job or (
+                field == "steps" and len(path) > 3
+            ):
+                # Findings carry a line, so a step on the same line can be
+                # mistaken for the job by the engine's liveness filter.
+                shared_lines.add(event.line)
+            if (
+                field in owned_fields
+                and event.alias_origin_line is not None
+                and path[:3] not in declared
+            ):
+                # Replayed leaves cannot establish absence of a key in the template.
+                ambiguous.add(job)
+            if event.kind is not EventKind.MAP_KEY or len(path) > 3:
+                continue
+            if len(path) == 3 and field != "<<" and field not in owned_fields:
+                continue
+            if path in declared or field == "<<":
+                ambiguous.add(job)
+            declared.add(path)
+            if path == ("jobs", job, "runs-on"):
+                runners[job] = event
+
+        matches = []
+        for job, runner in runners.items():
+            if (
+                job in ambiguous
+                or ("jobs", job, "steps") not in declared
+                or ("jobs", job, "timeout-minutes") in declared
+            ):
+                continue
+            if not 1 <= runner.line <= len(lines) or runner.line in shared_lines:
+                ambiguous.add(job)
+                continue
+            matches.append((runner.line, lines[runner.line - 1].strip()))
+        if ambiguous:
+            return IncompletePatternMatches(
+                matches, reason="job timeout ownership or source location could not be established"
+            )
+        return matches
+
+
 RULES: list[Rule] = [
     # =========================================================================
     # SEC10-GH-001: Job missing timeout-minutes
@@ -695,16 +788,7 @@ RULES: list[Rule] = [
             "compromised step may continue longer than the repository intends. An "
             "explicit per-job timeout can set a shorter bound."
         ),
-        pattern=ContextPattern(
-            # Anchor: any job-level 'runs-on:' (marks a real job)
-            anchor=r"^\s{2,4}runs-on:",
-            # Requires: steps: is always present in a real job — ensures this
-            # is a real workflow file, not a fragment
-            requires=r"steps\s*:",
-            # Fires only when the file has NO timeout-minutes anywhere
-            requires_absent=r"timeout-minutes\s*:",
-            exclude=[r"^\s*#"],
-        ),
+        pattern=_JobTimeoutPattern(),
         remediation=(
             "Set an explicit 'timeout-minutes' on each job:\n\n"
             "jobs:\n"

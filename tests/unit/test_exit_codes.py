@@ -59,6 +59,39 @@ def test_require_files_discloses_empty_scan(tmp_path: Path, write_baseline: bool
         assert baseline.read_bytes() == b"existing baseline"
 
 
+
+@pytest.mark.parametrize(
+    ("output", "extra"),
+    [("json", ()), ("sarif", ("--require-files", "--min-severity", "CRITICAL"))],
+)
+def test_unavailable_path_is_not_an_empty_success(tmp_path: Path, output, extra):
+    missing = tmp_path / ".github" / "workflows"
+    baseline = tmp_path / "baseline.json"
+    original = b"existing baseline"
+    baseline.write_bytes(original)
+    result = subprocess.run(
+        [sys.executable, "-m", "taintly", str(missing), "--platform", "github",
+         "--format", output, "--baseline", str(baseline), "--no-config", *extra],
+        cwd=ROOT, capture_output=True, timeout=30,
+    )
+    assert result.returncode == 11, result.stderr.decode(errors="replace")
+    assert baseline.read_bytes() == original
+    assert b"Scan path is unavailable" in result.stderr
+    report = json.loads(result.stdout)
+    if output == "json":
+        assert report["files_scanned"] == 0
+        assert report["coverage_status"] == "incomplete"
+        error, = report["errors"]
+        assert Path(error["file"]) == missing
+        assert "Scan path is unavailable" in error["description"]
+    else:
+        run, = report["runs"]
+        assert run["properties"]["coverage_status"] == "incomplete"
+        notice, = run["invocations"][0]["toolExecutionNotifications"]
+        assert "Scan path is unavailable" in notice["message"]["text"]
+        assert notice["descriptor"]["id"] == "ENGINE-ERR"
+
+
 def test_require_files_allows_scan_with_workflow(tmp_path: Path):
     workflows = tmp_path / ".github" / "workflows"
     workflows.mkdir(parents=True)

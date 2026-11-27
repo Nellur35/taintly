@@ -94,10 +94,14 @@ def _build_notifications(report: AuditReport) -> list[dict[str, Any]]:
     """
     out: list[dict[str, Any]] = []
     for f in sorted(report.engine_errors(), key=_finding_sort_key):
+        message = engine_error_message(f)
+        if f._pattern_analysis_incomplete:
+            # Carry the same bounded explanation as the mirrored SARIF result.
+            message = f"{message}: {f.description[:1000]}"
         out.append(
             {
                 "level": _LEVEL_MAP.get(f.severity, "warning"),
-                "message": {"text": engine_error_message(f)},
+                "message": {"text": message},
                 "descriptor": {"id": f.rule_id},
                 "locations": [
                     {

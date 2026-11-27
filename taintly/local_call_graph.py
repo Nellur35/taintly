@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from .authority_context import _Index
 from .call_authority import AuthorityInvocation, CallAuthorityEvidence, CallAuthorityResolver
 from .eventguard import event_guard_verdict
+from .git_evidence import GitEvidenceError, GitSourceSnapshot
 from .parsers.gha_expr import ExprSyntaxError, iter_expression_bodies, result_provenance_paths
 from .parsers.shell_words import shell_words_with_expansion
 from .parsers.structural import Event, EventKind, triggers, walk_workflow
@@ -524,7 +525,7 @@ class _Document:
             if path[-1] != "uses" or (owner := self.owner(path)) is None:
                 continue
             value = leaf.value or ""
-            if not value.startswith("./"):
+            if not value.startswith(("./", "$/")):
                 continue
             kind = "workflow" if len(owner) == 2 and owner[0] == "jobs" else "action"
             args = {
@@ -806,8 +807,10 @@ class _Document:
         )
 
 
-def _resolve(root: str, ref: str, kind: str) -> str | None:
+def _reference_paths(ref: str, kind: str) -> list[str]:
     rel = ref[2:]
+    if ref.startswith("$/") and (not rel or "@" in rel):
+        return []
     if kind == "action":
         if rel == "":
             parts = []
@@ -818,19 +821,23 @@ def _resolve(root: str, ref: str, kind: str) -> str | None:
     else:
         parts = rel.split("/")
     if any(p in {"", ".", ".."} for p in parts) or any(c in rel for c in "\\:$*?["):
-        return None
+        return []
     if kind == "workflow" and (
         len(parts) != 3
         or parts[:2] != [".github", "workflows"]
         or not rel.endswith((".yml", ".yaml"))
     ):
+        return []
+    if kind == "workflow":
+        return [rel]
+    directory = "/".join(parts)
+    return [f"{directory}/{name}" if directory else name for name in ("action.yml", "action.yaml")]
+
+
+def _resolve(root: str, ref: str, kind: str) -> str | None:
+    candidates = [os.path.join(root, *rel.split("/")) for rel in _reference_paths(ref, kind)]
+    if not candidates:
         return None
-    base = os.path.join(root, *parts)
-    candidates = (
-        [base]
-        if kind == "workflow"
-        else [os.path.join(base, "action.yml"), os.path.join(base, "action.yaml")]
-    )
     for path in candidates:
         if is_within_repo(root, path) and os.path.isfile(path):
             normalized = os.path.normpath(path)
@@ -886,6 +893,8 @@ def find_local_flows(
     frames = 0
     binding_count = 0
     authority_indexes: dict[str, _Index] = {}
+    snapshot: GitSourceSnapshot | None = None
+    snapshot_failure: str | None = None
 
     def record_source_gap(gap: CorpusAnalysisGap) -> None:
         if source_gaps is None:
@@ -905,17 +914,89 @@ def find_local_flows(
 
     authority_resolver = CallAuthorityResolver(authority_index)
 
-    def load(path: str, kind: str) -> _Document:
+    def load(path: str, kind: str, content: str | None = None) -> _Document:
         key = os.path.normcase(os.path.abspath(path))
         if key not in docs:
             if len(docs) >= _MAX_FILES:
                 raise LocalGraphLimitError("Local call graph file limit")
-            with open(path, encoding="utf-8", errors="replace") as stream:
-                content = stream.read(_MAX_BYTES + 1)
+            if content is None:
+                with open(path, encoding="utf-8", errors="replace") as stream:
+                    content = stream.read(_MAX_BYTES + 1)
             if len(content) > _MAX_BYTES:
                 raise LocalGraphLimitError(f"Local call graph file size limit at {path}")
             docs[key] = _Document(path, content, kind)
         return docs[key]
+
+    def self_repository_source(
+        ref: str, kind: str, source_chain: tuple[_Document, ...] | None
+    ) -> tuple[str, str, str]:
+        nonlocal snapshot, snapshot_failure
+        paths = _reference_paths(ref, kind)
+        if not paths:
+            raise _MissingLocalSource(f"Unsupported self-repository {kind} reference {ref!r}")
+        if source_chain is None:
+            raise _MissingLocalSource(
+                f"Source revision for self-repository {kind} {ref!r} is not established "
+                "through a workspace-relative action"
+            )
+        if snapshot is None and snapshot_failure is None:
+            try:
+                snapshot = GitSourceSnapshot.capture(
+                    root, max_paths=_MAX_FILES, max_bytes=_MAX_BYTES
+                )
+            except GitEvidenceError as exc:
+                snapshot_failure = str(exc)
+        if snapshot is None:
+            raise _MissingLocalSource(
+                f"Self-repository {kind} {ref!r} needs a local Git checkout "
+                f"at the caller commit: {snapshot_failure}"
+            )
+        try:
+            for caller in source_chain:
+                relative = os.path.relpath(caller.file, root).replace(os.sep, "/")
+                if snapshot.source(relative) != caller.content:
+                    raise _MissingLocalSource(
+                        f"Caller source for self-repository {kind} {ref!r} does not match "
+                        f"local Git commit {snapshot.revision}"
+                    )
+            for relative in paths:
+                committed = snapshot.source(relative)
+                if committed is None:
+                    continue
+                target = os.path.normpath(os.path.join(root, *relative.split("/")))
+                if not is_within_repo(root, target):
+                    raise _MissingLocalSource(
+                        f"Self-repository {kind} {ref!r} has no source within the scan checkout"
+                    )
+                # Keep path-keyed documents and findings tied to the scanned bytes.
+                # A different workspace copy must never populate this graph frame.
+                existing = docs.get(os.path.normcase(os.path.abspath(target)))
+                if existing is not None:
+                    scanned = existing.content
+                else:
+                    try:
+                        with open(target, encoding="utf-8") as stream:
+                            scanned = stream.read(_MAX_BYTES + 1)
+                    except FileNotFoundError as exc:
+                        raise _MissingLocalSource(
+                            f"Self-repository {kind} {ref!r} is in local Git commit "
+                            f"{snapshot.revision}, but absent from the scan checkout"
+                        ) from exc
+                if scanned != committed:
+                    raise _MissingLocalSource(
+                        f"Source for self-repository {kind} {ref!r} differs from "
+                        f"local Git commit {snapshot.revision}"
+                    )
+                return target, committed, snapshot.revision
+        except (GitEvidenceError, UnicodeError, OSError) as exc:
+            reason = f": {exc}" if isinstance(exc, GitEvidenceError) else ""
+            raise _MissingLocalSource(
+                f"Source for self-repository {kind} {ref!r} at local Git commit "
+                f"{snapshot.revision} could not be read and verified{reason}"
+            ) from exc
+        raise _MissingLocalSource(
+            f"Self-repository {kind} {ref!r} is unavailable at local Git commit {snapshot.revision}"
+        )
 
     def visit(
         doc: _Document,
@@ -925,6 +1006,7 @@ def find_local_flows(
         seen: tuple[str, ...],
         inherited: tuple[str, ...],
         authority: AuthorityInvocation,
+        source_chain: tuple[_Document, ...] | None,
     ) -> None:
         nonlocal frames, binding_count
         frames += 1
@@ -1058,13 +1140,15 @@ def find_local_flows(
                         "Local call graph finding limit; coverage incomplete"
                     )
         for owner, call, kind, args in doc.calls():
+            ref_value = call.value or ""
+            self_repository = ref_value.startswith("$/")
             allowed, guards = doc.guard(owner, event)
             if not allowed:
                 continue
             if (
                 kind == "action"
-                and (checkout := _checkout_overlaps_action(doc, owner, call.value or ""))
-                is not None
+                and not self_repository
+                and (checkout := _checkout_overlaps_action(doc, owner, ref_value)) is not None
             ):
                 record_source_gap(
                     CorpusAnalysisGap(
@@ -1076,8 +1160,17 @@ def find_local_flows(
                     )
                 )
                 continue
+            target: str | None
+            committed: str | None
+            revision: str | None
             try:
-                target = _resolve(root, call.value or "", kind)
+                if self_repository:
+                    target, committed, revision = self_repository_source(
+                        ref_value, kind, source_chain
+                    )
+                else:
+                    target = _resolve(root, ref_value, kind)
+                    committed = revision = None
             except _MissingLocalSource as exc:
                 if source_gaps is None:
                     raise
@@ -1090,13 +1183,34 @@ def find_local_flows(
                 raise LocalGraphLimitError(
                     f"Cyclic local call at {doc.file}:{call.line}; coverage incomplete"
                 )
-            callee = load(target, kind)
-            if kind == "action" and callee.value(("runs", "using")) not in {None, "composite"}:
-                continue
-            if kind == "workflow" and "workflow_call" not in triggers(callee.content):
+            callee = load(target, kind, committed)
+            using = callee.value(("runs", "using")) if kind == "action" else None
+            if kind == "action":
+                supported = using == "composite" or (not self_repository and using is None)
+            else:
+                supported = "workflow_call" in triggers(callee.content)
+            if not supported:
+                if self_repository:
+                    detail = (
+                        f"action execution type {using!r} is outside the local call analysis"
+                        if kind == "action"
+                        else "the file does not establish a workflow_call declaration"
+                    )
+                    record_source_gap(
+                        CorpusAnalysisGap(
+                            doc.file,
+                            call.line,
+                            f"Self-repository {kind} {ref_value!r} selects committed source at "
+                            f"{revision}; {detail}.",
+                        )
+                    )
                 continue
             call_notes = notes + guards
-            if kind == "action":
+            if self_repository:
+                call_notes += (
+                    f"Self-repository {kind} {ref_value!r} uses source at Git commit {revision}.",
+                )
+            elif kind == "action":
                 call_notes += (
                     "Local action checkout revision and workspace correspondence require verification.",
                 )
@@ -1208,6 +1322,9 @@ def find_local_flows(
                 authority_resolver.call(
                     authority, doc.file, doc.kind, owner, callee.file, kind, call.line
                 ),
+                source_chain + (callee,)
+                if source_chain is not None and (self_repository or kind == "workflow")
+                else None,
             )
 
     for doc in tuple(docs.values()):
@@ -1224,6 +1341,7 @@ def find_local_flows(
                 (os.path.normcase(os.path.abspath(doc.file)),),
                 (),
                 AuthorityInvocation(),
+                (doc,),
             )
     # Direct and env propagation can describe the same sink; preserve independent
     # call sites/sources, not duplicate projections of one proof.

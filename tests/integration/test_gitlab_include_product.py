@@ -279,6 +279,33 @@ def test_two_missing_includes_have_distinct_evidence_across_reporters(tmp_path):
     assert len({row["message"]["text"] for row in notifications}) == 2
 
 
+def test_sarif_notification_preserves_unresolved_project_ref_reason(tmp_path):
+    _write(
+        tmp_path / ".gitlab-ci.yml",
+        "include:\n"
+        "  - project: example/pipeline\n"
+        "    file: /compile.yml\n"
+        "    ref: main\n"
+        "  - project: example/other\n"
+        "    file: /lint.yml\n"
+        "    ref: $OTHER_REVISION\n"
+        "check:\n"
+        "  script: echo ready\n",
+    )
+    code, report = _scan(tmp_path)
+    assert report["coverage_status"] == "incomplete"
+    error, = report["errors"]
+    assert "project include revision could not be resolved" in error["description"]
+    assert [row["line"] for row in report["findings"] if row["rule_id"] == "SEC3-GL-002"] == [2]
+
+    sarif = _run(tmp_path, "sarif")
+    assert sarif.returncode == code
+    run, = json.loads(sarif.stdout)["runs"]
+    assert run["properties"]["coverage_status"] == "incomplete"
+    notification, = run["invocations"][0]["toolExecutionNotifications"]
+    assert error["description"] in notification["message"]["text"]
+
+
 
 @pytest.mark.parametrize(
     ("module", "limit", "scanned", "diagnostic"),

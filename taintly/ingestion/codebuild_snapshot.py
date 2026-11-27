@@ -6,10 +6,10 @@ import hashlib
 import json
 import os
 import re
-import subprocess  # nosec B404
 from dataclasses import dataclass
 from pathlib import Path
 
+from taintly.git_evidence import GitEvidenceError, read_local_git
 from taintly.ingestion.codebuild_checkout import CheckoutScriptReference, checkout_script_references
 from taintly.parsers.structural import EventKind, walk_workflow
 
@@ -45,18 +45,9 @@ class BoundBuildspec:
 
 
 def _git(root: Path, *args: str) -> bytes:
-    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
-    env.update(GIT_ALLOW_PROTOCOL="", GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
     try:
-        # Fixed read-only Git commands, with no shell or transports.
-        return subprocess.run(  # nosec B603 B607
-            ["git", "--no-replace-objects", "-C", str(root), *args],
-            env=env,
-            capture_output=True,
-            check=True,
-            timeout=5,
-        ).stdout
-    except (OSError, subprocess.SubprocessError) as exc:
+        return read_local_git(root, *args)
+    except GitEvidenceError as exc:
         raise SnapshotError("Required local Git evidence is unavailable") from exc
 
 
