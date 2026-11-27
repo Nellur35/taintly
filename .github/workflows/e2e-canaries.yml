@@ -146,6 +146,111 @@ jobs:
           print('Pinned scanner, expected source, Action output and local SARIF delivery verified.')
           PY
 
+      - name: Capture the published scanner's default posture
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir -p strict-posture/.github/workflows
+          cat > strict-posture/.github/workflows/ci.yml <<'YAML'
+          name: Configuration review
+          on: push
+          permissions:
+            contents: read
+          jobs:
+            scan:
+              runs-on: ubuntu-latest
+              timeout-minutes: 5
+              steps:
+                - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+                - uses: actions/setup-python@v5
+          YAML
+          taintly "$RUNNER_TEMP/strict-posture" --platform github --fail-on HIGH \
+            --min-severity INFO --no-config --format sarif > posture-published.sarif
+
+      - name: Run the candidate Action with ordinary policy
+        id: posture-default
+        uses: ./
+        with:
+          version: ${{ github.sha }}
+          path: ${{ runner.temp }}/strict-posture
+          platform: github
+          upload-sarif: true
+          sarif-file: ${{ runner.temp }}/posture-default.sarif
+          extra-args: --no-config
+
+      - name: Record the ordinary scan's installed scanner
+        working-directory: ${{ runner.temp }}
+        run: |
+          python - <<'PY'
+          from importlib.metadata import distribution
+          from pathlib import Path
+          Path("posture-default-metadata.json").write_text(distribution("taintly").read_text("direct_url.json"))
+          PY
+
+      - name: Run the candidate Action with the explicit posture option
+        id: posture-opt-in
+        uses: ./
+        with:
+          version: ${{ github.sha }}
+          path: ${{ runner.temp }}/strict-posture
+          platform: github
+          upload-sarif: true
+          sarif-file: ${{ runner.temp }}/posture-opt-in.sarif
+          extra-args: --no-config --github-strict-posture
+
+      - name: Verify posture activation, SARIF locations and preserved default
+        working-directory: ${{ runner.temp }}
+        env:
+          DEFAULT_EXIT: ${{ steps.posture-default.outputs.exit-code }}
+          OPT_IN_EXIT: ${{ steps.posture-opt-in.outputs.exit-code }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from importlib.metadata import distribution
+          from pathlib import Path
+
+          assert os.environ["DEFAULT_EXIT"] == os.environ["OPT_IN_EXIT"] == "0"
+          for metadata in (
+              Path("posture-default-metadata.json").read_text(),
+              distribution("taintly").read_text("direct_url.json"),
+          ):
+              vcs = json.loads(metadata)["vcs_info"]
+              assert vcs["requested_revision"] == vcs["commit_id"] == os.environ["GITHUB_SHA"]
+
+          def report(name):
+              data = json.loads(Path(f"posture-{name}.sarif").read_text())
+              assert data["version"] == "2.1.0" and len(data["runs"]) == 1
+              run = data["runs"][0]
+              assert all(item["executionSuccessful"] for item in run["invocations"])
+              run["tool"]["driver"].pop("version")
+              return data
+
+          published = report("published")
+          default = report("default")
+          opt_in = report("opt-in")
+          assert default == published
+          expected = {"SEC4-GH-005C": 10, "SEC3-GH-001B": 11}
+          original = default["runs"][0]["results"]
+          assert all(item["ruleId"] not in expected for item in original)
+          added = []
+          retained = []
+          for item in opt_in["runs"][0]["results"]:
+              rule = item["ruleId"]
+              if rule not in expected:
+                  retained.append(item)
+                  continue
+              assert item["level"] == "note" and item["properties"]["review_needed"] is True
+              location = item["locations"][0]["physicalLocation"]
+              assert Path(location["artifactLocation"]["uri"]).resolve() == Path(
+                  "strict-posture/.github/workflows/ci.yml"
+              ).resolve()
+              assert location["region"]["startLine"] == expected[rule]
+              added.append(rule)
+          assert sorted(added) == sorted(expected)
+          assert retained == original
+          print("Exact installed scanner, opt-in findings and unchanged default verified.")
+          PY
+
   tls-delivery:
     name: Pipeline Action delivery (${{ matrix.platform }}, ${{ matrix.case }})
     if: github.event_name == 'workflow_dispatch'

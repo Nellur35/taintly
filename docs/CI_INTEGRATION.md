@@ -67,6 +67,29 @@ exclusions and does not reject `ignore` exceptions. Default behavior is unchange
 
 `--respect-zizmor-ignores` extends recognition to zizmor's `# zizmor: ignore` / `# zizmor: ignore[<rule>]` form via a small mapped allowlist; default off.
 
+### Optional GitHub configuration checks
+
+Use `--github-strict-posture` on a local source scan to review mutable
+references for publishers such as GitHub and AWS and checkout steps that
+enable credential persistence or leave it unspecified.
+
+```bash
+python -m taintly . --platform github --github-strict-posture
+```
+
+The opt-in findings are `SEC3-GH-001B` and `SEC4-GH-005C`. They are `INFO`
+and marked for review. A source-bound workflow lockfile can satisfy the
+existing lock check. The checkout advisory describes configuration, with
+effective permissions and later credential use requiring separate evidence.
+More specific checkout findings take precedence at the same source location.
+An unresolved reference or checkout setting can produce the usual
+incomplete-coverage diagnostic.
+
+Pass the flag through the GitHub Action's `extra-args` when using a scanner
+version that supports it. A normal scan keeps the usual policy. In an opted-in
+scan, `--fail-on INFO` gates on all eligible INFO-and-above findings, including
+these two unless `--review-advisory` is also selected.
+
 ### Remote scans
 
 ```bash
