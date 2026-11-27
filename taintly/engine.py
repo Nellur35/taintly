@@ -171,6 +171,13 @@ def _qualify_shell_use(finding: Finding, evidence: object, content: str) -> None
         "Review downstream option parsing, splitting/globbing, configured shell and runtime bindings. "
         "For workflow inputs, separately verify who can supply the caller's value."
     )
+    if finding.rule_id == "TAINT-GH-012":
+        finding.remediation = (
+            "Inspect how the receiving command interprets the tracked argument, including "
+            "whether it can treat the value as an option or pass it to a code interpreter. "
+            "Verify the configured shell and exact command implementation. Use the receiver's "
+            "documented validation or encoding where its input format requires it."
+        )
     if witness is not None and validated and witness.script_argument:
         finding.title = "Untrusted workflow value reaches a Deno script argument (review)"
         finding.description = (
