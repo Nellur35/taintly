@@ -1679,7 +1679,7 @@ def _normalize_input_path(path: str) -> tuple[str, list[str]]:
         return (os.path.dirname(abs_path), [abs_path])
 
     if not os.path.isdir(abs_path):
-        # Doesn't exist — let the caller's existing error path handle it.
+        # Keep the unavailable path so the scan can report it.
         return (abs_path, [])
 
     # Recognise common scope-narrowing directory names and walk up.
@@ -2352,6 +2352,15 @@ def scan_repo(
         if platform not in (None, Platform.GITLAB) or explicit_files:
             raise ValueError("GitLab job evidence requires a local GitLab repository scan")
         platform = Platform.GITLAB
+    if not os.path.isdir(repo_path):
+        report = AuditReport(repo_path=repo_path, platform=platform.value if platform else "")
+        report.add(
+            SourceIssue(
+                repo_path, "Scan path is unavailable. Check that it exists and is accessible."
+            ).finding()
+        )
+        report.summarize()
+        return [report]
     # Explicit paths bypass discovery, so enforce the real-path boundary
     # before platform classification can inspect file content.
     explicit_issues = [

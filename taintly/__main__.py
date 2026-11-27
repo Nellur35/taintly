@@ -1595,8 +1595,9 @@ def main():
         gitlab_registry_job=registry_job,
     )
 
-    missing_scan_files = args.require_files and not any(report.files_scanned for report in reports)
-    if missing_scan_files:
+    empty_scan = not any(report.files_scanned for report in reports)
+    incomplete_empty_scan = empty_scan and any(report.engine_errors() for report in reports)
+    if args.require_files and empty_scan and not incomplete_empty_scan:
         reports[0].add(
             Finding(
                 rule_id="ENGINE-ERR",
@@ -1606,6 +1607,8 @@ def main():
                 file=reports[0].repo_path,
             )
         )
+
+        incomplete_empty_scan = True
 
     # Surface config-driven exclusions on every report so the summary
     # reporter can disclose them.  CLI-only exclusions are operator
@@ -1668,7 +1671,7 @@ def main():
 
     # Save observations after requested analysis, then use the same report
     # dispatch as ordinary scanning, including aggregate machine formats.
-    if args.baseline and not missing_scan_files:
+    if args.baseline and not incomplete_empty_scan:
         baseline_path = args.baseline
         resolved_refs = _resolve_current_refs(all_findings)
         try:
