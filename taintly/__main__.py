@@ -187,6 +187,11 @@ def main():
     )
     evidence_input = parser.add_mutually_exclusive_group()
     evidence_input.add_argument(
+        "--github-strict-posture",
+        action="store_true",
+        help="Add advisory checks for recognized publishers and checkout persistence to local GitHub scans.",
+    )
+    evidence_input.add_argument(
         "--codebuild-project-snapshot",
         nargs=3,
         metavar=("JSON", "PROJECT_ARN", "GITHUB_ORIGIN"),
@@ -707,6 +712,21 @@ def main():
 
     args = parser.parse_args()
 
+    if args.github_strict_posture and any(
+        (
+            args.self_test,
+            args.integration_test,
+            args.guide,
+            args.fix,
+            args.fix_dry_run,
+            args.platform_audit,
+            args.github_org,
+            args.gitlab_group,
+            args.jenkins_url,
+        )
+    ):
+        parser.error("--github-strict-posture requires a local GitHub source scan")
+
     if args.codebuild_webhook_snapshot:
         _assess_codebuild_webhook(parser, args)
         return
@@ -947,6 +967,13 @@ def main():
             file=sys.stderr,
         )
         sys.exit(3)
+
+    if args.github_strict_posture:
+        if not any(rule.platform is Platform.GITHUB for rule in all_rules):
+            parser.error("--github-strict-posture requires GitHub in the selected platforms")
+        from .rules.github._strict_posture import with_github_strict_posture
+
+        all_rules = with_github_strict_posture(all_rules)
 
     # Apply rule exclusions (CLI + config, merged)
     cli_excluded = set(args.exclude_rule or [])
