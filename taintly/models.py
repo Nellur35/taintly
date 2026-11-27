@@ -2154,6 +2154,9 @@ class Finding:
     _source_acquisition_issue: bool = field(default=False, repr=False, compare=False)
     """Internal origin marker for reports of unavailable source."""
 
+    _pattern_analysis_incomplete: bool = field(default=False, repr=False, compare=False)
+    """The pattern provided a coverage reason for the retained partial results."""
+
     def report_snippet(self) -> str:
         """Return the source preview intended for logs and reports."""
         from .evidence_redaction import redact_snippet

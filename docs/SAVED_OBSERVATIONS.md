@@ -1395,9 +1395,11 @@ produces an incomplete report. Analysis supports Linux containers with an empty
 project environment variable list and no fleet or secondary sources.
 
 Keep captures private because project metadata can include plaintext environment
-values. This offline mode reads the committed file with Git and supports text
-and JSON. It disregards checkout configuration and inline waivers, and applies
-no fixes. The report describes project defaults. A build can override them.
+values. This offline mode reads the committed file with Git and supports text,
+JSON and SARIF. SARIF stores the selection and its scope under
+`runs[].properties.codebuild_project`. It disregards checkout configuration
+and inline waivers, and applies no fixes. The report describes project defaults.
+A build can override them.
 
 ## Saved public CodeBuild runs
 
@@ -1420,6 +1422,8 @@ apply. Use the child build's own response and ID. A batch response, authenticate
 The report can identify the selected blob and still mark analysis incomplete
 when the selected file contains batch orchestration, root YAML merges,
 YAML document markers or an unsupported execution context.
+In SARIF, `runs[].properties.codebuild_run` holds the binding and its limits.
+Incomplete analysis also appears in the tool execution notifications.
 
 For a saved `LINUX_EC2` build with a `pr/<number>` source ref, Taintly
 can also identify a literal checkout script passed to Bash `source` or

@@ -31,6 +31,28 @@ def test_operand_on_another_line_keeps_its_own_ref_and_location():
     assert assess(source) == [(2, "'moving@main'")]
 
 
+def test_github_library_name_keeps_its_own_explicit_ref():
+    source = (
+        f"@Library(['github.com/example/fixed@{COMMIT}',\n"
+        "  'github.com/example/selected@release']) _"
+    )
+    assert assess(source) == [(2, "'github.com/example/selected@release'")]
+    assert assess(f"@Library('github.com/example/fixed@{COMMIT}') _") == []
+
+
+def test_github_library_without_ref_still_requires_controller_default():
+    outcome = assess("@Library('github.com/example/default') _")
+    assert isinstance(outcome, IncompletePatternMatches)
+    assert "configured default version" in outcome.reason
+
+
+def test_unmodeled_retriever_name_remains_unresolved():
+    outcome = assess("@Library('gitlab.com/example/library@release') _")
+    assert isinstance(outcome, IncompletePatternMatches)
+    assert not outcome
+    assert "unresolved @Library revision argument" in outcome.reason
+
+
 def test_provider_default_remains_unresolved_with_symbolic_sibling():
     outcome = assess("@Library(['configured', 'moving@main']) _")
     assert outcome == [(1, "'moving@main'")]

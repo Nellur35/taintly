@@ -3190,9 +3190,9 @@ def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Nam
     for name, value in vars(args).items():
         if name not in allowed and value != parser.get_default(name):
             parser.error(f"--{name.replace('_', '-')} is unavailable in CodeBuild snapshot mode")
-    if args.platform not in (None, "codebuild") or args.format not in ("text", "json"):
+    if args.platform not in (None, "codebuild") or args.format not in ("text", "json", "sarif"):
         parser.error(
-            "CodeBuild snapshot mode requires the codebuild platform and text or JSON format"
+            "CodeBuild snapshot mode requires the codebuild platform and text, JSON or SARIF format"
         )
 
     bind: Callable[[Path, str, Path, str], BoundBuildspec]
@@ -3263,9 +3263,8 @@ def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Nam
         "depends on the working directory and filesystem state. Execution and "
         "authority are unverified."
     )
-    if args.format == "json":
-        data = json.loads(format_json(report))
-        data[report_key] = {
+    if args.format in ("json", "sarif"):
+        evidence: dict[str, object] = {
             subject_key: subject,
             "selection_state": "bound" if selection else "unresolved",
             "scope": scope,
@@ -3279,7 +3278,7 @@ def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Nam
             else None,
         }
         if selection and selection.checkout_scripts:
-            data[report_key]["checkout_scripts"] = {
+            evidence["checkout_scripts"] = {
                 "scope": script_scope,
                 "pull_request_ref": selection.pull_request_ref,
                 "references": [
@@ -3294,6 +3293,12 @@ def _scan_codebuild_snapshot(parser: argparse.ArgumentParser, args: argparse.Nam
                     for item in selection.checkout_scripts
                 ],
             }
+        if args.format == "json":
+            data = json.loads(format_json(report))
+            data[report_key] = evidence
+        else:
+            data = json.loads(format_sarif(report))
+            data["runs"][0]["properties"][report_key] = evidence
         print(json.dumps(data, indent=2))
     else:
         print(f"{subject_label} {subject}\n{scope}")

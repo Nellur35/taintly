@@ -505,6 +505,7 @@ def _append_incomplete_pattern_diagnostic(
                 f"are retained. Reasons: {joined_reasons}"
             ),
             file=filepath,
+            _pattern_analysis_incomplete=True,
         )
     )
 

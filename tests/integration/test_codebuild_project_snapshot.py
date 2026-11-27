@@ -87,12 +87,12 @@ def receipt(source):
     }
 
 
-def scan_receipt(receipt, build_id=BUILD_ID, origin=ORIGIN, *extra, raw=None):
+def scan_receipt(receipt, build_id=BUILD_ID, origin=ORIGIN, *extra, raw=None, output="json"):
     root, response = receipt
     capture = root.parent / "receipt.json"
     capture.write_text(raw if raw is not None else json.dumps(response), encoding="utf-8")
     return subprocess.run(
-        [sys.executable, "-m", "taintly", str(root), "--format", "json",
+        [sys.executable, "-m", "taintly", str(root), "--format", output,
          "--codebuild-public-build", str(capture), build_id, origin, *extra],
         capture_output=True, encoding="utf-8", timeout=20,
         env={**os.environ, "PYTHONUTF8": "1"},
@@ -119,6 +119,27 @@ def test_public_build_scans_only_the_resolved_committed_file(receipt):
     assert ("SEC3-CB-001", "ci/review.yml", 5) in {
         (f["rule_id"], f["file"], f["line"]) for f in report["findings"]
     }
+
+
+@pytest.mark.parametrize("mismatched", [False, True])
+def test_public_build_sarif_preserves_selection_and_coverage(receipt, mismatched):
+    requested = BUILD_ID[:-1] + "0" if mismatched else BUILD_ID
+    regular = scan_receipt(receipt, requested)
+    sarif = scan_receipt(receipt, requested, output="sarif")
+    report = json.loads(regular.stdout)
+    assert sarif.returncode == regular.returncode == (11 if mismatched else 1)
+    assert sarif.stderr == regular.stderr
+    run, = json.loads(sarif.stdout)["runs"]
+    assert run["properties"]["codebuild_run"] == report["codebuild_run"]
+    assert run["properties"]["coverage_status"] == report["coverage_status"]
+    notices = run["invocations"][0]["toolExecutionNotifications"]
+    if mismatched:
+        assert report["codebuild_run"]["buildspec"] is None
+        notice, = notices
+        assert "does not match the requested build ID" in notice["message"]["text"]
+    else:
+        assert not notices
+        assert any(row["ruleId"] == "SEC3-CB-001" for row in run["results"])
 
 
 @pytest.mark.parametrize(("change", "reason"), [
@@ -346,7 +367,8 @@ def test_unbound_source_does_not_fall_back(source, change, reason):
         assert selection["selection_state"] == "unresolved"
         assert selection["buildspec"] is None
     assert [f["rule_id"] for f in report["findings"]] == ["ENGINE-ERR"]
-    assert reason in report["errors"][0]["description"] and reason in result.stderr
+    assert reason in report["errors"][0]["description"]
+    assert reason in result.stderr
 
 
 def test_missing_project_stays_actionable_in_text(source):
@@ -354,6 +376,27 @@ def test_missing_project_stays_actionable_in_text(source):
     assert result.returncode == 11
     assert "projectsNotFound" in result.stdout
     assert result.stderr.count("projectsNotFound") == 1
+
+
+
+@pytest.mark.parametrize(("name", "exit_code"), [("publish", 0), ("absent", 11)])
+def test_project_sarif_preserves_selection_and_coverage(source, name, exit_code):
+    regular = scan(source, name)
+    sarif = scan(source, name, output="sarif")
+    assert sarif.returncode == regular.returncode == exit_code
+    assert sarif.stderr == regular.stderr
+    report = json.loads(regular.stdout)
+    run, = json.loads(sarif.stdout)["runs"]
+    assert run["properties"]["codebuild_project"] == report["codebuild_project"]
+    assert run["properties"]["coverage_status"] == report["coverage_status"]
+    notices = run["invocations"][0]["toolExecutionNotifications"]
+    if name == "absent":
+        assert report["codebuild_project"]["buildspec"] is None
+        notice, = notices
+        assert "projectsNotFound" in notice["message"]["text"]
+    else:
+        assert report["codebuild_project"]["buildspec"]["path"] == "ci/publish.yml"
+        assert not notices
 
 
 def test_rule_budget_keeps_selection_but_reports_incomplete(source):

@@ -237,6 +237,15 @@ script preserves the candidate on the original value.
 
 The scanner follows statically configured local reusable-workflow and composite-action
 calls, preserving invocation-specific inputs, guards, source locations and shell sinks.
+
+For GitHub.com's `$/` syntax, scan a local Git checkout at the workflow's commit.
+The scanner verifies that the declaring file and the selected callee match regular
+files in that commit before following the call. A source archive without Git evidence
+or a checkout copy from another revision produces a diagnostic at the call site.
+A call reached through a workspace-relative action requires separate source evidence.
+The scanner identifies the committed manifest of a Docker or JavaScript action and
+reports that its execution type is outside this analysis.
+
 Findings describe configured input-flow candidates. They do not establish that a
 workflow ran, that a checked-out action matches the inspected local metadata, or what
 token permissions and secrets were available at runtime. Unknown inputs, guards,
